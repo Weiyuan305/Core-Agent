@@ -165,3 +165,45 @@ test("API server cannot start without an explicit key", () => {
     /CORE_AGENT_API_SERVER_KEY:\?set CORE_AGENT_API_SERVER_KEY/
   );
 });
+
+test("CI validates runtime contracts without building or publishing images", async () => {
+  const workflow = await readFile(
+    new URL("../../.github/workflows/runtime-contract.yml", import.meta.url),
+    "utf8"
+  );
+
+  assert.match(workflow, /^permissions:\n  contents: read\n\njobs:/m);
+  assert.match(workflow, /^\s+node-version: 22$/m);
+  assert.match(workflow, /^\s+run: npm test$/m);
+  assert.match(
+    workflow,
+    /^\s+CORE_AGENT_API_SERVER_KEY: ci-contract-test-only-not-a-secret-0000000000000000$/m
+  );
+  assert.match(
+    workflow,
+    /^\s+run: docker compose -f infra\/hermes\/compose\.dev\.yaml config --quiet$/m
+  );
+
+  const dockerCommands = workflow
+    .split("\n")
+    .filter((line) => /^\s+run:\s+docker(?:\s|$)/.test(line));
+  assert.deepEqual(dockerCommands, [
+    "        run: docker compose -f infra/hermes/compose.dev.yaml config --quiet"
+  ]);
+  const runCommands = workflow
+    .split("\n")
+    .filter((line) => /^\s+run:/.test(line));
+  assert.deepEqual(runCommands, [
+    "        run: npm test",
+    "        run: docker compose -f infra/hermes/compose.dev.yaml config --quiet"
+  ]);
+  const actions = workflow
+    .split("\n")
+    .filter((line) => /^\s+uses:/.test(line));
+  assert.deepEqual(actions, [
+    "        uses: actions/checkout@v4",
+    "        uses: actions/setup-node@v4"
+  ]);
+  assert.doesNotMatch(workflow, /docker\s+build|docker\s+compose\s+up/i);
+  assert.doesNotMatch(workflow, /\$\{\{\s*secrets\./i);
+});

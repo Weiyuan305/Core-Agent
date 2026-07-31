@@ -1352,7 +1352,7 @@ git log --oneline --decorate -7
 git status --short --branch
 ```
 
-Expected: 7 个小而清晰的提交，工作区干净。
+Expected: 各任务与根因修复保持小而清晰的提交，工作区干净。
 
 ---
 

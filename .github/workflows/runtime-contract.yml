@@ -1,0 +1,31 @@
+name: Runtime Contract
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run contract tests
+        run: npm test
+
+      - name: Validate Compose configuration
+        env:
+          CORE_AGENT_API_SERVER_KEY: ci-contract-test-only-not-a-secret-0000000000000000
+        run: docker compose -f infra/hermes/compose.dev.yaml config --quiet
