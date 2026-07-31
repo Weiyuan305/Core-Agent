@@ -39,3 +39,9 @@ isolation, and service credentials.
 Profile-prefixed OpenAI API routing requires Hermes `v2026.7.30` or newer.
 Core-Agent uses the official image pinned by platform digest instead of
 carrying a private source patch for this behavior.
+
+Named Profile routes resolve `API_SERVER_KEY` from the selected Profile secret
+scope. In the loopback-only demo runtime, bootstrap provisions the container
+ingress key into each named Profile. This key authenticates transport into the
+company container; it is not consultant identity or entitlement. Production
+consultant authorization belongs in the external Control Plane.

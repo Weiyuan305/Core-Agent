@@ -8,6 +8,35 @@ const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
 const composeFile = "infra/hermes/compose.dev.yaml";
 const runtimeEnvFile = ".env.runtime";
 const profileNamePattern = /^[a-z0-9][a-z0-9_-]{0,62}$/;
+const profileKeyProvisioningProgram = `import os
+import tempfile
+from pathlib import Path
+import sys
+
+profile_name = sys.argv[1]
+key = os.environ["API_SERVER_KEY"]
+if len(key) < 16:
+    raise SystemExit("API_SERVER_KEY is absent or unusable")
+
+target = Path("/opt/data/profiles") / profile_name / ".env"
+lines = target.read_text(encoding="utf-8").splitlines() if target.exists() else []
+lines = [line for line in lines if not line.startswith("API_SERVER_KEY=")]
+lines.append(f"API_SERVER_KEY={key}")
+payload = "\\n".join(lines) + "\\n"
+
+descriptor, temporary_name = tempfile.mkstemp(prefix=".env.", dir=target.parent)
+temporary_path = Path(temporary_name)
+try:
+    with os.fdopen(descriptor, "w", encoding="utf-8", newline="\\n") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.chmod(temporary_path, 0o600)
+    os.replace(temporary_path, target)
+except BaseException:
+    temporary_path.unlink(missing_ok=True)
+    raise
+`;
 
 export function validateCompanyFixture(fixture) {
   if (fixture?.schemaVersion !== 1 || !fixture.tenantId) {
@@ -59,6 +88,30 @@ export function buildProfileOperations(fixture) {
   };
 }
 
+export function buildProfileKeyProvisioningArgs(fixture, profileName) {
+  validateCompanyFixture(fixture);
+  if (!fixture.profiles.some((profile) => profile.name === profileName)) {
+    throw new Error(`Profile is not declared in company fixture: ${profileName}`);
+  }
+
+  return [
+    "compose",
+    "--env-file",
+    runtimeEnvFile,
+    "-f",
+    composeFile,
+    "exec",
+    "-T",
+    "--user",
+    "hermes",
+    "hermes",
+    "/opt/hermes/.venv/bin/python",
+    "-c",
+    profileKeyProvisioningProgram,
+    profileName
+  ];
+}
+
 function runHermes(arguments_, { allowFailure = false, quiet = false } = {}) {
   const result = spawnSync(
     "docker",
@@ -89,6 +142,24 @@ function runHermes(arguments_, { allowFailure = false, quiet = false } = {}) {
   return result.status ?? 1;
 }
 
+function provisionProfileKey(fixture, profileName) {
+  const result = spawnSync(
+    "docker",
+    buildProfileKeyProvisioningArgs(fixture, profileName),
+    {
+      cwd: repositoryRoot,
+      stdio: "inherit"
+    }
+  );
+
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(
+      `Profile API key provisioning failed (${result.status}): ${profileName}`
+    );
+  }
+}
+
 async function main() {
   const fixtureUrl = new URL(
     "../infra/hermes/tenants/company-demo.json",
@@ -110,6 +181,7 @@ async function main() {
     } else {
       runHermes(profile.create);
     }
+    provisionProfileKey(fixture, profile.name);
   }
 
   runHermes(["profile", "list"]);

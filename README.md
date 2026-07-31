@@ -38,3 +38,6 @@ set -a; source .env.runtime; set +a; npm run hermes:smoke
 ```
 
 The development API binds only to `127.0.0.1:18642`.
+The demo bootstrap copies that loopback container ingress key into each named
+Profile secret scope. It is transport authentication, not a consultant
+identity or authorization boundary.
