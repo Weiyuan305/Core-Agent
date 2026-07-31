@@ -1,0 +1,56 @@
+name: core-agent-company-demo
+
+services:
+  hermes:
+    image: ${CORE_AGENT_HERMES_IMAGE:-core-agent/hermes-runtime:dev}
+    command:
+      - gateway
+      - run
+    environment:
+      API_SERVER_ENABLED: "true"
+      API_SERVER_HOST: "0.0.0.0"
+      API_SERVER_PORT: "8642"
+      API_SERVER_KEY: ${CORE_AGENT_API_SERVER_KEY:?set CORE_AGENT_API_SERVER_KEY}
+      GATEWAY_MULTIPLEX_PROFILES: "true"
+    ports:
+      - "127.0.0.1:${CORE_AGENT_API_SERVER_PORT:-18642}:8642"
+    volumes:
+      - company-demo-hermes-data:/opt/data
+    read_only: true
+    tmpfs:
+      - /run:size=64m,mode=0755,exec
+      - /tmp:size=256m,mode=1777
+      - /var/tmp:size=64m,mode=1777
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    mem_limit: 4g
+    cpus: 2.0
+    restart: unless-stopped
+    stop_grace_period: 45s
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl --fail --silent http://127.0.0.1:8642/health >/dev/null || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks:
+      - core-agent-backplane
+
+volumes:
+  company-demo-hermes-data:
+    name: core-agent-company-demo-hermes-data
+
+networks:
+  core-agent-backplane:
+    name: core-agent-company-demo-backplane
+    driver: bridge

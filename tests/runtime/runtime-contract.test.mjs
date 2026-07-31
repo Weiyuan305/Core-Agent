@@ -136,3 +136,29 @@ test("build runner reports Docker spawn and nonzero failures", async () => {
     /docker build failed with exit code 17/
   );
 });
+
+const composeConfig = await readFile(
+  new URL("../../infra/hermes/compose.dev.yaml", import.meta.url),
+  "utf8"
+);
+
+test("development runtime is private and keeps state outside the image", () => {
+  assert.match(composeConfig, /127\.0\.0\.1:\$\{CORE_AGENT_API_SERVER_PORT:-18642\}:8642/);
+  assert.match(composeConfig, /company-demo-hermes-data:\/opt\/data/);
+  assert.match(composeConfig, /read_only:\s+true/);
+  assert.match(composeConfig, /- \/run:size=64m,mode=0755,exec/);
+  assert.match(composeConfig, /no-new-privileges:true/);
+  assert.match(
+    composeConfig,
+    /cap_add:\s*\n\s+- CHOWN\n\s+- DAC_OVERRIDE\n\s+- SETGID\n\s+- SETUID/
+  );
+  assert.match(composeConfig, /cap_drop:\s*\n\s+- ALL/);
+  assert.doesNotMatch(composeConfig, /docker\.sock/);
+});
+
+test("API server cannot start without an explicit key", () => {
+  assert.match(
+    composeConfig,
+    /CORE_AGENT_API_SERVER_KEY:\?set CORE_AGENT_API_SERVER_KEY/
+  );
+});
