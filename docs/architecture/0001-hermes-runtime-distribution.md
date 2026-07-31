@@ -33,3 +33,9 @@ isolation, and service credentials.
 - AMD64 and ARM64 builds use different immutable digests.
 - Runtime data survives image changes.
 - This phase does not yet provide production multi-tenant authorization.
+
+## Compatibility floor
+
+Profile-prefixed OpenAI API routing requires Hermes `v2026.7.30` or newer.
+Core-Agent uses the official image pinned by platform digest instead of
+carrying a private source patch for this behavior.

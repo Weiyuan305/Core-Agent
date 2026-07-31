@@ -6,7 +6,7 @@
 
 **Architecture:** 本计划只实现九个子项目中的第一个 `Hermes Distribution`。仓库不复制 Hermes 源码，而是通过按 CPU 架构锁定的官方镜像 digest 构建轻量派生镜像；产品级只读配置烘焙到 `/etc/hermes/config.yaml`，运行数据单独挂载到 `/opt/data`。容器只在宿主机 loopback 暴露带 Bearer Token 的 OpenAI-compatible API；两个顾问 Profile 以无内置 Skill 的窄 Profile 创建。Control Plane、业务 MCP、Composite Memory、Web UI 和自定义 Policy Plugin 均不在本计划内。
 
-**Tech Stack:** Docker / Docker Compose、Hermes Agent `v2026.7.7`、Node.js 22 ESM、Node 内置测试框架、GitHub Actions。
+**Tech Stack:** Docker / Docker Compose、Hermes Agent `v2026.7.30`、Node.js 22 ESM、Node 内置测试框架、GitHub Actions。
 
 ---
 
@@ -346,7 +346,7 @@ const lock = JSON.parse(await readFile(lockUrl, "utf8"));
 
 test("image lock contains valid immutable references", () => {
   assert.doesNotThrow(() => validateImageLock(lock));
-  assert.equal(lock.tag, "v2026.7.7");
+  assert.equal(lock.tag, "v2026.7.30");
   assert.match(resolveHermesImage(lock, "linux/amd64"), /@sha256:[a-f0-9]{64}$/);
   assert.match(resolveHermesImage(lock, "linux/arm64"), /@sha256:[a-f0-9]{64}$/);
 });
@@ -384,13 +384,13 @@ Expected: `ERR_MODULE_NOT_FOUND`，因为 resolver 尚未实现。
 {
   "schemaVersion": 1,
   "repository": "nousresearch/hermes-agent",
-  "tag": "v2026.7.7",
+  "tag": "v2026.7.30",
   "platforms": {
     "linux/amd64": {
-      "reference": "nousresearch/hermes-agent:v2026.7.7@sha256:abb1e2df7007fcdc1d498728111428baccab98a12bb51d7f1470a63be05f2deb"
+      "reference": "nousresearch/hermes-agent:v2026.7.30@sha256:5316c2c2534c49f5e1b1691e1a2115f1230d900033c3b35d1c8fc2e47352b26d"
     },
     "linux/arm64": {
-      "reference": "nousresearch/hermes-agent:v2026.7.7@sha256:6a4f70435b48bb72a02c98b500cced758aa65ae7e5dbf3adfeb2d7ec422fc4aa"
+      "reference": "nousresearch/hermes-agent:v2026.7.30@sha256:f3b812738ebc6113410c54ba5e6c48c56f5b379f00e1aab31c21733aa7842e38"
     }
   }
 }
@@ -478,7 +478,7 @@ node scripts/resolve-hermes-image.mjs --platform linux/arm64
 Expected:
 
 - 3 个测试通过；
-- 两条输出分别包含对应的 `v2026.7.7@sha256:...`。
+- 两条输出分别包含对应的 `v2026.7.30@sha256:...`。
 
 **Step 5: 提交**
 

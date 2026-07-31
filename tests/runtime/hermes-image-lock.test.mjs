@@ -13,7 +13,7 @@ const lock = JSON.parse(await readFile(lockUrl, "utf8"));
 
 test("image lock contains valid immutable references", () => {
   assert.doesNotThrow(() => validateImageLock(lock));
-  assert.equal(lock.tag, "v2026.7.7");
+  assert.equal(lock.tag, "v2026.7.30");
   assert.match(resolveHermesImage(lock, "linux/amd64"), /@sha256:[a-f0-9]{64}$/);
   assert.match(resolveHermesImage(lock, "linux/arm64"), /@sha256:[a-f0-9]{64}$/);
 });

@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "repository": "nousresearch/hermes-agent",
-  "tag": "v2026.7.7",
+  "tag": "v2026.7.30",
   "platforms": {
     "linux/amd64": {
-      "reference": "nousresearch/hermes-agent:v2026.7.7@sha256:abb1e2df7007fcdc1d498728111428baccab98a12bb51d7f1470a63be05f2deb"
+      "reference": "nousresearch/hermes-agent:v2026.7.30@sha256:5316c2c2534c49f5e1b1691e1a2115f1230d900033c3b35d1c8fc2e47352b26d"
     },
     "linux/arm64": {
-      "reference": "nousresearch/hermes-agent:v2026.7.7@sha256:6a4f70435b48bb72a02c98b500cced758aa65ae7e5dbf3adfeb2d7ec422fc4aa"
+      "reference": "nousresearch/hermes-agent:v2026.7.30@sha256:f3b812738ebc6113410c54ba5e6c48c56f5b379f00e1aab31c21733aa7842e38"
     }
   }
 }
