@@ -1,0 +1,16 @@
+{
+  "name": "@core-agent/platform",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test",
+    "hermes:image-ref": "node scripts/resolve-hermes-image.mjs",
+    "hermes:build": "node scripts/build-hermes-image.mjs",
+    "hermes:bootstrap": "node scripts/bootstrap-demo-company.mjs",
+    "hermes:smoke": "node scripts/smoke-runtime.mjs"
+  }
+}
