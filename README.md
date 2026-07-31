@@ -41,3 +41,12 @@ The development API binds only to `127.0.0.1:18642`.
 The demo bootstrap copies that loopback container ingress key into each named
 Profile secret scope. It is transport authentication, not a consultant
 identity or authorization boundary.
+
+## Stop the development runtime
+
+```bash
+docker compose --env-file .env.runtime -f infra/hermes/compose.dev.yaml down
+```
+
+This preserves the named volume. Add `--volumes` only when intentionally
+destroying all demo-company runtime data.
