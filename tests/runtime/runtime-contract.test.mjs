@@ -143,14 +143,17 @@ const composeConfig = await readFile(
 );
 
 test("development runtime is private and keeps state outside the image", () => {
-  assert.match(composeConfig, /127\.0\.0\.1:\$\{CORE_AGENT_API_SERVER_PORT:-18642\}:8642/);
+  assert.match(
+    composeConfig,
+    /    ports:\n      - "127\.0\.0\.1:\$\{CORE_AGENT_API_SERVER_PORT:-18642\}:8642"\n    volumes:/
+  );
   assert.match(composeConfig, /company-demo-hermes-data:\/opt\/data/);
   assert.match(composeConfig, /read_only:\s+true/);
   assert.match(composeConfig, /- \/run:size=64m,mode=0755,exec/);
   assert.match(composeConfig, /no-new-privileges:true/);
   assert.match(
     composeConfig,
-    /cap_add:\s*\n\s+- CHOWN\n\s+- DAC_OVERRIDE\n\s+- SETGID\n\s+- SETUID/
+    /    cap_add:\n      - CHOWN\n      - DAC_OVERRIDE\n      - SETGID\n      - SETUID\n    cap_drop:/
   );
   assert.match(composeConfig, /cap_drop:\s*\n\s+- ALL/);
   assert.doesNotMatch(composeConfig, /docker\.sock/);
