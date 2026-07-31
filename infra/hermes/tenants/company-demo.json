@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "tenantId": "company-demo",
+  "profiles": [
+    {
+      "name": "consultant-a",
+      "description": "Study-abroad consultant profile for the company-demo tenant."
+    },
+    {
+      "name": "consultant-b",
+      "description": "Study-abroad consultant profile for the company-demo tenant."
+    }
+  ]
+}
