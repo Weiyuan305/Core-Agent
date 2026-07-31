@@ -1,0 +1,20 @@
+gateway:
+  multiplex_profiles: true
+
+platform_toolsets:
+  api_server:
+    - clarify
+  cli:
+    - clarify
+
+plugins:
+  enabled: []
+
+security:
+  redact_secrets: true
+
+skills:
+  write_approval: true
+
+memory:
+  write_approval: true
