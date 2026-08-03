@@ -35,6 +35,15 @@ This milestone establishes contracts only. It does not implement the Control
 Plane runtime, database, Web client, Apple client, or MCP Server and business
 Tools.
 
+## Next milestone design
+
+The approved next milestone is the internal, single-node
+[Control Plane Runtime v1](docs/superpowers/specs/2026-08-03-control-plane-runtime-v1-design.md).
+Its architecture decisions are indexed in
+[`docs/architecture`](docs/architecture/README.md). The documents define the
+future implementation; the Runtime service, PostgreSQL schema, Worker, Runtime
+Supervisor, and SSE endpoints are not implemented yet.
+
 ## Prerequisites
 
 - Node.js 22+
