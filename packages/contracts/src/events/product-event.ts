@@ -1,24 +1,33 @@
-import Type, { type Static } from "typebox";
+import Type, { type Static, type TProperties } from "typebox";
 import Schema from "typebox/schema";
 
-import { ApprovalStatusSchema } from "../approval/schema.js";
 import {
   OpaqueIdSchema,
   SchemaVersionSchema,
   SequenceSchema,
   UtcTimestampSchema,
 } from "../common/primitives.js";
+import { type ContractViolation, violation } from "../common/validation.js";
 import {
   ErrorCategorySchema,
   StableErrorCodeSchema,
 } from "../errors/error-envelope.js";
 import { CaseRefSchema, StudentRefSchema } from "../runtime/refs.js";
 import {
-  AgentRunStatusSchema,
   ContainerObservedStateSchema,
-  ConversationStatusSchema,
   TaskStatusSchema,
 } from "../runtime/resources.js";
+
+const EmbeddedStudentRefSchema = Type.Omit(
+  StudentRefSchema,
+  [],
+  { additionalProperties: false },
+);
+const EmbeddedCaseRefSchema = Type.Omit(
+  CaseRefSchema,
+  [],
+  { additionalProperties: false },
+);
 
 const EventAssociationFields = {
   profile_id: Type.Optional(OpaqueIdSchema),
@@ -26,8 +35,8 @@ const EventAssociationFields = {
   run_id: Type.Optional(OpaqueIdSchema),
   task_id: Type.Optional(OpaqueIdSchema),
   approval_id: Type.Optional(OpaqueIdSchema),
-  student_ref: Type.Optional(StudentRefSchema),
-  case_ref: Type.Optional(CaseRefSchema),
+  student_ref: Type.Optional(EmbeddedStudentRefSchema),
+  case_ref: Type.Optional(EmbeddedCaseRefSchema),
   capability_id: Type.Optional(OpaqueIdSchema),
 } as const;
 
@@ -53,178 +62,230 @@ export const ProductEventEnvelopeSchema = Type.Object(
   { additionalProperties: false, $id: "core-agent://v1/product-event-envelope" },
 );
 
-export const ConversationEventSchema = Type.Object(
+function createEventBranch<
+  const EventType extends string,
+  const Payload extends TProperties,
+>(eventType: EventType, payload: Payload) {
+  return Type.Object(
+    {
+      ...ProductEventBaseFields,
+      event_type: Type.Literal(eventType, { "x-extensible-union": true }),
+      payload: Type.Object(payload, { additionalProperties: false }),
+    },
+    { additionalProperties: false },
+  );
+}
+
+const ConversationCreatedEventSchema = createEventBranch(
+  "conversation.created",
   {
-    ...ProductEventBaseFields,
-    event_type: Type.Union([
-      Type.Literal("conversation.created"),
-      Type.Literal("conversation.archived"),
-    ], { "x-extensible-union": true }),
-    payload: Type.Object(
-      {
-        conversation_id: OpaqueIdSchema,
-        status: ConversationStatusSchema,
-      },
-      { additionalProperties: false },
-    ),
+    conversation_id: OpaqueIdSchema,
+    status: Type.Literal("active"),
   },
-  { additionalProperties: false, $id: "core-agent://v1/conversation-event" },
+);
+const ConversationArchivedEventSchema = createEventBranch(
+  "conversation.archived",
+  {
+    conversation_id: OpaqueIdSchema,
+    status: Type.Literal("archived"),
+  },
 );
 
-export const RunEventSchema = Type.Object(
+export const ConversationEventSchema = Type.Union(
+  [ConversationCreatedEventSchema, ConversationArchivedEventSchema],
   {
-    ...ProductEventBaseFields,
-    event_type: Type.Union([
-      Type.Literal("run.queued"),
-      Type.Literal("run.started"),
-      Type.Literal("run.waiting_approval"),
-      Type.Literal("run.completed"),
-      Type.Literal("run.failed"),
-      Type.Literal("run.cancelled"),
-    ], { "x-extensible-union": true }),
-    payload: Type.Object(
-      {
-        run_id: OpaqueIdSchema,
-        status: AgentRunStatusSchema,
-        summary: Type.Optional(Type.String({ maxLength: 4000 })),
-      },
-      { additionalProperties: false },
-    ),
+    $id: "core-agent://v1/conversation-event",
+    "x-extensible-union": true,
   },
-  { additionalProperties: false, $id: "core-agent://v1/run-event" },
 );
 
-export const MessageDeltaEventSchema = Type.Object(
-  {
-    ...ProductEventBaseFields,
-    event_type: Type.Union([
-      Type.Literal("message.delta"),
-    ], { "x-extensible-union": true }),
-    payload: Type.Object(
-      {
-        message_id: OpaqueIdSchema,
-        delta: Type.String({ maxLength: 16_000 }),
-      },
-      { additionalProperties: false },
-    ),
-  },
-  { additionalProperties: false, $id: "core-agent://v1/message-delta-event" },
+function createRunEventBranch<
+  const EventType extends string,
+  const Status extends
+    | "queued"
+    | "running"
+    | "waiting_approval"
+    | "succeeded"
+    | "failed"
+    | "cancelled",
+>(eventType: EventType, status: Status) {
+  return createEventBranch(eventType, {
+    run_id: OpaqueIdSchema,
+    status: Type.Literal(status),
+    summary: Type.Optional(Type.String({ maxLength: 4000 })),
+  });
+}
+
+const RunQueuedEventSchema = createRunEventBranch("run.queued", "queued");
+const RunStartedEventSchema = createRunEventBranch("run.started", "running");
+const RunWaitingApprovalEventSchema = createRunEventBranch(
+  "run.waiting_approval",
+  "waiting_approval",
+);
+const RunCompletedEventSchema = createRunEventBranch("run.completed", "succeeded");
+const RunFailedEventSchema = createRunEventBranch("run.failed", "failed");
+const RunCancelledEventSchema = createRunEventBranch("run.cancelled", "cancelled");
+
+export const RunEventSchema = Type.Union(
+  [
+    RunQueuedEventSchema,
+    RunStartedEventSchema,
+    RunWaitingApprovalEventSchema,
+    RunCompletedEventSchema,
+    RunFailedEventSchema,
+    RunCancelledEventSchema,
+  ],
+  { $id: "core-agent://v1/run-event", "x-extensible-union": true },
 );
 
-export const MessageCompletedEventSchema = Type.Object(
+const MessageDeltaEventBranchSchema = createEventBranch(
+  "message.delta",
   {
-    ...ProductEventBaseFields,
-    event_type: Type.Union([
-      Type.Literal("message.completed"),
-    ], { "x-extensible-union": true }),
-    payload: Type.Object(
-      {
-        message_id: OpaqueIdSchema,
-        content: Type.String({ maxLength: 4000 }),
-      },
-      { additionalProperties: false },
-    ),
+    message_id: OpaqueIdSchema,
+    delta: Type.String({ maxLength: 16_000 }),
   },
-  { additionalProperties: false, $id: "core-agent://v1/message-completed-event" },
 );
 
-export const TaskEventSchema = Type.Object(
-  {
-    ...ProductEventBaseFields,
-    event_type: Type.Union([
-      Type.Literal("task.created"),
-      Type.Literal("task.status_changed"),
-    ], { "x-extensible-union": true }),
-    payload: Type.Object(
-      {
-        task_id: OpaqueIdSchema,
-        status: TaskStatusSchema,
-      },
-      { additionalProperties: false },
-    ),
-  },
-  { additionalProperties: false, $id: "core-agent://v1/task-event" },
+export const MessageDeltaEventSchema = Type.Union(
+  [MessageDeltaEventBranchSchema],
+  { $id: "core-agent://v1/message-delta-event", "x-extensible-union": true },
 );
 
-export const ApprovalEventSchema = Type.Object(
+const MessageCompletedEventBranchSchema = createEventBranch(
+  "message.completed",
   {
-    ...ProductEventBaseFields,
-    event_type: Type.Union([
-      Type.Literal("approval.requested"),
-      Type.Literal("approval.resolved"),
-    ], { "x-extensible-union": true }),
-    payload: Type.Object(
-      {
-        approval_id: OpaqueIdSchema,
-        status: ApprovalStatusSchema,
-      },
-      { additionalProperties: false },
-    ),
+    message_id: OpaqueIdSchema,
+    content: Type.String({ maxLength: 4000 }),
   },
-  { additionalProperties: false, $id: "core-agent://v1/approval-event" },
 );
 
-export const ToolEventSchema = Type.Object(
-  {
-    ...ProductEventBaseFields,
-    event_type: Type.Union([
-      Type.Literal("tool.requested"),
-      Type.Literal("tool.started"),
-      Type.Literal("tool.succeeded"),
-      Type.Literal("tool.failed"),
-    ], { "x-extensible-union": true }),
-    payload: Type.Object(
-      {
-        tool_call_id: OpaqueIdSchema,
-        tool_name: OpaqueIdSchema,
-        status: Type.Union([
-          Type.Literal("requested"),
-          Type.Literal("started"),
-          Type.Literal("succeeded"),
-          Type.Literal("failed"),
-        ]),
-        summary: Type.Optional(Type.String({ maxLength: 4000 })),
-      },
-      { additionalProperties: false },
-    ),
-  },
-  { additionalProperties: false, $id: "core-agent://v1/tool-event" },
+export const MessageCompletedEventSchema = Type.Union(
+  [MessageCompletedEventBranchSchema],
+  { $id: "core-agent://v1/message-completed-event", "x-extensible-union": true },
 );
 
-export const RuntimeEventSchema = Type.Object(
+const TaskCreatedEventSchema = createEventBranch(
+  "task.created",
   {
-    ...ProductEventBaseFields,
-    event_type: Type.Union([
-      Type.Literal("runtime.status_changed"),
-    ], { "x-extensible-union": true }),
-    payload: Type.Object(
-      {
-        container_id: OpaqueIdSchema,
-        observed_state: ContainerObservedStateSchema,
-      },
-      { additionalProperties: false },
-    ),
+    task_id: OpaqueIdSchema,
+    status: Type.Literal("queued"),
   },
-  { additionalProperties: false, $id: "core-agent://v1/runtime-event" },
+);
+const TaskStatusChangedEventSchema = createEventBranch(
+  "task.status_changed",
+  {
+    task_id: OpaqueIdSchema,
+    status: TaskStatusSchema,
+  },
 );
 
-export const ErrorReportedEventSchema = Type.Object(
-  {
-    ...ProductEventBaseFields,
-    event_type: Type.Union([
-      Type.Literal("error.reported"),
-    ], { "x-extensible-union": true }),
-    payload: Type.Object(
-      {
-        error_id: OpaqueIdSchema,
-        code: StableErrorCodeSchema,
-        category: ErrorCategorySchema,
-      },
-      { additionalProperties: false },
-    ),
-  },
-  { additionalProperties: false, $id: "core-agent://v1/error-reported-event" },
+export const TaskEventSchema = Type.Union(
+  [TaskCreatedEventSchema, TaskStatusChangedEventSchema],
+  { $id: "core-agent://v1/task-event", "x-extensible-union": true },
 );
+
+const ApprovalRequestedEventSchema = createEventBranch(
+  "approval.requested",
+  {
+    approval_id: OpaqueIdSchema,
+    status: Type.Literal("pending"),
+  },
+);
+const ResolvedApprovalStatusSchema = Type.Union([
+  Type.Literal("approved"),
+  Type.Literal("rejected"),
+  Type.Literal("expired"),
+  Type.Literal("cancelled"),
+]);
+const ApprovalResolvedEventSchema = createEventBranch(
+  "approval.resolved",
+  {
+    approval_id: OpaqueIdSchema,
+    status: ResolvedApprovalStatusSchema,
+  },
+);
+
+export const ApprovalEventSchema = Type.Union(
+  [ApprovalRequestedEventSchema, ApprovalResolvedEventSchema],
+  { $id: "core-agent://v1/approval-event", "x-extensible-union": true },
+);
+
+function createToolEventBranch<
+  const EventType extends string,
+  const Status extends "requested" | "started" | "succeeded" | "failed",
+>(eventType: EventType, status: Status) {
+  return createEventBranch(eventType, {
+    tool_call_id: OpaqueIdSchema,
+    tool_name: OpaqueIdSchema,
+    status: Type.Literal(status),
+    summary: Type.Optional(Type.String({ maxLength: 4000 })),
+  });
+}
+
+const ToolRequestedEventSchema = createToolEventBranch("tool.requested", "requested");
+const ToolStartedEventSchema = createToolEventBranch("tool.started", "started");
+const ToolSucceededEventSchema = createToolEventBranch("tool.succeeded", "succeeded");
+const ToolFailedEventSchema = createToolEventBranch("tool.failed", "failed");
+
+export const ToolEventSchema = Type.Union(
+  [
+    ToolRequestedEventSchema,
+    ToolStartedEventSchema,
+    ToolSucceededEventSchema,
+    ToolFailedEventSchema,
+  ],
+  { $id: "core-agent://v1/tool-event", "x-extensible-union": true },
+);
+
+const RuntimeStatusChangedEventSchema = createEventBranch(
+  "runtime.status_changed",
+  {
+    container_id: OpaqueIdSchema,
+    observed_state: ContainerObservedStateSchema,
+  },
+);
+
+export const RuntimeEventSchema = Type.Union(
+  [RuntimeStatusChangedEventSchema],
+  { $id: "core-agent://v1/runtime-event", "x-extensible-union": true },
+);
+
+const ErrorReportedEventBranchSchema = createEventBranch(
+  "error.reported",
+  {
+    error_id: OpaqueIdSchema,
+    code: StableErrorCodeSchema,
+    category: ErrorCategorySchema,
+  },
+);
+
+export const ErrorReportedEventSchema = Type.Union(
+  [ErrorReportedEventBranchSchema],
+  { $id: "core-agent://v1/error-reported-event", "x-extensible-union": true },
+);
+
+const ProductEventBranchSchemas = [
+  ConversationCreatedEventSchema,
+  ConversationArchivedEventSchema,
+  RunQueuedEventSchema,
+  RunStartedEventSchema,
+  RunWaitingApprovalEventSchema,
+  RunCompletedEventSchema,
+  RunFailedEventSchema,
+  RunCancelledEventSchema,
+  MessageDeltaEventBranchSchema,
+  MessageCompletedEventBranchSchema,
+  TaskCreatedEventSchema,
+  TaskStatusChangedEventSchema,
+  ApprovalRequestedEventSchema,
+  ApprovalResolvedEventSchema,
+  ToolRequestedEventSchema,
+  ToolStartedEventSchema,
+  ToolSucceededEventSchema,
+  ToolFailedEventSchema,
+  RuntimeStatusChangedEventSchema,
+  ErrorReportedEventBranchSchema,
+] as const;
 
 const ProductEventFamilySchemas = [
   ConversationEventSchema,
@@ -246,7 +307,7 @@ export const ProductEventSchema = Type.Union(
 const envelopeValidator = Schema.Compile(ProductEventEnvelopeSchema);
 const knownEventValidator = Schema.Compile(ProductEventSchema);
 const knownEventTypeValidator = Schema.Compile(Type.Union(
-  ProductEventFamilySchemas.map((family) => family.properties.event_type),
+  ProductEventBranchSchemas.map((branch) => branch.properties.event_type),
 ));
 
 export type ProductEvent = Static<typeof ProductEventSchema>;
@@ -256,4 +317,39 @@ export function classifyProductEvent(value: unknown): "known" | "unknown" | "inv
   if (!envelopeValidator.Check(value)) return "invalid";
   if (knownEventValidator.Check(value)) return "known";
   return knownEventTypeValidator.Check(value.event_type) ? "invalid" : "unknown";
+}
+
+const associationIdChecks = [
+  ["conversation_id", "EVENT_CONVERSATION_ID_MISMATCH"],
+  ["run_id", "EVENT_RUN_ID_MISMATCH"],
+  ["task_id", "EVENT_TASK_ID_MISMATCH"],
+  ["approval_id", "EVENT_APPROVAL_ID_MISMATCH"],
+] as const;
+
+/**
+ * Producer gate for associations that JSON Schema cannot compare across the
+ * envelope and payload. Run this after ProductEventSchema validation and
+ * before publishing a known event.
+ */
+export function validateProductEventConsistency(
+  event: ProductEvent,
+): ContractViolation[] {
+  const envelope = event as unknown as Record<string, unknown>;
+  const payload = envelope.payload as Record<string, unknown>;
+  const violations: ContractViolation[] = [];
+
+  for (const [field, code] of associationIdChecks) {
+    if (
+      typeof envelope[field] === "string"
+      && typeof payload[field] === "string"
+      && envelope[field] !== payload[field]
+    ) {
+      violations.push(violation(
+        code,
+        `payload.${field}`,
+        `Payload ${field} must match the event association`,
+      ));
+    }
+  }
+  return violations;
 }

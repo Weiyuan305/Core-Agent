@@ -38,6 +38,33 @@ test("versioned writes require an optimistic concurrency version", () => {
   assert.equal(validator.Check({ ...request, expected_resource_version: 7 }), true);
 });
 
+test("idempotency requests reject malformed payload hashes", () => {
+  const validator = Schema.Compile(contracts.IdempotencyRequestSchema);
+  const request = {
+    schema_version: 1,
+    idempotency_key: "idem_demo",
+    payload_hash: `sha256:${"a".repeat(64)}`,
+  };
+  assert.equal(validator.Check(request), true);
+  assert.equal(validator.Check({ ...request, payload_hash: "sha256:not-a-digest" }), false);
+});
+
+test("versioned writes reject zero and fractional resource versions", () => {
+  const validator = Schema.Compile(contracts.VersionedWriteRequestSchema);
+  const request = {
+    schema_version: 1,
+    idempotency_key: "idem_demo",
+    payload_hash: `sha256:${"a".repeat(64)}`,
+  };
+  for (const expected_resource_version of [0, 1.5]) {
+    assert.equal(
+      validator.Check({ ...request, expected_resource_version }),
+      false,
+      String(expected_resource_version),
+    );
+  }
+});
+
 const event = (eventId: string, sequence: number): ProductEventEnvelope => ({
   schema_version: 1,
   event_id: eventId,

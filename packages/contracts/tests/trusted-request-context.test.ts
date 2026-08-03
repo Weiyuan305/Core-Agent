@@ -110,6 +110,16 @@ test("fails closed when an inverted validity window is both future-issued and ex
   );
 });
 
+test("fails closed on a malformed authority comparison time", () => {
+  assert.deepEqual(
+    validateTrustedRequestContext(context, {
+      ...authority,
+      now: "not-a-date",
+    }).map((item) => ({ code: item.code, path: item.path })),
+    [{ code: "AUTHORITY_TIME_INVALID", path: "authority.now" }],
+  );
+});
+
 test("requires explicit delegation when an admin targets another owner profile", () => {
   const delegated = {
     ...context,
@@ -223,6 +233,29 @@ test("accepts complete delegation targeting the selected profile", () => {
   };
 
   assert.deepEqual(validateTrustedRequestContext(delegated, adminAuthority), []);
+});
+
+test("rejects every incomplete delegation field tuple", () => {
+  const incompleteTuples: Array<Partial<Pick<
+    TrustedRequestContext,
+    "delegation_id" | "delegation_reason" | "target_profile_id"
+  >>> = [
+    { delegation_id: "delegation_demo" },
+    { delegation_reason: "Support escalation" },
+    { target_profile_id: "profile_demo" },
+    { delegation_id: "delegation_demo", delegation_reason: "Support escalation" },
+    { delegation_id: "delegation_demo", target_profile_id: "profile_demo" },
+    { delegation_reason: "Support escalation", target_profile_id: "profile_demo" },
+  ];
+
+  for (const fields of incompleteTuples) {
+    assert.deepEqual(
+      validateTrustedRequestContext({ ...context, ...fields }, authority)
+        .map((item) => item.code),
+      ["DELEGATION_FIELDS_INCOMPLETE"],
+      JSON.stringify(Object.keys(fields).sort()),
+    );
+  }
 });
 
 test("context schema rejects duplicate capabilities, duplicate audience, and unknown fields", () => {

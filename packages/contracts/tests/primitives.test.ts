@@ -20,11 +20,20 @@ test("resource metadata accepts UTC Z timestamps", () => {
   assert.equal(Schema.Compile(ResourceMetadataSchema).Check(metadata), true);
 });
 
-test("resource metadata rejects offsets and zero resource versions", () => {
+test("resource metadata rejects resource version zero with valid UTC timestamps", () => {
   assert.equal(
     Schema.Compile(ResourceMetadataSchema).Check({
       ...metadata,
       resource_version: 0,
+    }),
+    false,
+  );
+});
+
+test("resource metadata rejects timezone offsets with a valid resource version", () => {
+  assert.equal(
+    Schema.Compile(ResourceMetadataSchema).Check({
+      ...metadata,
       updated_at: "2026-08-03T09:02:03+08:00",
     }),
     false,
@@ -60,5 +69,16 @@ test("case scope must reference the selected student", () => {
       },
     ).map((item) => item.code),
     ["CASE_STUDENT_MISMATCH"],
+  );
+});
+
+test("case scope requires a student reference", () => {
+  assert.deepEqual(
+    validateCaseScope(undefined, {
+      case_id: "case_demo",
+      student_id: "student_demo",
+      capability_id: "eduapply.application",
+    }).map((item) => item.code),
+    ["CASE_REQUIRES_STUDENT"],
   );
 });

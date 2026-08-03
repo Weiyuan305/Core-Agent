@@ -22,6 +22,8 @@
     "hermes:smoke": "node scripts/smoke-runtime.mjs"
   },
   "devDependencies": {
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
     "tsx": "4.23.5",
     "typescript": "7.0.2"
   }

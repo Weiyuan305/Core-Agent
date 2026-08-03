@@ -24,6 +24,8 @@ import {
   TaskStatusSchema,
   ToolEventSchema,
   classifyProductEvent,
+  validateProductEventConsistency,
+  type ProductEvent,
 } from "../src/index.js";
 
 const base = {
@@ -80,6 +82,132 @@ test("accepts all 20 approved event types across nine strict families", () => {
   }
 });
 
+test("rejects every fixed event type and status contradiction", () => {
+  const contradictions = [
+    { event_type: "conversation.created", payload: { conversation_id: "conversation_demo", status: "archived" } },
+    { event_type: "conversation.archived", payload: { conversation_id: "conversation_demo", status: "active" } },
+    { event_type: "run.queued", payload: { run_id: "run_demo", status: "running" } },
+    { event_type: "run.started", payload: { run_id: "run_demo", status: "queued" } },
+    { event_type: "run.waiting_approval", payload: { run_id: "run_demo", status: "running" } },
+    { event_type: "run.completed", payload: { run_id: "run_demo", status: "failed" } },
+    { event_type: "run.failed", payload: { run_id: "run_demo", status: "succeeded" } },
+    { event_type: "run.cancelled", payload: { run_id: "run_demo", status: "failed" } },
+    { event_type: "task.created", payload: { task_id: "task_demo", status: "running" } },
+    { event_type: "approval.requested", payload: { approval_id: "approval_demo", status: "approved" } },
+    { event_type: "approval.resolved", payload: { approval_id: "approval_demo", status: "pending" } },
+    { event_type: "tool.requested", payload: { tool_call_id: "tool_call_demo", tool_name: "eduapply.match", status: "started" } },
+    { event_type: "tool.started", payload: { tool_call_id: "tool_call_demo", tool_name: "eduapply.match", status: "requested" } },
+    { event_type: "tool.succeeded", payload: { tool_call_id: "tool_call_demo", tool_name: "eduapply.match", status: "failed" } },
+    { event_type: "tool.failed", payload: { tool_call_id: "tool_call_demo", tool_name: "eduapply.match", status: "succeeded" } },
+  ] as const;
+  const validator = Schema.Compile(ProductEventSchema);
+
+  for (const event of contradictions) {
+    const value = { ...base, ...event };
+    assert.equal(validator.Check(value), false, event.event_type);
+    assert.equal(classifyProductEvent(value), "invalid", `${event.event_type} classification`);
+  }
+});
+
+test("accepts the deliberately variable status event branches", () => {
+  const validator = Schema.Compile(ProductEventSchema);
+  for (const status of [
+    "queued", "running", "waiting_approval", "paused", "succeeded", "failed", "cancelled",
+  ] as const) {
+    assert.equal(validator.Check({
+      ...base,
+      event_type: "task.status_changed",
+      payload: { task_id: "task_demo", status },
+    }), true, `task.status_changed ${status}`);
+  }
+  for (const status of ["approved", "rejected", "expired", "cancelled"] as const) {
+    assert.equal(validator.Check({
+      ...base,
+      event_type: "approval.resolved",
+      payload: { approval_id: "approval_demo", status },
+    }), true, `approval.resolved ${status}`);
+  }
+  for (const observed_state of [
+    "requested", "provisioning", "starting", "ready", "draining", "upgrading",
+    "recovering", "stopping", "stopped", "failed", "deleting", "deleted",
+  ] as const) {
+    assert.equal(validator.Check({
+      ...base,
+      event_type: "runtime.status_changed",
+      payload: { container_id: "container_demo", observed_state },
+    }), true, `runtime.status_changed ${observed_state}`);
+  }
+});
+
+test("producer consistency gate accepts matching or absent association ids", () => {
+  const matching = {
+    ...base,
+    event_type: "run.started",
+    payload: { run_id: "run_demo", status: "running" },
+  } as ProductEvent;
+  const associationAbsent = {
+    ...base,
+    event_type: "task.created",
+    payload: { task_id: "task_demo", status: "queued" },
+  } as ProductEvent;
+
+  assert.deepEqual(validateProductEventConsistency(matching), []);
+  assert.deepEqual(validateProductEventConsistency(associationAbsent), []);
+});
+
+test("producer consistency gate reports stable association mismatches", () => {
+  const mismatches = [
+    {
+      event: {
+        ...base,
+        event_type: "conversation.created",
+        payload: { conversation_id: "conversation_other", status: "active" },
+      },
+      code: "EVENT_CONVERSATION_ID_MISMATCH",
+      path: "payload.conversation_id",
+    },
+    {
+      event: {
+        ...base,
+        event_type: "run.started",
+        payload: { run_id: "run_other", status: "running" },
+      },
+      code: "EVENT_RUN_ID_MISMATCH",
+      path: "payload.run_id",
+    },
+    {
+      event: {
+        ...base,
+        task_id: "task_demo",
+        event_type: "task.created",
+        payload: { task_id: "task_other", status: "queued" },
+      },
+      code: "EVENT_TASK_ID_MISMATCH",
+      path: "payload.task_id",
+    },
+    {
+      event: {
+        ...base,
+        approval_id: "approval_demo",
+        event_type: "approval.requested",
+        payload: { approval_id: "approval_other", status: "pending" },
+      },
+      code: "EVENT_APPROVAL_ID_MISMATCH",
+      path: "payload.approval_id",
+    },
+  ] as const;
+
+  for (const { event, code, path } of mismatches) {
+    assert.deepEqual(
+      validateProductEventConsistency(event as ProductEvent).map((item) => ({
+        code: item.code,
+        path: item.path,
+      })),
+      [{ code, path }],
+    );
+  }
+});
+
 test("keeps event text bounded and tool payloads redacted", () => {
   const validator = Schema.Compile(ProductEventSchema);
   assert.equal(validator.Check({ ...base, event_type: "message.delta", payload: { message_id: "message_demo", delta: "x".repeat(16_001) } }), false);
@@ -128,7 +256,14 @@ test("marks only event and error-code extension points extensible", () => {
   ] as const;
   assert.equal(ProductEventSchema["x-extensible-union"], true);
   for (const eventSchema of eventTypeSchemas) {
-    assert.equal(eventSchema.properties.event_type["x-extensible-union"], true);
+    const schema = eventSchema as unknown as Record<string, unknown>;
+    assert.equal(schema["x-extensible-union"], true);
+    const branches = Array.isArray(schema.anyOf)
+      ? schema.anyOf as Array<{ properties: { event_type: Record<string, unknown> } }>
+      : [schema as unknown as { properties: { event_type: Record<string, unknown> } }];
+    for (const branch of branches) {
+      assert.equal(branch.properties.event_type["x-extensible-union"], true);
+    }
   }
   assert.equal(StableErrorCodeSchema["x-extensible-union"], true);
   for (const stateOrRole of [
@@ -139,9 +274,14 @@ test("marks only event and error-code extension points extensible", () => {
     ErrorCategorySchema,
     TaskStatusSchema,
     MembershipRoleSchema,
-    ToolEventSchema.properties.payload.properties.status,
   ]) {
     assert.equal(stateOrRole["x-extensible-union"], undefined);
+  }
+  const toolBranches = (ToolEventSchema as unknown as {
+    anyOf: Array<{ properties: { payload: { properties: { status: Record<string, unknown> } } } }>;
+  }).anyOf;
+  for (const branch of toolBranches) {
+    assert.equal(branch.properties.payload.properties.status["x-extensible-union"], undefined);
   }
 });
 

@@ -33,6 +33,216 @@ test("detects const changes, enum narrowing, and non-extensible union growth", (
   assert.deepEqual(compareSchemas({ anyOf: [{ const: "a" }] }, { anyOf: [{ const: "a" }, { const: "b" }] }).map((item) => item.kind), ["union_growth_not_extensible"]);
 });
 
+test("detects numeric bound and multipleOf tightening", () => {
+  const cases = [
+    {
+      previous: { type: "number", minimum: 1 },
+      current: { type: "number", minimum: 2 },
+      kind: "lower_bound_tightened",
+    },
+    {
+      previous: { type: "number", minimum: 1 },
+      current: { type: "number", exclusiveMinimum: 1 },
+      kind: "lower_bound_tightened",
+    },
+    {
+      previous: { type: "number", maximum: 10 },
+      current: { type: "number", maximum: 9 },
+      kind: "upper_bound_tightened",
+    },
+    {
+      previous: { type: "number", maximum: 10 },
+      current: { type: "number", exclusiveMaximum: 10 },
+      kind: "upper_bound_tightened",
+    },
+    {
+      previous: { type: "number", multipleOf: 2 },
+      current: { type: "number", multipleOf: 4 },
+      kind: "multiple_of_changed",
+    },
+  ] as const;
+
+  for (const { previous, current, kind } of cases) {
+    assert.deepEqual(compareSchemas(previous, current).map((item) => item.kind), [kind]);
+  }
+});
+
+test("detects string constraint tightening", () => {
+  const cases = [
+    {
+      previous: { type: "string", minLength: 1 },
+      current: { type: "string", minLength: 2 },
+      kind: "min_length_increased",
+    },
+    {
+      previous: { type: "string", maxLength: 255 },
+      current: { type: "string", maxLength: 64 },
+      kind: "max_length_decreased",
+    },
+    {
+      previous: { type: "string" },
+      current: { type: "string", pattern: "^[a-z]+$" },
+      kind: "pattern_changed",
+    },
+    {
+      previous: { type: "string", format: "date-time" },
+      current: { type: "string", format: "uuid" },
+      kind: "format_changed",
+    },
+  ] as const;
+
+  for (const { previous, current, kind } of cases) {
+    assert.deepEqual(compareSchemas(previous, current).map((item) => item.kind), [kind]);
+  }
+});
+
+test("detects array constraint and item schema tightening", () => {
+  assert.deepEqual(
+    compareSchemas(
+      { type: "array", minItems: 0 },
+      { type: "array", minItems: 1 },
+    ).map((item) => item.kind),
+    ["min_items_increased"],
+  );
+  assert.deepEqual(
+    compareSchemas(
+      { type: "array", maxItems: 10 },
+      { type: "array", maxItems: 5 },
+    ).map((item) => item.kind),
+    ["max_items_decreased"],
+  );
+  assert.deepEqual(
+    compareSchemas(
+      { type: "array" },
+      { type: "array", uniqueItems: true },
+    ).map((item) => item.kind),
+    ["unique_items_enabled"],
+  );
+  assert.deepEqual(
+    compareSchemas(
+      { type: "array", items: { type: "string", maxLength: 255 } },
+      { type: "array", items: { type: "string", maxLength: 64 } },
+    ).map((item) => [item.kind, item.path]),
+    [["max_length_decreased", "$.items.maxLength"]],
+  );
+});
+
+test("detects object constraint, closure, and property schema tightening", () => {
+  assert.deepEqual(
+    compareSchemas(
+      { type: "object", minProperties: 0 },
+      { type: "object", minProperties: 1 },
+    ).map((item) => item.kind),
+    ["min_properties_increased"],
+  );
+  assert.deepEqual(
+    compareSchemas(
+      { type: "object", maxProperties: 10 },
+      { type: "object", maxProperties: 5 },
+    ).map((item) => item.kind),
+    ["max_properties_decreased"],
+  );
+  assert.deepEqual(
+    compareSchemas(
+      { type: "object", properties: {} },
+      { type: "object", properties: {}, additionalProperties: false },
+    ).map((item) => item.kind),
+    ["additional_properties_restricted"],
+  );
+  assert.deepEqual(
+    compareSchemas(
+      { type: "object", properties: { name: { type: "string", maxLength: 255 } } },
+      { type: "object", properties: { name: { type: "string", maxLength: 64 } } },
+    ).map((item) => [item.kind, item.path]),
+    [["max_length_decreased", "$.properties.name.maxLength"]],
+  );
+});
+
+test("conservatively detects oneOf, allOf, not, and conditional changes", () => {
+  assert.deepEqual(
+    compareSchemas(
+      { oneOf: [{ const: "a" }, { const: "b" }] },
+      { oneOf: [{ const: "a" }] },
+    ).map((item) => item.kind),
+    ["one_of_changed"],
+  );
+  assert.deepEqual(
+    compareSchemas(
+      { type: "string" },
+      { type: "string", allOf: [{ maxLength: 64 }] },
+    ).map((item) => item.kind),
+    ["all_of_tightened"],
+  );
+  assert.deepEqual(
+    compareSchemas(
+      { type: "string" },
+      { type: "string", not: { const: "blocked" } },
+    ).map((item) => item.kind),
+    ["not_changed"],
+  );
+  assert.deepEqual(
+    compareSchemas(
+      { type: "object" },
+      { type: "object", if: { required: ["kind"] }, then: { required: ["value"] } },
+    ).map((item) => item.kind),
+    ["conditional_changed"],
+  );
+});
+
+test("reports all three compatibility review probes", () => {
+  assert.notDeepEqual(
+    compareSchemas({ type: "integer", minimum: 1 }, { type: "integer", minimum: 2 }),
+    [],
+  );
+  assert.notDeepEqual(
+    compareSchemas({ type: "string", maxLength: 255 }, { type: "string", maxLength: 64 }),
+    [],
+  );
+  assert.notDeepEqual(
+    compareSchemas(
+      { type: "object", properties: {} },
+      { type: "object", properties: {}, additionalProperties: false },
+    ),
+    [],
+  );
+});
+
+test("allows supported constraint relaxation", () => {
+  assert.deepEqual(
+    compareSchemas(
+      {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          values: {
+            type: "array",
+            minItems: 2,
+            maxItems: 5,
+            uniqueItems: true,
+            items: { type: "string", minLength: 2, maxLength: 10 },
+          },
+          count: { type: "number", minimum: 2, maximum: 5 },
+        },
+      },
+      {
+        type: "object",
+        additionalProperties: true,
+        properties: {
+          values: {
+            type: "array",
+            minItems: 1,
+            maxItems: 6,
+            uniqueItems: false,
+            items: { type: "string", minLength: 1, maxLength: 11 },
+          },
+          count: { type: "number", minimum: 1, maximum: 6 },
+        },
+      },
+    ),
+    [],
+  );
+});
+
 test("allows optional properties and explicitly extensible union growth", () => {
   assert.deepEqual(compareSchemas({ type: "object", properties: {} }, { type: "object", properties: { note: { type: "string" } } }), []);
   assert.deepEqual(compareSchemas(

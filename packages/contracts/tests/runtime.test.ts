@@ -19,6 +19,7 @@ import {
   SessionSchema,
   TaskSchema,
   validateContainerMutation,
+  validateConversationMutation,
   validateConversationScopeChange,
   validateRetryRun,
   validateRuntimeGraph,
@@ -269,6 +270,86 @@ test("conversation case binding cannot be silently replaced", () => {
     ).map((item) => item.code),
     ["CONVERSATION_CASE_IMMUTABLE"],
   );
+});
+
+test("conversation fixed identity and frozen scope reject every mutation", () => {
+  const previous = {
+    ...resource,
+    conversation_id: "conversation_demo",
+    tenant_id: "tenant_demo",
+    profile_id: "profile_demo",
+    created_by_actor_id: "actor_demo",
+    status: "active" as const,
+    student_ref: { student_id: "student_demo", source_system: "eduapply" },
+    case_ref: {
+      case_id: "case_demo",
+      student_id: "student_demo",
+      capability_id: "university_apply",
+    },
+  };
+  const mutations = [
+    {
+      code: "CONVERSATION_ID_IMMUTABLE",
+      mutate: () => ({ ...previous, conversation_id: "conversation_other" }),
+    },
+    {
+      code: "CONVERSATION_TENANT_IMMUTABLE",
+      mutate: () => ({ ...previous, tenant_id: "tenant_other" }),
+    },
+    {
+      code: "CONVERSATION_PROFILE_IMMUTABLE",
+      mutate: () => ({ ...previous, profile_id: "profile_other" }),
+    },
+    {
+      code: "CONVERSATION_CREATOR_IMMUTABLE",
+      mutate: () => ({ ...previous, created_by_actor_id: "actor_other" }),
+    },
+    {
+      code: "CONVERSATION_STUDENT_IMMUTABLE",
+      mutate: () => ({
+        ...previous,
+        student_ref: { ...previous.student_ref, student_id: "student_other" },
+      }),
+    },
+    {
+      code: "CONVERSATION_CASE_IMMUTABLE",
+      mutate: () => ({
+        ...previous,
+        case_ref: { ...previous.case_ref, case_id: "case_other" },
+      }),
+    },
+  ] as const;
+
+  for (const { code, mutate } of mutations) {
+    assert.deepEqual(
+      validateConversationMutation(previous, mutate()).map((item) => item.code),
+      [code],
+    );
+  }
+});
+
+test("conversation mutation permits lifecycle and metadata changes", () => {
+  const previous = {
+    ...resource,
+    conversation_id: "conversation_demo",
+    tenant_id: "tenant_demo",
+    profile_id: "profile_demo",
+    created_by_actor_id: "actor_demo",
+    status: "active" as const,
+    student_ref: { student_id: "student_demo", source_system: "eduapply" },
+    case_ref: {
+      case_id: "case_demo",
+      student_id: "student_demo",
+      capability_id: "university_apply",
+    },
+  };
+
+  assert.deepEqual(validateConversationMutation(previous, {
+    ...previous,
+    resource_version: 2,
+    updated_at: "2026-08-03T01:03:03Z",
+    status: "archived",
+  }), []);
 });
 
 test("a retry must have a new run id and point to the failed run", () => {

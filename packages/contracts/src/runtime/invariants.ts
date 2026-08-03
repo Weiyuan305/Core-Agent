@@ -3,6 +3,88 @@ import { type ContractViolation, violation } from "../common/validation.js";
 import { validateCaseScope } from "./refs.js";
 import type { AgentRun, Conversation, RuntimeContainer, Session, Task } from "./resources.js";
 
+type ConversationIdentity = Pick<
+  Conversation,
+  | "conversation_id"
+  | "tenant_id"
+  | "profile_id"
+  | "created_by_actor_id"
+  | "student_ref"
+  | "case_ref"
+>;
+
+function sameStudentScope(
+  previous: Conversation["student_ref"],
+  current: Conversation["student_ref"],
+): boolean {
+  if (previous === undefined || current === undefined) return previous === current;
+  return previous.student_id === current.student_id
+    && previous.source_system === current.source_system
+    && previous.source_version === current.source_version;
+}
+
+function sameCaseScope(
+  previous: Conversation["case_ref"],
+  current: Conversation["case_ref"],
+): boolean {
+  if (previous === undefined || current === undefined) return previous === current;
+  return previous.case_id === current.case_id
+    && previous.student_id === current.student_id
+    && previous.capability_id === current.capability_id
+    && previous.source_system === current.source_system
+    && previous.source_version === current.source_version;
+}
+
+export function validateConversationMutation(
+  previous: ConversationIdentity,
+  current: ConversationIdentity,
+): ContractViolation[] {
+  const violations: ContractViolation[] = [];
+  if (previous.conversation_id !== current.conversation_id) {
+    violations.push(violation(
+      "CONVERSATION_ID_IMMUTABLE",
+      "conversation_id",
+      "Conversation identity cannot change after creation",
+    ));
+  }
+  if (previous.tenant_id !== current.tenant_id) {
+    violations.push(violation(
+      "CONVERSATION_TENANT_IMMUTABLE",
+      "tenant_id",
+      "Conversation tenant cannot change after creation",
+    ));
+  }
+  if (previous.profile_id !== current.profile_id) {
+    violations.push(violation(
+      "CONVERSATION_PROFILE_IMMUTABLE",
+      "profile_id",
+      "Conversation profile cannot change after creation",
+    ));
+  }
+  if (previous.created_by_actor_id !== current.created_by_actor_id) {
+    violations.push(violation(
+      "CONVERSATION_CREATOR_IMMUTABLE",
+      "created_by_actor_id",
+      "Conversation creator cannot change after creation",
+    ));
+  }
+  if (!sameStudentScope(previous.student_ref, current.student_ref)) {
+    violations.push(violation(
+      "CONVERSATION_STUDENT_IMMUTABLE",
+      "student_ref",
+      "Create a new conversation to change student scope",
+    ));
+  }
+  if (!sameCaseScope(previous.case_ref, current.case_ref)) {
+    violations.push(violation(
+      "CONVERSATION_CASE_IMMUTABLE",
+      "case_ref",
+      "Create a new conversation to change case scope",
+    ));
+  }
+  return violations;
+}
+
 export function validateConversationScopeChange(
   previous: { student_id?: string; case_id?: string },
   next: { student_id?: string; case_id?: string },

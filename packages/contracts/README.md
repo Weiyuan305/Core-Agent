@@ -44,6 +44,23 @@ verify the real signature, issuer, audience, validity window, and the latest
 membership, profile, and delegation authority before using the context for an
 authorization decision.
 
+## ProductEvent producer gate
+
+Producers must validate known events with `ProductEventSchema` and then run
+`validateProductEventConsistency` before publishing. The pure consistency gate
+rejects contradictory envelope and payload association IDs; consumer-side
+unknown-event fallback does not relax this producer requirement.
+
+## Idempotency, versions, and event streams
+
+- Idempotency keys are tenant scoped. Persistence and lookup must use the pair
+  `(tenant_id, idempotency_key)`; the same key in another tenant is unrelated.
+- `expected_resource_version` applies only to the one resource targeted by the
+  versioned write. It is not a tenant-wide or global version.
+- Each `EventCursor` belongs to one Conversation/Run stream. Never combine
+  events from different streams under one cursor or interpret `sequence` as a
+  global order.
+
 ## MCP boundary
 
 MCP integration is deferred. New first-party MCP services should default to

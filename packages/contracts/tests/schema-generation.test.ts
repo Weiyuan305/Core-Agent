@@ -53,6 +53,33 @@ test("serialized schemas declare JSON Schema 2020-12", () => {
   assert.equal(document.$id, "core-agent://v1/tenant");
 });
 
+test("every generated schema has recursively unique canonical ids", () => {
+  for (const [schemaKey, schema] of Object.entries(ContractSchemas)) {
+    const document = JSON.parse(serializeSchema(schema)) as unknown;
+    const pathsById = new Map<string, string[]>();
+    const visit = (value: unknown, path: string): void => {
+      if (value === null || typeof value !== "object") return;
+      if (!Array.isArray(value)) {
+        const record = value as Record<string, unknown>;
+        if (typeof record.$id === "string") {
+          const paths = pathsById.get(record.$id) ?? [];
+          paths.push(path);
+          pathsById.set(record.$id, paths);
+        }
+        for (const [key, item] of Object.entries(record)) visit(item, `${path}.${key}`);
+        return;
+      }
+      value.forEach((item, index) => visit(item, `${path}[${index}]`));
+    };
+    visit(document, "$");
+
+    const duplicates = [...pathsById]
+      .filter(([, paths]) => paths.length > 1)
+      .map(([id, paths]) => ({ id, paths }));
+    assert.deepEqual(duplicates, [], schemaKey);
+  }
+});
+
 test("committed generated schemas have no drift", () => {
   const result = spawnSync(process.execPath, ["--import", "tsx", "scripts/generate-schemas.ts", "--check"], {
     cwd: new URL("..", import.meta.url),

@@ -14,7 +14,6 @@
       "type": "string"
     },
     "case_ref": {
-      "$id": "core-agent://v1/case-ref",
       "additionalProperties": false,
       "properties": {
         "capability_id": {
@@ -106,7 +105,6 @@
       "type": "integer"
     },
     "student_ref": {
-      "$id": "core-agent://v1/student-ref",
       "additionalProperties": false,
       "properties": {
         "source_system": {

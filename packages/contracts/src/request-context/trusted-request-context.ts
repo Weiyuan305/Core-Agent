@@ -189,23 +189,33 @@ export function validateTrustedRequestContext(
   const issuedAt = Date.parse(context.issued_at);
   const expiresAt = Date.parse(context.expires_at);
 
-  if (now < issuedAt) {
+  if (!Number.isFinite(now)) {
     violations.push(
       violation(
-        "CONTEXT_NOT_YET_VALID",
-        "issued_at",
-        "Context was issued after the authority comparison time",
+        "AUTHORITY_TIME_INVALID",
+        "authority.now",
+        "Authority comparison time must be a valid timestamp",
       ),
     );
-  }
-  if (now >= expiresAt) {
-    violations.push(
-      violation(
-        "CONTEXT_EXPIRED",
-        "expires_at",
-        "Context has expired at the authority comparison time",
-      ),
-    );
+  } else {
+    if (now < issuedAt) {
+      violations.push(
+        violation(
+          "CONTEXT_NOT_YET_VALID",
+          "issued_at",
+          "Context was issued after the authority comparison time",
+        ),
+      );
+    }
+    if (now >= expiresAt) {
+      violations.push(
+        violation(
+          "CONTEXT_EXPIRED",
+          "expires_at",
+          "Context has expired at the authority comparison time",
+        ),
+      );
+    }
   }
 
   if (expiresAt - issuedAt > MAX_CONTEXT_TTL_MILLISECONDS) {
