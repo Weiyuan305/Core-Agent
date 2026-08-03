@@ -11,3 +11,6 @@ export * from "./runtime/resources.js";
 export * from "./runtime/transitions.js";
 export * from "./runtime/invariants.js";
 export * from "./request-context/trusted-request-context.js";
+export * from "./events/product-event.js";
+export * from "./audit/audit-event.js";
+export * from "./errors/error-envelope.js";
