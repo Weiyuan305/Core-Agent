@@ -4,3 +4,5 @@ export const WIRE_SCHEMA_VERSION = 1 as const;
 export * from "./common/primitives.js";
 export * from "./common/validation.js";
 export * from "./runtime/refs.js";
+export * from "./tenant/identity.js";
+export * from "./profile/profile.js";
