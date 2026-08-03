@@ -93,10 +93,23 @@ test("keeps event text bounded and tool payloads redacted", () => {
   }
 });
 
-test("classifies unknown events without breaking the cursor consumer", () => {
+test("classifies malformed known events as invalid", () => {
+  assert.equal(classifyProductEvent({
+    ...base,
+    event_type: "message.delta",
+    payload: { message_id: "message_demo" },
+  }), "invalid");
+  assert.equal(classifyProductEvent({
+    ...base,
+    event_type: "message.delta",
+    payload: { message_id: "message_demo", delta: "Hello", hidden_reasoning: "private" },
+  }), "invalid");
+});
+
+test("distinguishes valid known and structurally valid future events", () => {
   assert.equal(Schema.Compile(ProductEventSchema).Check({ ...base, event_type: "future.event", payload: {} }), false);
-  assert.equal(classifyProductEvent({ ...base, event_type: "future.event", payload: {} }), "unknown");
   assert.equal(classifyProductEvent({ ...base, event_type: "message.delta", payload: { message_id: "message_demo", delta: "Hello" } }), "known");
+  assert.equal(classifyProductEvent({ ...base, event_type: "future.event", payload: {} }), "unknown");
   assert.equal(classifyProductEvent({ ...base, event_type: "future.event", payload: {}, extra: true }), "invalid");
   assert.equal(classifyProductEvent({ ...base, event_id: "", event_type: "future.event", payload: {} }), "invalid");
 });

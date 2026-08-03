@@ -240,11 +240,23 @@ export const ProductEventSchema = Type.Union([
 
 const envelopeValidator = Schema.Compile(ProductEventEnvelopeSchema);
 const knownEventValidator = Schema.Compile(ProductEventSchema);
+const knownEventTypeValidator = Schema.Compile(Type.Union([
+  ConversationEventSchema.properties.event_type,
+  RunEventSchema.properties.event_type,
+  MessageDeltaEventSchema.properties.event_type,
+  MessageCompletedEventSchema.properties.event_type,
+  TaskEventSchema.properties.event_type,
+  ApprovalEventSchema.properties.event_type,
+  ToolEventSchema.properties.event_type,
+  RuntimeEventSchema.properties.event_type,
+  ErrorReportedEventSchema.properties.event_type,
+]));
 
 export type ProductEvent = Static<typeof ProductEventSchema>;
 export type ProductEventEnvelope = Static<typeof ProductEventEnvelopeSchema>;
 
 export function classifyProductEvent(value: unknown): "known" | "unknown" | "invalid" {
   if (!envelopeValidator.Check(value)) return "invalid";
-  return knownEventValidator.Check(value) ? "known" : "unknown";
+  if (knownEventValidator.Check(value)) return "known";
+  return knownEventTypeValidator.Check(value.event_type) ? "invalid" : "unknown";
 }
