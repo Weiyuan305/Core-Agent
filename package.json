@@ -3,14 +3,26 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test",
+    "test": "npm run test:runtime && npm run test -w @core-agent/contracts",
+    "test:runtime": "node --test tests/runtime/*.test.mjs",
+    "contracts:build": "npm run build -w @core-agent/contracts",
+    "contracts:test": "npm run test -w @core-agent/contracts",
+    "contracts:schemas": "npm run schemas -w @core-agent/contracts",
+    "contracts:check": "npm run check -w @core-agent/contracts",
     "hermes:image-ref": "node scripts/resolve-hermes-image.mjs",
     "hermes:build": "node scripts/build-hermes-image.mjs",
     "hermes:bootstrap": "node scripts/bootstrap-demo-company.mjs",
     "hermes:smoke": "node scripts/smoke-runtime.mjs"
+  },
+  "devDependencies": {
+    "tsx": "4.23.5",
+    "typescript": "7.0.2"
   }
 }

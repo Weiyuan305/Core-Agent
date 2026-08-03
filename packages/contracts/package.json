@@ -1,0 +1,32 @@
+{
+  "name": "@core-agent/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./schemas/v1/*": "./schemas/v1/*"
+  },
+  "files": [
+    "dist",
+    "schemas",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "schemas": "tsx scripts/generate-schemas.ts",
+    "schemas:check": "tsx scripts/generate-schemas.ts --check",
+    "fixtures:check": "tsx scripts/verify-fixtures.ts",
+    "compat:check": "tsx scripts/check-compatibility.ts",
+    "check": "npm run build && npm test && npm run schemas:check && npm run fixtures:check && npm run compat:check"
+  },
+  "dependencies": {
+    "typebox": "1.3.10"
+  }
+}
