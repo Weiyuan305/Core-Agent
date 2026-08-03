@@ -481,21 +481,22 @@ test("tenant composite foreign keys fail closed", async () => {
 });
 ```
 
-- [ ] **Step 2: Start PostgreSQL and confirm failure**
+- [ ] **Step 2: Connect to the disposable PostgreSQL database and confirm failure**
 
 Run:
 
 ```bash
-docker compose -f infra/runtime/compose.dev.yaml up -d postgres
-npm run test:postgres -w @core-agent/runtime-core -- --test-name-pattern="migrates|composite"
+CONTROL_PLANE_TEST_DATABASE_URL=postgresql://core_agent_test:core_agent_test@127.0.0.1:5432/core_agent_runtime_v1_task3 \
+  npm run test:postgres -w @core-agent/runtime-core -- --test-name-pattern="migrates|composite"
 ```
 
 Expected: FAIL because the migration runner does not exist. Use a disposable
 PostgreSQL 17 database named `core_agent_runtime_v1_task3` supplied through
 `CONTROL_PLANE_TEST_DATABASE_URL`. Task 17 supplies the canonical private
-Compose topology; until then, the engineer may use an already running local
-PostgreSQL 17 instance, but the tests must refuse any database name that does
-not start with `core_agent_`.
+Compose topology. Task 3 deliberately does not create or depend on that later
+Compose file; until Task 17, the engineer supplies an already running local
+PostgreSQL 17 instance. Tests must refuse any database name that does not start
+with `core_agent_`.
 
 - [ ] **Step 3: Create the resource migration with typed tenant constraints**
 
