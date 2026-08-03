@@ -1,0 +1,15 @@
+{
+  "schema_key": "error-envelope",
+  "expected": { "structurally_valid": false, "violation_codes": [] },
+  "value": {
+    "schema_version": 1,
+    "error_id": "error_demo",
+    "code": "INTERNAL_ERROR",
+    "category": "internal",
+    "message": "Synthetic internal error",
+    "retryable": false,
+    "request_id": "request_demo",
+    "trace_id": "trace_demo",
+    "stack": "synthetic forbidden stack"
+  }
+}

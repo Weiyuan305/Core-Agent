@@ -16,3 +16,4 @@ export * from "./request-context/trusted-request-context.js";
 export * from "./events/product-event.js";
 export * from "./audit/audit-event.js";
 export * from "./errors/error-envelope.js";
+export * from "./registry.js";

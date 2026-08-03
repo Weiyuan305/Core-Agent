@@ -1,0 +1,5 @@
+{
+  "schema_key": "page-info",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": { "schema_version": 1, "next_cursor": "cursor_next", "has_more": true }
+}

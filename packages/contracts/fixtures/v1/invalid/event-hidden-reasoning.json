@@ -1,0 +1,21 @@
+{
+  "schema_key": "product-event",
+  "expected": { "structurally_valid": false, "violation_codes": [] },
+  "value": {
+    "schema_version": 1,
+    "event_id": "event_demo",
+    "occurred_at": "2026-08-03T01:02:03Z",
+    "sequence": 1,
+    "tenant_id": "tenant_demo",
+    "request_id": "request_demo",
+    "trace_id": "trace_demo",
+    "correlation_id": "correlation_demo",
+    "causation_id": "causation_demo",
+    "event_type": "message.delta",
+    "payload": {
+      "message_id": "message_demo",
+      "delta": "Synthetic message",
+      "hidden_reasoning": "synthetic forbidden field"
+    }
+  }
+}

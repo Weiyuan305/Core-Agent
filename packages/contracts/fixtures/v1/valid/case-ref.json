@@ -1,0 +1,11 @@
+{
+  "schema_key": "case-ref",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": {
+    "case_id": "case_demo",
+    "student_id": "student_demo",
+    "capability_id": "capability_demo",
+    "source_system": "synthetic_system",
+    "source_version": "version_demo"
+  }
+}

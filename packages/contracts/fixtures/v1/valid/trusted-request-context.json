@@ -1,0 +1,32 @@
+{
+  "schema_key": "trusted-request-context",
+  "semantic_validator": "trusted_context",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": {
+    "schema_version": 1,
+    "tenant_mode": "b2b",
+    "tenant_id": "tenant_demo",
+    "actor_id": "actor_consultant",
+    "original_actor_id": "actor_consultant",
+    "membership_id": "membership_demo",
+    "effective_role": "consultant",
+    "profile_id": "profile_demo",
+    "student_ref": { "student_id": "student_demo", "source_system": "synthetic_system" },
+    "case_ref": { "case_id": "case_demo", "student_id": "student_demo", "capability_id": "capability_demo" },
+    "entitlement_snapshot_ref": { "snapshot_id": "entitlement_demo", "version": 1, "evaluated_at": "2026-08-03T01:00:00Z" },
+    "consent_snapshot_ref": { "snapshot_id": "consent_demo", "version": 1, "evaluated_at": "2026-08-03T01:00:00Z" },
+    "capability_ids": ["capability_demo"],
+    "container_id": "container_demo",
+    "conversation_id": "conversation_demo",
+    "run_id": "run_demo",
+    "request_id": "request_demo",
+    "trace_id": "trace_demo",
+    "client_request_id": "client_request_demo",
+    "context_id": "context_demo",
+    "issuer": "core-agent-control-plane",
+    "audience": ["capability-gateway"],
+    "issued_at": "2026-08-03T01:00:00Z",
+    "expires_at": "2026-08-03T01:05:00Z",
+    "key_id": "key_demo"
+  }
+}

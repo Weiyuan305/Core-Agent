@@ -1,0 +1,20 @@
+{
+  "schema_key": "task",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": {
+    "schema_version": 1,
+    "resource_version": 1,
+    "created_at": "2026-08-03T01:02:03Z",
+    "updated_at": "2026-08-03T01:02:03Z",
+    "task_id": "task_demo",
+    "tenant_id": "tenant_demo",
+    "origin_run_id": "run_demo",
+    "idempotency_key": "idempotency_task_demo",
+    "capability_id": "capability_demo",
+    "student_ref": { "student_id": "student_demo", "source_system": "synthetic_system" },
+    "case_ref": { "case_id": "case_demo", "student_id": "student_demo", "capability_id": "capability_demo" },
+    "status": "queued",
+    "attempt_count": 0,
+    "dependency_status": "ready"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "schema_key": "trace-context",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": {
+    "request_id": "request_demo",
+    "trace_id": "trace_demo",
+    "client_request_id": "client_request_demo"
+  }
+}

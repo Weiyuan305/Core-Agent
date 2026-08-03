@@ -1,0 +1,5 @@
+{
+  "schema_key": "entitlement-snapshot-ref",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": { "snapshot_id": "entitlement_demo", "version": 1, "evaluated_at": "2026-08-03T01:02:03Z" }
+}

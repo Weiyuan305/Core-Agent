@@ -1,0 +1,21 @@
+{
+  "schema_key": "audit-event",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": {
+    "schema_version": 1,
+    "audit_event_id": "audit_demo",
+    "occurred_at": "2026-08-03T01:02:03Z",
+    "tenant_id": "tenant_demo",
+    "actor_id": "actor_consultant",
+    "membership_id": "membership_demo",
+    "effective_role": "consultant",
+    "action": "synthetic_action",
+    "resource_type": "synthetic_resource",
+    "resource_id": "resource_demo",
+    "decision": "allowed",
+    "outcome": "succeeded",
+    "request_id": "request_demo",
+    "trace_id": "trace_demo",
+    "reason_summary": "Synthetic policy checks passed"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "schema_key": "session",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": {
+    "schema_version": 1,
+    "resource_version": 1,
+    "created_at": "2026-08-03T01:02:03Z",
+    "updated_at": "2026-08-03T01:02:03Z",
+    "session_id": "session_demo",
+    "tenant_id": "tenant_demo",
+    "profile_id": "profile_demo",
+    "actor_id": "actor_consultant",
+    "conversation_id": "conversation_demo",
+    "status": "active",
+    "last_active_at": "2026-08-03T01:02:03Z",
+    "expires_at": "2026-08-03T01:05:00Z",
+    "hermes_session_ref": "hermes_session_demo"
+  }
+}

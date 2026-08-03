@@ -1,0 +1,20 @@
+{
+  "schema_key": "approval",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": {
+    "schema_version": 1,
+    "resource_version": 1,
+    "created_at": "2026-08-03T01:02:03Z",
+    "updated_at": "2026-08-03T01:02:03Z",
+    "approval_id": "approval_demo",
+    "tenant_id": "tenant_demo",
+    "task_id": "task_demo",
+    "run_id": "run_demo",
+    "requested_action": "synthetic_action",
+    "summary": "Synthetic approval summary",
+    "status": "pending",
+    "requester_actor_id": "actor_consultant",
+    "requested_at": "2026-08-03T01:02:03Z",
+    "trusted_context_version": 1
+  }
+}

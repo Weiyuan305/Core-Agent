@@ -1,0 +1,11 @@
+{
+  "schema_key": "idempotency-record",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": {
+    "schema_version": 1,
+    "tenant_id": "tenant_demo",
+    "idempotency_key": "idempotency_demo",
+    "payload_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "result_ref": "result_demo"
+  }
+}

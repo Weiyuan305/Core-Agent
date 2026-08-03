@@ -1,0 +1,17 @@
+{
+  "schema_key": "product-event-envelope",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": {
+    "schema_version": 1,
+    "event_id": "event_envelope_demo",
+    "occurred_at": "2026-08-03T01:02:03Z",
+    "sequence": 1,
+    "tenant_id": "tenant_demo",
+    "request_id": "request_demo",
+    "trace_id": "trace_demo",
+    "correlation_id": "correlation_demo",
+    "causation_id": "causation_demo",
+    "event_type": "synthetic.event",
+    "payload": { "summary": "Synthetic payload" }
+  }
+}

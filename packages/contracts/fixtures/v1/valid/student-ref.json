@@ -1,0 +1,5 @@
+{
+  "schema_key": "student-ref",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": { "student_id": "student_demo", "source_system": "synthetic_system", "source_version": "version_demo" }
+}

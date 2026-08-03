@@ -1,0 +1,10 @@
+{
+  "schema_key": "versioned-write-request",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": {
+    "schema_version": 1,
+    "idempotency_key": "idempotency_demo",
+    "payload_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expected_resource_version": 1
+  }
+}

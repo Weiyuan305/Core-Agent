@@ -1,0 +1,14 @@
+{
+  "schema_key": "error-envelope",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": {
+    "schema_version": 1,
+    "error_id": "error_demo",
+    "code": "APPROVAL_REQUIRED",
+    "category": "authorization",
+    "message": "Synthetic approval requirement",
+    "retryable": false,
+    "request_id": "request_demo",
+    "trace_id": "trace_demo"
+  }
+}

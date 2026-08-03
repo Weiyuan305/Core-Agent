@@ -1,0 +1,5 @@
+{
+  "schema_key": "page-request",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": { "schema_version": 1, "cursor": "cursor_demo", "limit": 25 }
+}
