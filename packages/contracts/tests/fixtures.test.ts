@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cp, mkdtemp, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -50,5 +50,29 @@ test("fixture verifier rejects added or renamed invalid fixtures", async (t) => 
   await assert.rejects(
     verifyFixtureDirectories(directories.valid, directories.invalid),
     /context-expired\.json.*missing.*context-renamed\.json.*unexpected/is,
+  );
+});
+
+test("fixture verifier sorts multiple diagnostics by relative path", async (t) => {
+  const directories = await copyFixtures(t);
+  for (const fileName of ["resource-metadata.json", "actor.json"]) {
+    const path = resolve(directories.valid, fileName);
+    const fixture = JSON.parse(await readFile(path, "utf8")) as {
+      expected: { structurally_valid: boolean };
+    };
+    fixture.expected.structurally_valid = false;
+    await writeFile(path, `${JSON.stringify(fixture, null, 2)}\n`, "utf8");
+  }
+
+  await assert.rejects(
+    verifyFixtureDirectories(directories.valid, directories.invalid),
+    (error: unknown) => {
+      assert.equal(error instanceof Error, true);
+      const lines = (error as Error).message.split("\n");
+      assert.equal(lines.length, 2);
+      assert.match(lines[0]!, /actor\.json/);
+      assert.match(lines[1]!, /resource-metadata\.json/);
+      return true;
+    },
   );
 });

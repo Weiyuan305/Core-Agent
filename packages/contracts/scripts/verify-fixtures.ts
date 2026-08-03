@@ -231,7 +231,10 @@ export async function verifyFixtureDirectories(
       contract,
     )))
   ).flat();
-  if (fixtureErrors.length > 0) throw new Error(fixtureErrors.join("\n"));
+  if (fixtureErrors.length > 0) {
+    fixtureErrors.sort((left, right) => left.localeCompare(right));
+    throw new Error(fixtureErrors.join("\n"));
+  }
 
   return {
     validCount: Object.keys(validFixtureContracts).length,
