@@ -27,6 +27,18 @@ OpenAPI generators, and Swift generators must derive their models from that
 artifact (and the corresponding files for other contract types); do not copy or
 hand-write the wire fields in another language.
 
+Each generated schema is a standalone document: compile the one schema needed
+by an isolated validator registry. Do not bulk-register all 28 artifacts in one
+Ajv instance, because resource identifiers may overlap across those standalone
+documents. Strict Ajv consumers must also register `x-extensible-union` as an
+annotation keyword before compiling:
+
+```ts
+const ajv = new Ajv2020({ strict: true });
+ajv.addKeyword({ keyword: "x-extensible-union", schemaType: "boolean", valid: true });
+const validate = ajv.compile(tenantSchema);
+```
+
 From the repository root, regenerate and verify the committed artifacts with:
 
 ```bash
@@ -43,6 +55,14 @@ verification and do not make client input trusted. A server consumer must also
 verify the real signature, issuer, audience, validity window, and the latest
 membership, profile, and delegation authority before using the context for an
 authorization decision.
+
+## Conversation mutation gate
+
+Every conversation update must call `validateConversationMutation` with the
+stored and proposed conversation identity. It freezes the complete student and
+case references, including additions, removals, source metadata, and capability
+scope. `validateConversationScopeChange` is deprecated because its flattened
+arguments cannot enforce those invariants.
 
 ## ProductEvent producer gate
 
@@ -75,3 +95,30 @@ Every protocol change must update both `CHANGELOG.md` and
 the package version, wire schema version, and a `change_level` of `patch`,
 `minor`, or `major`. The initial wire-schema version 1 baseline is a major
 compatibility change.
+
+The files directly under `compat/v1` are the immutable initial v1 baseline.
+After regenerating schemas and passing the compatibility check, append one exact
+28-file snapshot for every published package version:
+
+```bash
+npm run contracts:schemas
+npm run contracts:check
+npm exec -w @core-agent/contracts -- tsx scripts/check-compatibility.ts --accept-v1-release 0.2.0
+```
+
+The accept command refuses to overwrite an existing version and writes to
+`compat/v1/releases/<package-version>`. Normal compatibility checks compare the
+current schemas with the initial baseline and every accepted release snapshot,
+in deterministic version-directory order. The initial baseline command remains
+one-time-only and refuses any occupied target:
+
+```bash
+npm exec -w @core-agent/contracts -- tsx scripts/check-compatibility.ts --accept-initial-v1
+```
+
+The comparator handles the documented JSON Schema 2020-12 assertion keywords
+recursively and fails closed when an unclassified assertion appears or changes.
+It ignores standard annotation keywords and the known
+`x-extensible-union` metadata keyword. Pattern and `patternProperties` changes
+are intentionally conservative: any newly applied or changed pattern is
+reported as potentially breaking.

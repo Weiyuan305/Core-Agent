@@ -352,6 +352,49 @@ test("conversation mutation permits lifecycle and metadata changes", () => {
   }), []);
 });
 
+test("conversation mutation freezes complete student and case references", () => {
+  const identity = {
+    conversation_id: "conversation_demo",
+    tenant_id: "tenant_demo",
+    profile_id: "profile_demo",
+    created_by_actor_id: "actor_demo",
+  };
+  const student_ref = {
+    student_id: "student_demo",
+    source_system: "eduapply",
+    source_version: "student-v1",
+  };
+  const case_ref = {
+    case_id: "case_demo",
+    student_id: "student_demo",
+    capability_id: "university_apply",
+    source_system: "eduapply",
+    source_version: "case-v1",
+  };
+  const cases = [
+    { name: "student add", previous: identity, current: { ...identity, student_ref }, code: "CONVERSATION_STUDENT_IMMUTABLE" },
+    { name: "student remove", previous: { ...identity, student_ref }, current: identity, code: "CONVERSATION_STUDENT_IMMUTABLE" },
+    { name: "student id", previous: { ...identity, student_ref }, current: { ...identity, student_ref: { ...student_ref, student_id: "student_other" } }, code: "CONVERSATION_STUDENT_IMMUTABLE" },
+    { name: "student source", previous: { ...identity, student_ref }, current: { ...identity, student_ref: { ...student_ref, source_system: "other" } }, code: "CONVERSATION_STUDENT_IMMUTABLE" },
+    { name: "student version", previous: { ...identity, student_ref }, current: { ...identity, student_ref: { ...student_ref, source_version: "student-v2" } }, code: "CONVERSATION_STUDENT_IMMUTABLE" },
+    { name: "case add", previous: identity, current: { ...identity, case_ref }, code: "CONVERSATION_CASE_IMMUTABLE" },
+    { name: "case remove", previous: { ...identity, case_ref }, current: identity, code: "CONVERSATION_CASE_IMMUTABLE" },
+    { name: "case id", previous: { ...identity, case_ref }, current: { ...identity, case_ref: { ...case_ref, case_id: "case_other" } }, code: "CONVERSATION_CASE_IMMUTABLE" },
+    { name: "case student", previous: { ...identity, case_ref }, current: { ...identity, case_ref: { ...case_ref, student_id: "student_other" } }, code: "CONVERSATION_CASE_IMMUTABLE" },
+    { name: "case capability", previous: { ...identity, case_ref }, current: { ...identity, case_ref: { ...case_ref, capability_id: "other" } }, code: "CONVERSATION_CASE_IMMUTABLE" },
+    { name: "case source", previous: { ...identity, case_ref }, current: { ...identity, case_ref: { ...case_ref, source_system: "other" } }, code: "CONVERSATION_CASE_IMMUTABLE" },
+    { name: "case version", previous: { ...identity, case_ref }, current: { ...identity, case_ref: { ...case_ref, source_version: "case-v2" } }, code: "CONVERSATION_CASE_IMMUTABLE" },
+  ];
+
+  for (const { name, previous, current, code } of cases) {
+    assert.deepEqual(
+      validateConversationMutation(previous, current).map((item) => item.code),
+      [code],
+      name,
+    );
+  }
+});
+
 test("a retry must have a new run id and point to the failed run", () => {
   assert.deepEqual(
     validateRetryRun(

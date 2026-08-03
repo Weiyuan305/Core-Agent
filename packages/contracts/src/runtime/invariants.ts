@@ -85,6 +85,11 @@ export function validateConversationMutation(
   return violations;
 }
 
+/**
+ * @deprecated This flattened compatibility helper cannot validate complete
+ * student and case references. All conversation mutation paths must call
+ * {@link validateConversationMutation} with the stored and proposed identity.
+ */
 export function validateConversationScopeChange(
   previous: { student_id?: string; case_id?: string },
   next: { student_id?: string; case_id?: string },

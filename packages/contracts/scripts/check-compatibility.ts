@@ -1,12 +1,15 @@
-import { copyFile, mkdir, readdir, readFile } from "node:fs/promises";
+import { copyFile, mkdir, readdir, readFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { ContractSchemas } from "../src/registry.js";
 
+type JsonSchema = boolean | Record<string, unknown>;
+
 export interface BreakingChange {
   kind:
     | "property_removed"
+    | "property_added_restricts_open_object"
     | "type_changed"
     | "required_added"
     | "const_changed"
@@ -24,21 +27,117 @@ export interface BreakingChange {
     | "max_items_decreased"
     | "unique_items_enabled"
     | "items_restricted"
+    | "contains_restricted"
+    | "min_contains_increased"
+    | "max_contains_decreased"
+    | "prefix_items_restricted"
+    | "unevaluated_items_restricted"
     | "min_properties_increased"
     | "max_properties_decreased"
     | "additional_properties_restricted"
+    | "pattern_properties_changed"
+    | "property_names_restricted"
+    | "dependent_required_added"
+    | "dependent_schema_restricted"
+    | "unevaluated_properties_restricted"
     | "one_of_changed"
     | "all_of_tightened"
     | "not_changed"
     | "conditional_changed"
-    | "reference_changed";
+    | "reference_changed"
+    | "definition_removed"
+    | "schema_id_changed"
+    | "schema_dialect_changed"
+    | "boolean_schema_restricted"
+    | "unsupported_assertion_changed";
   path: string;
   before?: unknown;
   after?: unknown;
 }
 
+const annotationKeywords = new Set([
+  "$comment",
+  "contentEncoding",
+  "contentMediaType",
+  "contentSchema",
+  "default",
+  "deprecated",
+  "description",
+  "examples",
+  "readOnly",
+  "title",
+  "writeOnly",
+]);
+
+const handledKeywords = new Set([
+  "$defs",
+  "$id",
+  "$ref",
+  "$schema",
+  "additionalProperties",
+  "allOf",
+  "anyOf",
+  "const",
+  "contains",
+  "dependentRequired",
+  "dependentSchemas",
+  "else",
+  "enum",
+  "exclusiveMaximum",
+  "exclusiveMinimum",
+  "format",
+  "if",
+  "items",
+  "maxContains",
+  "maxItems",
+  "maxLength",
+  "maxProperties",
+  "maximum",
+  "minContains",
+  "minItems",
+  "minLength",
+  "minProperties",
+  "minimum",
+  "multipleOf",
+  "not",
+  "oneOf",
+  "pattern",
+  "patternProperties",
+  "prefixItems",
+  "properties",
+  "propertyNames",
+  "required",
+  "then",
+  "type",
+  "unevaluatedItems",
+  "unevaluatedProperties",
+  "uniqueItems",
+  "x-extensible-union",
+]);
+
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (!isSchemaObject(value)) return value;
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort((left, right) => left.localeCompare(right))
+      .map((key) => [key, canonicalize(value[key])]),
+  );
+}
+
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(canonicalize(value));
+}
+
 function sameJson(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  return canonicalJson(left) === canonicalJson(right);
+}
+
+function sameSchemaSet(left: unknown, right: unknown): boolean {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+  const before = left.map(canonicalJson).sort((a, b) => a.localeCompare(b));
+  const after = right.map(canonicalJson).sort((a, b) => a.localeCompare(b));
+  return before.every((item, index) => item === after[index]);
 }
 
 function change(
@@ -107,11 +206,10 @@ function isUpperBoundTighter(
     || (after.value === before.value && after.exclusive && !before.exclusive);
 }
 
-function isMinimumIncreased(previous: unknown, current: unknown): boolean {
+function isMinimumIncreased(previous: unknown, current: unknown, defaultValue = 0): boolean {
   const after = finiteNumber(current);
   if (after === undefined) return false;
-  const before = finiteNumber(previous);
-  return before === undefined || after > before;
+  return after > (finiteNumber(previous) ?? defaultValue);
 }
 
 function isMaximumDecreased(previous: unknown, current: unknown): boolean {
@@ -130,28 +228,42 @@ function normalizedTypes(value: unknown): Set<string> | undefined {
 }
 
 function typeNarrows(previous: unknown, current: unknown): boolean {
-  if (current === undefined) return false;
-  if (sameJson(previous, current)) return false;
+  if (current === undefined || sameJson(previous, current)) return false;
   if (previous === undefined) return true;
   const before = normalizedTypes(previous);
   const after = normalizedTypes(current);
   if (before === undefined || after === undefined) return true;
-  return [...before].some((item) => !after.has(item));
+  return [...before].some((item) => !after.has(item) && !(item === "integer" && after.has("number")));
+}
+
+function multipleOfNarrows(previous: unknown, current: unknown): boolean {
+  if (current === undefined || sameJson(previous, current)) return false;
+  const before = finiteNumber(previous);
+  const after = finiteNumber(current);
+  if (before === undefined || after === undefined || before <= 0 || after <= 0) return true;
+  const ratio = before / after;
+  return Math.abs(ratio - Math.round(ratio)) > Number.EPSILON * Math.max(1, Math.abs(ratio)) * 8;
 }
 
 function isSchemaObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function isJsonSchema(value: unknown): value is JsonSchema {
+  return typeof value === "boolean" || isSchemaObject(value);
+}
+
 function isEmptySchema(value: Record<string, unknown>): boolean {
-  return Object.keys(value).length === 0;
+  return Object.keys(value).every((key) => (
+    annotationKeywords.has(key) || key === "x-extensible-union"
+  ));
 }
 
 function compareSubschema(
   previous: unknown,
   current: unknown,
   path: string,
-  restrictionKind: "items_restricted" | "additional_properties_restricted",
+  restrictionKind: BreakingChange["kind"],
 ): BreakingChange[] {
   if (current === undefined || current === true) return [];
   if (current === false) {
@@ -162,6 +274,8 @@ function compareSubschema(
   }
   if (previous === false) return [];
   if (previous === undefined || previous === true) {
+    const unknownChanges = compareUnknownKeywords({}, current, path);
+    if (unknownChanges.length > 0) return unknownChanges;
     return isEmptySchema(current) ? [] : [change(restrictionKind, path, previous, current)];
   }
   if (!isSchemaObject(previous)) {
@@ -170,20 +284,21 @@ function compareSubschema(
   return compareSchemas(previous, current, path);
 }
 
-function branchIdentity(schema: Record<string, unknown>): string | undefined {
+function branchIdentity(schema: JsonSchema): string | undefined {
+  if (!isSchemaObject(schema)) return undefined;
   if (typeof schema.$id === "string") return `$id:${schema.$id}`;
-  if (schema.const !== undefined) return `const:${JSON.stringify(schema.const)}`;
+  if (schema.const !== undefined) return `const:${canonicalJson(schema.const)}`;
   const properties = isSchemaObject(schema.properties) ? schema.properties : undefined;
   const eventType = properties?.event_type;
   if (isSchemaObject(eventType)) {
-    if (eventType.const !== undefined) return `event_type:${JSON.stringify(eventType.const)}`;
+    if (eventType.const !== undefined) return `event_type:${canonicalJson(eventType.const)}`;
     if (Array.isArray(eventType.anyOf)) {
       const values = eventType.anyOf
         .filter(isSchemaObject)
         .map((branch) => branch.const)
         .filter((value) => value !== undefined);
       if (values.length === eventType.anyOf.length) {
-        return `event_type_union:${JSON.stringify(values)}`;
+        return `event_type_union:${canonicalJson(values)}`;
       }
     }
   }
@@ -195,22 +310,25 @@ function compareAnyOf(
   current: Record<string, unknown>,
   path: string,
 ): BreakingChange[] {
-  const before = Array.isArray(previous.anyOf)
-    ? previous.anyOf.filter(isSchemaObject)
+  const before = Array.isArray(previous.anyOf) && previous.anyOf.every(isJsonSchema)
+    ? previous.anyOf
     : undefined;
-  const after = Array.isArray(current.anyOf)
-    ? current.anyOf.filter(isSchemaObject)
+  const after = Array.isArray(current.anyOf) && current.anyOf.every(isJsonSchema)
+    ? current.anyOf
     : undefined;
-  if (after === undefined) return [];
+  if (after === undefined || sameSchemaSet(before, after)) return [];
   if (before === undefined) {
-    return [change("union_narrowed", `${path}.anyOf`, previous.anyOf, current.anyOf)];
+    return after.includes(true)
+      ? []
+      : [change("union_narrowed", `${path}.anyOf`, previous.anyOf, current.anyOf)];
   }
 
   const changes: BreakingChange[] = [];
   const matchedAfter = new Set<number>();
   for (const [beforeIndex, branch] of before.entries()) {
-    let matchIndex = after.findIndex((candidate) => (
-      compareSchemas(branch, candidate, `${path}.anyOf[${beforeIndex}]`).length === 0
+    let matchIndex = after.findIndex((candidate, index) => (
+      !matchedAfter.has(index)
+      && compareSchemas(branch, candidate, `${path}.anyOf[${beforeIndex}]`).length === 0
     ));
     if (matchIndex >= 0) {
       matchedAfter.add(matchIndex);
@@ -219,17 +337,14 @@ function compareAnyOf(
 
     const identity = branchIdentity(branch);
     if (identity !== undefined) {
-      matchIndex = after.findIndex((candidate) => branchIdentity(candidate) === identity);
-    } else if (before.length === after.length) {
+      matchIndex = after.findIndex((candidate, index) => (
+        !matchedAfter.has(index) && branchIdentity(candidate) === identity
+      ));
+    } else if (before.length === after.length && !matchedAfter.has(beforeIndex)) {
       matchIndex = beforeIndex;
     }
     if (matchIndex < 0) {
-      changes.push(change(
-        "union_narrowed",
-        `${path}.anyOf[${beforeIndex}]`,
-        branch,
-        undefined,
-      ));
+      changes.push(change("union_narrowed", `${path}.anyOf[${beforeIndex}]`, branch, undefined));
       continue;
     }
     matchedAfter.add(matchIndex);
@@ -239,26 +354,173 @@ function compareAnyOf(
       : [change("union_narrowed", `${path}.anyOf[${beforeIndex}]`, branch, after[matchIndex])]));
   }
 
-  if (
-    after.some((_, index) => !matchedAfter.has(index))
-    && previous["x-extensible-union"] !== true
-  ) {
-    changes.push(change(
-      "union_growth_not_extensible",
-      `${path}.anyOf`,
-      previous.anyOf,
-      current.anyOf,
+  if (after.some((_, index) => !matchedAfter.has(index)) && previous["x-extensible-union"] !== true) {
+    changes.push(change("union_growth_not_extensible", `${path}.anyOf`, previous.anyOf, current.anyOf));
+  }
+  return changes;
+}
+
+function compareDefinitions(
+  previous: Record<string, unknown>,
+  current: Record<string, unknown>,
+  path: string,
+): BreakingChange[] {
+  const before = isSchemaObject(previous.$defs) ? previous.$defs : {};
+  const after = isSchemaObject(current.$defs) ? current.$defs : {};
+  const changes: BreakingChange[] = [];
+  for (const key of Object.keys(before).sort((a, b) => a.localeCompare(b))) {
+    const definitionPath = `${path}.$defs.${key}`;
+    if (!(key in after)) {
+      changes.push(change("definition_removed", definitionPath, before[key], undefined));
+    } else if (isJsonSchema(before[key]) && isJsonSchema(after[key])) {
+      changes.push(...compareSchemas(before[key], after[key], definitionPath));
+    } else if (!sameJson(before[key], after[key])) {
+      changes.push(change("unsupported_assertion_changed", definitionPath, before[key], after[key]));
+    }
+  }
+  return changes;
+}
+
+function comparePatternProperties(
+  previous: Record<string, unknown>,
+  current: Record<string, unknown>,
+  path: string,
+): BreakingChange[] {
+  if (sameJson(previous.patternProperties, current.patternProperties)) return [];
+  return [change(
+    "pattern_properties_changed",
+    `${path}.patternProperties`,
+    previous.patternProperties,
+    current.patternProperties,
+  )];
+}
+
+function matchingPatternSchemas(schema: Record<string, unknown>, propertyName: string): unknown[] {
+  if (!isSchemaObject(schema.patternProperties)) return [];
+  return Object.keys(schema.patternProperties)
+    .sort((a, b) => a.localeCompare(b))
+    .filter((pattern) => {
+      try {
+        return new RegExp(pattern).test(propertyName);
+      } catch {
+        return true;
+      }
+    })
+    .map((pattern) => (schema.patternProperties as Record<string, unknown>)[pattern]);
+}
+
+function compareDependentRequired(
+  previous: Record<string, unknown>,
+  current: Record<string, unknown>,
+  path: string,
+): BreakingChange[] {
+  const before = isSchemaObject(previous.dependentRequired) ? previous.dependentRequired : {};
+  const after = isSchemaObject(current.dependentRequired) ? current.dependentRequired : {};
+  const changes: BreakingChange[] = [];
+  for (const key of Object.keys(after).sort((a, b) => a.localeCompare(b))) {
+    const beforeNames = new Set(Array.isArray(before[key]) ? before[key] as string[] : []);
+    const afterNames = Array.isArray(after[key]) ? after[key] as string[] : [];
+    for (const name of [...afterNames].sort((a, b) => a.localeCompare(b))) {
+      if (!beforeNames.has(name)) {
+        changes.push(change(
+          "dependent_required_added",
+          `${path}.dependentRequired.${key}.${name}`,
+          before[key],
+          after[key],
+        ));
+      }
+    }
+  }
+  return changes;
+}
+
+function compareDependentSchemas(
+  previous: Record<string, unknown>,
+  current: Record<string, unknown>,
+  path: string,
+): BreakingChange[] {
+  const before = isSchemaObject(previous.dependentSchemas) ? previous.dependentSchemas : {};
+  const after = isSchemaObject(current.dependentSchemas) ? current.dependentSchemas : {};
+  const changes: BreakingChange[] = [];
+  for (const key of Object.keys(after).sort((a, b) => a.localeCompare(b))) {
+    const dependencyPath = `${path}.dependentSchemas.${key}`;
+    if (!(key in before)) {
+      if (after[key] !== true && !(isSchemaObject(after[key]) && isEmptySchema(after[key]))) {
+        changes.push(change("dependent_schema_restricted", dependencyPath, undefined, after[key]));
+      }
+    } else {
+      changes.push(...compareSubschema(
+        before[key],
+        after[key],
+        dependencyPath,
+        "dependent_schema_restricted",
+      ));
+    }
+  }
+  return changes;
+}
+
+function comparePrefixItems(
+  previous: Record<string, unknown>,
+  current: Record<string, unknown>,
+  path: string,
+): BreakingChange[] {
+  const before = Array.isArray(previous.prefixItems) ? previous.prefixItems : [];
+  const after = Array.isArray(current.prefixItems) ? current.prefixItems : [];
+  const changes: BreakingChange[] = [];
+  const length = Math.max(before.length, after.length);
+  for (let index = 0; index < length; index += 1) {
+    const beforeSchema = before[index] ?? previous.items;
+    const afterSchema = after[index] ?? current.items;
+    changes.push(...compareSubschema(
+      beforeSchema,
+      afterSchema,
+      `${path}.prefixItems[${index}]`,
+      "prefix_items_restricted",
     ));
   }
   return changes;
 }
 
-export function compareSchemas(
+function compareUnknownKeywords(
   previous: Record<string, unknown>,
   current: Record<string, unknown>,
+  path: string,
+): BreakingChange[] {
+  const keys = new Set([...Object.keys(previous), ...Object.keys(current)]);
+  return [...keys]
+    .sort((a, b) => a.localeCompare(b))
+    .filter((key) => (
+      !handledKeywords.has(key)
+      && !annotationKeywords.has(key)
+      && !sameJson(previous[key], current[key])
+    ))
+    .map((key) => change(
+      "unsupported_assertion_changed",
+      `${path}.${key}`,
+      previous[key],
+      current[key],
+    ));
+}
+
+export function compareSchemas(
+  previous: JsonSchema,
+  current: JsonSchema,
   path = "$",
 ): BreakingChange[] {
+  if (sameJson(previous, current) || current === true || previous === false) return [];
+  if (current === false) {
+    return [change("boolean_schema_restricted", path, previous, current)];
+  }
+  if (previous === true) return compareSchemas({}, current, path);
+
   const changes: BreakingChange[] = [];
+  if (!sameJson(previous.$id, current.$id)) {
+    changes.push(change("schema_id_changed", `${path}.$id`, previous.$id, current.$id));
+  }
+  if (!sameJson(previous.$schema, current.$schema)) {
+    changes.push(change("schema_dialect_changed", `${path}.$schema`, previous.$schema, current.$schema));
+  }
   if (typeNarrows(previous.type, current.type)) {
     changes.push(change("type_changed", path, previous.type, current.type));
   }
@@ -268,6 +530,7 @@ export function compareSchemas(
   if (current.$ref !== undefined && !sameJson(current.$ref, previous.$ref)) {
     changes.push(change("reference_changed", `${path}.$ref`, previous.$ref, current.$ref));
   }
+  changes.push(...compareDefinitions(previous, current, path));
 
   if (isLowerBoundTighter(previous, current)) {
     changes.push(change(
@@ -285,7 +548,7 @@ export function compareSchemas(
       upperBound(current),
     ));
   }
-  if (current.multipleOf !== undefined && !sameJson(previous.multipleOf, current.multipleOf)) {
+  if (multipleOfNarrows(previous.multipleOf, current.multipleOf)) {
     changes.push(change("multiple_of_changed", `${path}.multipleOf`, previous.multipleOf, current.multipleOf));
   }
   if (isMinimumIncreased(previous.minLength, current.minLength)) {
@@ -317,21 +580,64 @@ export function compareSchemas(
   }
 
   const previousRequired = new Set(Array.isArray(previous.required) ? previous.required as string[] : []);
-  const currentRequired = new Set(Array.isArray(current.required) ? current.required as string[] : []);
-  for (const key of currentRequired) {
-    if (!previousRequired.has(key)) changes.push({ kind: "required_added", path: `${path}.required.${key}` });
-  }
-
-  const previousProperties = (previous.properties ?? {}) as Record<string, Record<string, unknown>>;
-  const currentProperties = (current.properties ?? {}) as Record<string, Record<string, unknown>>;
-  for (const [key, value] of Object.entries(previousProperties)) {
-    if (!(key in currentProperties)) {
-      changes.push({ kind: "property_removed", path: `${path}.properties.${key}` });
-    } else {
-      changes.push(...compareSchemas(value, currentProperties[key]!, `${path}.properties.${key}`));
+  const currentRequired = Array.isArray(current.required) ? current.required as string[] : [];
+  for (const key of [...currentRequired].sort((a, b) => a.localeCompare(b))) {
+    if (!previousRequired.has(key)) {
+      changes.push(change("required_added", `${path}.required.${key}`, previous.required, current.required));
     }
   }
 
+  const previousProperties = isSchemaObject(previous.properties) ? previous.properties : {};
+  const currentProperties = isSchemaObject(current.properties) ? current.properties : {};
+  for (const key of Object.keys(previousProperties).sort((a, b) => a.localeCompare(b))) {
+    const propertyPath = `${path}.properties.${key}`;
+    if (!(key in currentProperties)) {
+      const currentFallback = current.additionalProperties;
+      const currentPatterns = matchingPatternSchemas(current, key);
+      if (
+        (currentFallback === false && currentPatterns.length === 0)
+        || currentPatterns.some((patternSchema) => (
+          compareSubschema(previousProperties[key], patternSchema, propertyPath, "property_removed").length > 0
+        ))
+        || (isSchemaObject(currentFallback)
+          && compareSubschema(previousProperties[key], currentFallback, propertyPath, "property_removed").length > 0)
+      ) {
+        changes.push(change("property_removed", propertyPath, previousProperties[key], undefined));
+      }
+    } else if (isJsonSchema(previousProperties[key]) && isJsonSchema(currentProperties[key])) {
+      changes.push(...compareSchemas(previousProperties[key], currentProperties[key], propertyPath));
+    }
+  }
+  for (const key of Object.keys(currentProperties).sort((a, b) => a.localeCompare(b))) {
+    if (key in previousProperties) continue;
+    const previousFallback = previous.additionalProperties;
+    const previousPatterns = matchingPatternSchemas(previous, key);
+    if (
+      (previousPatterns.length > 0 && compareSubschema(
+        true,
+        currentProperties[key],
+        `${path}.properties.${key}`,
+        "property_added_restricts_open_object",
+      ).length > 0)
+      || (previousPatterns.length === 0
+        && previousFallback !== false
+        && compareSubschema(
+          previousFallback,
+          currentProperties[key],
+          `${path}.properties.${key}`,
+          "property_added_restricts_open_object",
+        ).length > 0)
+    ) {
+      changes.push(change(
+        "property_added_restricts_open_object",
+        `${path}.properties.${key}`,
+        previousFallback,
+        currentProperties[key],
+      ));
+    }
+  }
+
+  changes.push(...comparePatternProperties(previous, current, path));
   changes.push(...compareSubschema(
     previous.additionalProperties,
     current.additionalProperties,
@@ -339,10 +645,65 @@ export function compareSchemas(
     "additional_properties_restricted",
   ));
   changes.push(...compareSubschema(
+    previous.propertyNames,
+    current.propertyNames,
+    `${path}.propertyNames`,
+    "property_names_restricted",
+  ));
+  changes.push(...compareDependentRequired(previous, current, path));
+  changes.push(...compareDependentSchemas(previous, current, path));
+  changes.push(...compareSubschema(
     previous.items,
     current.items,
     `${path}.items`,
     "items_restricted",
+  ));
+  changes.push(...comparePrefixItems(previous, current, path));
+
+  if (previous.contains === undefined && current.contains !== undefined) {
+    if (current.minContains !== 0) {
+      changes.push(change("contains_restricted", `${path}.contains`, previous.contains, current.contains));
+    } else if (finiteNumber(current.maxContains) !== undefined) {
+      changes.push(change(
+        "max_contains_decreased",
+        `${path}.maxContains`,
+        previous.maxContains,
+        current.maxContains,
+      ));
+    }
+  } else if (previous.contains !== undefined && current.contains !== undefined) {
+    changes.push(...compareSubschema(
+      previous.contains,
+      current.contains,
+      `${path}.contains`,
+      "contains_restricted",
+    ));
+  }
+  if (
+    current.contains !== undefined
+    && previous.contains !== undefined
+    && isMinimumIncreased(previous.minContains, current.minContains, 1)
+  ) {
+    changes.push(change("min_contains_increased", `${path}.minContains`, previous.minContains, current.minContains));
+  }
+  if (
+    current.contains !== undefined
+    && previous.contains !== undefined
+    && isMaximumDecreased(previous.maxContains, current.maxContains)
+  ) {
+    changes.push(change("max_contains_decreased", `${path}.maxContains`, previous.maxContains, current.maxContains));
+  }
+  changes.push(...compareSubschema(
+    previous.unevaluatedItems,
+    current.unevaluatedItems,
+    `${path}.unevaluatedItems`,
+    "unevaluated_items_restricted",
+  ));
+  changes.push(...compareSubschema(
+    previous.unevaluatedProperties,
+    current.unevaluatedProperties,
+    `${path}.unevaluatedProperties`,
+    "unevaluated_properties_restricted",
   ));
 
   const previousEnum = Array.isArray(previous.enum) ? previous.enum : undefined;
@@ -355,11 +716,10 @@ export function compareSchemas(
   }
 
   changes.push(...compareAnyOf(previous, current, path));
-
-  if (current.oneOf !== undefined && !sameJson(previous.oneOf, current.oneOf)) {
+  if (current.oneOf !== undefined && !sameSchemaSet(previous.oneOf, current.oneOf)) {
     changes.push(change("one_of_changed", `${path}.oneOf`, previous.oneOf, current.oneOf));
   }
-  if (current.allOf !== undefined && !sameJson(previous.allOf, current.allOf)) {
+  if (current.allOf !== undefined && !sameSchemaSet(previous.allOf, current.allOf)) {
     changes.push(change("all_of_tightened", `${path}.allOf`, previous.allOf, current.allOf));
   }
   if (current.not !== undefined && !sameJson(previous.not, current.not)) {
@@ -380,6 +740,7 @@ export function compareSchemas(
       { if: current.if, then: current.then, else: current.else },
     ));
   }
+  changes.push(...compareUnknownKeywords(previous, current, path));
   return changes;
 }
 
@@ -387,7 +748,11 @@ const expectedSchemaFiles = Object.keys(ContractSchemas)
   .map((key) => `${key}.schema.json`)
   .sort((left, right) => left.localeCompare(right));
 
-async function schemaManifestFailures(directory: string, label: string): Promise<string[]> {
+async function schemaManifestFailures(
+  directory: string,
+  label: string,
+  allowReleasesDirectory = false,
+): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
   const actual = new Map(entries.map((entry) => [entry.name, entry]));
   const expected = new Set(expectedSchemaFiles);
@@ -399,9 +764,39 @@ async function schemaManifestFailures(directory: string, label: string): Promise
     else if (!entry.isFile()) failures.push(`${label} ${fileName}: not a file`);
   }
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
-    if (!expected.has(entry.name)) failures.push(`${label} ${entry.name}: unexpected`);
+    if (expected.has(entry.name)) continue;
+    if (allowReleasesDirectory && entry.name === "releases" && entry.isDirectory()) continue;
+    failures.push(`${label} ${entry.name}: unexpected`);
   }
   return failures;
+}
+
+interface ReleaseSnapshot {
+  version: string;
+  directory: string;
+}
+
+async function discoverReleaseSnapshots(
+  compatibilityDirectory: string,
+): Promise<{ snapshots: ReleaseSnapshot[]; failures: string[] }> {
+  const releasesDirectory = resolve(compatibilityDirectory, "releases");
+  const entries = await readdir(releasesDirectory, { withFileTypes: true }).catch(() => []);
+  const snapshots: ReleaseSnapshot[] = [];
+  const failures: string[] = [];
+  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+    if (!entry.isDirectory()) {
+      failures.push(`release ${entry.name}: unexpected non-directory entry`);
+      continue;
+    }
+    if (!validPackageVersion(entry.name)) {
+      failures.push(`release ${entry.name}: invalid package version directory`);
+      continue;
+    }
+    const directory = resolve(releasesDirectory, entry.name);
+    snapshots.push({ version: entry.name, directory });
+    failures.push(...await schemaManifestFailures(directory, `release ${entry.name} schema manifest`));
+  }
+  return { snapshots, failures };
 }
 
 export async function acceptInitialV1Baseline(
@@ -420,54 +815,116 @@ export async function acceptInitialV1Baseline(
   }
 
   for (const fileName of expectedSchemaFiles) {
-    await copyFile(
-      resolve(schemaDirectory, fileName),
-      resolve(compatibilityDirectory, fileName),
-    );
+    await copyFile(resolve(schemaDirectory, fileName), resolve(compatibilityDirectory, fileName));
   }
   return expectedSchemaFiles.length;
+}
+
+async function compareSnapshot(
+  schemaDirectory: string,
+  snapshotDirectory: string,
+  label: string,
+): Promise<string[]> {
+  const failures: string[] = [];
+  for (const fileName of expectedSchemaFiles) {
+    let previous: JsonSchema;
+    let current: JsonSchema;
+    try {
+      previous = JSON.parse(await readFile(resolve(snapshotDirectory, fileName), "utf8")) as JsonSchema;
+      current = JSON.parse(await readFile(resolve(schemaDirectory, fileName), "utf8")) as JsonSchema;
+    } catch {
+      failures.push(`${label} ${fileName}: unreadable schema`);
+      continue;
+    }
+    for (const schemaChange of compareSchemas(previous, current)) {
+      failures.push(`${label} ${fileName}: ${schemaChange.kind} at ${schemaChange.path}`);
+    }
+  }
+  return failures;
 }
 
 export async function checkCompatibilityDirectories(
   schemaDirectory: string,
   compatibilityDirectory: string,
 ): Promise<string[]> {
+  const releases = await discoverReleaseSnapshots(compatibilityDirectory);
   const manifestFailures = [
     ...await schemaManifestFailures(schemaDirectory, "generated schema manifest"),
-    ...await schemaManifestFailures(compatibilityDirectory, "compatibility schema manifest"),
+    ...await schemaManifestFailures(compatibilityDirectory, "compatibility schema manifest", true),
+    ...releases.failures,
   ];
   if (manifestFailures.length > 0) return manifestFailures;
 
-  const failures: string[] = [];
-  for (const fileName of expectedSchemaFiles) {
-    const baselinePath = resolve(compatibilityDirectory, fileName);
-    const currentPath = resolve(schemaDirectory, fileName);
-    let previous: Record<string, unknown>;
-    let current: Record<string, unknown>;
-    try {
-      previous = JSON.parse(await readFile(baselinePath, "utf8")) as Record<string, unknown>;
-      current = JSON.parse(await readFile(currentPath, "utf8")) as Record<string, unknown>;
-    } catch {
-      failures.push(`${fileName}: unreadable schema`);
-      continue;
-    }
-    for (const change of compareSchemas(previous, current)) {
-      failures.push(`${fileName}: ${change.kind} at ${change.path}`);
-    }
+  const failures = await compareSnapshot(schemaDirectory, compatibilityDirectory, "initial v1");
+  for (const snapshot of releases.snapshots) {
+    failures.push(...await compareSnapshot(
+      schemaDirectory,
+      snapshot.directory,
+      `release ${snapshot.version}`,
+    ));
   }
   return failures;
+}
+
+function validPackageVersion(version: string): boolean {
+  return /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/.test(version);
+}
+
+export async function acceptV1Release(
+  schemaDirectory: string,
+  compatibilityDirectory: string,
+  packageVersion: string,
+): Promise<number> {
+  if (!validPackageVersion(packageVersion)) {
+    throw new Error(`Invalid package version for v1 release snapshot: ${packageVersion}`);
+  }
+  const releasesDirectory = resolve(compatibilityDirectory, "releases");
+  const releaseDirectory = resolve(releasesDirectory, packageVersion);
+  const existing = await stat(releaseDirectory).catch(() => undefined);
+  if (existing !== undefined) {
+    throw new Error(`V1 release ${packageVersion} already exists; refusing to overwrite it`);
+  }
+  const failures = await checkCompatibilityDirectories(schemaDirectory, compatibilityDirectory);
+  if (failures.length > 0) {
+    throw new Error(`Compatibility check failed; release snapshot was not accepted:\n${failures.join("\n")}`);
+  }
+
+  await mkdir(releasesDirectory, { recursive: true });
+  await mkdir(releaseDirectory).catch((error: unknown) => {
+    if (isSchemaObject(error) && error.code === "EEXIST") {
+      throw new Error(`V1 release ${packageVersion} already exists; refusing to overwrite it`);
+    }
+    throw error;
+  });
+  for (const fileName of expectedSchemaFiles) {
+    await copyFile(resolve(schemaDirectory, fileName), resolve(releaseDirectory, fileName));
+  }
+  return expectedSchemaFiles.length;
 }
 
 async function main(): Promise<void> {
   const root = resolve(import.meta.dirname, "..");
   const schemaDirectory = resolve(root, "schemas/v1");
   const compatibilityDirectory = resolve(root, "compat/v1");
+  const args = process.argv.slice(2);
 
-  if (process.argv.includes("--accept-initial-v1")) {
+  if (args.includes("--accept-initial-v1")) {
+    if (args.length !== 1) throw new Error("--accept-initial-v1 does not accept other arguments");
     const count = await acceptInitialV1Baseline(schemaDirectory, compatibilityDirectory);
     console.log(`Accepted ${count} initial v1 compatibility baselines`);
     return;
   }
+
+  const releaseArgument = args.indexOf("--accept-v1-release");
+  if (releaseArgument >= 0) {
+    if (args.length !== 2 || releaseArgument !== 0 || args[1] === undefined) {
+      throw new Error("Usage: --accept-v1-release <package-version>");
+    }
+    const count = await acceptV1Release(schemaDirectory, compatibilityDirectory, args[1]);
+    console.log(`Accepted ${count} v1 compatibility schemas for release ${args[1]}`);
+    return;
+  }
+  if (args.length > 0) throw new Error(`Unknown compatibility argument: ${args[0]}`);
 
   const failures = await checkCompatibilityDirectories(schemaDirectory, compatibilityDirectory);
   if (failures.length > 0) {
