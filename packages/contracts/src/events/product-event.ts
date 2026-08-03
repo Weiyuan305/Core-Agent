@@ -226,7 +226,7 @@ export const ErrorReportedEventSchema = Type.Object(
   { additionalProperties: false, $id: "core-agent://v1/error-reported-event" },
 );
 
-export const ProductEventSchema = Type.Union([
+const ProductEventFamilySchemas = [
   ConversationEventSchema,
   RunEventSchema,
   MessageDeltaEventSchema,
@@ -236,21 +236,18 @@ export const ProductEventSchema = Type.Union([
   ToolEventSchema,
   RuntimeEventSchema,
   ErrorReportedEventSchema,
-], { $id: "core-agent://v1/product-event", "x-extensible-union": true });
+] as const;
+
+export const ProductEventSchema = Type.Union(
+  [...ProductEventFamilySchemas],
+  { $id: "core-agent://v1/product-event", "x-extensible-union": true },
+);
 
 const envelopeValidator = Schema.Compile(ProductEventEnvelopeSchema);
 const knownEventValidator = Schema.Compile(ProductEventSchema);
-const knownEventTypeValidator = Schema.Compile(Type.Union([
-  ConversationEventSchema.properties.event_type,
-  RunEventSchema.properties.event_type,
-  MessageDeltaEventSchema.properties.event_type,
-  MessageCompletedEventSchema.properties.event_type,
-  TaskEventSchema.properties.event_type,
-  ApprovalEventSchema.properties.event_type,
-  ToolEventSchema.properties.event_type,
-  RuntimeEventSchema.properties.event_type,
-  ErrorReportedEventSchema.properties.event_type,
-]));
+const knownEventTypeValidator = Schema.Compile(Type.Union(
+  ProductEventFamilySchemas.map((family) => family.properties.event_type),
+));
 
 export type ProductEvent = Static<typeof ProductEventSchema>;
 export type ProductEventEnvelope = Static<typeof ProductEventEnvelopeSchema>;
