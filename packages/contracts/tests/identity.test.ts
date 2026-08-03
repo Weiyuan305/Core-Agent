@@ -58,3 +58,34 @@ test("rejects a consultant profile without an active consultant membership", () 
   graph.memberships[0]!.status = "suspended";
   assert.deepEqual(validateIdentityGraph(graph).map((item) => item.code), ["PROFILE_OWNER_NOT_ACTIVE_CONSULTANT"]);
 });
+
+test("rejects B2B default profiles owned by student memberships", () => {
+  const graph = structuredClone(b2bGraph);
+  graph.memberships[0]!.roles = ["student"];
+  graph.profiles[0]!.profile_kind = "default";
+  assert.deepEqual(validateIdentityGraph(graph).map((item) => item.code), ["B2B_PROFILE_KIND_INVALID"]);
+});
+
+test("rejects B2C default profiles without an active student membership", () => {
+  const baseGraph = structuredClone(b2bGraph);
+  baseGraph.tenant.tenant_mode = "b2c";
+  baseGraph.profiles[0]!.profile_kind = "default";
+  baseGraph.memberships[0]!.roles = ["student"];
+
+  const graphs = [
+    { ...structuredClone(baseGraph), memberships: [] },
+    structuredClone(baseGraph),
+    structuredClone(baseGraph),
+    structuredClone(baseGraph),
+  ];
+  graphs[1]!.memberships[0]!.roles = ["admin"];
+  graphs[2]!.memberships[0]!.status = "suspended";
+  graphs[3]!.memberships[0]!.status = "revoked";
+
+  for (const graph of graphs) {
+    assert.deepEqual(
+      validateIdentityGraph(graph).map((item) => item.code),
+      ["B2C_PROFILE_OWNER_NOT_ACTIVE_STUDENT"],
+    );
+  }
+});

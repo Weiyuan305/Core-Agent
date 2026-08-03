@@ -60,6 +60,9 @@ export function validateIdentityGraph(graph: IdentityGraph): ContractViolation[]
     if (!actorIds.has(profile.owner_actor_id)) {
       violations.push(violation("PROFILE_OWNER_NOT_FOUND", "profiles.owner_actor_id", "Profile owner does not exist"));
     }
+    if (graph.tenant.tenant_mode === "b2b" && profile.profile_kind === "default") {
+      violations.push(violation("B2B_PROFILE_KIND_INVALID", "profiles.profile_kind", "B2B tenant only allows consultant profiles"));
+    }
     if (graph.tenant.tenant_mode === "b2b" && profile.profile_kind === "consultant") {
       const membership = tenantMemberships.find(
         (item) => item.actor_id === profile.owner_actor_id
@@ -68,6 +71,16 @@ export function validateIdentityGraph(graph: IdentityGraph): ContractViolation[]
       );
       if (membership === undefined) {
         violations.push(violation("PROFILE_OWNER_NOT_ACTIVE_CONSULTANT", "profiles.owner_actor_id", "Consultant profile requires an active consultant membership"));
+      }
+    }
+    if (graph.tenant.tenant_mode === "b2c" && profile.profile_kind === "default") {
+      const membership = tenantMemberships.find(
+        (item) => item.actor_id === profile.owner_actor_id
+          && item.status === "active"
+          && item.roles.includes("student"),
+      );
+      if (membership === undefined) {
+        violations.push(violation("B2C_PROFILE_OWNER_NOT_ACTIVE_STUDENT", "profiles.owner_actor_id", "B2C default profile requires an active student membership"));
       }
     }
   }
