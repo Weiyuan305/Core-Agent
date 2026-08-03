@@ -46,6 +46,34 @@
     "code": {
       "anyOf": [
         {
+          "const": "INVALID_REQUEST",
+          "type": "string"
+        },
+        {
+          "const": "UNAUTHENTICATED",
+          "type": "string"
+        },
+        {
+          "const": "RESOURCE_NOT_FOUND",
+          "type": "string"
+        },
+        {
+          "const": "RESOURCE_VERSION_CONFLICT",
+          "type": "string"
+        },
+        {
+          "const": "INVALID_STATE_TRANSITION",
+          "type": "string"
+        },
+        {
+          "const": "RUNTIME_NOT_READY",
+          "type": "string"
+        },
+        {
+          "const": "SUPERVISOR_REJECTED",
+          "type": "string"
+        },
+        {
           "const": "TENANT_SCOPE_MISMATCH",
           "type": "string"
         },
@@ -71,6 +99,10 @@
         },
         {
           "const": "DEPENDENCY_UNAVAILABLE",
+          "type": "string"
+        },
+        {
+          "const": "DEPENDENCY_TIMEOUT",
           "type": "string"
         },
         {

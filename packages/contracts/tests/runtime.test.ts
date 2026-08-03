@@ -14,6 +14,8 @@ import {
   canTransitionTask,
   canTransitionTenant,
   ConversationSchema,
+  CreateAgentRunRequestSchema,
+  MessageSchema,
   resolveContainerDeletion,
   RuntimeContainerSchema,
   SessionSchema,
@@ -28,6 +30,41 @@ import {
 
 const timestamp = "2026-08-03T01:02:03Z";
 const resource = { schema_version: 1 as const, resource_version: 1, created_at: timestamp, updated_at: timestamp };
+
+test("Message and Create Agent Run requests have bounded client input", () => {
+  const now = "2026-08-03T12:00:00.000Z";
+  const message = {
+    schema_version: 1,
+    resource_version: 1,
+    created_at: now,
+    updated_at: now,
+    message_id: "msg_01",
+    tenant_id: "tenant_01",
+    conversation_id: "conversation_01",
+    run_id: "run_01",
+    role: "user",
+    status: "completed",
+    content: "Synthetic hello",
+  };
+  assert.equal(Schema.Check(MessageSchema, message), true);
+  assert.equal(Schema.Check(MessageSchema, { ...message, api_key: "sentinel" }), false);
+
+  const request = {
+    schema_version: 1,
+    idempotency_key: "idem_01",
+    payload_hash: `sha256:${"a".repeat(64)}`,
+    client_request_id: "client_01",
+    input_message: {
+      client_message_id: "client_message_01",
+      content: "Synthetic hello",
+    },
+  };
+  assert.equal(Schema.Check(CreateAgentRunRequestSchema, request), true);
+  assert.equal(Schema.Check(CreateAgentRunRequestSchema, {
+    ...request,
+    tenant_id: "tenant_forged",
+  }), false);
+});
 
 function assertTransitionMatrix<State extends string>(
   states: readonly State[],

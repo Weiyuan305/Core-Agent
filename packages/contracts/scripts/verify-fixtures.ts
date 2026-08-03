@@ -99,6 +99,16 @@ const invalidFixtureContracts = {
     structurallyValid: false,
     violationCodes: [],
   },
+  "message-secret-field.json": {
+    schemaKey: "message",
+    structurallyValid: false,
+    violationCodes: [],
+  },
+  "create-agent-run-forged-scope.json": {
+    schemaKey: "create-agent-run-request",
+    structurallyValid: false,
+    violationCodes: [],
+  },
 } as const satisfies Record<string, FixtureContract>;
 
 const authority: TrustedContextAuthority = {

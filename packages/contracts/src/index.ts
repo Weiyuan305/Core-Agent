@@ -1,4 +1,4 @@
-export const CONTRACT_PACKAGE_VERSION = "0.1.0" as const;
+export const CONTRACT_PACKAGE_VERSION = "0.2.0" as const;
 export const WIRE_SCHEMA_VERSION = 1 as const;
 
 export * from "./common/primitives.js";
@@ -11,6 +11,8 @@ export * from "./runtime/resources.js";
 export * from "./runtime/transitions.js";
 export * from "./runtime/invariants.js";
 export * from "./runtime/idempotency.js";
+export * from "./runtime/messages.js";
+export * from "./runtime/requests.js";
 export * from "./runtime/delivery.js";
 export * from "./request-context/trusted-request-context.js";
 export * from "./events/product-event.js";

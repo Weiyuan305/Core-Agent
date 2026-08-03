@@ -1,6 +1,6 @@
 {
-  "package_version": "0.1.0",
+  "package_version": "0.2.0",
   "wire_schema_version": 1,
-  "change_level": "major",
-  "reason": "Initial wire schema version 1 baseline"
+  "change_level": "minor",
+  "reason": "Add bounded Message, CreateAgentRunRequest, and message.created contracts"
 }

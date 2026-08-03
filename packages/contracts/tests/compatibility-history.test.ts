@@ -46,7 +46,7 @@ test("history policy rejects deletion of a whole accepted release", () => {
     path: releasePath("1.1.0", fileName),
   }));
   const failures = compatibilityHistoryFailures(changes);
-  assert.equal(failures.length, 28);
+  assert.equal(failures.length, schemaFiles.length);
   assert.match(failures[0]!, /append-only/);
 });
 

@@ -9,7 +9,11 @@ import {
   TraceContextSchema,
 } from "./common/primitives.js";
 import { ErrorEnvelopeSchema } from "./errors/error-envelope.js";
-import { ProductEventEnvelopeSchema, ProductEventSchema } from "./events/product-event.js";
+import {
+  MessageCreatedEventSchema,
+  ProductEventEnvelopeSchema,
+  ProductEventSchema,
+} from "./events/product-event.js";
 import { IdentityGraphSchema, ProfileSchema } from "./profile/profile.js";
 import {
   SignedTrustedRequestContextSchema,
@@ -20,6 +24,8 @@ import {
   IdempotencyRequestSchema,
   VersionedWriteRequestSchema,
 } from "./runtime/idempotency.js";
+import { MessageSchema } from "./runtime/messages.js";
+import { CreateAgentRunRequestSchema } from "./runtime/requests.js";
 import {
   CaseRefSchema,
   ConsentSnapshotRefSchema,
@@ -53,17 +59,20 @@ export const ContractSchemas = {
   conversation: ConversationSchema,
   session: SessionSchema,
   "agent-run": AgentRunSchema,
+  message: MessageSchema,
   task: TaskSchema,
   approval: ApprovalSchema,
   "trusted-request-context": TrustedRequestContextSchema,
   "signed-trusted-request-context": SignedTrustedRequestContextSchema,
   "product-event-envelope": ProductEventEnvelopeSchema,
   "product-event": ProductEventSchema,
+  "message-created-event": MessageCreatedEventSchema,
   "audit-event": AuditEventSchema,
   "error-envelope": ErrorEnvelopeSchema,
   "idempotency-request": IdempotencyRequestSchema,
   "idempotency-record": IdempotencyRecordSchema,
   "versioned-write-request": VersionedWriteRequestSchema,
+  "create-agent-run-request": CreateAgentRunRequestSchema,
 } satisfies Record<string, TSchema>;
 
 function sortJson(value: unknown): unknown {

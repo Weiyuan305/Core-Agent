@@ -164,6 +164,17 @@ export const MessageCompletedEventSchema = Type.Union(
   { $id: "core-agent://v1/message-completed-event", "x-extensible-union": true },
 );
 
+const MessageCreatedEventBranchSchema = createEventBranch("message.created", {
+  message_id: OpaqueIdSchema,
+  role: Type.Literal("user"),
+  status: Type.Literal("completed"),
+});
+
+export const MessageCreatedEventSchema = Type.Union(
+  [MessageCreatedEventBranchSchema],
+  { $id: "core-agent://v1/message-created-event", "x-extensible-union": true },
+);
+
 const TaskCreatedEventSchema = createEventBranch(
   "task.created",
   {
@@ -285,6 +296,7 @@ const ProductEventBranchSchemas = [
   ToolFailedEventSchema,
   RuntimeStatusChangedEventSchema,
   ErrorReportedEventBranchSchema,
+  MessageCreatedEventBranchSchema,
 ] as const;
 
 const ProductEventFamilySchemas = [
@@ -297,6 +309,7 @@ const ProductEventFamilySchemas = [
   ToolEventSchema,
   RuntimeEventSchema,
   ErrorReportedEventSchema,
+  MessageCreatedEventSchema,
 ] as const;
 
 export const ProductEventSchema = Type.Union(

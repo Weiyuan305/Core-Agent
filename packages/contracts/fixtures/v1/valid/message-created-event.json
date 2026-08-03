@@ -1,0 +1,23 @@
+{
+  "schema_key": "message-created-event",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": {
+    "schema_version": 1,
+    "event_id": "event_01",
+    "occurred_at": "2026-08-03T12:00:00.000Z",
+    "sequence": 1,
+    "tenant_id": "tenant_01",
+    "request_id": "request_01",
+    "trace_id": "trace_01",
+    "correlation_id": "conversation_01",
+    "causation_id": "request_01",
+    "conversation_id": "conversation_01",
+    "run_id": "run_01",
+    "event_type": "message.created",
+    "payload": {
+      "message_id": "msg_01",
+      "role": "user",
+      "status": "completed"
+    }
+  }
+}

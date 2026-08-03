@@ -19,6 +19,13 @@ export const ErrorCategorySchema = Type.Union([
 ]);
 
 export const StableErrorCodeSchema = Type.Union([
+  Type.Literal("INVALID_REQUEST"),
+  Type.Literal("UNAUTHENTICATED"),
+  Type.Literal("RESOURCE_NOT_FOUND"),
+  Type.Literal("RESOURCE_VERSION_CONFLICT"),
+  Type.Literal("INVALID_STATE_TRANSITION"),
+  Type.Literal("RUNTIME_NOT_READY"),
+  Type.Literal("SUPERVISOR_REJECTED"),
   Type.Literal("TENANT_SCOPE_MISMATCH"),
   Type.Literal("PROFILE_NOT_ACTIVE"),
   Type.Literal("CONTEXT_EXPIRED"),
@@ -26,6 +33,7 @@ export const StableErrorCodeSchema = Type.Union([
   Type.Literal("APPROVAL_REQUIRED"),
   Type.Literal("IDEMPOTENCY_CONFLICT"),
   Type.Literal("DEPENDENCY_UNAVAILABLE"),
+  Type.Literal("DEPENDENCY_TIMEOUT"),
   Type.Literal("INTERNAL_ERROR"),
 ], { "x-extensible-union": true });
 

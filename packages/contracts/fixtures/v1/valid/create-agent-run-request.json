@@ -1,0 +1,14 @@
+{
+  "schema_key": "create-agent-run-request",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": {
+    "schema_version": 1,
+    "idempotency_key": "idem_01",
+    "payload_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "client_request_id": "client_01",
+    "input_message": {
+      "client_message_id": "client_message_01",
+      "content": "Synthetic hello"
+    }
+  }
+}

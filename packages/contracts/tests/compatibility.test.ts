@@ -354,6 +354,19 @@ test("allows explicitly extensible union growth", () => {
     { anyOf: [{ const: "a" }], "x-extensible-union": true },
     { anyOf: [{ const: "a" }, { const: "b" }], "x-extensible-union": true },
   ), []);
+  assert.deepEqual(compareSchemas(
+    {
+      anyOf: [{ $id: "urn:branch:a", const: "a" }],
+      "x-extensible-union": true,
+    },
+    {
+      anyOf: [
+        { $id: "urn:branch:a", const: "a" },
+        { $id: "urn:branch:b", const: "b" },
+      ],
+      "x-extensible-union": true,
+    },
+  ), []);
 });
 
 test("detects every advanced assertion keyword recursively", () => {
@@ -1177,7 +1190,7 @@ test("initial v1 baseline copies generated schemas once and refuses overwrite", 
   await writeSchemaManifest(schemas);
   const schemaDocument = await readFile(resolve(schemas, "tenant.schema.json"), "utf8");
 
-  assert.equal(await acceptInitialV1Baseline(schemas, baseline), 28);
+  assert.equal(await acceptInitialV1Baseline(schemas, baseline), expectedSchemaFiles.length);
   assert.equal(await readFile(resolve(baseline, "tenant.schema.json"), "utf8"), schemaDocument);
   await assert.rejects(
     acceptInitialV1Baseline(schemas, baseline),
@@ -1201,20 +1214,23 @@ test("initial v1 baseline refuses non-file and non-JSON directory entries", asyn
   await assert.rejects(acceptInitialV1Baseline(schemas, baseline), /refusing to overwrite/i);
 });
 
-test("compatibility rejects a deleted baseline schema", async (t) => {
+test("compatibility allows current schemas added after the immutable baseline", async (t) => {
   const directory = await mkdtemp(resolve(tmpdir(), "contracts-compat-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const schemas = resolve(directory, "schemas");
-  const baseline = resolve(directory, "compat");
+  const baseline = resolve(directory, "compat/v1");
   await writeSchemaManifest(schemas);
   await writeSchemaManifest(baseline);
-  await unlink(resolve(baseline, "tenant.schema.json"));
+  for (const fileName of [
+    "create-agent-run-request.schema.json",
+    "message-created-event.schema.json",
+    "message.schema.json",
+  ]) {
+    await unlink(resolve(baseline, fileName));
+  }
+  await writeSchemaManifest(resolve(baseline, "releases/0.2.0"));
 
-  assert.equal(
-    (await checkCompatibilityDirectories(schemas, baseline))
-      .some((item) => item.includes("tenant.schema.json") && item.includes("missing")),
-    true,
-  );
+  assert.deepEqual(await checkCompatibilityDirectories(schemas, baseline), []);
 });
 
 test("compatibility rejects an extra current schema", async (t) => {
@@ -1262,7 +1278,7 @@ test("accepted v1 releases make compatibility checks cumulative", async (t) => {
   assert.deepEqual(await checkCompatibilityDirectories(schemas, baseline), []);
   assert.equal(await acceptV1Release(schemas, baseline, "1.1.0", {
     versionAuthorities: releaseAuthorities("1.1.0"),
-  }), 28);
+  }), expectedSchemaFiles.length);
   await assert.rejects(
     acceptV1Release(schemas, baseline, "1.1.0", {
       versionAuthorities: releaseAuthorities("1.1.0"),
@@ -1361,7 +1377,7 @@ test("initial snapshot publication cleans an interrupted staging copy and permit
     (await readdir(resolve(directory, "compat"))).filter((name) => name.includes(".staging-")),
     [],
   );
-  assert.equal(await acceptInitialV1Baseline(schemas, baseline), 28);
+  assert.equal(await acceptInitialV1Baseline(schemas, baseline), expectedSchemaFiles.length);
 });
 
 test("concurrent release publishers accept one complete source without mixing", async (t) => {
@@ -1402,7 +1418,7 @@ test("concurrent release publishers accept one complete source without mixing", 
     const schema = JSON.parse(await readFile(resolve(release, fileName), "utf8")) as { title: string };
     markers.add(schema.title);
   }
-  assert.equal((await readdir(release)).length, 28);
+  assert.equal((await readdir(release)).length, expectedSchemaFiles.length);
   assert.equal(markers.size, 1);
   assert.equal(["source-a", "source-b"].includes([...markers][0]!), true);
   assert.deepEqual(
@@ -1439,7 +1455,7 @@ test("release copy interruption leaves no final and a clean retry succeeds", asy
   );
   assert.equal(await acceptV1Release(schemas, baseline, "1.1.0", {
     versionAuthorities: authorities,
-  }), 28);
+  }), expectedSchemaFiles.length);
 });
 
 test("snapshot publication refuses an empty target created after staging without clobbering it", async (t) => {
@@ -1481,7 +1497,7 @@ test("snapshot publication refuses an empty target created after staging without
         : await acceptV1Release(schemas, baseline, "1.1.0", {
           versionAuthorities: releaseAuthorities("1.1.0"),
         }),
-      28,
+      expectedSchemaFiles.length,
       `${mode} retry`,
     );
   }

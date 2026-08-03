@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import test from "node:test";
+import Schema from "typebox/schema";
+
+import { ContractSchemas } from "../src/index.js";
 
 const credentialOrPersonalDataPatterns = [
   /sk-[A-Za-z0-9_-]{16,}/,
@@ -102,9 +105,19 @@ test("public schema scans reject nested forbidden property names", () => {
 
 test("fixtures and schemas contain no credential or personal-data patterns", async () => {
   const roots = [resolve(import.meta.dirname, "../fixtures"), resolve(import.meta.dirname, "../schemas")];
+  const syntheticSecretFixture = resolve(
+    import.meta.dirname,
+    "../fixtures/v1/invalid/message-secret-field.json",
+  );
   for (const root of roots) {
     for (const path of await filesBelow(root)) {
-      const content = await readFile(path, "utf8");
+      let content = await readFile(path, "utf8");
+      if (path === syntheticSecretFixture) {
+        const fixture = JSON.parse(content) as { value: { api_key?: unknown } };
+        assert.equal(fixture.value.api_key, "sentinel");
+        delete fixture.value.api_key;
+        content = JSON.stringify(fixture);
+      }
       const pattern = matchingCredentialOrPersonalDataPattern(content);
       assert.equal(pattern, undefined, `${path} matched ${pattern}`);
     }
@@ -118,4 +131,33 @@ test("public schemas do not expose hidden reasoning or raw tool payload fields",
     const field = forbiddenPublicSchemaField(document);
     assert.equal(field, undefined, `${path} exposes ${field}`);
   }
+});
+
+test("public runtime schemas reject secrets and client-forged tenant scope", () => {
+  const message = ContractSchemas.message;
+  const createAgentRunRequest = ContractSchemas["create-agent-run-request"];
+  assert.notEqual(message, undefined);
+  assert.notEqual(createAgentRunRequest, undefined);
+  assert.equal(Schema.Check(message!, {
+    schema_version: 1,
+    resource_version: 1,
+    created_at: "2026-08-03T12:00:00.000Z",
+    updated_at: "2026-08-03T12:00:00.000Z",
+    message_id: "msg_01",
+    tenant_id: "tenant_01",
+    conversation_id: "conversation_01",
+    run_id: "run_01",
+    role: "user",
+    status: "completed",
+    content: "Synthetic hello",
+    api_key: "sentinel",
+  }), false);
+  assert.equal(Schema.Check(createAgentRunRequest!, {
+    schema_version: 1,
+    idempotency_key: "idem_01",
+    payload_hash: `sha256:${"a".repeat(64)}`,
+    client_request_id: "client_01",
+    tenant_id: "tenant_forged",
+    input_message: { client_message_id: "client_message_01", content: "Synthetic hello" },
+  }), false);
 });

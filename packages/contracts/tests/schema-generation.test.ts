@@ -33,17 +33,20 @@ test("registry publishes exactly the planned v1 contracts", () => {
     "conversation",
     "session",
     "agent-run",
+    "message",
     "task",
     "approval",
     "trusted-request-context",
     "signed-trusted-request-context",
     "product-event-envelope",
     "product-event",
+    "message-created-event",
     "audit-event",
     "error-envelope",
     "idempotency-request",
     "idempotency-record",
     "versioned-write-request",
+    "create-agent-run-request",
   ]);
 });
 

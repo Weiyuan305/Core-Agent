@@ -14,6 +14,7 @@ import {
   ErrorEnvelopeSchema,
   ErrorReportedEventSchema,
   MembershipRoleSchema,
+  MessageCreatedEventSchema,
   MessageCompletedEventSchema,
   MessageDeltaEventSchema,
   ProductEventSchema,
@@ -53,6 +54,7 @@ const knownEvents = [
   { event_type: "run.cancelled", payload: { run_id: "run_demo", status: "cancelled" } },
   { event_type: "message.delta", payload: { message_id: "message_demo", delta: "Hello" } },
   { event_type: "message.completed", payload: { message_id: "message_demo", content: "Hello" } },
+  { event_type: "message.created", payload: { message_id: "message_demo", role: "user", status: "completed" } },
   { event_type: "task.created", payload: { task_id: "task_demo", status: "queued" } },
   { event_type: "task.status_changed", payload: { task_id: "task_demo", status: "running" } },
   { event_type: "approval.requested", payload: { approval_id: "approval_demo", status: "pending" } },
@@ -73,8 +75,8 @@ test("accepts a typed message delta and rejects hidden reasoning", () => {
   assert.equal(validator.Check({ ...event, payload: { ...event.payload, chain_of_thought: "private" } }), false);
 });
 
-test("accepts all 20 approved event types across nine strict families", () => {
-  assert.equal(new Set(knownEvents.map(({ event_type }) => event_type)).size, 20);
+test("accepts all 21 approved event types across ten strict families", () => {
+  assert.equal(new Set(knownEvents.map(({ event_type }) => event_type)).size, 21);
   const validator = Schema.Compile(ProductEventSchema);
   for (const event of knownEvents) {
     assert.equal(validator.Check({ ...base, ...event }), true, event.event_type);
@@ -137,6 +139,20 @@ test("accepts the deliberately variable status event branches", () => {
       payload: { container_id: "container_demo", observed_state },
     }), true, `runtime.status_changed ${observed_state}`);
   }
+});
+
+test("accepts the message.created branch with its fixed user completion", () => {
+  const event = {
+    ...base,
+    event_type: "message.created",
+    payload: { message_id: "msg_01", role: "user", status: "completed" },
+  };
+  assert.equal(Schema.Check(ProductEventSchema, event), true);
+  assert.equal(Schema.Check(MessageCreatedEventSchema, event), true);
+  assert.equal(Schema.Check(ProductEventSchema, {
+    ...event,
+    payload: { ...event.payload, role: "assistant" },
+  }), false);
 });
 
 test("producer consistency gate accepts matching or absent association ids", () => {
@@ -246,6 +262,7 @@ test("marks only event and error-code extension points extensible", () => {
   const eventTypeSchemas = [
     ConversationEventSchema,
     RunEventSchema,
+    MessageCreatedEventSchema,
     MessageDeltaEventSchema,
     MessageCompletedEventSchema,
     TaskEventSchema,
@@ -282,6 +299,22 @@ test("marks only event and error-code extension points extensible", () => {
   }).anyOf;
   for (const branch of toolBranches) {
     assert.equal(branch.properties.payload.properties.status["x-extensible-union"], undefined);
+  }
+});
+
+test("runtime errors add the accepted stable machine codes", () => {
+  const validator = Schema.Compile(StableErrorCodeSchema);
+  for (const code of [
+    "INVALID_REQUEST",
+    "UNAUTHENTICATED",
+    "RESOURCE_NOT_FOUND",
+    "RESOURCE_VERSION_CONFLICT",
+    "INVALID_STATE_TRANSITION",
+    "RUNTIME_NOT_READY",
+    "SUPERVISOR_REJECTED",
+    "DEPENDENCY_TIMEOUT",
+  ]) {
+    assert.equal(validator.Check(code), true, code);
   }
 });
 

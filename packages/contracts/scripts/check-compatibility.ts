@@ -605,6 +605,7 @@ function compareResourceMetadataArrays(
   previous: unknown,
   current: unknown,
   path: string,
+  allowAdditions = false,
 ): BreakingChange[] {
   const before = Array.isArray(previous) && previous.every(isJsonSchema) ? previous : [];
   const after = Array.isArray(current) && current.every(isJsonSchema) ? current : [];
@@ -632,6 +633,12 @@ function compareResourceMetadataArrays(
         )
       ));
     }
+    const identity = branchIdentity(beforeSchema);
+    if (matchIndex < 0 && identity !== undefined) {
+      matchIndex = after.findIndex((candidate, index) => (
+        !matchedAfter.has(index) && branchIdentity(candidate) === identity
+      ));
+    }
     if (matchIndex < 0 && before.length === after.length && !matchedAfter.has(beforeIndex)) {
       matchIndex = beforeIndex;
     }
@@ -645,6 +652,7 @@ function compareResourceMetadataArrays(
 
   for (const [afterIndex, afterSchema] of after.entries()) {
     if (matchedAfter.has(afterIndex)) continue;
+    if (allowAdditions) continue;
     changes.push(...compareResourceMetadataTree(undefined, afterSchema, `${path}[${afterIndex}]`));
   }
   return changes;
@@ -885,6 +893,7 @@ function compareResourceMetadataTree(
       before[keyword],
       after[keyword],
       `${path}.${keyword}`,
+      keyword === "anyOf" && before["x-extensible-union"] === true,
     ));
   }
   return changes;
@@ -1249,6 +1258,7 @@ async function schemaManifestFailures(
   directory: string,
   label: string,
   allowReleasesDirectory = false,
+  requireComplete = true,
 ): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
   const actual = new Map(entries.map((entry) => [entry.name, entry]));
@@ -1257,8 +1267,11 @@ async function schemaManifestFailures(
 
   for (const fileName of expectedSchemaFiles) {
     const entry = actual.get(fileName);
-    if (entry === undefined) failures.push(`${label} ${fileName}: missing`);
-    else if (!entry.isFile()) failures.push(`${label} ${fileName}: not a file`);
+    if (entry === undefined) {
+      if (requireComplete) failures.push(`${label} ${fileName}: missing`);
+    } else if (!entry.isFile()) {
+      failures.push(`${label} ${fileName}: not a file`);
+    }
   }
   for (const entry of entries.sort((left, right) => compareAscii(left.name, right.name))) {
     if (expected.has(entry.name)) continue;
@@ -1433,7 +1446,11 @@ async function compareSnapshot(
   label: string,
 ): Promise<string[]> {
   const failures: string[] = [];
-  for (const fileName of expectedSchemaFiles) {
+  const snapshotFiles = (await readdir(snapshotDirectory, { withFileTypes: true }))
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".schema.json"))
+    .map((entry) => entry.name)
+    .sort(compareAscii);
+  for (const fileName of snapshotFiles) {
     let previous: JsonSchema;
     let current: JsonSchema;
     try {
@@ -1457,7 +1474,12 @@ export async function checkCompatibilityDirectories(
   const releases = await discoverReleaseSnapshots(compatibilityDirectory);
   const manifestFailures = [
     ...await schemaManifestFailures(schemaDirectory, "generated schema manifest"),
-    ...await schemaManifestFailures(compatibilityDirectory, "compatibility schema manifest", true),
+    ...await schemaManifestFailures(
+      compatibilityDirectory,
+      "compatibility schema manifest",
+      true,
+      false,
+    ),
     ...releases.failures,
   ];
   if (manifestFailures.length > 0) return manifestFailures;
