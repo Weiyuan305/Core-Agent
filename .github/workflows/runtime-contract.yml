@@ -21,9 +21,16 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
 
-      - name: Run contract tests
+      - name: Install pinned dependencies
+        run: npm ci
+
+      - name: Run runtime and contracts tests
         run: npm test
+
+      - name: Build and verify contracts
+        run: npm run contracts:check
 
       - name: Validate Compose configuration
         env:

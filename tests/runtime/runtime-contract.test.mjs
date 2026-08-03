@@ -194,7 +194,9 @@ test("CI validates runtime contracts without building or publishing images", asy
     .split("\n")
     .filter((line) => /^\s+run:/.test(line));
   assert.deepEqual(runCommands, [
+    "        run: npm ci",
     "        run: npm test",
+    "        run: npm run contracts:check",
     "        run: docker compose -f infra/hermes/compose.dev.yaml config --quiet"
   ]);
   const actions = workflow

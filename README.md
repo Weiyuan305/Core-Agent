@@ -19,6 +19,22 @@ The first milestone builds a reproducible Hermes runtime image and a local
 single-company container with two consultant Profiles. It intentionally has no
 business MCP, custom UI, or production tenant provisioning yet.
 
+## Control Plane Contracts
+
+The versioned Control Plane wire contracts live in
+[`packages/contracts`](packages/contracts). Run the complete release gate from
+the repository root:
+
+```bash
+npm run contracts:check
+```
+
+See the [contract consumption guide](packages/contracts/README.md) and the
+[Control Plane Contracts v1 design specification](docs/superpowers/specs/2026-08-03-control-plane-contracts-v1-design.md).
+This milestone establishes contracts only. It does not implement the Control
+Plane runtime, database, Web client, Apple client, or MCP Server and business
+Tools.
+
 ## Prerequisites
 
 - Node.js 22+

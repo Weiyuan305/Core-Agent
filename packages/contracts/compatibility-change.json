@@ -1,0 +1,6 @@
+{
+  "package_version": "0.1.0",
+  "wire_schema_version": 1,
+  "change_level": "major",
+  "reason": "Initial wire schema version 1 baseline"
+}
