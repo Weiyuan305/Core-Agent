@@ -2,6 +2,8 @@ import { copyFile, mkdir, readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { ContractSchemas } from "../src/registry.js";
+
 export interface BreakingChange {
   kind: "property_removed" | "type_changed" | "required_added" | "const_changed" | "enum_narrowed" | "union_narrowed" | "union_growth_not_extensible";
   path: string;
@@ -82,34 +84,79 @@ export function compareSchemas(
   return changes;
 }
 
-async function jsonFileNames(directory: string): Promise<string[]> {
-  return (await readdir(directory, { withFileTypes: true }).catch(() => []))
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
-    .map((entry) => entry.name)
-    .sort((left, right) => left.localeCompare(right));
+const expectedSchemaFiles = Object.keys(ContractSchemas)
+  .map((key) => `${key}.schema.json`)
+  .sort((left, right) => left.localeCompare(right));
+
+async function schemaManifestFailures(directory: string, label: string): Promise<string[]> {
+  const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+  const actual = new Map(entries.map((entry) => [entry.name, entry]));
+  const expected = new Set(expectedSchemaFiles);
+  const failures: string[] = [];
+
+  for (const fileName of expectedSchemaFiles) {
+    const entry = actual.get(fileName);
+    if (entry === undefined) failures.push(`${label} ${fileName}: missing`);
+    else if (!entry.isFile()) failures.push(`${label} ${fileName}: not a file`);
+  }
+  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+    if (!expected.has(entry.name)) failures.push(`${label} ${entry.name}: unexpected`);
+  }
+  return failures;
 }
 
 export async function acceptInitialV1Baseline(
   schemaDirectory: string,
   compatibilityDirectory: string,
 ): Promise<number> {
+  const schemaFailures = await schemaManifestFailures(schemaDirectory, "generated schema manifest");
+  if (schemaFailures.length > 0) {
+    throw new Error(`Generated schema manifest mismatch:\n${schemaFailures.join("\n")}`);
+  }
+
   await mkdir(compatibilityDirectory, { recursive: true });
-  const existing = await jsonFileNames(compatibilityDirectory);
+  const existing = await readdir(compatibilityDirectory);
   if (existing.length > 0) {
     throw new Error("Initial v1 compatibility baseline already exists; refusing to overwrite it");
   }
 
-  const schemaFiles = await jsonFileNames(schemaDirectory);
-  if (schemaFiles.length === 0) {
-    throw new Error("No generated JSON schemas are available for the initial v1 baseline");
-  }
-  for (const fileName of schemaFiles) {
+  for (const fileName of expectedSchemaFiles) {
     await copyFile(
       resolve(schemaDirectory, fileName),
       resolve(compatibilityDirectory, fileName),
     );
   }
-  return schemaFiles.length;
+  return expectedSchemaFiles.length;
+}
+
+export async function checkCompatibilityDirectories(
+  schemaDirectory: string,
+  compatibilityDirectory: string,
+): Promise<string[]> {
+  const manifestFailures = [
+    ...await schemaManifestFailures(schemaDirectory, "generated schema manifest"),
+    ...await schemaManifestFailures(compatibilityDirectory, "compatibility schema manifest"),
+  ];
+  if (manifestFailures.length > 0) return manifestFailures;
+
+  const failures: string[] = [];
+  for (const fileName of expectedSchemaFiles) {
+    const baselinePath = resolve(compatibilityDirectory, fileName);
+    const currentPath = resolve(schemaDirectory, fileName);
+    let previous: Record<string, unknown>;
+    let current: Record<string, unknown>;
+    try {
+      previous = JSON.parse(await readFile(baselinePath, "utf8")) as Record<string, unknown>;
+      current = JSON.parse(await readFile(currentPath, "utf8")) as Record<string, unknown>;
+    } catch {
+      failures.push(`${fileName}: unreadable schema`);
+      continue;
+    }
+    for (const change of compareSchemas(previous, current)) {
+      failures.push(`${fileName}: ${change.kind} at ${change.path}`);
+    }
+  }
+  return failures;
 }
 
 async function main(): Promise<void> {
@@ -123,29 +170,9 @@ async function main(): Promise<void> {
     return;
   }
 
-  const baselineFiles = await jsonFileNames(compatibilityDirectory);
-  if (baselineFiles.length === 0) {
-    throw new Error("No v1 compatibility baseline found; run with --accept-initial-v1 once");
-  }
-
-  const failures: string[] = [];
-  for (const fileName of baselineFiles) {
-    const baselinePath = resolve(compatibilityDirectory, fileName);
-    const currentPath = resolve(schemaDirectory, fileName);
-    const currentText = await readFile(currentPath, "utf8").catch(() => undefined);
-    if (currentText === undefined) {
-      failures.push(`${fileName}: generated schema missing`);
-      continue;
-    }
-    const previous = JSON.parse(await readFile(baselinePath, "utf8")) as Record<string, unknown>;
-    const current = JSON.parse(currentText) as Record<string, unknown>;
-    for (const change of compareSchemas(previous, current)) {
-      failures.push(`${fileName}: ${change.kind} at ${change.path}`);
-    }
-  }
-
+  const failures = await checkCompatibilityDirectories(schemaDirectory, compatibilityDirectory);
   if (failures.length > 0) {
-    console.error(`Breaking schema changes:\n${failures.join("\n")}`);
+    console.error(`Schema compatibility check failed:\n${failures.join("\n")}`);
     process.exitCode = 1;
   }
 }

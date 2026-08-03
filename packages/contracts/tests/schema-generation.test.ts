@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { cp, mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 import test from "node:test";
 
+import { findSchemaDrift } from "../scripts/generate-schemas.js";
 import { ContractSchemas, serializeSchema } from "../src/index.js";
 
 test("registry keys and schema ids are unique", () => {
@@ -55,4 +59,23 @@ test("committed generated schemas have no drift", () => {
     encoding: "utf8",
   });
   assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
+test("schema drift detects unexpected and missing schema files", async (t) => {
+  const directory = await mkdtemp(resolve(tmpdir(), "contracts-schemas-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await cp(new URL("../schemas/v1", import.meta.url), directory, { recursive: true });
+
+  await writeFile(resolve(directory, "internal-helper.schema.json"), "{}\n", "utf8");
+  assert.equal(
+    (await findSchemaDrift(directory)).some((item) => item.includes("internal-helper.schema.json") && item.includes("unexpected")),
+    true,
+  );
+
+  await unlink(resolve(directory, "internal-helper.schema.json"));
+  await unlink(resolve(directory, "tenant.schema.json"));
+  assert.equal(
+    (await findSchemaDrift(directory)).some((item) => item.includes("tenant.schema.json") && item.includes("missing")),
+    true,
+  );
 });
