@@ -896,6 +896,152 @@ test("preserves embedded resource metadata required by an external reference", (
   );
 });
 
+test("compares stable embedded resources even when enclosing anyOf remains true", () => {
+  const externalId = "https://example.test/nested";
+  const previous = {
+    allOf: [{ $ref: externalId }],
+    anyOf: [{ $id: externalId, type: "string" }, true],
+  };
+  const current = {
+    allOf: [{ $ref: externalId }],
+    anyOf: [{ $id: externalId, type: "string", minLength: 2 }, true],
+  };
+  const previousValidator = new Ajv2020({ strict: true }).compile(previous);
+  const currentValidator = new Ajv2020({ strict: true }).compile(current);
+  assert.equal(previousValidator("a"), true);
+  assert.equal(currentValidator("a"), false);
+  assert.deepEqual(
+    compareSchemas(previous, current).map((item) => item.kind),
+    ["min_length_increased"],
+  );
+});
+
+test("matches stable resources independently of path and order", () => {
+  const resource = { $id: "urn:stable:moved", type: "string", minLength: 2 };
+  const cases: Array<[string, Record<string, unknown>, Record<string, unknown>]> = [
+    [
+      "moved from anyOf to defs",
+      { anyOf: [resource, true] },
+      { $defs: { Moved: resource }, anyOf: [true] },
+    ],
+    [
+      "reordered within anyOf",
+      { anyOf: [resource, true] },
+      { anyOf: [true, resource] },
+    ],
+    [
+      "widened behind true",
+      { anyOf: [resource, true] },
+      { anyOf: [{ ...resource, minLength: 1 }, true] },
+    ],
+  ];
+  for (const [name, previous, current] of cases) {
+    assert.deepEqual(compareSchemas(previous, current), [], name);
+  }
+});
+
+test("finds stable-resource tightening and unknown assertions through nested applicator routes", () => {
+  const cases: Array<{
+    name: string;
+    previous: Record<string, unknown>;
+    current: Record<string, unknown>;
+    kind: string;
+  }> = [
+    {
+      name: "items then anyOf",
+      previous: {
+        items: { anyOf: [{ $id: "urn:stable:items", type: "string" }, true] },
+      },
+      current: {
+        items: {
+          anyOf: [{ $id: "urn:stable:items", type: "string", minLength: 2 }, true],
+        },
+      },
+      kind: "min_length_increased",
+    },
+    {
+      name: "resource nested inside another resource",
+      previous: {
+        $defs: {
+          Outer: {
+            $id: "urn:stable:outer",
+            anyOf: [{ $id: "urn:stable:inner", type: "number" }, true],
+          },
+        },
+      },
+      current: {
+        $defs: {
+          Outer: {
+            $id: "urn:stable:outer",
+            anyOf: [{ $id: "urn:stable:inner", type: "number", maximum: 10 }, true],
+          },
+        },
+      },
+      kind: "upper_bound_tightened",
+    },
+    {
+      name: "properties then anyOf unknown assertion",
+      previous: {
+        properties: {
+          value: { anyOf: [{ $id: "urn:stable:unknown", type: "string" }, true] },
+        },
+      },
+      current: {
+        properties: {
+          value: {
+            anyOf: [{
+              $id: "urn:stable:unknown",
+              type: "string",
+              "x-unknown-assertion": true,
+            }, true],
+          },
+        },
+      },
+      kind: "unsupported_assertion_changed",
+    },
+  ];
+
+  for (const { name, previous, current, kind } of cases) {
+    assert.equal(
+      compareSchemas(previous, current).some((item) => item.kind === kind),
+      true,
+      name,
+    );
+  }
+});
+
+test("keeps embedded resource deletion and rename as metadata breaks", () => {
+  const previous = {
+    anyOf: [{ $id: "urn:stable:before", type: "string" }, true],
+  };
+  const removed = { anyOf: [true] };
+  const renamed = {
+    anyOf: [{ $id: "urn:stable:after", type: "string" }, true],
+  };
+  assert.equal(
+    compareSchemas(previous, removed).some((item) => item.kind === "schema_id_changed"),
+    true,
+  );
+  assert.equal(
+    compareSchemas(previous, renamed).some((item) => item.kind === "schema_id_changed"),
+    true,
+  );
+});
+
+test("reserves exact array resource matches before metadata-neutral pairing", () => {
+  const resourceA = { $id: "urn:resource:a", type: "string" };
+  const resourceB = { $id: "urn:resource:b", type: "string" };
+  assert.deepEqual(
+    compareSchemas(
+      { anyOf: [resourceA, resourceB] },
+      { anyOf: [resourceB] },
+    )
+      .filter((item) => item.kind === "schema_id_changed")
+      .map((item) => [item.path, item.before, item.after]),
+    [["$.anyOf[0].$id", "urn:resource:a", undefined]],
+  );
+});
+
 test("does not report semantic no-ops or supported widening", () => {
   const cases: Array<[unknown, unknown]> = [
     [{ type: "integer" }, { type: "number" }],

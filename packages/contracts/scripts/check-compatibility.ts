@@ -599,11 +599,19 @@ function compareResourceMetadataArrays(
   const after = Array.isArray(current) && current.every(isJsonSchema) ? current : [];
   const changes: BreakingChange[] = [];
   const matchedAfter = new Set<number>();
+  const exactMatches = new Map<number, number>();
 
   for (const [beforeIndex, beforeSchema] of before.entries()) {
-    let matchIndex = after.findIndex((candidate, index) => (
+    const matchIndex = after.findIndex((candidate, index) => (
       !matchedAfter.has(index) && sameJson(beforeSchema, candidate)
     ));
+    if (matchIndex < 0) continue;
+    exactMatches.set(beforeIndex, matchIndex);
+    matchedAfter.add(matchIndex);
+  }
+
+  for (const [beforeIndex, beforeSchema] of before.entries()) {
+    let matchIndex = exactMatches.get(beforeIndex) ?? -1;
     if (matchIndex < 0) {
       matchIndex = after.findIndex((candidate, index) => (
         !matchedAfter.has(index)
@@ -629,6 +637,162 @@ function compareResourceMetadataArrays(
     changes.push(...compareResourceMetadataTree(undefined, afterSchema, `${path}[${afterIndex}]`));
   }
   return changes;
+}
+
+interface SchemaResource {
+  id: string;
+  path: string;
+  schema: Record<string, unknown>;
+}
+
+type SchemaResourceInventory = Map<string, SchemaResource[]>;
+
+function collectSchemaResources(
+  schema: unknown,
+  path: string,
+  inventory: SchemaResourceInventory,
+): void {
+  if (!isSchemaObject(schema)) return;
+  if (typeof schema.$id === "string") {
+    const resources = inventory.get(schema.$id) ?? [];
+    resources.push({ id: schema.$id, path, schema });
+    inventory.set(schema.$id, resources);
+  }
+
+  for (const keyword of schemaMapKeywords) {
+    const map = isSchemaObject(schema[keyword]) ? schema[keyword] : {};
+    for (const key of Object.keys(map).sort(compareAscii)) {
+      if (isJsonSchema(map[key])) {
+        collectSchemaResources(map[key], `${path}.${keyword}.${key}`, inventory);
+      }
+    }
+  }
+  for (const keyword of schemaValueKeywords) {
+    if (isJsonSchema(schema[keyword])) {
+      collectSchemaResources(schema[keyword], `${path}.${keyword}`, inventory);
+    }
+  }
+  for (const keyword of schemaArrayKeywords) {
+    const schemas = Array.isArray(schema[keyword]) ? schema[keyword] : [];
+    for (const [index, child] of schemas.entries()) {
+      if (isJsonSchema(child)) collectSchemaResources(child, `${path}.${keyword}[${index}]`, inventory);
+    }
+  }
+}
+
+function schemaResourceInventory(schema: JsonSchema, path: string): SchemaResourceInventory {
+  const inventory: SchemaResourceInventory = new Map();
+  collectSchemaResources(schema, path, inventory);
+  for (const resources of inventory.values()) {
+    resources.sort((left, right) => compareAscii(left.path, right.path));
+  }
+  return inventory;
+}
+
+function pairStableResources(
+  before: readonly SchemaResource[],
+  after: readonly SchemaResource[],
+): Array<{ before: SchemaResource; after: SchemaResource }> {
+  const pairs = new Map<number, number>();
+  const matchedAfter = new Set<number>();
+  for (const [beforeIndex, resource] of before.entries()) {
+    const matchIndex = after.findIndex((candidate, index) => (
+      !matchedAfter.has(index) && sameJson(resource.schema, candidate.schema)
+    ));
+    if (matchIndex < 0) continue;
+    pairs.set(beforeIndex, matchIndex);
+    matchedAfter.add(matchIndex);
+  }
+  for (const [beforeIndex, resource] of before.entries()) {
+    if (pairs.has(beforeIndex)) continue;
+    let matchIndex = after.findIndex((candidate, index) => (
+      !matchedAfter.has(index) && resource.path === candidate.path
+    ));
+    if (matchIndex < 0) matchIndex = after.findIndex((_, index) => !matchedAfter.has(index));
+    if (matchIndex < 0) continue;
+    pairs.set(beforeIndex, matchIndex);
+    matchedAfter.add(matchIndex);
+  }
+  return [...pairs.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([beforeIndex, afterIndex]) => ({
+      before: before[beforeIndex]!,
+      after: after[afterIndex]!,
+    }));
+}
+
+function compareStableSchemaResources(
+  previous: JsonSchema,
+  current: JsonSchema,
+  path: string,
+): {
+  changes: BreakingChange[];
+  movedMetadataBefore: Set<string>;
+  movedMetadataAfter: Set<string>;
+} {
+  const before = schemaResourceInventory(previous, path);
+  const after = schemaResourceInventory(current, path);
+  const changes: BreakingChange[] = [];
+  const movedMetadataBefore = new Set<string>();
+  const movedMetadataAfter = new Set<string>();
+  const stableIds = [...before.keys()]
+    .filter((id) => after.has(id))
+    .sort(compareAscii);
+
+  for (const id of stableIds) {
+    const pairs = pairStableResources(before.get(id) ?? [], after.get(id) ?? []);
+    for (const pair of pairs) {
+      if (pair.before.path !== pair.after.path) {
+        movedMetadataBefore.add(`${pair.before.path}.$id\0${canonicalJson(id)}`);
+        movedMetadataAfter.add(`${pair.after.path}.$id\0${canonicalJson(id)}`);
+        if (pair.before.schema.$schema !== undefined) {
+          movedMetadataBefore.add(
+            `${pair.before.path}.$schema\0${canonicalJson(pair.before.schema.$schema)}`,
+          );
+        }
+        if (pair.after.schema.$schema !== undefined) {
+          movedMetadataAfter.add(
+            `${pair.after.path}.$schema\0${canonicalJson(pair.after.schema.$schema)}`,
+          );
+        }
+      }
+      changes.push(...compareSchemaMetadata(
+        pair.before.schema,
+        pair.after.schema,
+        pair.before.path,
+      ));
+      changes.push(...compareSchemaAssertions(
+        pair.before.schema,
+        pair.after.schema,
+        pair.before.path,
+      ));
+    }
+  }
+  return { changes, movedMetadataBefore, movedMetadataAfter };
+}
+
+function isMovedResourceMetadataChange(
+  item: BreakingChange,
+  resources: ReturnType<typeof compareStableSchemaResources>,
+): boolean {
+  if (item.kind !== "schema_id_changed" && item.kind !== "schema_dialect_changed") return false;
+  return (
+    item.before !== undefined
+    && resources.movedMetadataBefore.has(`${item.path}\0${canonicalJson(item.before)}`)
+  ) || (
+    item.after !== undefined
+    && resources.movedMetadataAfter.has(`${item.path}\0${canonicalJson(item.after)}`)
+  );
+}
+
+function deduplicateChanges(changes: readonly BreakingChange[]): BreakingChange[] {
+  const seen = new Set<string>();
+  return changes.filter((item) => {
+    const key = `${item.kind}\0${item.path}\0${canonicalJson(item.before)}\0${canonicalJson(item.after)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function compareResourceMetadataTree(
@@ -1013,10 +1177,14 @@ export function compareSchemas(
   path = "$",
 ): BreakingChange[] {
   if (sameJson(previous, current)) return [];
-  return [
-    ...compareResourceMetadataTree(previous, current, path),
+  const resources = compareStableSchemaResources(previous, current, path);
+  const documentMetadata = compareResourceMetadataTree(previous, current, path)
+    .filter((item) => !isMovedResourceMetadataChange(item, resources));
+  return deduplicateChanges([
+    ...documentMetadata,
     ...compareSchemaAssertions(previous, current, path),
-  ];
+    ...resources.changes,
+  ]);
 }
 
 const expectedSchemaFiles = Object.keys(ContractSchemas)
