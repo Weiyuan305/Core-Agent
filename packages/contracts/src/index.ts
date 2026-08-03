@@ -10,3 +10,4 @@ export * from "./approval/schema.js";
 export * from "./runtime/resources.js";
 export * from "./runtime/transitions.js";
 export * from "./runtime/invariants.js";
+export * from "./request-context/trusted-request-context.js";
