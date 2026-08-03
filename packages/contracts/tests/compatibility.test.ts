@@ -916,7 +916,7 @@ test("compares stable embedded resources even when enclosing anyOf remains true"
   );
 });
 
-test("matches stable resources independently of path and order", () => {
+test("matches absolute stable resources independently of path and order", () => {
   const resource = { $id: "urn:stable:moved", type: "string", minLength: 2 };
   const cases: Array<[string, Record<string, unknown>, Record<string, unknown>]> = [
     [
@@ -1028,17 +1028,64 @@ test("keeps embedded resource deletion and rename as metadata breaks", () => {
   );
 });
 
+test("fails closed on unchanged relative schema ids before equality shortcuts", () => {
+  const relative = { $id: "child", type: "string" };
+  assert.deepEqual(
+    compareSchemas(relative, relative).map((item) => [item.kind, item.path, item.before, item.after]),
+    [["relative_schema_id_unsupported", "$.$id", "child", "child"]],
+  );
+});
+
+test("rejects relative resource ids when enclosing absolute bases change", () => {
+  const previous = {
+    $id: "https://example.test/parent-a/",
+    anyOf: [{ $id: "child", type: "string" }, true],
+  };
+  const current = {
+    $id: "https://example.test/parent-b/",
+    anyOf: [{ $id: "child", type: "string" }, true],
+  };
+  assert.deepEqual(
+    compareSchemas(previous, current).map((item) => [item.kind, item.path, item.before, item.after]),
+    [["relative_schema_id_unsupported", "$.anyOf[0].$id", "child", "child"]],
+  );
+});
+
+test("finds relative schema ids recursively through map, value, and array applicators", () => {
+  const schema = {
+    $id: "core-agent://v1/absolute-root",
+    $defs: { Nested: { $id: "child", type: "string" } },
+    items: { $id: "../child", type: "string" },
+    anyOf: [{ $id: "#fragment", type: "string" }, true],
+  };
+  assert.deepEqual(
+    compareSchemas(schema, schema).map((item) => [item.kind, item.path, item.before]),
+    [
+      ["relative_schema_id_unsupported", "$.$defs.Nested.$id", "child"],
+      ["relative_schema_id_unsupported", "$.anyOf[0].$id", "#fragment"],
+      ["relative_schema_id_unsupported", "$.items.$id", "../child"],
+    ],
+  );
+});
+
 test("reserves exact array resource matches before metadata-neutral pairing", () => {
   const resourceA = { $id: "urn:resource:a", type: "string" };
   const resourceB = { $id: "urn:resource:b", type: "string" };
+  const changes = compareSchemas(
+    { anyOf: [resourceA, resourceB] },
+    { anyOf: [resourceB] },
+  );
   assert.deepEqual(
-    compareSchemas(
-      { anyOf: [resourceA, resourceB] },
-      { anyOf: [resourceB] },
-    )
+    changes
       .filter((item) => item.kind === "schema_id_changed")
       .map((item) => [item.path, item.before, item.after]),
     [["$.anyOf[0].$id", "urn:resource:a", undefined]],
+  );
+  assert.deepEqual(
+    changes
+      .filter((item) => item.kind === "union_narrowed")
+      .map((item) => [item.path, item.before, item.after]),
+    [["$.anyOf[0]", resourceA, undefined]],
   );
 });
 

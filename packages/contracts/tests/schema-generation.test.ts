@@ -80,6 +80,38 @@ test("every generated schema has recursively unique canonical ids", () => {
   }
 });
 
+test("every generated schema id is an absolute URI", () => {
+  const isAbsoluteUri = (value: string): boolean => {
+    try {
+      new URL(value);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  for (const [schemaKey, schema] of Object.entries(ContractSchemas)) {
+    const document = JSON.parse(serializeSchema(schema)) as unknown;
+    const invalid: Array<{ path: string; value: unknown }> = [];
+    const visit = (value: unknown, path: string): void => {
+      if (value === null || typeof value !== "object") return;
+      if (Array.isArray(value)) {
+        value.forEach((item, index) => visit(item, `${path}[${index}]`));
+        return;
+      }
+      const record = value as Record<string, unknown>;
+      if ("$id" in record && (
+        typeof record.$id !== "string" || !isAbsoluteUri(record.$id)
+      )) {
+        invalid.push({ path: `${path}.$id`, value: record.$id });
+      }
+      for (const [key, item] of Object.entries(record)) visit(item, `${path}.${key}`);
+    };
+    visit(document, "$");
+    assert.deepEqual(invalid, [], schemaKey);
+  }
+});
+
 test("committed generated schemas have no drift", () => {
   const result = spawnSync(process.execPath, ["--import", "tsx", "scripts/generate-schemas.ts", "--check"], {
     cwd: new URL("..", import.meta.url),

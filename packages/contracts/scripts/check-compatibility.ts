@@ -10,7 +10,7 @@ import {
   stat,
 } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, URL } from "node:url";
 
 import { ContractSchemas } from "../src/registry.js";
 import { CONTRACT_PACKAGE_VERSION } from "../src/index.js";
@@ -76,6 +76,7 @@ export interface BreakingChange {
     | "reference_changed"
     | "definition_removed"
     | "schema_id_changed"
+    | "relative_schema_id_unsupported"
     | "schema_dialect_changed"
     | "boolean_schema_restricted"
     | "unsupported_assertion_changed";
@@ -365,7 +366,17 @@ function compareAnyOf(
 
   const changes: BreakingChange[] = [];
   const matchedAfter = new Set<number>();
+  const exactMatches = new Map<number, number>();
   for (const [beforeIndex, branch] of before.entries()) {
+    const matchIndex = after.findIndex((candidate, index) => (
+      !matchedAfter.has(index) && sameJson(branch, candidate)
+    ));
+    if (matchIndex < 0) continue;
+    exactMatches.set(beforeIndex, matchIndex);
+    matchedAfter.add(matchIndex);
+  }
+  for (const [beforeIndex, branch] of before.entries()) {
+    if (exactMatches.has(beforeIndex)) continue;
     let matchIndex = after.findIndex((candidate, index) => (
       !matchedAfter.has(index)
       && compareSchemaAssertions(branch, candidate, `${path}.anyOf[${beforeIndex}]`).length === 0
@@ -647,42 +658,83 @@ interface SchemaResource {
 
 type SchemaResourceInventory = Map<string, SchemaResource[]>;
 
-function collectSchemaResources(
+function visitSchemaObjects(
   schema: unknown,
   path: string,
-  inventory: SchemaResourceInventory,
+  visitor: (schema: Record<string, unknown>, path: string) => void,
 ): void {
   if (!isSchemaObject(schema)) return;
-  if (typeof schema.$id === "string") {
-    const resources = inventory.get(schema.$id) ?? [];
-    resources.push({ id: schema.$id, path, schema });
-    inventory.set(schema.$id, resources);
-  }
+  visitor(schema, path);
 
   for (const keyword of schemaMapKeywords) {
     const map = isSchemaObject(schema[keyword]) ? schema[keyword] : {};
     for (const key of Object.keys(map).sort(compareAscii)) {
       if (isJsonSchema(map[key])) {
-        collectSchemaResources(map[key], `${path}.${keyword}.${key}`, inventory);
+        visitSchemaObjects(map[key], `${path}.${keyword}.${key}`, visitor);
       }
     }
   }
   for (const keyword of schemaValueKeywords) {
     if (isJsonSchema(schema[keyword])) {
-      collectSchemaResources(schema[keyword], `${path}.${keyword}`, inventory);
+      visitSchemaObjects(schema[keyword], `${path}.${keyword}`, visitor);
     }
   }
   for (const keyword of schemaArrayKeywords) {
     const schemas = Array.isArray(schema[keyword]) ? schema[keyword] : [];
     for (const [index, child] of schemas.entries()) {
-      if (isJsonSchema(child)) collectSchemaResources(child, `${path}.${keyword}[${index}]`, inventory);
+      if (isJsonSchema(child)) visitSchemaObjects(child, `${path}.${keyword}[${index}]`, visitor);
     }
   }
 }
 
+function isAbsoluteSchemaId(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    new URL(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function schemaIdsByPath(schema: JsonSchema, path: string): Map<string, unknown> {
+  const ids = new Map<string, unknown>();
+  visitSchemaObjects(schema, path, (resource, resourcePath) => {
+    if ("$id" in resource) ids.set(resourcePath, resource.$id);
+  });
+  return ids;
+}
+
+function compareUnsupportedSchemaIds(
+  previous: JsonSchema,
+  current: JsonSchema,
+  path: string,
+): BreakingChange[] {
+  const before = schemaIdsByPath(previous, path);
+  const after = schemaIdsByPath(current, path);
+  const paths = new Set([...before.keys(), ...after.keys()]);
+  return [...paths]
+    .sort(compareAscii)
+    .filter((resourcePath) => (
+      (before.has(resourcePath) && !isAbsoluteSchemaId(before.get(resourcePath)))
+      || (after.has(resourcePath) && !isAbsoluteSchemaId(after.get(resourcePath)))
+    ))
+    .map((resourcePath) => change(
+      "relative_schema_id_unsupported",
+      `${resourcePath}.$id`,
+      before.get(resourcePath),
+      after.get(resourcePath),
+    ));
+}
+
 function schemaResourceInventory(schema: JsonSchema, path: string): SchemaResourceInventory {
   const inventory: SchemaResourceInventory = new Map();
-  collectSchemaResources(schema, path, inventory);
+  visitSchemaObjects(schema, path, (resource, resourcePath) => {
+    if (!isAbsoluteSchemaId(resource.$id)) return;
+    const resources = inventory.get(resource.$id) ?? [];
+    resources.push({ id: resource.$id, path: resourcePath, schema: resource });
+    inventory.set(resource.$id, resources);
+  });
   for (const resources of inventory.values()) {
     resources.sort((left, right) => compareAscii(left.path, right.path));
   }
@@ -1176,6 +1228,8 @@ export function compareSchemas(
   current: JsonSchema,
   path = "$",
 ): BreakingChange[] {
+  const unsupportedIds = compareUnsupportedSchemaIds(previous, current, path);
+  if (unsupportedIds.length > 0) return unsupportedIds;
   if (sameJson(previous, current)) return [];
   const resources = compareStableSchemaResources(previous, current, path);
   const documentMetadata = compareResourceMetadataTree(previous, current, path)

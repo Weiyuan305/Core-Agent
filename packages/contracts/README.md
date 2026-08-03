@@ -148,3 +148,10 @@ It ignores standard annotation keywords and the known
 `x-extensible-union` metadata keyword. Pattern and `patternProperties` changes
 are intentionally conservative: any newly applied or changed pattern is
 reported as potentially breaking.
+
+Every published or embedded `$id` must be an absolute URI. Custom absolute
+schemes such as `core-agent://` are supported, but relative references such as
+`child`, `../child`, and `#fragment` are rejected even when unchanged. The
+offline compatibility checker has no authoritative retrieval URI from which to
+resolve a relative resource identity, so treating its raw text as stable would
+make compatibility dependent on an unavailable parent base.
