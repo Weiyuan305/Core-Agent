@@ -165,6 +165,58 @@ test("authority comparison time requires a real UTC-Z calendar timestamp", () =>
   }
 });
 
+test("compares issued and expiry boundaries at nanosecond precision", () => {
+  const preciseContext = {
+    ...context,
+    issued_at: "2026-08-03T01:00:00.123900000Z",
+    expires_at: "2026-08-03T01:05:00.123900000Z",
+  };
+  assert.deepEqual(
+    validateTrustedRequestContext(preciseContext, {
+      ...authority,
+      now: "2026-08-03T01:00:00.123800000Z",
+    }).map((item) => item.code),
+    ["CONTEXT_NOT_YET_VALID"],
+  );
+
+  const expiryBoundary = {
+    ...context,
+    issued_at: "2026-08-03T01:00:00Z",
+    expires_at: "2026-08-03T01:05:00.123900000Z",
+  };
+  const cases = [
+    { now: "2026-08-03T01:05:00.123800000Z", expired: false },
+    { now: "2026-08-03T01:05:00.123900000Z", expired: true },
+    { now: "2026-08-03T01:05:00.123900001Z", expired: true },
+  ];
+  for (const { now, expired } of cases) {
+    assert.equal(
+      validateTrustedRequestContext(expiryBoundary, { ...authority, now })
+        .some((item) => item.code === "CONTEXT_EXPIRED"),
+      expired,
+      now,
+    );
+  }
+});
+
+test("enforces the 300-second TTL boundary at nanosecond precision", () => {
+  const issuedAt = "2026-08-03T01:00:00.123900000Z";
+  const cases = [
+    { expiresAt: "2026-08-03T01:05:00.123900000Z", exceeded: false },
+    { expiresAt: "2026-08-03T01:05:00.123900001Z", exceeded: true },
+  ];
+  for (const { expiresAt, exceeded } of cases) {
+    assert.equal(
+      validateTrustedRequestContext(
+        { ...context, issued_at: issuedAt, expires_at: expiresAt },
+        authority,
+      ).some((item) => item.code === "CONTEXT_TTL_EXCEEDED"),
+      exceeded,
+      expiresAt,
+    );
+  }
+});
+
 test("requires explicit delegation when an admin targets another owner profile", () => {
   const delegated = {
     ...context,

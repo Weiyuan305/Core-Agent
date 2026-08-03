@@ -113,9 +113,14 @@ npm exec -w @core-agent/contracts -- tsx scripts/check-compatibility.ts --accept
 
 The accept command refuses to overwrite an existing version and writes to
 `compat/v1/releases/<package-version>`. Publication stages and verifies all 28
-files before an atomic rename, so an interrupted or concurrent writer cannot
-leave a partial or mixed snapshot. The requested version must exactly match the
-package version in `package.json`, `CONTRACT_PACKAGE_VERSION`, and
+files, then takes an exclusive sibling claim for cooperating publishers and
+rechecks that the target is absent immediately before the final rename. This
+prevents interrupted or cooperating concurrent publishers from leaving a
+partial or mixed snapshot and refuses a target created before that final check.
+Portable Node does not provide a rename-without-replace primitive, so this is a
+cooperative guarantee; arbitrary out-of-band mutation between the final check
+and rename remains outside the contract. The requested version must exactly
+match the package version in `package.json`, `CONTRACT_PACKAGE_VERSION`, and
 `compatibility-change.json`. Normal compatibility checks compare the current
 schemas with the initial baseline and every accepted release snapshot, in
 deterministic version-directory order. The initial baseline command remains
@@ -127,7 +132,8 @@ npm exec -w @core-agent/contracts -- tsx scripts/check-compatibility.ts --accept
 
 CI additionally protects committed compatibility history with an explicit Git
 base SHA. It permits only the first exact initial baseline and new exact release
-directories; modification, deletion, and rename of accepted snapshots fail:
+directories whose name matches the same package-version authorities;
+modification, deletion, rename, and manual unrelated-version additions fail:
 
 ```bash
 npm run compat:history -w @core-agent/contracts -- --base <base-sha-or-ref>

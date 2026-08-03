@@ -20,11 +20,11 @@ function daysInUtcMonth(year: number, month: number): number {
   return [4, 6, 9, 11].includes(month) ? 30 : 31;
 }
 
-/** Parses the exact UTC-Z timestamp shape used by {@link UtcTimestampSchema}. */
-export function parseStrictUtcTimestamp(value: string): number | undefined {
+/** Parses the exact UTC-Z timestamp shape as epoch nanoseconds. */
+export function parseStrictUtcTimestamp(value: string): bigint | undefined {
   const match = strictUtcTimestamp.exec(value);
   if (match === null) return undefined;
-  const [, yearText, monthText, dayText, hourText, minuteText, secondText] = match;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, fractionText = ""] = match;
   const year = Number(yearText);
   const month = Number(monthText);
   const day = Number(dayText);
@@ -40,8 +40,12 @@ export function parseStrictUtcTimestamp(value: string): number | undefined {
     || minute > 59
     || second > 59
   ) return undefined;
-  const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) ? timestamp : undefined;
+  const wholeSecond = Date.parse(
+    `${yearText}-${monthText}-${dayText}T${hourText}:${minuteText}:${secondText}Z`,
+  );
+  if (!Number.isFinite(wholeSecond)) return undefined;
+  const fractionalNanoseconds = BigInt(fractionText.padEnd(9, "0"));
+  return BigInt(wholeSecond) * 1_000_000n + fractionalNanoseconds;
 }
 export const ResourceVersionSchema = Type.Integer({ minimum: 1 });
 export const SequenceSchema = Type.Integer({ minimum: 0 });

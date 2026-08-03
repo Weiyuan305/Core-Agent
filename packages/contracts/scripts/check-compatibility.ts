@@ -6,6 +6,7 @@ import {
   readFile,
   rename,
   rm,
+  rmdir,
   stat,
 } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
@@ -313,7 +314,7 @@ function compareSubschema(
   if (!isSchemaObject(previous)) {
     return sameJson(previous, current) ? [] : [change(restrictionKind, path, previous, current)];
   }
-  return compareSchemas(previous, current, path);
+  return compareSchemaAssertions(previous, current, path);
 }
 
 function branchIdentity(schema: JsonSchema): string | undefined {
@@ -367,7 +368,7 @@ function compareAnyOf(
   for (const [beforeIndex, branch] of before.entries()) {
     let matchIndex = after.findIndex((candidate, index) => (
       !matchedAfter.has(index)
-      && compareSchemas(branch, candidate, `${path}.anyOf[${beforeIndex}]`).length === 0
+      && compareSchemaAssertions(branch, candidate, `${path}.anyOf[${beforeIndex}]`).length === 0
     ));
     if (matchIndex >= 0) {
       matchedAfter.add(matchIndex);
@@ -387,7 +388,7 @@ function compareAnyOf(
       continue;
     }
     matchedAfter.add(matchIndex);
-    const nested = compareSchemas(branch, after[matchIndex]!, `${path}.anyOf[${beforeIndex}]`);
+    const nested = compareSchemaAssertions(branch, after[matchIndex]!, `${path}.anyOf[${beforeIndex}]`);
     changes.push(...(nested.length > 0
       ? nested
       : [change("union_narrowed", `${path}.anyOf[${beforeIndex}]`, branch, after[matchIndex])]));
@@ -412,7 +413,7 @@ function compareDefinitions(
     if (!(key in after)) {
       changes.push(change("definition_removed", definitionPath, before[key], undefined));
     } else if (isJsonSchema(before[key]) && isJsonSchema(after[key])) {
-      changes.push(...compareSchemas(before[key], after[key], definitionPath));
+      changes.push(...compareSchemaAssertions(before[key], after[key], definitionPath));
     } else if (!sameJson(before[key], after[key])) {
       changes.push(change("unsupported_assertion_changed", definitionPath, before[key], after[key]));
     }
@@ -543,8 +544,8 @@ function compareUnknownKeywords(
 }
 
 function compareSchemaMetadata(
-  previous: JsonSchema,
-  current: JsonSchema,
+  previous: unknown,
+  current: unknown,
   path: string,
 ): BreakingChange[] {
   const before = isSchemaObject(previous) ? previous : {};
@@ -555,6 +556,120 @@ function compareSchemaMetadata(
   }
   if (!sameJson(before.$schema, after.$schema)) {
     changes.push(change("schema_dialect_changed", `${path}.$schema`, before.$schema, after.$schema));
+  }
+  return changes;
+}
+
+const schemaMapKeywords = [
+  "$defs",
+  "dependentSchemas",
+  "patternProperties",
+  "properties",
+] as const;
+
+const schemaValueKeywords = [
+  "additionalProperties",
+  "contains",
+  "else",
+  "if",
+  "items",
+  "not",
+  "propertyNames",
+  "then",
+  "unevaluatedItems",
+  "unevaluatedProperties",
+] as const;
+
+const schemaArrayKeywords = ["allOf", "anyOf", "oneOf", "prefixItems"] as const;
+
+function withoutDirectSchemaMetadata(schema: JsonSchema): JsonSchema {
+  if (!isSchemaObject(schema)) return schema;
+  const copy = { ...schema };
+  delete copy.$id;
+  delete copy.$schema;
+  return copy;
+}
+
+function compareResourceMetadataArrays(
+  previous: unknown,
+  current: unknown,
+  path: string,
+): BreakingChange[] {
+  const before = Array.isArray(previous) && previous.every(isJsonSchema) ? previous : [];
+  const after = Array.isArray(current) && current.every(isJsonSchema) ? current : [];
+  const changes: BreakingChange[] = [];
+  const matchedAfter = new Set<number>();
+
+  for (const [beforeIndex, beforeSchema] of before.entries()) {
+    let matchIndex = after.findIndex((candidate, index) => (
+      !matchedAfter.has(index) && sameJson(beforeSchema, candidate)
+    ));
+    if (matchIndex < 0) {
+      matchIndex = after.findIndex((candidate, index) => (
+        !matchedAfter.has(index)
+        && sameJson(
+          withoutDirectSchemaMetadata(beforeSchema),
+          withoutDirectSchemaMetadata(candidate),
+        )
+      ));
+    }
+    if (matchIndex < 0 && before.length === after.length && !matchedAfter.has(beforeIndex)) {
+      matchIndex = beforeIndex;
+    }
+    if (matchIndex >= 0) matchedAfter.add(matchIndex);
+    changes.push(...compareResourceMetadataTree(
+      beforeSchema,
+      matchIndex >= 0 ? after[matchIndex] : undefined,
+      `${path}[${beforeIndex}]`,
+    ));
+  }
+
+  for (const [afterIndex, afterSchema] of after.entries()) {
+    if (matchedAfter.has(afterIndex)) continue;
+    changes.push(...compareResourceMetadataTree(undefined, afterSchema, `${path}[${afterIndex}]`));
+  }
+  return changes;
+}
+
+function compareResourceMetadataTree(
+  previous: unknown,
+  current: unknown,
+  path: string,
+): BreakingChange[] {
+  if (sameJson(previous, current)) return [];
+  const changes = compareSchemaMetadata(previous, current, path);
+  const before = isSchemaObject(previous) ? previous : {};
+  const after = isSchemaObject(current) ? current : {};
+
+  for (const keyword of schemaMapKeywords) {
+    const beforeMap = isSchemaObject(before[keyword]) ? before[keyword] : {};
+    const afterMap = isSchemaObject(after[keyword]) ? after[keyword] : {};
+    const keys = new Set([...Object.keys(beforeMap), ...Object.keys(afterMap)]);
+    for (const key of [...keys].sort(compareAscii)) {
+      if (!isJsonSchema(beforeMap[key]) && !isJsonSchema(afterMap[key])) continue;
+      changes.push(...compareResourceMetadataTree(
+        beforeMap[key],
+        afterMap[key],
+        `${path}.${keyword}.${key}`,
+      ));
+    }
+  }
+
+  for (const keyword of schemaValueKeywords) {
+    if (!isJsonSchema(before[keyword]) && !isJsonSchema(after[keyword])) continue;
+    changes.push(...compareResourceMetadataTree(
+      before[keyword],
+      after[keyword],
+      `${path}.${keyword}`,
+    ));
+  }
+
+  for (const keyword of schemaArrayKeywords) {
+    changes.push(...compareResourceMetadataArrays(
+      before[keyword],
+      after[keyword],
+      `${path}.${keyword}`,
+    ));
   }
   return changes;
 }
@@ -586,8 +701,7 @@ function compareEvaluationAnnotations(
 ): BreakingChange[] {
   const changes: BreakingChange[] = [];
   if (
-    sameJson(previous.unevaluatedProperties, current.unevaluatedProperties)
-    && isRestrictiveUnevaluated(current.unevaluatedProperties)
+    isRestrictiveUnevaluated(current.unevaluatedProperties)
     && (
       hasRemovedMapEntry(previous.properties, current.properties)
       || anyKeywordChanged(previous, current, [
@@ -613,8 +727,7 @@ function compareEvaluationAnnotations(
     ));
   }
   if (
-    sameJson(previous.unevaluatedItems, current.unevaluatedItems)
-    && isRestrictiveUnevaluated(current.unevaluatedItems)
+    isRestrictiveUnevaluated(current.unevaluatedItems)
     && anyKeywordChanged(previous, current, [
       "$defs",
       "$ref",
@@ -639,20 +752,19 @@ function compareEvaluationAnnotations(
   return changes;
 }
 
-export function compareSchemas(
+function compareSchemaAssertions(
   previous: JsonSchema,
   current: JsonSchema,
-  path = "$",
+  path: string,
 ): BreakingChange[] {
   if (sameJson(previous, current)) return [];
-  const metadataChanges = compareSchemaMetadata(previous, current, path);
-  if (current === true || previous === false) return metadataChanges;
+  if (current === true || previous === false) return [];
   if (current === false) {
-    return [...metadataChanges, change("boolean_schema_restricted", path, previous, current)];
+    return [change("boolean_schema_restricted", path, previous, current)];
   }
   if (previous === true) previous = {};
 
-  const changes: BreakingChange[] = [...metadataChanges];
+  const changes: BreakingChange[] = [];
   changes.push(...compareEvaluationAnnotations(previous, current, path));
   if (typeNarrows(previous.type, current.type)) {
     changes.push(change("type_changed", path, previous.type, current.type));
@@ -738,7 +850,7 @@ export function compareSchemas(
         changes.push(change("property_removed", propertyPath, previousProperties[key], undefined));
       }
     } else if (isJsonSchema(previousProperties[key]) && isJsonSchema(currentProperties[key])) {
-      changes.push(...compareSchemas(previousProperties[key], currentProperties[key], propertyPath));
+      changes.push(...compareSchemaAssertions(previousProperties[key], currentProperties[key], propertyPath));
     }
   }
   for (const key of Object.keys(currentProperties).sort(compareAscii)) {
@@ -895,6 +1007,18 @@ export function compareSchemas(
   return changes;
 }
 
+export function compareSchemas(
+  previous: JsonSchema,
+  current: JsonSchema,
+  path = "$",
+): BreakingChange[] {
+  if (sameJson(previous, current)) return [];
+  return [
+    ...compareResourceMetadataTree(previous, current, path),
+    ...compareSchemaAssertions(previous, current, path),
+  ];
+}
+
 const expectedSchemaFiles = Object.keys(ContractSchemas)
   .map((key) => `${key}.schema.json`)
   .sort(compareAscii);
@@ -1017,10 +1141,12 @@ async function publishExactSnapshot(
   if (await targetExists(targetDirectory)) throw new Error(refusalMessage);
   const parentDirectory = dirname(targetDirectory);
   const stagingPrefix = `.${basename(targetDirectory)}.staging-`;
+  const claimDirectory = resolve(parentDirectory, `.${basename(targetDirectory)}.claim`);
   await mkdir(parentDirectory, { recursive: true });
   const stagingDirectory = await mkdtemp(resolve(parentDirectory, stagingPrefix));
   assertOwnedStagingDirectory(stagingDirectory, parentDirectory, stagingPrefix);
   let committed = false;
+  let claimAcquired = false;
   try {
     const copySchemaFile = options.copySchemaFile ?? copyFile;
     for (const fileName of expectedSchemaFiles) {
@@ -1032,6 +1158,14 @@ async function publishExactSnapshot(
     await verifyStagedSnapshot(sourceDirectory, stagingDirectory);
     await options.beforeSnapshotCommit?.(stagingDirectory);
     try {
+      await mkdir(claimDirectory);
+      claimAcquired = true;
+    } catch (error: unknown) {
+      if (errorCode(error) === "EEXIST") throw new Error(refusalMessage);
+      throw error;
+    }
+    if (await targetExists(targetDirectory)) throw new Error(refusalMessage);
+    try {
       await rename(stagingDirectory, targetDirectory);
     } catch (error: unknown) {
       if (["EEXIST", "ENOTEMPTY"].includes(errorCode(error) ?? "")) {
@@ -1042,9 +1176,13 @@ async function publishExactSnapshot(
     committed = true;
     return expectedSchemaFiles.length;
   } finally {
-    if (!committed) {
-      assertOwnedStagingDirectory(stagingDirectory, parentDirectory, stagingPrefix);
-      await rm(stagingDirectory, { recursive: true, force: true });
+    try {
+      if (!committed) {
+        assertOwnedStagingDirectory(stagingDirectory, parentDirectory, stagingPrefix);
+        await rm(stagingDirectory, { recursive: true, force: true });
+      }
+    } finally {
+      if (claimAcquired) await rmdir(claimDirectory);
     }
   }
 }
@@ -1117,7 +1255,7 @@ function validPackageVersion(version: string): boolean {
   return /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/.test(version);
 }
 
-async function loadReleaseVersionAuthorities(): Promise<ReleaseVersionAuthorities> {
+export async function loadReleaseVersionAuthorities(): Promise<ReleaseVersionAuthorities> {
   const root = resolve(import.meta.dirname, "..");
   const packageDocument = JSON.parse(
     await readFile(resolve(root, "package.json"), "utf8"),
@@ -1138,7 +1276,7 @@ async function loadReleaseVersionAuthorities(): Promise<ReleaseVersionAuthoritie
   };
 }
 
-function assertReleaseVersionAuthorities(
+export function assertReleaseVersionAuthorities(
   requestedVersion: string,
   authorities: ReleaseVersionAuthorities,
 ): void {

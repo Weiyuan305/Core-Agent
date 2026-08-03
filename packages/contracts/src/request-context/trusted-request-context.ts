@@ -98,7 +98,7 @@ export interface TrustedContextAuthority {
   };
 }
 
-const MAX_CONTEXT_TTL_MILLISECONDS = 300_000;
+const MAX_CONTEXT_TTL_NANOSECONDS = 300_000_000_000n;
 
 export function validateTrustedRequestContext(
   context: TrustedRequestContext,
@@ -187,8 +187,8 @@ export function validateTrustedRequestContext(
   }
 
   const now = parseStrictUtcTimestamp(authority.now);
-  const issuedAt = Date.parse(context.issued_at);
-  const expiresAt = Date.parse(context.expires_at);
+  const issuedAt = parseStrictUtcTimestamp(context.issued_at);
+  const expiresAt = parseStrictUtcTimestamp(context.expires_at);
 
   if (now === undefined) {
     violations.push(
@@ -199,7 +199,7 @@ export function validateTrustedRequestContext(
       ),
     );
   } else {
-    if (now < issuedAt) {
+    if (issuedAt !== undefined && now < issuedAt) {
       violations.push(
         violation(
           "CONTEXT_NOT_YET_VALID",
@@ -208,7 +208,7 @@ export function validateTrustedRequestContext(
         ),
       );
     }
-    if (now >= expiresAt) {
+    if (expiresAt !== undefined && now >= expiresAt) {
       violations.push(
         violation(
           "CONTEXT_EXPIRED",
@@ -219,7 +219,11 @@ export function validateTrustedRequestContext(
     }
   }
 
-  if (expiresAt - issuedAt > MAX_CONTEXT_TTL_MILLISECONDS) {
+  if (
+    issuedAt !== undefined
+    && expiresAt !== undefined
+    && expiresAt - issuedAt > MAX_CONTEXT_TTL_NANOSECONDS
+  ) {
     violations.push(
       violation(
         "CONTEXT_TTL_EXCEEDED",

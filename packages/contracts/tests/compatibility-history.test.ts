@@ -10,7 +10,7 @@ import {
   compatibilityHistoryFailures,
   type CompatibilityHistoryChange,
 } from "../scripts/check-compatibility-history.js";
-import { ContractSchemas } from "../src/index.js";
+import { CONTRACT_PACKAGE_VERSION, ContractSchemas } from "../src/index.js";
 
 const execFile = promisify(execFileCallback);
 const schemaFiles = Object.keys(ContractSchemas)
@@ -57,15 +57,36 @@ test("history policy allows only exact initial introduction and exact new releas
   }));
   const release = schemaFiles.map<CompatibilityHistoryChange>((fileName) => ({
     status: "A",
-    path: releasePath("1.1.0", fileName),
+    path: releasePath(CONTRACT_PACKAGE_VERSION, fileName),
   }));
   assert.deepEqual(compatibilityHistoryFailures(initial), []);
   assert.deepEqual(compatibilityHistoryFailures(release), []);
   assert.notDeepEqual(compatibilityHistoryFailures(release.slice(1)), []);
   assert.notDeepEqual(compatibilityHistoryFailures([
     ...release,
-    { status: "A", path: releasePath("1.1.0", "extra.schema.json") },
+    { status: "A", path: releasePath(CONTRACT_PACKAGE_VERSION, "extra.schema.json") },
   ]), []);
+});
+
+test("history policy binds complete release additions to the authoritative package version", () => {
+  const currentRelease = schemaFiles.map<CompatibilityHistoryChange>((fileName) => ({
+    status: "A",
+    path: releasePath(CONTRACT_PACKAGE_VERSION, fileName),
+  }));
+  const unrelatedRelease = schemaFiles.map<CompatibilityHistoryChange>((fileName) => ({
+    status: "A",
+    path: releasePath("9.9.9", fileName),
+  }));
+  assert.deepEqual(
+    compatibilityHistoryFailures(currentRelease, CONTRACT_PACKAGE_VERSION),
+    [],
+  );
+  assert.deepEqual(
+    compatibilityHistoryFailures(unrelatedRelease, CONTRACT_PACKAGE_VERSION),
+    [
+      `compatibility release 9.9.9 does not match package version authority ${CONTRACT_PACKAGE_VERSION}`,
+    ],
+  );
 });
 
 async function git(repository: string, ...args: string[]): Promise<string> {
@@ -125,6 +146,63 @@ test("history CLI compares an explicit base ref in a temporary git repository", 
     (error: unknown) => {
       const output = error as { stderr?: string };
       assert.match(output.stderr ?? "", /append-only/);
+      return true;
+    },
+  );
+});
+
+test("history CLI allows the current release version and rejects a manual 9.9.9 release", async (t) => {
+  const repository = await mkdtemp(resolve(tmpdir(), "contracts-history-version-git-"));
+  t.after(() => rm(repository, { recursive: true, force: true }));
+  await git(repository, "init", "-q");
+  await git(repository, "config", "user.email", "contracts@example.test");
+  await git(repository, "config", "user.name", "Contracts Test");
+
+  const compatibility = resolve(repository, "packages/contracts/compat/v1");
+  await mkdir(compatibility, { recursive: true });
+  await Promise.all(schemaFiles.map((fileName) => (
+    writeFile(resolve(compatibility, fileName), "{}\n", "utf8")
+  )));
+  await git(repository, "add", "packages/contracts/compat/v1");
+  await git(repository, "commit", "-qm", "establish initial compatibility history");
+  const base = await git(repository, "rev-parse", "HEAD");
+
+  const currentRelease = resolve(compatibility, "releases", CONTRACT_PACKAGE_VERSION);
+  await mkdir(currentRelease, { recursive: true });
+  await Promise.all(schemaFiles.map((fileName) => (
+    writeFile(resolve(currentRelease, fileName), "{}\n", "utf8")
+  )));
+  await git(repository, "add", "packages/contracts/compat/v1");
+  await git(repository, "commit", "-qm", "add authoritative release snapshot");
+
+  const root = resolve(import.meta.dirname, "../../..");
+  const script = resolve(root, "packages/contracts/scripts/check-compatibility-history.ts");
+  const cliArguments = ["--import", "tsx", script, "--repository", repository];
+  const accepted = await execFile(process.execPath, [
+    ...cliArguments,
+    "--base",
+    base,
+  ], { cwd: root, encoding: "utf8" });
+  assert.match(accepted.stdout, /Compatibility history check passed/);
+
+  const authoritativeRelease = await git(repository, "rev-parse", "HEAD");
+  const unrelatedRelease = resolve(compatibility, "releases/9.9.9");
+  await mkdir(unrelatedRelease, { recursive: true });
+  await Promise.all(schemaFiles.map((fileName) => (
+    writeFile(resolve(unrelatedRelease, fileName), "{}\n", "utf8")
+  )));
+  await git(repository, "add", "packages/contracts/compat/v1");
+  await git(repository, "commit", "-qm", "manually bypass release acceptance");
+
+  await assert.rejects(
+    execFile(process.execPath, [
+      ...cliArguments,
+      "--base",
+      authoritativeRelease,
+    ], { cwd: root, encoding: "utf8" }),
+    (error: unknown) => {
+      const output = error as { stderr?: string };
+      assert.match(output.stderr ?? "", /does not match package version authority/);
       return true;
     },
   );

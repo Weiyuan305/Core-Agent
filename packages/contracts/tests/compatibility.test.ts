@@ -635,6 +635,126 @@ test("fails closed when evaluation annotations change under unevaluated closure"
   );
 });
 
+test("fails closed when annotation loss is composed with a changed restrictive unevaluated schema", () => {
+  const cases: Array<{
+    name: string;
+    previous: Record<string, unknown>;
+    current: Record<string, unknown>;
+    value: unknown;
+    kind: string;
+  }> = [
+    {
+      name: "properties removal",
+      previous: { type: "object", properties: { x: true }, unevaluatedProperties: false },
+      current: { type: "object", unevaluatedProperties: { type: "string" } },
+      value: { x: 1 },
+      kind: "unevaluated_properties_evaluation_changed",
+    },
+    {
+      name: "items removal",
+      previous: { type: "array", items: true, unevaluatedItems: false },
+      current: { type: "array", unevaluatedItems: { type: "string" } },
+      value: [1],
+      kind: "unevaluated_items_evaluation_changed",
+    },
+    {
+      name: "same-ref defs target annotation removal",
+      previous: {
+        type: "object",
+        $defs: { Scope: { type: "object", properties: { x: true } } },
+        $ref: "#/$defs/Scope",
+        unevaluatedProperties: false,
+      },
+      current: {
+        type: "object",
+        $defs: { Scope: { type: "object" } },
+        $ref: "#/$defs/Scope",
+        unevaluatedProperties: { type: "string" },
+      },
+      value: { x: 1 },
+      kind: "unevaluated_properties_evaluation_changed",
+    },
+    {
+      name: "prefixItems removal",
+      previous: {
+        type: "array",
+        prefixItems: [true],
+        minItems: 1,
+        maxItems: 1,
+        unevaluatedItems: false,
+      },
+      current: {
+        type: "array",
+        minItems: 1,
+        maxItems: 1,
+        unevaluatedItems: { type: "string" },
+      },
+      value: [1],
+      kind: "unevaluated_items_evaluation_changed",
+    },
+    {
+      name: "dependentSchemas annotation removal",
+      previous: {
+        type: "object",
+        properties: { flag: true },
+        dependentSchemas: { flag: { type: "object", properties: { x: true } } },
+        unevaluatedProperties: false,
+      },
+      current: {
+        type: "object",
+        properties: { flag: true },
+        unevaluatedProperties: { type: "string" },
+      },
+      value: { flag: true, x: 1 },
+      kind: "unevaluated_properties_evaluation_changed",
+    },
+    {
+      name: "patternProperties annotation removal",
+      previous: {
+        type: "object",
+        patternProperties: { "^x$": true },
+        unevaluatedProperties: false,
+      },
+      current: { type: "object", unevaluatedProperties: { type: "string" } },
+      value: { x: 1 },
+      kind: "unevaluated_properties_evaluation_changed",
+    },
+    {
+      name: "additionalProperties annotation removal",
+      previous: {
+        type: "object",
+        additionalProperties: true,
+        unevaluatedProperties: false,
+      },
+      current: { type: "object", unevaluatedProperties: { type: "string" } },
+      value: { x: 1 },
+      kind: "unevaluated_properties_evaluation_changed",
+    },
+  ];
+
+  for (const { name, previous, current, value, kind } of cases) {
+    assertAjvCompatibilityWitness(previous, current, value);
+    assert.equal(
+      compareSchemas(previous, current).some((item) => item.kind === kind),
+      true,
+      name,
+    );
+  }
+
+  assert.deepEqual(
+    compareSchemas(
+      { type: "object", properties: { x: true }, unevaluatedProperties: false },
+      {
+        type: "object",
+        properties: { x: true },
+        unevaluatedProperties: { type: "string" },
+      },
+    ),
+    [],
+    "changing only false to a schema is a genuine widening",
+  );
+});
+
 test("compares schema resource identity and dialect at nested resource boundaries", () => {
   const changes = compareSchemas(
     {
@@ -682,6 +802,97 @@ test("reports resource metadata before boolean widening short-circuits", () => {
       { $defs: { Nested: true } },
     ).map((item) => [item.kind, item.path]),
     [["schema_id_changed", "$.$defs.Nested.$id"]],
+  );
+});
+
+test("reports resource metadata loss through every schema-valued boolean shortcut", () => {
+  const metadata = {
+    $id: "urn:embedded:resource",
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    type: "string",
+  };
+  const cases: Array<{
+    name: string;
+    previous: Record<string, unknown>;
+    current: Record<string, unknown>;
+    path: string;
+  }> = [
+    { name: "items", previous: { items: metadata }, current: { items: true }, path: "$.items" },
+    {
+      name: "prefixItems",
+      previous: { prefixItems: [metadata] },
+      current: { prefixItems: [true] },
+      path: "$.prefixItems[0]",
+    },
+    {
+      name: "dependentSchemas",
+      previous: { dependentSchemas: { flag: metadata } },
+      current: { dependentSchemas: { flag: true } },
+      path: "$.dependentSchemas.flag",
+    },
+    {
+      name: "additionalProperties",
+      previous: { additionalProperties: metadata },
+      current: { additionalProperties: true },
+      path: "$.additionalProperties",
+    },
+    {
+      name: "contains",
+      previous: { contains: metadata },
+      current: { contains: true },
+      path: "$.contains",
+    },
+    {
+      name: "properties removal",
+      previous: { properties: { value: metadata } },
+      current: {},
+      path: "$.properties.value",
+    },
+    {
+      name: "anyOf object to true",
+      previous: { anyOf: [metadata] },
+      current: { anyOf: [true] },
+      path: "$.anyOf[0]",
+    },
+    {
+      name: "anyOf object absent beside true",
+      previous: { anyOf: [metadata, true] },
+      current: { anyOf: [true] },
+      path: "$.anyOf[0]",
+    },
+  ];
+
+  for (const { name, previous, current, path } of cases) {
+    assert.deepEqual(
+      compareSchemas(previous, current)
+        .filter((item) => item.kind === "schema_id_changed" || item.kind === "schema_dialect_changed")
+        .map((item) => [item.kind, item.path]),
+      [
+        ["schema_id_changed", `${path}.$id`],
+        ["schema_dialect_changed", `${path}.$schema`],
+      ],
+      name,
+    );
+  }
+});
+
+test("preserves embedded resource metadata required by an external reference", () => {
+  const externalId = "urn:embedded:any-of-resource";
+  const previous = {
+    allOf: [{ $ref: externalId }],
+    anyOf: [{ $id: externalId, type: "string" }, true],
+  };
+  const current = {
+    allOf: [{ $ref: externalId }],
+    anyOf: [true],
+  };
+  assert.doesNotThrow(() => new Ajv2020({ strict: true }).compile(previous));
+  assert.throws(() => new Ajv2020({ strict: true }).compile(current), /can't resolve reference/);
+  assert.deepEqual(
+    compareSchemas(previous, current)
+      .filter((item) => item.kind === "schema_id_changed")
+      .map((item) => [item.kind, item.path]),
+    [["schema_id_changed", "$.anyOf[0].$id"]],
   );
 });
 
@@ -1036,6 +1247,51 @@ test("release copy interruption leaves no final and a clean retry succeeds", asy
   assert.equal(await acceptV1Release(schemas, baseline, "1.1.0", {
     versionAuthorities: authorities,
   }), 28);
+});
+
+test("snapshot publication refuses an empty target created after staging without clobbering it", async (t) => {
+  const modes = ["initial", "release"] as const;
+  for (const mode of modes) {
+    const directory = await mkdtemp(resolve(tmpdir(), `contracts-compat-empty-race-${mode}-`));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const schemas = resolve(directory, "schemas");
+    const baseline = resolve(directory, "compat/v1");
+    await writeSchemaManifest(schemas);
+    if (mode === "release") await acceptInitialV1Baseline(schemas, baseline);
+    const target = mode === "initial" ? baseline : resolve(baseline, "releases/1.1.0");
+    const parent = resolve(target, "..");
+    const options = {
+      beforeSnapshotCommit: async (): Promise<void> => { await mkdir(target); },
+    };
+
+    await assert.rejects(
+      mode === "initial"
+        ? acceptInitialV1Baseline(schemas, baseline, options)
+        : acceptV1Release(schemas, baseline, "1.1.0", {
+          ...options,
+          versionAuthorities: releaseAuthorities("1.1.0"),
+        }),
+      /refusing to overwrite/i,
+      mode,
+    );
+    assert.deepEqual(await readdir(target), [], `${mode} target must remain untouched`);
+    assert.deepEqual(
+      (await readdir(parent)).filter((name) => name.includes(".staging-") || name.endsWith(".claim")),
+      [],
+      `${mode} staging and claim state must be cleaned`,
+    );
+
+    await rm(target, { recursive: true });
+    assert.equal(
+      mode === "initial"
+        ? await acceptInitialV1Baseline(schemas, baseline)
+        : await acceptV1Release(schemas, baseline, "1.1.0", {
+          versionAuthorities: releaseAuthorities("1.1.0"),
+        }),
+      28,
+      `${mode} retry`,
+    );
+  }
 });
 
 test("release publication binds CLI input to all version authorities", async (t) => {

@@ -3,6 +3,11 @@ import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
+import {
+  assertReleaseVersionAuthorities,
+  loadReleaseVersionAuthorities,
+} from "./check-compatibility.js";
+import { CONTRACT_PACKAGE_VERSION } from "../src/index.js";
 import { ContractSchemas } from "../src/registry.js";
 
 const execFile = promisify(execFileCallback);
@@ -40,6 +45,7 @@ function validPackageVersion(version: string): boolean {
 
 export function compatibilityHistoryFailures(
   changes: readonly CompatibilityHistoryChange[],
+  authoritativeReleaseVersion = CONTRACT_PACKAGE_VERSION,
 ): string[] {
   const failures: string[] = [];
   const initialAdditions: string[] = [];
@@ -84,6 +90,12 @@ export function compatibilityHistoryFailures(
     failures.push(...manifestFailures("initial compatibility introduction", initialAdditions));
   }
   for (const version of [...releaseAdditions.keys()].sort(compareAscii)) {
+    if (version !== authoritativeReleaseVersion) {
+      failures.push(
+        `compatibility release ${version} does not match package version authority ${authoritativeReleaseVersion}`,
+      );
+      continue;
+    }
     failures.push(...manifestFailures(
       `release ${version} compatibility introduction`,
       releaseAdditions.get(version) ?? [],
@@ -117,6 +129,8 @@ export async function checkCompatibilityHistory(
   repositoryDirectory = resolve(import.meta.dirname, "../../.."),
 ): Promise<string[]> {
   if (!validBaseRef(baseRef)) throw new Error(`Invalid compatibility history base ref: ${baseRef}`);
+  const authorities = await loadReleaseVersionAuthorities();
+  assertReleaseVersionAuthorities(authorities.packageJsonVersion, authorities);
   const result = await execFile(
     "git",
     [
@@ -132,7 +146,10 @@ export async function checkCompatibilityHistory(
     ],
     { encoding: "utf8" },
   );
-  return compatibilityHistoryFailures(parseGitNameStatus(result.stdout));
+  return compatibilityHistoryFailures(
+    parseGitNameStatus(result.stdout),
+    authorities.packageJsonVersion,
+  );
 }
 
 async function main(): Promise<void> {
