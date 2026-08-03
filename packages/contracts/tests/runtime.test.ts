@@ -377,6 +377,8 @@ test("conversation mutation freezes complete student and case references", () =>
     { name: "student id", previous: { ...identity, student_ref }, current: { ...identity, student_ref: { ...student_ref, student_id: "student_other" } }, code: "CONVERSATION_STUDENT_IMMUTABLE" },
     { name: "student source", previous: { ...identity, student_ref }, current: { ...identity, student_ref: { ...student_ref, source_system: "other" } }, code: "CONVERSATION_STUDENT_IMMUTABLE" },
     { name: "student version", previous: { ...identity, student_ref }, current: { ...identity, student_ref: { ...student_ref, source_version: "student-v2" } }, code: "CONVERSATION_STUDENT_IMMUTABLE" },
+    { name: "student version add", previous: { ...identity, student_ref: { student_id: student_ref.student_id, source_system: student_ref.source_system } }, current: { ...identity, student_ref }, code: "CONVERSATION_STUDENT_IMMUTABLE" },
+    { name: "student version remove", previous: { ...identity, student_ref }, current: { ...identity, student_ref: { student_id: student_ref.student_id, source_system: student_ref.source_system } }, code: "CONVERSATION_STUDENT_IMMUTABLE" },
     { name: "case add", previous: identity, current: { ...identity, case_ref }, code: "CONVERSATION_CASE_IMMUTABLE" },
     { name: "case remove", previous: { ...identity, case_ref }, current: identity, code: "CONVERSATION_CASE_IMMUTABLE" },
     { name: "case id", previous: { ...identity, case_ref }, current: { ...identity, case_ref: { ...case_ref, case_id: "case_other" } }, code: "CONVERSATION_CASE_IMMUTABLE" },
@@ -384,6 +386,10 @@ test("conversation mutation freezes complete student and case references", () =>
     { name: "case capability", previous: { ...identity, case_ref }, current: { ...identity, case_ref: { ...case_ref, capability_id: "other" } }, code: "CONVERSATION_CASE_IMMUTABLE" },
     { name: "case source", previous: { ...identity, case_ref }, current: { ...identity, case_ref: { ...case_ref, source_system: "other" } }, code: "CONVERSATION_CASE_IMMUTABLE" },
     { name: "case version", previous: { ...identity, case_ref }, current: { ...identity, case_ref: { ...case_ref, source_version: "case-v2" } }, code: "CONVERSATION_CASE_IMMUTABLE" },
+    { name: "case source add", previous: { ...identity, case_ref: { case_id: case_ref.case_id, student_id: case_ref.student_id, capability_id: case_ref.capability_id, source_version: case_ref.source_version } }, current: { ...identity, case_ref }, code: "CONVERSATION_CASE_IMMUTABLE" },
+    { name: "case source remove", previous: { ...identity, case_ref }, current: { ...identity, case_ref: { case_id: case_ref.case_id, student_id: case_ref.student_id, capability_id: case_ref.capability_id, source_version: case_ref.source_version } }, code: "CONVERSATION_CASE_IMMUTABLE" },
+    { name: "case version add", previous: { ...identity, case_ref: { ...case_ref, source_version: undefined } }, current: { ...identity, case_ref }, code: "CONVERSATION_CASE_IMMUTABLE" },
+    { name: "case version remove", previous: { ...identity, case_ref }, current: { ...identity, case_ref: { ...case_ref, source_version: undefined } }, code: "CONVERSATION_CASE_IMMUTABLE" },
   ];
 
   for (const { name, previous, current, code } of cases) {

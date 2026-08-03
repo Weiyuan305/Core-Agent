@@ -24,6 +24,7 @@
     "schemas:check": "tsx scripts/generate-schemas.ts --check",
     "fixtures:check": "tsx scripts/verify-fixtures.ts",
     "compat:check": "tsx scripts/check-compatibility.ts",
+    "compat:history": "tsx scripts/check-compatibility-history.ts",
     "check": "npm run build && npm test && npm run schemas:check && npm run fixtures:check && npm run compat:check"
   },
   "dependencies": {

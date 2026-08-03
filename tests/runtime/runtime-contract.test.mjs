@@ -174,7 +174,9 @@ test("CI validates runtime contracts without building or publishing images", asy
 
   assert.match(workflow, /^permissions:\n  contents: read\n\njobs:/m);
   assert.match(workflow, /^\s+node-version: 22$/m);
+  assert.match(workflow, /^\s+fetch-depth: 0$/m);
   assert.match(workflow, /^\s+run: npm test$/m);
+  assert.match(workflow, /github\.event\.pull_request\.base\.sha \|\| github\.event\.before/);
   assert.match(
     workflow,
     /^\s+CORE_AGENT_API_SERVER_KEY: ci-contract-test-only-not-a-secret-0000000000000000$/m
@@ -197,6 +199,7 @@ test("CI validates runtime contracts without building or publishing images", asy
     "        run: npm ci",
     "        run: npm test",
     "        run: npm run contracts:check",
+    "        run: npm run compat:history -w @core-agent/contracts -- --base \"$COMPAT_HISTORY_BASE\"",
     "        run: docker compose -f infra/hermes/compose.dev.yaml config --quiet"
   ]);
   const actions = workflow

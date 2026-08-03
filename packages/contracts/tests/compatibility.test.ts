@@ -1,14 +1,27 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import {
+  copyFile,
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
+
+import Ajv2020 from "ajv/dist/2020.js";
 
 import {
   acceptV1Release,
   acceptInitialV1Baseline,
   checkCompatibilityDirectories,
   compareSchemas,
+  type ReleaseVersionAuthorities,
 } from "../scripts/check-compatibility.js";
 import { ContractSchemas } from "../src/index.js";
 
@@ -30,6 +43,36 @@ async function writeTenantSchema(
     `${JSON.stringify(schema, undefined, 2)}\n`,
     "utf8",
   );
+}
+
+function releaseAuthorities(version: string): ReleaseVersionAuthorities {
+  return {
+    packageJsonVersion: version,
+    exportedPackageVersion: version,
+    compatibilityChangeVersion: version,
+  };
+}
+
+async function writeMarkedSchemaManifest(directory: string, marker: string): Promise<void> {
+  await mkdir(directory, { recursive: true });
+  await Promise.all(expectedSchemaFiles.map((fileName) => (
+    writeFile(
+      resolve(directory, fileName),
+      `${JSON.stringify({ type: "object", title: marker }, undefined, 2)}\n`,
+      "utf8",
+    )
+  )));
+}
+
+function assertAjvCompatibilityWitness(
+  previous: boolean | Record<string, unknown>,
+  current: boolean | Record<string, unknown>,
+  value: unknown,
+): void {
+  const previousValidator = new Ajv2020({ strict: true }).compile(previous);
+  const currentValidator = new Ajv2020({ strict: true }).compile(current);
+  assert.equal(previousValidator(value), true, "witness must be accepted by the previous schema");
+  assert.equal(currentValidator(value), false, "witness must be rejected by the current schema");
 }
 
 test("detects property removal, type change, required addition, and union narrowing", () => {
@@ -430,6 +473,168 @@ test("detects every advanced assertion keyword recursively", () => {
   }
 });
 
+test("normalizes effective minContains and protects finite maxContains composition", () => {
+  const minimumCases = [
+    {
+      name: "object predicate",
+      previous: { type: "array", contains: { const: "x" }, minContains: 0, maxContains: 10 },
+      current: { type: "array", contains: { const: "x" }, maxContains: 10 },
+    },
+    {
+      name: "boolean predicate",
+      previous: { type: "array", contains: true, minContains: 0, maxContains: 10 },
+      current: { type: "array", contains: true, maxContains: 10 },
+    },
+  ];
+  for (const { name, previous, current } of minimumCases) {
+    assertAjvCompatibilityWitness(previous, current, []);
+    assert.equal(
+      compareSchemas(previous, current).some((item) => item.kind === "min_contains_increased"),
+      true,
+      name,
+    );
+  }
+
+  const previous = {
+    type: "array",
+    contains: { const: "x" },
+    minContains: 0,
+    maxContains: 1,
+  };
+  const current = {
+    type: "array",
+    contains: true,
+    minContains: 0,
+    maxContains: 1,
+  };
+  assertAjvCompatibilityWitness(previous, current, ["x", "y"]);
+  assert.deepEqual(
+    compareSchemas(previous, current).map((item) => [item.kind, item.path]),
+    [["contains_match_set_changed", "$.contains"]],
+  );
+});
+
+test("fails closed when evaluation annotations change under unevaluated closure", () => {
+  const cases: Array<{
+    name: string;
+    previous: Record<string, unknown>;
+    current: Record<string, unknown>;
+    value: unknown;
+    kind: string;
+  }> = [
+    {
+      name: "properties removal",
+      previous: { type: "object", properties: { x: true }, unevaluatedProperties: false },
+      current: { type: "object", unevaluatedProperties: false },
+      value: { x: 1 },
+      kind: "unevaluated_properties_evaluation_changed",
+    },
+    {
+      name: "items removal",
+      previous: { type: "array", items: true, unevaluatedItems: false },
+      current: { type: "array", unevaluatedItems: false },
+      value: [1],
+      kind: "unevaluated_items_evaluation_changed",
+    },
+    {
+      name: "same ref defs target property removal",
+      previous: {
+        type: "object",
+        $defs: { Scope: { type: "object", properties: { x: true } } },
+        $ref: "#/$defs/Scope",
+        unevaluatedProperties: false,
+      },
+      current: {
+        type: "object",
+        $defs: { Scope: { type: "object" } },
+        $ref: "#/$defs/Scope",
+        unevaluatedProperties: false,
+      },
+      value: { x: 1 },
+      kind: "unevaluated_properties_evaluation_changed",
+    },
+    {
+      name: "prefixItems removal",
+      previous: {
+        type: "array",
+        prefixItems: [true],
+        minItems: 1,
+        maxItems: 1,
+        unevaluatedItems: false,
+      },
+      current: { type: "array", minItems: 1, maxItems: 1, unevaluatedItems: false },
+      value: [1],
+      kind: "unevaluated_items_evaluation_changed",
+    },
+    {
+      name: "dependentSchemas annotation removal",
+      previous: {
+        type: "object",
+        properties: { flag: true },
+        dependentSchemas: { flag: { type: "object", properties: { x: true } } },
+        unevaluatedProperties: false,
+      },
+      current: {
+        type: "object",
+        properties: { flag: true },
+        unevaluatedProperties: false,
+      },
+      value: { flag: true, x: 1 },
+      kind: "unevaluated_properties_evaluation_changed",
+    },
+    {
+      name: "patternProperties annotation removal",
+      previous: {
+        type: "object",
+        patternProperties: { "^x$": true },
+        unevaluatedProperties: false,
+      },
+      current: { type: "object", unevaluatedProperties: false },
+      value: { x: 1 },
+      kind: "unevaluated_properties_evaluation_changed",
+    },
+    {
+      name: "additionalProperties annotation removal",
+      previous: {
+        type: "object",
+        additionalProperties: true,
+        unevaluatedProperties: false,
+      },
+      current: { type: "object", unevaluatedProperties: false },
+      value: { x: 1 },
+      kind: "unevaluated_properties_evaluation_changed",
+    },
+    {
+      name: "allOf annotation removal",
+      previous: {
+        type: "object",
+        allOf: [{ type: "object", properties: { x: true } }],
+        unevaluatedProperties: false,
+      },
+      current: { type: "object", unevaluatedProperties: false },
+      value: { x: 1 },
+      kind: "unevaluated_properties_evaluation_changed",
+    },
+  ];
+
+  for (const { name, previous, current, value, kind } of cases) {
+    assertAjvCompatibilityWitness(previous, current, value);
+    assert.equal(
+      compareSchemas(previous, current).some((item) => item.kind === kind),
+      true,
+      name,
+    );
+  }
+  assert.equal(
+    compareSchemas(
+      { type: "array", contains: true, unevaluatedItems: false },
+      { type: "array", unevaluatedItems: false },
+    ).some((item) => item.kind === "unevaluated_items_evaluation_changed"),
+    true,
+    "contains annotation change",
+  );
+});
+
 test("compares schema resource identity and dialect at nested resource boundaries", () => {
   const changes = compareSchemas(
     {
@@ -457,6 +662,29 @@ test("compares schema resource identity and dialect at nested resource boundarie
   );
 });
 
+test("reports resource metadata before boolean widening short-circuits", () => {
+  assert.deepEqual(
+    compareSchemas(
+      {
+        $id: "urn:root",
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+      },
+      true,
+    ).map((item) => [item.kind, item.path]),
+    [
+      ["schema_id_changed", "$.$id"],
+      ["schema_dialect_changed", "$.$schema"],
+    ],
+  );
+  assert.deepEqual(
+    compareSchemas(
+      { $defs: { Nested: { $id: "urn:nested", type: "string" } } },
+      { $defs: { Nested: true } },
+    ).map((item) => [item.kind, item.path]),
+    [["schema_id_changed", "$.$defs.Nested.$id"]],
+  );
+});
+
 test("does not report semantic no-ops or supported widening", () => {
   const cases: Array<[unknown, unknown]> = [
     [{ type: "integer" }, { type: "number" }],
@@ -465,6 +693,16 @@ test("does not report semantic no-ops or supported widening", () => {
     [{ const: { a: 1, b: 2 } }, { const: { b: 2, a: 1 } }],
     [{ oneOf: [{ const: "a" }, { const: "b" }] }, { oneOf: [{ const: "b" }, { const: "a" }] }],
     [{ allOf: [{ type: "string" }, { maxLength: 10 }] }, { allOf: [{ maxLength: 10 }, { type: "string" }] }],
+    [{ const: "a" }, { enum: ["a", "b"] }],
+    [{ anyOf: [true] }, { anyOf: [true, false] }],
+    [
+      { type: "object", patternProperties: { "^note$": { type: "string" } } },
+      {
+        type: "object",
+        patternProperties: { "^note$": { type: "string" } },
+        properties: { note: { type: "string" } },
+      },
+    ],
   ];
   for (const [previous, current] of cases) {
     assert.deepEqual(
@@ -478,6 +716,28 @@ test("does not report semantic no-ops or supported widening", () => {
       { type: "number", multipleOf: 4 },
     ).map((item) => item.kind),
     ["multiple_of_changed"],
+  );
+  assert.notDeepEqual(compareSchemas({ enum: ["a", "b"] }, { const: "a" }), []);
+  assert.notDeepEqual(compareSchemas({ const: "a" }, { enum: ["b"] }), []);
+  assert.deepEqual(
+    compareSchemas(
+      {
+        type: "object",
+        patternProperties: {
+          "^note": { type: "string" },
+          "note$": { maxLength: 10 },
+        },
+      },
+      {
+        type: "object",
+        patternProperties: {
+          "^note": { type: "string" },
+          "note$": { maxLength: 10 },
+        },
+        properties: { note: { type: "number" } },
+      },
+    ).map((item) => item.kind),
+    ["property_added_restricts_open_object"],
   );
 });
 
@@ -596,9 +856,13 @@ test("accepted v1 releases make compatibility checks cumulative", async (t) => {
     },
   });
   assert.deepEqual(await checkCompatibilityDirectories(schemas, baseline), []);
-  assert.equal(await acceptV1Release(schemas, baseline, "1.1.0"), 28);
+  assert.equal(await acceptV1Release(schemas, baseline, "1.1.0", {
+    versionAuthorities: releaseAuthorities("1.1.0"),
+  }), 28);
   await assert.rejects(
-    acceptV1Release(schemas, baseline, "1.1.0"),
+    acceptV1Release(schemas, baseline, "1.1.0", {
+      versionAuthorities: releaseAuthorities("1.1.0"),
+    }),
     /refusing to overwrite/i,
   );
 
@@ -665,5 +929,153 @@ test("release acceptance rejects invalid versions and incompatible candidates", 
   await acceptInitialV1Baseline(schemas, baseline);
   await assert.rejects(acceptV1Release(schemas, baseline, "../escape"), /package version/i);
   await writeTenantSchema(schemas, { type: "string" });
-  await assert.rejects(acceptV1Release(schemas, baseline, "1.1.0"), /compatibility check failed/i);
+  await assert.rejects(acceptV1Release(schemas, baseline, "1.1.0", {
+    versionAuthorities: releaseAuthorities("1.1.0"),
+  }), /compatibility check failed/i);
+});
+
+test("initial snapshot publication cleans an interrupted staging copy and permits retry", async (t) => {
+  const directory = await mkdtemp(resolve(tmpdir(), "contracts-compat-atomic-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const schemas = resolve(directory, "schemas");
+  const baseline = resolve(directory, "compat/v1");
+  await writeSchemaManifest(schemas);
+  let copies = 0;
+
+  await assert.rejects(
+    acceptInitialV1Baseline(schemas, baseline, {
+      copySchemaFile: async (source, destination) => {
+        copies += 1;
+        if (copies === 4) throw new Error("injected copy interruption");
+        await copyFile(source, destination);
+      },
+    }),
+    /injected copy interruption/,
+  );
+  await assert.rejects(stat(baseline), { code: "ENOENT" });
+  assert.deepEqual(
+    (await readdir(resolve(directory, "compat"))).filter((name) => name.includes(".staging-")),
+    [],
+  );
+  assert.equal(await acceptInitialV1Baseline(schemas, baseline), 28);
+});
+
+test("concurrent release publishers accept one complete source without mixing", async (t) => {
+  const directory = await mkdtemp(resolve(tmpdir(), "contracts-compat-race-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const initialSchemas = resolve(directory, "initial");
+  const sourceA = resolve(directory, "source-a");
+  const sourceB = resolve(directory, "source-b");
+  const baseline = resolve(directory, "compat/v1");
+  await writeSchemaManifest(initialSchemas);
+  await acceptInitialV1Baseline(initialSchemas, baseline);
+  await writeMarkedSchemaManifest(sourceA, "source-a");
+  await writeMarkedSchemaManifest(sourceB, "source-b");
+
+  let arrivals = 0;
+  let openBarrier!: () => void;
+  const barrier = new Promise<void>((resolveBarrier) => { openBarrier = resolveBarrier; });
+  const beforeCommit = async (): Promise<void> => {
+    arrivals += 1;
+    if (arrivals === 2) openBarrier();
+    await barrier;
+  };
+  const options = {
+    versionAuthorities: releaseAuthorities("1.1.0"),
+    beforeSnapshotCommit: beforeCommit,
+  };
+  const results = await Promise.allSettled([
+    acceptV1Release(sourceA, baseline, "1.1.0", options),
+    acceptV1Release(sourceB, baseline, "1.1.0", options),
+  ]);
+  assert.equal(arrivals, 2, "both publishers must stage before either atomic rename");
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(results.filter((result) => result.status === "rejected").length, 1);
+
+  const release = resolve(baseline, "releases/1.1.0");
+  const markers = new Set<string>();
+  for (const fileName of expectedSchemaFiles) {
+    const schema = JSON.parse(await readFile(resolve(release, fileName), "utf8")) as { title: string };
+    markers.add(schema.title);
+  }
+  assert.equal((await readdir(release)).length, 28);
+  assert.equal(markers.size, 1);
+  assert.equal(["source-a", "source-b"].includes([...markers][0]!), true);
+  assert.deepEqual(
+    (await readdir(resolve(baseline, "releases"))).filter((name) => name.includes(".staging-")),
+    [],
+  );
+});
+
+test("release copy interruption leaves no final and a clean retry succeeds", async (t) => {
+  const directory = await mkdtemp(resolve(tmpdir(), "contracts-compat-release-atomic-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const schemas = resolve(directory, "schemas");
+  const baseline = resolve(directory, "compat/v1");
+  await writeSchemaManifest(schemas);
+  await acceptInitialV1Baseline(schemas, baseline);
+  let copies = 0;
+  const authorities = releaseAuthorities("1.1.0");
+  await assert.rejects(
+    acceptV1Release(schemas, baseline, "1.1.0", {
+      versionAuthorities: authorities,
+      copySchemaFile: async (source, destination) => {
+        copies += 1;
+        if (copies === 7) throw new Error("injected release copy interruption");
+        await copyFile(source, destination);
+      },
+    }),
+    /injected release copy interruption/,
+  );
+  const release = resolve(baseline, "releases/1.1.0");
+  await assert.rejects(stat(release), { code: "ENOENT" });
+  assert.deepEqual(
+    (await readdir(resolve(baseline, "releases"))).filter((name) => name.includes(".staging-")),
+    [],
+  );
+  assert.equal(await acceptV1Release(schemas, baseline, "1.1.0", {
+    versionAuthorities: authorities,
+  }), 28);
+});
+
+test("release publication binds CLI input to all version authorities", async (t) => {
+  const directory = await mkdtemp(resolve(tmpdir(), "contracts-compat-version-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const schemas = resolve(directory, "schemas");
+  const baseline = resolve(directory, "compat/v1");
+  await writeSchemaManifest(schemas);
+  await acceptInitialV1Baseline(schemas, baseline);
+
+  await assert.rejects(
+    acceptV1Release(schemas, baseline, "9.9.9"),
+    /does not match package version authority/i,
+  );
+  await assert.rejects(
+    acceptV1Release(schemas, baseline, "1.1.0", {
+      versionAuthorities: {
+        packageJsonVersion: "1.1.0",
+        exportedPackageVersion: "1.1.0",
+        compatibilityChangeVersion: "1.2.0",
+      },
+    }),
+    /version authorities disagree/i,
+  );
+  await assert.rejects(stat(resolve(baseline, "releases/1.1.0")), { code: "ENOENT" });
+  await assert.rejects(stat(resolve(baseline, "releases/9.9.9")), { code: "ENOENT" });
+});
+
+test("release discovery fails closed when the releases path is unreadable", async (t) => {
+  const directory = await mkdtemp(resolve(tmpdir(), "contracts-compat-read-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const schemas = resolve(directory, "schemas");
+  const baseline = resolve(directory, "compat/v1");
+  await writeSchemaManifest(schemas);
+  await acceptInitialV1Baseline(schemas, baseline);
+  await writeFile(resolve(baseline, "releases"), "not a directory\n", "utf8");
+
+  assert.equal(
+    (await checkCompatibilityDirectories(schemas, baseline))
+      .some((failure) => failure.includes("unable to read releases directory")),
+    true,
+  );
 });

@@ -1,10 +1,35 @@
-import { copyFile, mkdir, readdir, readFile, stat } from "node:fs/promises";
-import { resolve } from "node:path";
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+} from "node:fs/promises";
+import { basename, dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { ContractSchemas } from "../src/registry.js";
+import { CONTRACT_PACKAGE_VERSION } from "../src/index.js";
 
 type JsonSchema = boolean | Record<string, unknown>;
+
+export interface ReleaseVersionAuthorities {
+  packageJsonVersion: string;
+  exportedPackageVersion: string;
+  compatibilityChangeVersion: string;
+}
+
+interface SnapshotPublicationOptions {
+  copySchemaFile?: (source: string, destination: string) => Promise<void>;
+  beforeSnapshotCommit?: (stagingDirectory: string) => Promise<void>;
+}
+
+interface ReleaseAcceptanceOptions extends SnapshotPublicationOptions {
+  versionAuthorities?: ReleaseVersionAuthorities;
+}
 
 export interface BreakingChange {
   kind:
@@ -28,6 +53,7 @@ export interface BreakingChange {
     | "unique_items_enabled"
     | "items_restricted"
     | "contains_restricted"
+    | "contains_match_set_changed"
     | "min_contains_increased"
     | "max_contains_decreased"
     | "prefix_items_restricted"
@@ -40,6 +66,8 @@ export interface BreakingChange {
     | "dependent_required_added"
     | "dependent_schema_restricted"
     | "unevaluated_properties_restricted"
+    | "unevaluated_items_evaluation_changed"
+    | "unevaluated_properties_evaluation_changed"
     | "one_of_changed"
     | "all_of_tightened"
     | "not_changed"
@@ -115,12 +143,16 @@ const handledKeywords = new Set([
   "x-extensible-union",
 ]);
 
+function compareAscii(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize);
   if (!isSchemaObject(value)) return value;
   return Object.fromEntries(
     Object.keys(value)
-      .sort((left, right) => left.localeCompare(right))
+      .sort(compareAscii)
       .map((key) => [key, canonicalize(value[key])]),
   );
 }
@@ -135,8 +167,8 @@ function sameJson(left: unknown, right: unknown): boolean {
 
 function sameSchemaSet(left: unknown, right: unknown): boolean {
   if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
-  const before = left.map(canonicalJson).sort((a, b) => a.localeCompare(b));
-  const after = right.map(canonicalJson).sort((a, b) => a.localeCompare(b));
+  const before = left.map(canonicalJson).sort(compareAscii);
+  const after = right.map(canonicalJson).sort(compareAscii);
   return before.every((item, index) => item === after[index]);
 }
 
@@ -316,7 +348,14 @@ function compareAnyOf(
   const after = Array.isArray(current.anyOf) && current.anyOf.every(isJsonSchema)
     ? current.anyOf
     : undefined;
-  if (after === undefined || sameSchemaSet(before, after)) return [];
+  if (after === undefined || after.includes(true) || sameSchemaSet(before, after)) return [];
+  if (
+    before !== undefined
+    && sameSchemaSet(
+      before.filter((branch) => branch !== false),
+      after.filter((branch) => branch !== false),
+    )
+  ) return [];
   if (before === undefined) {
     return after.includes(true)
       ? []
@@ -368,7 +407,7 @@ function compareDefinitions(
   const before = isSchemaObject(previous.$defs) ? previous.$defs : {};
   const after = isSchemaObject(current.$defs) ? current.$defs : {};
   const changes: BreakingChange[] = [];
-  for (const key of Object.keys(before).sort((a, b) => a.localeCompare(b))) {
+  for (const key of Object.keys(before).sort(compareAscii)) {
     const definitionPath = `${path}.$defs.${key}`;
     if (!(key in after)) {
       changes.push(change("definition_removed", definitionPath, before[key], undefined));
@@ -398,7 +437,7 @@ function comparePatternProperties(
 function matchingPatternSchemas(schema: Record<string, unknown>, propertyName: string): unknown[] {
   if (!isSchemaObject(schema.patternProperties)) return [];
   return Object.keys(schema.patternProperties)
-    .sort((a, b) => a.localeCompare(b))
+    .sort(compareAscii)
     .filter((pattern) => {
       try {
         return new RegExp(pattern).test(propertyName);
@@ -417,10 +456,10 @@ function compareDependentRequired(
   const before = isSchemaObject(previous.dependentRequired) ? previous.dependentRequired : {};
   const after = isSchemaObject(current.dependentRequired) ? current.dependentRequired : {};
   const changes: BreakingChange[] = [];
-  for (const key of Object.keys(after).sort((a, b) => a.localeCompare(b))) {
+  for (const key of Object.keys(after).sort(compareAscii)) {
     const beforeNames = new Set(Array.isArray(before[key]) ? before[key] as string[] : []);
     const afterNames = Array.isArray(after[key]) ? after[key] as string[] : [];
-    for (const name of [...afterNames].sort((a, b) => a.localeCompare(b))) {
+    for (const name of [...afterNames].sort(compareAscii)) {
       if (!beforeNames.has(name)) {
         changes.push(change(
           "dependent_required_added",
@@ -442,7 +481,7 @@ function compareDependentSchemas(
   const before = isSchemaObject(previous.dependentSchemas) ? previous.dependentSchemas : {};
   const after = isSchemaObject(current.dependentSchemas) ? current.dependentSchemas : {};
   const changes: BreakingChange[] = [];
-  for (const key of Object.keys(after).sort((a, b) => a.localeCompare(b))) {
+  for (const key of Object.keys(after).sort(compareAscii)) {
     const dependencyPath = `${path}.dependentSchemas.${key}`;
     if (!(key in before)) {
       if (after[key] !== true && !(isSchemaObject(after[key]) && isEmptySchema(after[key]))) {
@@ -489,7 +528,7 @@ function compareUnknownKeywords(
 ): BreakingChange[] {
   const keys = new Set([...Object.keys(previous), ...Object.keys(current)]);
   return [...keys]
-    .sort((a, b) => a.localeCompare(b))
+    .sort(compareAscii)
     .filter((key) => (
       !handledKeywords.has(key)
       && !annotationKeywords.has(key)
@@ -503,24 +542,118 @@ function compareUnknownKeywords(
     ));
 }
 
+function compareSchemaMetadata(
+  previous: JsonSchema,
+  current: JsonSchema,
+  path: string,
+): BreakingChange[] {
+  const before = isSchemaObject(previous) ? previous : {};
+  const after = isSchemaObject(current) ? current : {};
+  const changes: BreakingChange[] = [];
+  if (!sameJson(before.$id, after.$id)) {
+    changes.push(change("schema_id_changed", `${path}.$id`, before.$id, after.$id));
+  }
+  if (!sameJson(before.$schema, after.$schema)) {
+    changes.push(change("schema_dialect_changed", `${path}.$schema`, before.$schema, after.$schema));
+  }
+  return changes;
+}
+
+function isRestrictiveUnevaluated(value: unknown): boolean {
+  return value !== undefined
+    && value !== true
+    && !(isSchemaObject(value) && isEmptySchema(value));
+}
+
+function hasRemovedMapEntry(previous: unknown, current: unknown): boolean {
+  const before = isSchemaObject(previous) ? previous : {};
+  const after = isSchemaObject(current) ? current : {};
+  return Object.keys(before).some((key) => !(key in after));
+}
+
+function anyKeywordChanged(
+  previous: Record<string, unknown>,
+  current: Record<string, unknown>,
+  keywords: readonly string[],
+): boolean {
+  return keywords.some((keyword) => !sameJson(previous[keyword], current[keyword]));
+}
+
+function compareEvaluationAnnotations(
+  previous: Record<string, unknown>,
+  current: Record<string, unknown>,
+  path: string,
+): BreakingChange[] {
+  const changes: BreakingChange[] = [];
+  if (
+    sameJson(previous.unevaluatedProperties, current.unevaluatedProperties)
+    && isRestrictiveUnevaluated(current.unevaluatedProperties)
+    && (
+      hasRemovedMapEntry(previous.properties, current.properties)
+      || anyKeywordChanged(previous, current, [
+        "$defs",
+        "$ref",
+        "additionalProperties",
+        "allOf",
+        "anyOf",
+        "dependentSchemas",
+        "else",
+        "if",
+        "oneOf",
+        "patternProperties",
+        "then",
+      ])
+    )
+  ) {
+    changes.push(change(
+      "unevaluated_properties_evaluation_changed",
+      `${path}.unevaluatedProperties`,
+      previous.unevaluatedProperties,
+      current.unevaluatedProperties,
+    ));
+  }
+  if (
+    sameJson(previous.unevaluatedItems, current.unevaluatedItems)
+    && isRestrictiveUnevaluated(current.unevaluatedItems)
+    && anyKeywordChanged(previous, current, [
+      "$defs",
+      "$ref",
+      "allOf",
+      "anyOf",
+      "contains",
+      "else",
+      "if",
+      "items",
+      "oneOf",
+      "prefixItems",
+      "then",
+    ])
+  ) {
+    changes.push(change(
+      "unevaluated_items_evaluation_changed",
+      `${path}.unevaluatedItems`,
+      previous.unevaluatedItems,
+      current.unevaluatedItems,
+    ));
+  }
+  return changes;
+}
+
 export function compareSchemas(
   previous: JsonSchema,
   current: JsonSchema,
   path = "$",
 ): BreakingChange[] {
-  if (sameJson(previous, current) || current === true || previous === false) return [];
+  if (sameJson(previous, current)) return [];
+  const metadataChanges = compareSchemaMetadata(previous, current, path);
+  if (current === true || previous === false) return metadataChanges;
   if (current === false) {
-    return [change("boolean_schema_restricted", path, previous, current)];
+    return [...metadataChanges, change("boolean_schema_restricted", path, previous, current)];
   }
-  if (previous === true) return compareSchemas({}, current, path);
+  if (previous === true) previous = {};
 
-  const changes: BreakingChange[] = [];
-  if (!sameJson(previous.$id, current.$id)) {
-    changes.push(change("schema_id_changed", `${path}.$id`, previous.$id, current.$id));
-  }
-  if (!sameJson(previous.$schema, current.$schema)) {
-    changes.push(change("schema_dialect_changed", `${path}.$schema`, previous.$schema, current.$schema));
-  }
+  const changes: BreakingChange[] = [...metadataChanges];
+  changes.push(...compareEvaluationAnnotations(previous, current, path));
   if (typeNarrows(previous.type, current.type)) {
     changes.push(change("type_changed", path, previous.type, current.type));
   }
@@ -581,7 +714,7 @@ export function compareSchemas(
 
   const previousRequired = new Set(Array.isArray(previous.required) ? previous.required as string[] : []);
   const currentRequired = Array.isArray(current.required) ? current.required as string[] : [];
-  for (const key of [...currentRequired].sort((a, b) => a.localeCompare(b))) {
+  for (const key of [...currentRequired].sort(compareAscii)) {
     if (!previousRequired.has(key)) {
       changes.push(change("required_added", `${path}.required.${key}`, previous.required, current.required));
     }
@@ -589,7 +722,7 @@ export function compareSchemas(
 
   const previousProperties = isSchemaObject(previous.properties) ? previous.properties : {};
   const currentProperties = isSchemaObject(current.properties) ? current.properties : {};
-  for (const key of Object.keys(previousProperties).sort((a, b) => a.localeCompare(b))) {
+  for (const key of Object.keys(previousProperties).sort(compareAscii)) {
     const propertyPath = `${path}.properties.${key}`;
     if (!(key in currentProperties)) {
       const currentFallback = current.additionalProperties;
@@ -608,12 +741,15 @@ export function compareSchemas(
       changes.push(...compareSchemas(previousProperties[key], currentProperties[key], propertyPath));
     }
   }
-  for (const key of Object.keys(currentProperties).sort((a, b) => a.localeCompare(b))) {
+  for (const key of Object.keys(currentProperties).sort(compareAscii)) {
     if (key in previousProperties) continue;
     const previousFallback = previous.additionalProperties;
     const previousPatterns = matchingPatternSchemas(previous, key);
+    const repeatsMatchingPattern = previousPatterns.some((patternSchema) => (
+      sameJson(patternSchema, currentProperties[key])
+    ));
     if (
-      (previousPatterns.length > 0 && compareSubschema(
+      (previousPatterns.length > 0 && !repeatsMatchingPattern && compareSubschema(
         true,
         currentProperties[key],
         `${path}.properties.${key}`,
@@ -678,11 +814,22 @@ export function compareSchemas(
       `${path}.contains`,
       "contains_restricted",
     ));
+    if (
+      !sameJson(previous.contains, current.contains)
+      && finiteNumber(current.maxContains) !== undefined
+    ) {
+      changes.push(change(
+        "contains_match_set_changed",
+        `${path}.contains`,
+        previous.contains,
+        current.contains,
+      ));
+    }
   }
   if (
     current.contains !== undefined
     && previous.contains !== undefined
-    && isMinimumIncreased(previous.minContains, current.minContains, 1)
+    && (finiteNumber(current.minContains) ?? 1) > (finiteNumber(previous.minContains) ?? 1)
   ) {
     changes.push(change("min_contains_increased", `${path}.minContains`, previous.minContains, current.minContains));
   }
@@ -709,8 +856,12 @@ export function compareSchemas(
   const previousEnum = Array.isArray(previous.enum) ? previous.enum : undefined;
   const currentEnum = Array.isArray(current.enum) ? current.enum : undefined;
   if (currentEnum !== undefined && (
-    previousEnum === undefined
-    || previousEnum.some((item) => !currentEnum.some((candidate) => sameJson(item, candidate)))
+    (previousEnum === undefined
+      && previous.const === undefined)
+    || (previous.const !== undefined
+      && !currentEnum.some((candidate) => sameJson(previous.const, candidate)))
+    || (previousEnum !== undefined
+      && previousEnum.some((item) => !currentEnum.some((candidate) => sameJson(item, candidate))))
   )) {
     changes.push(change("enum_narrowed", `${path}.enum`, previous.enum, current.enum));
   }
@@ -746,7 +897,7 @@ export function compareSchemas(
 
 const expectedSchemaFiles = Object.keys(ContractSchemas)
   .map((key) => `${key}.schema.json`)
-  .sort((left, right) => left.localeCompare(right));
+  .sort(compareAscii);
 
 async function schemaManifestFailures(
   directory: string,
@@ -763,7 +914,7 @@ async function schemaManifestFailures(
     if (entry === undefined) failures.push(`${label} ${fileName}: missing`);
     else if (!entry.isFile()) failures.push(`${label} ${fileName}: not a file`);
   }
-  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+  for (const entry of entries.sort((left, right) => compareAscii(left.name, right.name))) {
     if (expected.has(entry.name)) continue;
     if (allowReleasesDirectory && entry.name === "releases" && entry.isDirectory()) continue;
     failures.push(`${label} ${entry.name}: unexpected`);
@@ -780,10 +931,19 @@ async function discoverReleaseSnapshots(
   compatibilityDirectory: string,
 ): Promise<{ snapshots: ReleaseSnapshot[]; failures: string[] }> {
   const releasesDirectory = resolve(compatibilityDirectory, "releases");
-  const entries = await readdir(releasesDirectory, { withFileTypes: true }).catch(() => []);
+  let entries;
+  try {
+    entries = await readdir(releasesDirectory, { withFileTypes: true });
+  } catch (error: unknown) {
+    if (errorCode(error) === "ENOENT") return { snapshots: [], failures: [] };
+    return {
+      snapshots: [],
+      failures: [`unable to read releases directory: ${errorCode(error) ?? "unknown error"}`],
+    };
+  }
   const snapshots: ReleaseSnapshot[] = [];
   const failures: string[] = [];
-  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+  for (const entry of entries.sort((left, right) => compareAscii(left.name, right.name))) {
     if (!entry.isDirectory()) {
       failures.push(`release ${entry.name}: unexpected non-directory entry`);
       continue;
@@ -799,25 +959,112 @@ async function discoverReleaseSnapshots(
   return { snapshots, failures };
 }
 
+function errorCode(error: unknown): string | undefined {
+  return isSchemaObject(error) && typeof error.code === "string" ? error.code : undefined;
+}
+
+async function targetExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch (error: unknown) {
+    if (errorCode(error) === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function assertOwnedStagingDirectory(
+  stagingDirectory: string,
+  parentDirectory: string,
+  stagingPrefix: string,
+): void {
+  const stagingName = basename(stagingDirectory);
+  if (
+    dirname(stagingDirectory) !== parentDirectory
+    || !stagingName.startsWith(stagingPrefix)
+    || stagingName.length <= stagingPrefix.length
+  ) {
+    throw new Error(`Refusing unsafe staging cleanup target: ${stagingDirectory}`);
+  }
+}
+
+async function verifyStagedSnapshot(
+  sourceDirectory: string,
+  stagingDirectory: string,
+): Promise<void> {
+  const manifestFailures = await schemaManifestFailures(stagingDirectory, "staged schema manifest");
+  if (manifestFailures.length > 0) {
+    throw new Error(`Staged schema manifest mismatch:\n${manifestFailures.join("\n")}`);
+  }
+  for (const fileName of expectedSchemaFiles) {
+    const source = await readFile(resolve(sourceDirectory, fileName), "utf8");
+    const staged = await readFile(resolve(stagingDirectory, fileName), "utf8");
+    if (source !== staged) throw new Error(`Staged schema content mismatch: ${fileName}`);
+    try {
+      JSON.parse(staged);
+    } catch {
+      throw new Error(`Staged schema is not valid JSON: ${fileName}`);
+    }
+  }
+}
+
+async function publishExactSnapshot(
+  sourceDirectory: string,
+  targetDirectory: string,
+  refusalMessage: string,
+  options: SnapshotPublicationOptions,
+): Promise<number> {
+  if (await targetExists(targetDirectory)) throw new Error(refusalMessage);
+  const parentDirectory = dirname(targetDirectory);
+  const stagingPrefix = `.${basename(targetDirectory)}.staging-`;
+  await mkdir(parentDirectory, { recursive: true });
+  const stagingDirectory = await mkdtemp(resolve(parentDirectory, stagingPrefix));
+  assertOwnedStagingDirectory(stagingDirectory, parentDirectory, stagingPrefix);
+  let committed = false;
+  try {
+    const copySchemaFile = options.copySchemaFile ?? copyFile;
+    for (const fileName of expectedSchemaFiles) {
+      await copySchemaFile(
+        resolve(sourceDirectory, fileName),
+        resolve(stagingDirectory, fileName),
+      );
+    }
+    await verifyStagedSnapshot(sourceDirectory, stagingDirectory);
+    await options.beforeSnapshotCommit?.(stagingDirectory);
+    try {
+      await rename(stagingDirectory, targetDirectory);
+    } catch (error: unknown) {
+      if (["EEXIST", "ENOTEMPTY"].includes(errorCode(error) ?? "")) {
+        throw new Error(refusalMessage);
+      }
+      throw error;
+    }
+    committed = true;
+    return expectedSchemaFiles.length;
+  } finally {
+    if (!committed) {
+      assertOwnedStagingDirectory(stagingDirectory, parentDirectory, stagingPrefix);
+      await rm(stagingDirectory, { recursive: true, force: true });
+    }
+  }
+}
+
 export async function acceptInitialV1Baseline(
   schemaDirectory: string,
   compatibilityDirectory: string,
+  options: SnapshotPublicationOptions = {},
 ): Promise<number> {
   const schemaFailures = await schemaManifestFailures(schemaDirectory, "generated schema manifest");
   if (schemaFailures.length > 0) {
     throw new Error(`Generated schema manifest mismatch:\n${schemaFailures.join("\n")}`);
   }
 
-  await mkdir(compatibilityDirectory, { recursive: true });
-  const existing = await readdir(compatibilityDirectory);
-  if (existing.length > 0) {
-    throw new Error("Initial v1 compatibility baseline already exists; refusing to overwrite it");
-  }
-
-  for (const fileName of expectedSchemaFiles) {
-    await copyFile(resolve(schemaDirectory, fileName), resolve(compatibilityDirectory, fileName));
-  }
-  return expectedSchemaFiles.length;
+  return publishExactSnapshot(
+    schemaDirectory,
+    compatibilityDirectory,
+    "Initial v1 compatibility baseline already exists; refusing to overwrite it",
+    options,
+  );
 }
 
 async function compareSnapshot(
@@ -870,18 +1117,65 @@ function validPackageVersion(version: string): boolean {
   return /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/.test(version);
 }
 
+async function loadReleaseVersionAuthorities(): Promise<ReleaseVersionAuthorities> {
+  const root = resolve(import.meta.dirname, "..");
+  const packageDocument = JSON.parse(
+    await readFile(resolve(root, "package.json"), "utf8"),
+  ) as { version?: unknown };
+  const compatibilityChange = JSON.parse(
+    await readFile(resolve(root, "compatibility-change.json"), "utf8"),
+  ) as { package_version?: unknown };
+  if (
+    typeof packageDocument.version !== "string"
+    || typeof compatibilityChange.package_version !== "string"
+  ) {
+    throw new Error("Release version authorities must contain string package versions");
+  }
+  return {
+    packageJsonVersion: packageDocument.version,
+    exportedPackageVersion: CONTRACT_PACKAGE_VERSION,
+    compatibilityChangeVersion: compatibilityChange.package_version,
+  };
+}
+
+function assertReleaseVersionAuthorities(
+  requestedVersion: string,
+  authorities: ReleaseVersionAuthorities,
+): void {
+  const versions = [
+    authorities.packageJsonVersion,
+    authorities.exportedPackageVersion,
+    authorities.compatibilityChangeVersion,
+  ];
+  if (!versions.every((version) => version === versions[0])) {
+    throw new Error(
+      "Release version authorities disagree: "
+      + `package.json=${authorities.packageJsonVersion}, `
+      + `CONTRACT_PACKAGE_VERSION=${authorities.exportedPackageVersion}, `
+      + `compatibility-change.json=${authorities.compatibilityChangeVersion}`,
+    );
+  }
+  if (requestedVersion !== versions[0]) {
+    throw new Error(
+      `Release version ${requestedVersion} does not match package version authority ${versions[0]}`,
+    );
+  }
+}
+
 export async function acceptV1Release(
   schemaDirectory: string,
   compatibilityDirectory: string,
   packageVersion: string,
+  options: ReleaseAcceptanceOptions = {},
 ): Promise<number> {
   if (!validPackageVersion(packageVersion)) {
     throw new Error(`Invalid package version for v1 release snapshot: ${packageVersion}`);
   }
+  const authorities = options.versionAuthorities ?? await loadReleaseVersionAuthorities();
+  assertReleaseVersionAuthorities(packageVersion, authorities);
   const releasesDirectory = resolve(compatibilityDirectory, "releases");
   const releaseDirectory = resolve(releasesDirectory, packageVersion);
-  const existing = await stat(releaseDirectory).catch(() => undefined);
-  if (existing !== undefined) {
+  if (await targetExists(releaseDirectory)) {
     throw new Error(`V1 release ${packageVersion} already exists; refusing to overwrite it`);
   }
   const failures = await checkCompatibilityDirectories(schemaDirectory, compatibilityDirectory);
@@ -889,17 +1183,12 @@ export async function acceptV1Release(
     throw new Error(`Compatibility check failed; release snapshot was not accepted:\n${failures.join("\n")}`);
   }
 
-  await mkdir(releasesDirectory, { recursive: true });
-  await mkdir(releaseDirectory).catch((error: unknown) => {
-    if (isSchemaObject(error) && error.code === "EEXIST") {
-      throw new Error(`V1 release ${packageVersion} already exists; refusing to overwrite it`);
-    }
-    throw error;
-  });
-  for (const fileName of expectedSchemaFiles) {
-    await copyFile(resolve(schemaDirectory, fileName), resolve(releaseDirectory, fileName));
-  }
-  return expectedSchemaFiles.length;
+  return publishExactSnapshot(
+    schemaDirectory,
+    releaseDirectory,
+    `V1 release ${packageVersion} already exists; refusing to overwrite it`,
+    options,
+  );
 }
 
 async function main(): Promise<void> {

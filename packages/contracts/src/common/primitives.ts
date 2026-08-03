@@ -9,6 +9,40 @@ export const UtcTimestampSchema = Type.String({
   format: "date-time",
   pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
 });
+
+const strictUtcTimestamp = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?Z$/;
+
+function daysInUtcMonth(year: number, month: number): number {
+  if (month === 2) {
+    const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+    return leapYear ? 29 : 28;
+  }
+  return [4, 6, 9, 11].includes(month) ? 30 : 31;
+}
+
+/** Parses the exact UTC-Z timestamp shape used by {@link UtcTimestampSchema}. */
+export function parseStrictUtcTimestamp(value: string): number | undefined {
+  const match = strictUtcTimestamp.exec(value);
+  if (match === null) return undefined;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  if (
+    month < 1
+    || month > 12
+    || day < 1
+    || day > daysInUtcMonth(year, month)
+    || hour > 23
+    || minute > 59
+    || second > 59
+  ) return undefined;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : undefined;
+}
 export const ResourceVersionSchema = Type.Integer({ minimum: 1 });
 export const SequenceSchema = Type.Integer({ minimum: 0 });
 

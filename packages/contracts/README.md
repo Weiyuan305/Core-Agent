@@ -34,7 +34,12 @@ documents. Strict Ajv consumers must also register `x-extensible-union` as an
 annotation keyword before compiling:
 
 ```ts
+import Ajv2020 from "ajv/dist/2020.js";
+import addFormats from "ajv-formats";
+import tenantSchema from "@core-agent/contracts/schemas/v1/tenant.schema.json" with { type: "json" };
+
 const ajv = new Ajv2020({ strict: true });
+addFormats(ajv);
 ajv.addKeyword({ keyword: "x-extensible-union", schemaType: "boolean", valid: true });
 const validate = ajv.compile(tenantSchema);
 ```
@@ -107,14 +112,29 @@ npm exec -w @core-agent/contracts -- tsx scripts/check-compatibility.ts --accept
 ```
 
 The accept command refuses to overwrite an existing version and writes to
-`compat/v1/releases/<package-version>`. Normal compatibility checks compare the
-current schemas with the initial baseline and every accepted release snapshot,
-in deterministic version-directory order. The initial baseline command remains
+`compat/v1/releases/<package-version>`. Publication stages and verifies all 28
+files before an atomic rename, so an interrupted or concurrent writer cannot
+leave a partial or mixed snapshot. The requested version must exactly match the
+package version in `package.json`, `CONTRACT_PACKAGE_VERSION`, and
+`compatibility-change.json`. Normal compatibility checks compare the current
+schemas with the initial baseline and every accepted release snapshot, in
+deterministic version-directory order. The initial baseline command remains
 one-time-only and refuses any occupied target:
 
 ```bash
 npm exec -w @core-agent/contracts -- tsx scripts/check-compatibility.ts --accept-initial-v1
 ```
+
+CI additionally protects committed compatibility history with an explicit Git
+base SHA. It permits only the first exact initial baseline and new exact release
+directories; modification, deletion, and rename of accepted snapshots fail:
+
+```bash
+npm run compat:history -w @core-agent/contracts -- --base <base-sha-or-ref>
+```
+
+This history command is intentionally separate from `contracts:check`, so local
+checks do not guess an unstable comparison base.
 
 The comparator handles the documented JSON Schema 2020-12 assertion keywords
 recursively and fails closed when an unclassified assertion appears or changes.

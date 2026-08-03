@@ -2,6 +2,7 @@ import Type, { type Static } from "typebox";
 
 import {
   OpaqueIdSchema,
+  parseStrictUtcTimestamp,
   SchemaVersionSchema,
   UtcTimestampSchema,
 } from "../common/primitives.js";
@@ -185,11 +186,11 @@ export function validateTrustedRequestContext(
     );
   }
 
-  const now = Date.parse(authority.now);
+  const now = parseStrictUtcTimestamp(authority.now);
   const issuedAt = Date.parse(context.issued_at);
   const expiresAt = Date.parse(context.expires_at);
 
-  if (!Number.isFinite(now)) {
+  if (now === undefined) {
     violations.push(
       violation(
         "AUTHORITY_TIME_INVALID",

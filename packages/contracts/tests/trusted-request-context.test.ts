@@ -120,6 +120,51 @@ test("fails closed on a malformed authority comparison time", () => {
   );
 });
 
+test("authority comparison time requires a real UTC-Z calendar timestamp", () => {
+  const invalid = [
+    "2026-02-30T01:02:00Z",
+    "2026-02-29T01:02:00Z",
+    "2026-03-02T09:02:00+08:00",
+    "2026-08-03T01:02:00.1234567890Z",
+  ];
+  for (const now of invalid) {
+    assert.deepEqual(
+      validateTrustedRequestContext(context, { ...authority, now })
+        .map((item) => ({ code: item.code, path: item.path })),
+      [{ code: "AUTHORITY_TIME_INVALID", path: "authority.now" }],
+      now,
+    );
+  }
+
+  const valid = [
+    {
+      now: "2024-02-29T01:02:00Z",
+      issued_at: "2024-02-29T01:00:00Z",
+      expires_at: "2024-02-29T01:05:00Z",
+    },
+    {
+      now: "2026-08-03T01:02:00.1Z",
+      issued_at: context.issued_at,
+      expires_at: context.expires_at,
+    },
+    {
+      now: "2026-08-03T01:02:00.123456789Z",
+      issued_at: context.issued_at,
+      expires_at: context.expires_at,
+    },
+  ];
+  for (const { now, issued_at, expires_at } of valid) {
+    assert.deepEqual(
+      validateTrustedRequestContext(
+        { ...context, issued_at, expires_at },
+        { ...authority, now },
+      ),
+      [],
+      now,
+    );
+  }
+});
+
 test("requires explicit delegation when an admin targets another owner profile", () => {
   const delegated = {
     ...context,
