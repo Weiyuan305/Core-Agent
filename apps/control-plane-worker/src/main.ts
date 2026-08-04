@@ -11,7 +11,10 @@ import { dispatchJob, type DispatchPort, type HandlerResult } from "./dispatch-j
 import { dispatchOutbox } from "./handlers/dispatch-outbox.js";
 import { buildProvisionRuntimeRequest, handleProvisionRuntime, validatePrivateHermesOrigin } from "./handlers/provision-runtime.js";
 import { handleReconcileRuntime } from "./handlers/reconcile-runtime.js";
+import { handleNonReconcileRecovery } from "./recovery-boundary.js";
 import { runWorkerLoop } from "./worker-loop.js";
+
+export const implementedWorkerJobKinds = ["provision_runtime", "reconcile_runtime", "dispatch_outbox"] as const;
 
 export interface WorkerClock {
   now(): Date;
@@ -45,6 +48,13 @@ function nextAttempt(dependencies: WorkerDependencies, job: ClaimedJob, summary:
 
 async function dispatchRuntimeJob(dependencies: WorkerDependencies, job: ClaimedJob, signal: AbortSignal): Promise<HandlerResult> {
   const ref = jobRef(dependencies, job);
+  if (job.jobKind === "provision_runtime" || job.jobKind === "dispatch_outbox") {
+    const recovery = await handleNonReconcileRecovery({
+      failRuntime: (_job, summary) => dependencies.repositories.runtimes.failRuntimeJob(ref, summary, "runtime.provision"),
+      complete: async () => (await completeJob(dependencies.db, { tenantId: job.tenantId, jobId: job.jobId, workerId: dependencies.workerId })).kind === "updated",
+    }, job);
+    if (recovery !== undefined) return recovery;
+  }
   if (job.jobKind === "provision_runtime") return withRuntimeAdvisoryLock(dependencies.db, job.tenantId, job.payloadRef, () => handleProvisionRuntime({
     transitionToProvisioning: () => dependencies.repositories.runtimes.beginProvision(ref),
     loadFacts: () => dependencies.repositories.runtimes.loadProvisionFacts(job.tenantId, job.payloadRef, dependencies.providerCatalog),
@@ -78,7 +88,7 @@ async function dispatchRuntimeJob(dependencies: WorkerDependencies, job: Claimed
       : dependencies.repositories.runtimes.completeSuperseded(ref),
     retry: async (_job, summary) => { const retry = nextAttempt(dependencies, job, summary); return dependencies.repositories.runtimes.retryJob(ref, retry.summary, retry.at); },
     fail: (_job, summary) => dependencies.repositories.runtimes.failRuntimeJob(ref, summary),
-  }, { tenantId: job.tenantId, jobId: job.jobId, attemptCount: job.attemptCount, maxAttempts: job.maxAttempts, targetCommandVersion: job.targetCommandVersion, command: job.runtimeCommand, effectState: job.effectState }, signal));
+  }, { tenantId: job.tenantId, jobId: job.jobId, attemptCount: job.attemptCount, maxAttempts: job.maxAttempts, targetCommandVersion: job.targetCommandVersion, command: job.runtimeCommand, effectState: job.effectState, recoveryOnly: job.recoveryOnly }, signal));
   if (job.jobKind === "dispatch_outbox") {
     await pollOutbox(dependencies);
     await completeJob(dependencies.db, { tenantId: job.tenantId, jobId: job.jobId, workerId: dependencies.workerId });
@@ -107,7 +117,7 @@ export async function runControlPlaneWorker(dependencies: WorkerDependencies, si
   };
   await runWorkerLoop({
     tick: () => pollOutbox(dependencies),
-    claim: (limit) => claimPlatformWorkerJobs(dependencies.db, { workerId: dependencies.workerId, limit, leaseMs: 30_000 }),
+    claim: (limit) => claimPlatformWorkerJobs(dependencies.db, { workerId: dependencies.workerId, limit, leaseMs: 30_000, jobKinds: implementedWorkerJobKinds }),
     dispatch: (job, operationSignal) => dispatchJob(dispatchPort, job, operationSignal),
     wait: (milliseconds, operationSignal) => dependencies.clock.wait(milliseconds, operationSignal),
   }, signal);

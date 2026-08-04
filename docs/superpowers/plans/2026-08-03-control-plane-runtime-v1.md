@@ -2065,6 +2065,12 @@ git commit -m "feat(api): add durable conversation runs"
 
 ### Task 14: Stream Hermes execution into durable Run and Message events
 
+Until this task implements atomic AgentRun and Worker-job handling, the
+production Worker claim allowlist explicitly excludes `execute_agent_run`.
+Repository claim tests may opt into that kind to verify storage and recovery
+contracts, but Task 14 is the only milestone allowed to add it to the process
+allowlist.
+
 **Files:**
 - Create: `packages/runtime-core/src/hermes/stream-parser.ts`
 - Create: `packages/runtime-core/src/hermes/client.ts`
@@ -2162,6 +2168,12 @@ explicit retry must enter through Task 13 and create a child Run with
 `parent_run_id`.
 
 Cancellation of the Worker process leaves the lease to expire. It does not write `run.cancelled`. A reclaimed job checks the execution record: `pre_effect` may retry safely; `unsafe_to_replay` converts to terminal failed without calling Hermes.
+
+An expired running job already at `max_attempts` is claimed as
+`recoveryOnly` without incrementing the counter. Both `pre_effect` and
+`unsafe_to_replay` recovery must terminalize the Run and job atomically and
+must not call Hermes; only then may Task 14 add `execute_agent_run` to the
+production Worker allowlist.
 
 - [ ] **Step 6: Run Worker and core gates, then commit**
 

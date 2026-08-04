@@ -125,6 +125,14 @@ prove that binding and is likewise failed closed during upgrade; its persisted
 command remains available for diagnosis, and terminal schema-v4 history is not
 rewritten.
 
+Schema v6 adds only the Worker attempt fence `attempt_count <= max_attempts`.
+It does not repair invalid v5 history: migration fails closed when a row already
+exceeds its maximum. Expired final-attempt running work is reclaimed without an
+increment and carries `recoveryOnly`; it may inspect or terminalize under the
+lease fence, but it may not replay a Supervisor effect. Production scheduling
+continues to exclude `execute_agent_run` until Task 14 implements the matching
+Run-state transaction.
+
 ## Alternatives considered
 
 ### Trust a provisioning tenant header
@@ -164,7 +172,7 @@ explicit `test:postgres` gate.
 
 - Runtime reconciliation can execute restart exactly and can suppress any job
   whose target command version is no longer current.
-- Database schema authority advances through version 5; ambiguous active v3
+- Database schema authority advances through version 6; ambiguous active v3
   intent and unbound active v4 intent both fail closed during their upgrades.
 - Contracts advance additively to 0.3.0 with a new immutable compatibility
   snapshot.

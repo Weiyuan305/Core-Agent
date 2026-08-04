@@ -34,7 +34,7 @@ test("dispatch heartbeat lease loss aborts work and suppresses terminal commit",
   }, {
     tenantId: "tenant_a", jobId: "job_a", jobKind: "provision_runtime",
     runtimeCommand: null, payloadRef: "runtime_a", attemptCount: 1, maxAttempts: 5,
-    targetCommandVersion: null, effectState: "pre_effect", leaseExpiresAt: new Date("2026-08-04T00:00:30.000Z"),
+    targetCommandVersion: null, effectState: "pre_effect", recoveryOnly: false, leaseExpiresAt: new Date("2026-08-04T00:00:30.000Z"),
   }, new AbortController().signal);
   assert.equal(observedAbort, true);
 });
@@ -59,6 +59,6 @@ test("already-aborted parent starts no heartbeat or handler effect", async () =>
     workerId: "worker_a", heartbeatEveryMs: 10_000,
     scheduleHeartbeat: () => { scheduled += 1; return () => undefined; }, heartbeat: async () => "updated",
     handle: async () => { handled += 1; return { kind: "succeeded" }; },
-  }, { tenantId: "tenant_a", jobId: "job_a", jobKind: "provision_runtime", runtimeCommand: null, targetCommandVersion: null, payloadRef: "runtime_a", attemptCount: 1, maxAttempts: 5, effectState: "pre_effect", leaseExpiresAt: new Date() }, controller.signal);
+  }, { tenantId: "tenant_a", jobId: "job_a", jobKind: "provision_runtime", runtimeCommand: null, targetCommandVersion: null, payloadRef: "runtime_a", attemptCount: 1, maxAttempts: 5, effectState: "pre_effect", recoveryOnly: false, leaseExpiresAt: new Date() }, controller.signal);
   assert.equal(scheduled, 0); assert.equal(handled, 0);
 });

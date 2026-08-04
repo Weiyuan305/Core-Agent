@@ -1,0 +1,24 @@
+import type { ClaimedJob } from "@core-agent/runtime-core";
+
+import type { HandlerResult } from "./dispatch-job.js";
+
+export type NonReconcileRecoveryJob = ClaimedJob & { jobKind: "provision_runtime" | "dispatch_outbox" };
+
+export interface NonReconcileRecoveryPort {
+  failRuntime(job: NonReconcileRecoveryJob, summary: string): Promise<boolean>;
+  complete(job: NonReconcileRecoveryJob): Promise<boolean>;
+}
+
+export async function handleNonReconcileRecovery(
+  port: NonReconcileRecoveryPort,
+  job: NonReconcileRecoveryJob,
+): Promise<HandlerResult | undefined> {
+  if (!job.recoveryOnly) return undefined;
+  if (job.jobKind === "provision_runtime") {
+    const text = "Final-attempt recovery cannot safely replay runtime provisioning";
+    if (!await port.failRuntime(job, text)) return { kind: "failed", summary: "Worker job lease lost" };
+    return { kind: "failed", summary: text };
+  }
+  if (!await port.complete(job)) return { kind: "failed", summary: "Worker job lease lost" };
+  return { kind: "succeeded" };
+}

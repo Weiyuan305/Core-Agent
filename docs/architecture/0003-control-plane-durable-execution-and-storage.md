@@ -50,6 +50,14 @@ Runtime v1 schema version 5 records three Worker-only durability facts:
   cross-tenant scheduler claim for jobs and Outbox rows; every subsequent
   resource operation restores the returned tenant scope.
 
+Schema version 6 adds the storage invariant `attempt_count <= max_attempts`.
+Queued and retrying rows are claimable only below the maximum. An expired
+running row at the maximum remains claimable for terminal recovery without
+incrementing its attempt count; row locking admits only one recovery owner at
+a time, and the typed claim is marked `recoveryOnly`. A genuine v5 database
+containing a larger attempt count fails the migration closed instead of
+clamping or rewriting historical work.
+
 Schema-v4 active reconcile jobs lack a command-version binding and are failed
 closed during upgrade. Existing runtime platforms stay unknown for the same
 reason: neither command intent ordering nor CPU architecture is fabricated.
@@ -91,6 +99,16 @@ the expired running job is reclaimable with its inspect-only phase intact. If
 it loses the lease before the mark, it cannot write either the phase or retry
 state; the Supervisor journal remains the idempotency authority for an
 uncommitted replay attempt.
+
+Final-attempt recovery never opens another external-effect boundary. Reconcile
+recovery may only inspect: a healthy observation that proves the requested
+state can complete, while non-healthy, contradictory, or unprovable state
+fails terminally. In particular, `pre_effect` restart cannot be proven by a
+running inspection. Provision recovery fails without calling Supervisor and
+Outbox recovery completes without dispatching a notification. Every terminal
+write still uses the owned, unexpired lease fence. The production Worker
+allowlist excludes `execute_agent_run` until Task 14 supplies its atomic Run
+and job terminalization contract.
 
 Internal infrastructure jobs are distinct from the contract Task resource,
 which belongs to an Agent Run.

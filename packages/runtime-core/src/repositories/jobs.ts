@@ -9,6 +9,7 @@ interface ClaimedJobBase {
   attemptCount: number;
   maxAttempts: number;
   payloadRef: string;
+  recoveryOnly: boolean;
   leaseExpiresAt: Date;
 }
 
@@ -52,6 +53,7 @@ export interface PlatformWorkerClaimInput {
   workerId: string;
   limit: number;
   leaseMs: number;
+  jobKinds?: readonly WorkerJobKind[];
 }
 
 export type JobLeaseResult = { kind: "updated" } | { kind: "lease_lost" };
@@ -61,27 +63,43 @@ function assertClaimInput(input: ClaimJobsInput): void {
   if (!Number.isSafeInteger(input.leaseMs) || input.leaseMs < 1 || input.leaseMs > 300_000) throw new RangeError("leaseMs must be bounded");
 }
 
+function platformJobKinds(input: PlatformWorkerClaimInput): readonly WorkerJobKind[] {
+  const kinds = input.jobKinds ?? workerJobKinds;
+  if (kinds.length < 1 || new Set(kinds).size !== kinds.length || kinds.some((kind) => !workerJobKinds.includes(kind))) {
+    throw new RangeError("jobKinds must be a non-empty unique Worker job-kind allowlist");
+  }
+  return kinds;
+}
+
+function isRecoveryOnly(candidate: { status: string; attempt_count: number; max_attempts: number }): boolean {
+  if (candidate.attempt_count > candidate.max_attempts) throw new Error("Stored worker job attempt count exceeds its maximum");
+  return candidate.status === "running" && candidate.attempt_count === candidate.max_attempts;
+}
+
 export async function claimJobs(db: Kysely<RuntimeDatabase>, input: ClaimJobsInput): Promise<ClaimedJob[]> {
   assertClaimInput(input);
   const databaseNow = sql<Date>`now()`;
   const leaseExpiresAt = sql<Date>`now() + ${input.leaseMs} * interval '1 millisecond'`;
   return db.transaction().execute(async (trx) => {
-    const candidates = await trx.selectFrom("worker_jobs").select("job_id")
+    const candidates = await trx.selectFrom("worker_jobs").select(["job_id", "status", "attempt_count", "max_attempts"])
       .where("tenant_id", "=", input.tenantId)
-      .where("next_attempt_at", "<=", databaseNow)
-      .whereRef("attempt_count", "<", "max_attempts")
       .where((expression) => expression.or([
-        expression("status", "in", ["queued", "retrying"]),
+        expression.and([
+          expression("status", "in", ["queued", "retrying"]),
+          expression("attempt_count", "<", expression.ref("max_attempts")),
+          expression("next_attempt_at", "<=", databaseNow),
+        ]),
         expression.and([expression("status", "=", "running"), expression("lease_expires_at", "<", databaseNow)]),
       ]))
       .orderBy("created_at")
       .limit(input.limit)
       .forUpdate().skipLocked().execute();
     if (candidates.length === 0) return [];
+    const recoveryByJobId = new Map(candidates.map((candidate) => [candidate.job_id, isRecoveryOnly(candidate)]));
     const jobIds = candidates.map((candidate) => candidate.job_id);
     const claimed = await trx.updateTable("worker_jobs").set({
       status: "running",
-      attempt_count: sql<number>`attempt_count + 1`,
+      attempt_count: sql<number>`case when attempt_count < max_attempts then attempt_count + 1 else attempt_count end`,
       lease_owner: input.workerId,
       lease_expires_at: leaseExpiresAt,
       updated_at: databaseNow,
@@ -95,6 +113,7 @@ export async function claimJobs(db: Kysely<RuntimeDatabase>, input: ClaimJobsInp
         attemptCount: job.attempt_count,
         maxAttempts: job.max_attempts,
         payloadRef: job.payload_ref,
+        recoveryOnly: recoveryByJobId.get(job.job_id) ?? false,
         leaseExpiresAt: job.lease_expires_at!,
       };
       const effectState = workerEffectState(job.effect_state);
@@ -118,22 +137,28 @@ export async function claimPlatformWorkerJobs(
   db: Kysely<RuntimeDatabase>, input: PlatformWorkerClaimInput,
 ): Promise<ClaimedJob[]> {
   assertClaimInput({ ...input, tenantId: "platform_scheduler" });
+  const allowedJobKinds = platformJobKinds(input);
   const databaseNow = sql<Date>`now()`;
   const leaseExpiresAt = sql<Date>`now() + ${input.leaseMs} * interval '1 millisecond'`;
   return db.transaction().execute(async (trx) => {
     // @platform-worker-cross-tenant-claim reviewed scheduler authority
-    const candidates = await trx.selectFrom("worker_jobs").select(["tenant_id", "job_id"])
-      .where("next_attempt_at", "<=", databaseNow).whereRef("attempt_count", "<", "max_attempts")
+    const candidates = await trx.selectFrom("worker_jobs").select(["tenant_id", "job_id", "status", "attempt_count", "max_attempts"])
+      .where("job_kind", "in", allowedJobKinds)
       .where((expression) => expression.or([
-        expression("status", "in", ["queued", "retrying"]),
+        expression.and([
+          expression("status", "in", ["queued", "retrying"]),
+          expression("attempt_count", "<", expression.ref("max_attempts")),
+          expression("next_attempt_at", "<=", databaseNow),
+        ]),
         expression.and([expression("status", "=", "running"), expression("lease_expires_at", "<", databaseNow)]),
       ])).orderBy("created_at").limit(input.limit).forUpdate().skipLocked().execute();
     const claimed: ClaimedJob[] = [];
     for (const candidate of candidates) {
-      const row = await trx.updateTable("worker_jobs").set({ status: "running", attempt_count: sql<number>`attempt_count + 1`, lease_owner: input.workerId, lease_expires_at: leaseExpiresAt, updated_at: databaseNow })
+      const recoveryOnly = isRecoveryOnly(candidate);
+      const row = await trx.updateTable("worker_jobs").set({ status: "running", attempt_count: sql<number>`case when attempt_count < max_attempts then attempt_count + 1 else attempt_count end`, lease_owner: input.workerId, lease_expires_at: leaseExpiresAt, updated_at: databaseNow })
         .where("tenant_id", "=", candidate.tenant_id).where("job_id", "=", candidate.job_id)
         .returning(["tenant_id", "job_id", "job_kind", "attempt_count", "max_attempts", "payload_ref", "runtime_command", "target_command_version", "effect_state", "lease_expires_at"]).executeTakeFirstOrThrow();
-      const base: ClaimedJobBase = { tenantId: row.tenant_id, jobId: row.job_id, attemptCount: row.attempt_count, maxAttempts: row.max_attempts, payloadRef: row.payload_ref, leaseExpiresAt: row.lease_expires_at! };
+      const base: ClaimedJobBase = { tenantId: row.tenant_id, jobId: row.job_id, attemptCount: row.attempt_count, maxAttempts: row.max_attempts, payloadRef: row.payload_ref, recoveryOnly, leaseExpiresAt: row.lease_expires_at! };
       const effectState = workerEffectState(row.effect_state);
       if (row.job_kind === "reconcile_runtime") {
         if (row.target_command_version === null) throw new Error("Stored reconcile target command version is invalid");

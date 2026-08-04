@@ -90,14 +90,14 @@ test.after(async () => {
   await db.destroy();
 });
 
-test("empty database migrates exactly to schema version 5 with durable Worker facts", async () => {
+test("empty database migrates exactly to schema version 6 with bounded Worker attempts", async () => {
   await applyMigrations(pool, migrationsDirectory);
 
-  assert.equal(EXPECTED_SCHEMA_VERSION, 5);
+  assert.equal(EXPECTED_SCHEMA_VERSION, 6);
   assert.equal(await readSchemaVersion(db), EXPECTED_SCHEMA_VERSION);
   await assert.doesNotReject(assertSchemaVersion(db, EXPECTED_SCHEMA_VERSION));
   await assert.rejects(assertSchemaVersion(db, 3), /ahead/);
-  await assert.rejects(assertSchemaVersion(db, 6), /behind/);
+  await assert.rejects(assertSchemaVersion(db, 7), /behind/);
   const runtimeCommandColumn = await sql<{ column_name: string }>`
     select column_name from information_schema.columns
     where table_schema = 'public' and table_name = 'worker_jobs' and column_name = 'runtime_command'
@@ -120,6 +120,7 @@ test("version 4 terminalizes ambiguous legacy reconcile jobs and enforces the jo
   await cp(migrationsDirectory, legacyDirectory, { recursive: true });
   await rm(join(legacyDirectory, "004_runtime_command_intent.sql"));
   await rm(join(legacyDirectory, "005_worker_runtime_facts.sql"));
+  await rm(join(legacyDirectory, "006_worker_job_attempt_fence.sql"));
   try {
     await applyMigrations(pool, legacyDirectory);
     await seedTenant("tenant_upgrade");
@@ -230,6 +231,7 @@ test("version 5 fails genuine active v4 command intent closed and preserves term
   const v4Directory = await mkdtemp(join(tmpdir(), "core-agent-v4-migrations-"));
   await cp(migrationsDirectory, v4Directory, { recursive: true });
   await rm(join(v4Directory, "005_worker_runtime_facts.sql"));
+  await rm(join(v4Directory, "006_worker_job_attempt_fence.sql"));
   try {
     await applyMigrations(pool, v4Directory);
     await seedTenant("tenant_v4_worker_upgrade");
@@ -252,6 +254,57 @@ test("version 5 fails genuine active v4 command intent closed and preserves term
     ]);
   } finally {
     await rm(v4Directory, { recursive: true, force: true });
+  }
+});
+
+test("version 6 upgrades a genuine v5 database and enforces the Worker attempt fence", async () => {
+  const v5Directory = await mkdtemp(join(tmpdir(), "core-agent-v5-migrations-"));
+  await cp(migrationsDirectory, v5Directory, { recursive: true });
+  await rm(join(v5Directory, "006_worker_job_attempt_fence.sql"));
+  try {
+    await applyMigrations(pool, v5Directory);
+    assert.equal(await readSchemaVersion(db), 5);
+    await seedTenant("tenant_v5_attempt_upgrade");
+    const timestamp = new Date("2026-08-04T00:00:00.000Z");
+    await pool.query(
+      `insert into worker_jobs (
+        tenant_id, job_id, job_kind, status, attempt_count, max_attempts, lease_owner,
+        lease_expires_at, next_attempt_at, payload_ref, runtime_command, target_command_version,
+        effect_state, last_error_summary, run_id, container_id, created_at, updated_at
+      ) values ($1, 'job_v5_final', 'execute_agent_run', 'running', 3, 3, 'worker_v5', $2, $2, 'run_v5', null, null, 'unsafe_to_replay', null, null, null, $2, $2)`,
+      ["tenant_v5_attempt_upgrade", timestamp],
+    );
+    await applyMigrations(pool, migrationsDirectory);
+    assert.equal(await readSchemaVersion(db), 6);
+    await assert.rejects(
+      db.updateTable("worker_jobs").set({ attempt_count: 4 }).where("tenant_id", "=", "tenant_v5_attempt_upgrade").where("job_id", "=", "job_v5_final").execute(),
+      /worker_jobs_attempt_count_max_check/,
+    );
+  } finally {
+    await rm(v5Directory, { recursive: true, force: true });
+  }
+});
+
+test("version 6 fails closed when genuine v5 storage already exceeds the Worker attempt fence", async () => {
+  const v5Directory = await mkdtemp(join(tmpdir(), "core-agent-v5-invalid-migrations-"));
+  await cp(migrationsDirectory, v5Directory, { recursive: true });
+  await rm(join(v5Directory, "006_worker_job_attempt_fence.sql"));
+  try {
+    await applyMigrations(pool, v5Directory);
+    await seedTenant("tenant_v5_invalid_attempt");
+    const timestamp = new Date("2026-08-04T00:00:00.000Z");
+    await pool.query(
+      `insert into worker_jobs (
+        tenant_id, job_id, job_kind, status, attempt_count, max_attempts, lease_owner,
+        lease_expires_at, next_attempt_at, payload_ref, runtime_command, target_command_version,
+        effect_state, last_error_summary, run_id, container_id, created_at, updated_at
+      ) values ($1, 'job_v5_invalid', 'execute_agent_run', 'running', 4, 3, 'worker_v5', $2, $2, 'run_v5', null, null, 'unsafe_to_replay', null, null, null, $2, $2)`,
+      ["tenant_v5_invalid_attempt", timestamp],
+    );
+    await assert.rejects(applyMigrations(pool, migrationsDirectory), /worker_jobs_attempt_count_max_check/);
+    assert.equal(await readSchemaVersion(db), 5);
+  } finally {
+    await rm(v5Directory, { recursive: true, force: true });
   }
 });
 
