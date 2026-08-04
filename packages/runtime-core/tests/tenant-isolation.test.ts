@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { createRuntimeDatabase, ResourceRepositories, type RuntimeContainer } from "@core-agent/runtime-core";
+import { createRuntimeDatabase, ResourceRepositories, type Actor, type RuntimeContainer } from "@core-agent/runtime-core";
 import { Pool } from "pg";
 
 import { applyMigrations } from "../src/db/migrate.js";
@@ -60,6 +60,20 @@ function syntheticRuntime(overrides: Partial<RuntimeContainer> = {}): RuntimeCon
   };
 }
 
+function syntheticActor(overrides: Partial<Actor> = {}): Actor {
+  return {
+    schema_version: 1,
+    resource_version: 1,
+    actor_id: "actor_a",
+    actor_kind: "service",
+    status: "active",
+    display_name: "Synthetic actor",
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
 test.beforeEach(async () => {
   await resetDatabase();
   await seedTenant("tenant_a");
@@ -101,4 +115,27 @@ test("repository rejects a runtime whose mapped bigint is not a safe integer", a
     repositories.forTenant("tenant_a").runtimes.find("runtime_unsafe_version"),
     /safe integer/i,
   );
+});
+
+test("repository inserts reject unsafe contract resource versions before writing", async () => {
+  const unsafeVersion = Number.MAX_SAFE_INTEGER + 1;
+  const tenant = repositories.forTenant("tenant_a");
+
+  await assert.rejects(
+    tenant.runtimes.insert(syntheticRuntime({ container_id: "runtime_unsafe_input", resource_version: unsafeVersion })),
+    /positive safe integer/i,
+  );
+  await assert.rejects(
+    tenant.actors.insert(syntheticActor({ actor_id: "actor_unsafe_input", resource_version: unsafeVersion })),
+    /positive safe integer/i,
+  );
+  assert.equal(
+    await db.selectFrom("runtime_containers")
+      .select(({ fn }) => fn.countAll<string>().as("count"))
+      .where("tenant_id", "=", "tenant_a")
+      .executeTakeFirstOrThrow()
+      .then((row) => row.count),
+    "0",
+  );
+  assert.equal(await tenant.actors.find("actor_unsafe_input"), undefined);
 });

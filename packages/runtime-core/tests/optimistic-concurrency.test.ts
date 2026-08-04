@@ -83,6 +83,112 @@ test("expected resource version prevents a lost runtime update", async () => {
   );
 });
 
+test("maximum safe resource version cannot be incremented or persisted out of contract range", async () => {
+  const repo = repositories.forTenant("tenant_a").runtimes;
+  await repo.insert(syntheticRuntime({ resource_version: Number.MAX_SAFE_INTEGER }));
+
+  await assert.rejects(
+    repo.updateDesiredState("runtime_a", "stopped", Number.MAX_SAFE_INTEGER),
+    /safe integer/i,
+  );
+  const stored = await db.selectFrom("runtime_containers")
+    .select(["desired_state", "resource_version"])
+    .where("tenant_id", "=", "tenant_a")
+    .where("container_id", "=", "runtime_a")
+    .executeTakeFirstOrThrow();
+  assert.deepEqual(stored, {
+    desired_state: "running",
+    resource_version: Number.MAX_SAFE_INTEGER.toString(),
+  });
+});
+
+async function waitForBlockedRuntimeQuery(): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const blocked = await pool.query<{ blocked: boolean }>(`
+      select exists (
+        select 1
+        from pg_stat_activity
+        where pid <> pg_backend_pid()
+          and datname = current_database()
+          and wait_event_type = 'Lock'
+          and query like '%runtime_containers%'
+      ) as blocked
+    `);
+    if (blocked.rows[0]?.blocked === true) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("Timed out waiting for the runtime CAS query to block");
+}
+
+test("CAS classification does not observe a replacement row created during the write", async () => {
+  const repo = repositories.forTenant("tenant_a").runtimes;
+  await repo.insert(syntheticRuntime());
+
+  let releaseLock: (() => void) | undefined;
+  let announceLock: (() => void) | undefined;
+  const mayReplace = new Promise<void>((resolve) => {
+    releaseLock = resolve;
+  });
+  const lockAcquired = new Promise<void>((resolve) => {
+    announceLock = resolve;
+  });
+  const replacement = db.transaction().execute(async (trx) => {
+    await trx.selectFrom("runtime_containers")
+      .select("container_id")
+      .where("tenant_id", "=", "tenant_a")
+      .where("container_id", "=", "runtime_a")
+      .forUpdate()
+      .executeTakeFirstOrThrow();
+    announceLock?.();
+    await mayReplace;
+    await trx.deleteFrom("runtime_containers")
+      .where("tenant_id", "=", "tenant_a")
+      .where("container_id", "=", "runtime_a")
+      .execute();
+    await trx.insertInto("runtime_containers").values({
+      tenant_id: "tenant_a",
+      container_id: "runtime_a",
+      schema_version: 1,
+      resource_version: 9,
+      runtime_kind: "hermes",
+      desired_state: "deleted",
+      observed_state: "deleted",
+      image_ref: `registry.example/hermes@sha256:${"a".repeat(64)}`,
+      generation: 1,
+      volume_ref: "volume_replacement",
+      health_status: "unknown",
+      last_probed_at: null,
+      failure_summary: null,
+      created_at: new Date("2026-01-02T00:00:00.000Z"),
+      updated_at: new Date("2026-01-02T00:00:00.000Z"),
+    }).execute();
+  });
+
+  await lockAcquired;
+  const result = repo.updateDesiredState("runtime_a", "stopped", 1);
+  await waitForBlockedRuntimeQuery().catch(async (error) => {
+    releaseLock?.();
+    await replacement;
+    throw error;
+  });
+  releaseLock?.();
+  await replacement;
+
+  assert.deepEqual(await result, { kind: "not_found" });
+  assert.deepEqual(
+    await repo.find("runtime_a"),
+    syntheticRuntime({
+      resource_version: 9,
+      desired_state: "deleted",
+      observed_state: "deleted",
+      volume_ref: "volume_replacement",
+      health_status: "unknown",
+      created_at: "2026-01-02T00:00:00.000Z",
+      updated_at: "2026-01-02T00:00:00.000Z",
+    }),
+  );
+});
+
 test("tenant transaction rejects invalid scope before beginning database work", async () => {
   await assert.rejects(
     withTenantTransaction(db, "tenant invalid", async () => undefined),

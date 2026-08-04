@@ -1,6 +1,7 @@
 import { RuntimeContainerSchema, type RuntimeContainer } from "@core-agent/contracts";
-import { sql } from "kysely";
+import { sql, type Transaction } from "kysely";
 
+import type { RuntimeDatabase } from "../db/database.js";
 import type { TenantRepositoryContext } from "./resources.js";
 import { safeContractInteger, validateContract } from "./resources.js";
 
@@ -67,22 +68,47 @@ export class RuntimeRepository {
     if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
       throw new Error("Expected resource version must be a positive safe integer");
     }
-    const updated = await this.context.db.updateTable("runtime_containers")
+    if (expectedVersion === Number.MAX_SAFE_INTEGER) {
+      throw new RangeError("Expected resource version cannot be incremented within the safe integer range");
+    }
+    if (this.context.transactional) {
+      return this.updateDesiredStateInTransaction(this.context.db, containerId, desiredState, expectedVersion);
+    }
+    return this.context.db.transaction().execute(async (trx) => (
+      this.updateDesiredStateInTransaction(trx, containerId, desiredState, expectedVersion)
+    ));
+  }
+
+  private async updateDesiredStateInTransaction(
+    trx: Transaction<RuntimeDatabase>,
+    containerId: string,
+    desiredState: RuntimeContainer["desired_state"],
+    expectedVersion: number,
+  ): Promise<VersionedWriteResult> {
+    const current = await trx.selectFrom("runtime_containers")
+      .select("resource_version")
+      .where("tenant_id", "=", this.context.tenantId)
+      .where("container_id", "=", containerId)
+      .forUpdate()
+      .executeTakeFirst();
+    if (current === undefined) return { kind: "not_found" };
+
+    const currentVersion = safeContractInteger(current.resource_version);
+    if (currentVersion !== expectedVersion) {
+      return { kind: "version_conflict", current_resource_version: currentVersion };
+    }
+
+    const nextVersion = currentVersion + 1;
+    if (!Number.isSafeInteger(nextVersion)) {
+      throw new RangeError("Resource version cannot be incremented within the safe integer range");
+    }
+    const updated = await trx.updateTable("runtime_containers")
       .set({ desired_state: desiredState, resource_version: sql`resource_version + 1`, updated_at: new Date() })
       .where("tenant_id", "=", this.context.tenantId)
       .where("container_id", "=", containerId)
       .where("resource_version", "=", expectedVersion.toString())
       .returning("resource_version")
-      .executeTakeFirst();
-    if (updated !== undefined) return { kind: "updated", resource_version: safeContractInteger(updated.resource_version) };
-
-    const current = await this.context.db.selectFrom("runtime_containers")
-      .select("resource_version")
-      .where("tenant_id", "=", this.context.tenantId)
-      .where("container_id", "=", containerId)
-      .executeTakeFirst();
-    return current === undefined
-      ? { kind: "not_found" }
-      : { kind: "version_conflict", current_resource_version: safeContractInteger(current.resource_version) };
+      .executeTakeFirstOrThrow();
+    return { kind: "updated", resource_version: safeContractInteger(updated.resource_version) };
   }
 }

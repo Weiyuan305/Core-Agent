@@ -7,12 +7,9 @@ import type { Kysely, Transaction } from "kysely";
 import { assertTenantId, type TenantDatabaseContext, type TenantTransaction } from "../db/transaction.js";
 import type { RuntimeDatabase } from "../db/database.js";
 
-type TenantExecutor = Kysely<RuntimeDatabase> | Transaction<RuntimeDatabase>;
-
-export interface TenantRepositoryContext {
-  readonly tenantId: string;
-  readonly db: TenantExecutor;
-}
+export type TenantRepositoryContext =
+  | { readonly tenantId: string; readonly db: Kysely<RuntimeDatabase>; readonly transactional: false }
+  | { readonly tenantId: string; readonly db: Transaction<RuntimeDatabase>; readonly transactional: true };
 
 export type ProfileInsert = Profile & {
   readonly description: string;
@@ -23,8 +20,8 @@ export type ProfileInsert = Profile & {
 export function repositoryContext(context: TenantDatabaseContext | TenantTransaction): TenantRepositoryContext {
   assertTenantId(context.tenantId);
   return "trx" in context
-    ? { tenantId: context.tenantId, db: context.trx }
-    : { tenantId: context.tenantId, db: context.db };
+    ? { tenantId: context.tenantId, db: context.trx, transactional: true }
+    : { tenantId: context.tenantId, db: context.db, transactional: false };
 }
 
 export function safeContractInteger(value: string): number {
@@ -39,6 +36,18 @@ export function safeContractInteger(value: string): number {
 }
 
 export function validateContract<T>(schema: TSchema, value: unknown): T {
+  if (typeof value === "object" && value !== null && "resource_version" in value) {
+    const resourceVersion = (value as { resource_version: unknown }).resource_version;
+    if (typeof resourceVersion !== "number" || !Number.isSafeInteger(resourceVersion) || resourceVersion < 1) {
+      throw new RangeError("resource_version must be a positive safe integer");
+    }
+  }
+  if (typeof value === "object" && value !== null && "generation" in value) {
+    const generation = (value as { generation: unknown }).generation;
+    if (typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 1) {
+      throw new RangeError("generation must be a positive safe integer");
+    }
+  }
   if (!Schema.Check(schema, value)) throw new Error("Database row violates its contract schema");
   return value as T;
 }
