@@ -105,7 +105,7 @@ test("empty database migrates exactly to schema version 4 with durable runtime c
   assert.deepEqual(runtimeCommandColumn.rows, [{ column_name: "runtime_command" }]);
 });
 
-test("version 4 backfills legacy reconcile intent and enforces the job-kind invariant", async () => {
+test("version 4 terminalizes ambiguous legacy reconcile jobs and enforces the job-kind invariant", async () => {
   const legacyDirectory = await mkdtemp(join(tmpdir(), "core-agent-v3-migrations-"));
   await cp(migrationsDirectory, legacyDirectory, { recursive: true });
   await rm(join(legacyDirectory, "004_runtime_command_intent.sql"));
@@ -151,26 +151,33 @@ test("version 4 backfills legacy reconcile intent and enforces the job-kind inva
     );
 
     await applyMigrations(pool, migrationsDirectory);
-    const jobs = await db.selectFrom("worker_jobs").select(["job_id", "runtime_command"]).orderBy("job_id").execute();
-    assert.deepEqual(jobs, [
-      { job_id: "job_deleted", runtime_command: "delete" },
-      { job_id: "job_dispatch", runtime_command: null },
-      { job_id: "job_orphan", runtime_command: "stop" },
-      { job_id: "job_running", runtime_command: "start" },
-      { job_id: "job_stopped", runtime_command: "stop" },
+    const legacyReconcileJobs = await db.selectFrom("worker_jobs")
+      .select(["job_id", "status", "runtime_command", "lease_owner", "lease_expires_at", "last_error_summary"])
+      .where("job_kind", "=", "reconcile_runtime").orderBy("job_id").execute();
+    assert.deepEqual(legacyReconcileJobs.map((job) => job.job_id), [
+      "job_deleted", "job_orphan", "job_running", "job_stopped",
     ]);
-    const orphan = await db.selectFrom("worker_jobs")
-      .select(["status", "lease_owner", "lease_expires_at", "last_error_summary"])
-      .where("job_id", "=", "job_orphan").executeTakeFirstOrThrow();
-    assert.deepEqual(orphan, {
-      status: "failed",
-      lease_owner: null,
-      lease_expires_at: null,
-      last_error_summary: "Legacy reconcile intent unavailable after schema upgrade",
-    });
-    await assert.rejects(
-      db.updateTable("worker_jobs").set({ runtime_command: null }).where("job_id", "=", "job_running").execute(),
-      /worker_jobs_runtime_command_intent_check/,
+    for (const job of legacyReconcileJobs) {
+      assert.equal(job.status, "failed", job.job_id);
+      assert.equal(job.runtime_command, null, job.job_id);
+      assert.equal(job.lease_owner, null, job.job_id);
+      assert.equal(job.lease_expires_at, null, job.job_id);
+      assert.equal(job.last_error_summary, "Legacy reconcile intent unavailable after schema upgrade", job.job_id);
+    }
+    assert.equal(
+      legacyReconcileJobs.find((job) => job.job_id === "job_running")?.runtime_command,
+      null,
+      "running desired state must not be fabricated into start or restart",
+    );
+    for (const status of ["queued", "running", "retrying"] as const) {
+      await assert.rejects(
+        db.updateTable("worker_jobs").set({ status, runtime_command: null }).where("job_id", "=", "job_running").execute(),
+        /worker_jobs_runtime_command_intent_check/,
+      );
+    }
+    await assert.doesNotReject(
+      db.updateTable("worker_jobs").set({ status: "cancelled", runtime_command: null })
+        .where("job_id", "=", "job_running").execute(),
     );
     await assert.rejects(
       db.updateTable("worker_jobs").set({ runtime_command: "start" }).where("job_id", "=", "job_dispatch").execute(),

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 const repositoryDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "repositories");
+const runtimeCommandMigration = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations", "004_runtime_command_intent.sql");
 const tenantOwnedTables = new Set([
   "tenants", "actors", "memberships", "profiles", "runtime_containers", "conversations", "sessions", "agent_runs", "messages",
   "idempotency_records", "worker_jobs", "product_events", "audit_events", "outbox", "stream_sequences", "stream_cursors", "secret_references",
@@ -225,4 +226,11 @@ test("repository read and write queries retain a tenant scope", async () => {
     violations.push(...findRepositoryQuerySafetyViolations(file, await readFile(join(repositoryDirectory, file), "utf8")));
   }
   assert.deepEqual(violations, []);
+});
+
+test("runtime command migration never fabricates ambiguous legacy intent", async () => {
+  const migration = await readFile(runtimeCommandMigration, "utf8");
+  assert.doesNotMatch(migration, /desired_state/);
+  assert.match(migration, /where job_kind = 'reconcile_runtime';/);
+  assert.match(migration, /status in \('failed', 'cancelled'\)/);
 });
