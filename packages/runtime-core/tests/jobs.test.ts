@@ -53,6 +53,52 @@ test("concurrent workers claim a job once and reclaim only after lease expiry", 
   })).length, 1);
 });
 
+test("claimed jobs discriminate reconcile command intent and fail closed on invalid storage", async () => {
+  await insertJob();
+  await db.insertInto("runtime_containers").values({
+    tenant_id: "tenant_jobs", container_id: "runtime_1", schema_version: 1, resource_version: 1,
+    runtime_kind: "hermes", desired_state: "running", observed_state: "requested",
+    image_ref: `managed/runtime:v1@sha256:${"a".repeat(64)}`, generation: 1, volume_ref: "volume_1",
+    health_status: "unknown", last_probed_at: null, failure_summary: null,
+    created_at: new Date(0), updated_at: new Date(0),
+  }).execute();
+  await db.insertInto("worker_jobs").values({
+    tenant_id: "tenant_jobs", job_id: "job_reconcile", job_kind: "reconcile_runtime", status: "queued",
+    attempt_count: 0, max_attempts: 3, lease_owner: null, lease_expires_at: null,
+    next_attempt_at: new Date(0), payload_ref: "runtime_1", effect_state: "pre_effect",
+    runtime_command: "restart", last_error_summary: null, run_id: null, container_id: "runtime_1",
+    created_at: new Date(1), updated_at: new Date(1),
+  }).execute();
+  const jobs = await claimJobs(db, { tenantId: "tenant_jobs", workerId: "worker_shapes", limit: 2, leaseMs: 30_000 });
+  for (const job of jobs) {
+    if (job.jobKind === "reconcile_runtime") {
+      const intent: "start" | "stop" | "restart" | "delete" = job.runtimeCommand;
+      assert.equal(intent, "restart");
+    } else {
+      const noIntent: null = job.runtimeCommand;
+      assert.equal(noIntent, null);
+    }
+  }
+
+  await db.schema.alterTable("worker_jobs").dropConstraint("worker_jobs_runtime_command_intent_check").execute();
+  await db.updateTable("worker_jobs").set({
+    status: "queued", lease_owner: null, lease_expires_at: null, next_attempt_at: new Date(0), runtime_command: "start",
+  }).where("job_id", "=", "job_1").execute();
+  await assert.rejects(
+    claimJobs(db, { tenantId: "tenant_jobs", workerId: "worker_invalid", limit: 1, leaseMs: 30_000 }),
+    /Stored worker job command intent is invalid/,
+  );
+  await db.updateTable("worker_jobs").set({ next_attempt_at: new Date("2100-01-01T00:00:00.000Z") })
+    .where("job_id", "=", "job_1").execute();
+  await db.updateTable("worker_jobs").set({
+    status: "queued", lease_owner: null, lease_expires_at: null, next_attempt_at: new Date(0), runtime_command: null,
+  }).where("job_id", "=", "job_reconcile").execute();
+  await assert.rejects(
+    claimJobs(db, { tenantId: "tenant_jobs", workerId: "worker_invalid", limit: 1, leaseMs: 30_000 }),
+    /Stored worker job command intent is invalid/,
+  );
+});
+
 test("stale workers cannot backdate or future-date database lease authority", async () => {
   await insertJob();
   await claimJobs(db, { tenantId: "tenant_jobs", workerId: "worker_a", limit: 1, leaseMs: 30_000 });

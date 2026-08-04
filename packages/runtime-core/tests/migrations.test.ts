@@ -105,6 +105,82 @@ test("empty database migrates exactly to schema version 4 with durable runtime c
   assert.deepEqual(runtimeCommandColumn.rows, [{ column_name: "runtime_command" }]);
 });
 
+test("version 4 backfills legacy reconcile intent and enforces the job-kind invariant", async () => {
+  const legacyDirectory = await mkdtemp(join(tmpdir(), "core-agent-v3-migrations-"));
+  await cp(migrationsDirectory, legacyDirectory, { recursive: true });
+  await rm(join(legacyDirectory, "004_runtime_command_intent.sql"));
+  try {
+    await applyMigrations(pool, legacyDirectory);
+    await seedTenant("tenant_upgrade");
+    const createdAt = new Date("2026-08-03T00:00:00.000Z");
+    for (const [suffix, desiredState] of [
+      ["running", "running"], ["stopped", "stopped"], ["deleted", "deleted"],
+    ] as const) {
+      await pool.query(
+        `insert into runtime_containers (
+          tenant_id, container_id, schema_version, resource_version, runtime_kind,
+          desired_state, observed_state, image_ref, generation, volume_ref, health_status,
+          last_probed_at, failure_summary, created_at, updated_at
+        ) values ($1, $2, 1, 1, 'hermes', $3, 'requested', $4, 1, $5, 'unknown', null, null, $6, $6)`,
+        ["tenant_upgrade", `runtime_${suffix}`, desiredState, `managed/runtime:v1@sha256:${"a".repeat(64)}`, `volume_${suffix}`, createdAt],
+      );
+      await pool.query(
+        `insert into worker_jobs (
+          tenant_id, job_id, job_kind, status, attempt_count, max_attempts, lease_owner,
+          lease_expires_at, next_attempt_at, payload_ref, effect_state, last_error_summary,
+          run_id, container_id, created_at, updated_at
+        ) values ($1, $2, 'reconcile_runtime', 'queued', 0, 3, null, null, $3, $4, 'pre_effect', null, null, $4, $3, $3)`,
+        ["tenant_upgrade", `job_${suffix}`, createdAt, `runtime_${suffix}`],
+      );
+    }
+    await pool.query(
+      `insert into worker_jobs (
+        tenant_id, job_id, job_kind, status, attempt_count, max_attempts, lease_owner,
+        lease_expires_at, next_attempt_at, payload_ref, effect_state, last_error_summary,
+        run_id, container_id, created_at, updated_at
+      ) values ($1, 'job_dispatch', 'dispatch_outbox', 'queued', 0, 3, null, null, $2, 'outbox_1', 'pre_effect', null, null, null, $2, $2)`,
+      ["tenant_upgrade", createdAt],
+    );
+    await pool.query(
+      `insert into worker_jobs (
+        tenant_id, job_id, job_kind, status, attempt_count, max_attempts, lease_owner,
+        lease_expires_at, next_attempt_at, payload_ref, effect_state, last_error_summary,
+        run_id, container_id, created_at, updated_at
+      ) values ($1, 'job_orphan', 'reconcile_runtime', 'running', 1, 3, 'legacy_worker', $2, $2, 'runtime_missing', 'pre_effect', null, null, null, $2, $2)`,
+      ["tenant_upgrade", createdAt],
+    );
+
+    await applyMigrations(pool, migrationsDirectory);
+    const jobs = await db.selectFrom("worker_jobs").select(["job_id", "runtime_command"]).orderBy("job_id").execute();
+    assert.deepEqual(jobs, [
+      { job_id: "job_deleted", runtime_command: "delete" },
+      { job_id: "job_dispatch", runtime_command: null },
+      { job_id: "job_orphan", runtime_command: "stop" },
+      { job_id: "job_running", runtime_command: "start" },
+      { job_id: "job_stopped", runtime_command: "stop" },
+    ]);
+    const orphan = await db.selectFrom("worker_jobs")
+      .select(["status", "lease_owner", "lease_expires_at", "last_error_summary"])
+      .where("job_id", "=", "job_orphan").executeTakeFirstOrThrow();
+    assert.deepEqual(orphan, {
+      status: "failed",
+      lease_owner: null,
+      lease_expires_at: null,
+      last_error_summary: "Legacy reconcile intent unavailable after schema upgrade",
+    });
+    await assert.rejects(
+      db.updateTable("worker_jobs").set({ runtime_command: null }).where("job_id", "=", "job_running").execute(),
+      /worker_jobs_runtime_command_intent_check/,
+    );
+    await assert.rejects(
+      db.updateTable("worker_jobs").set({ runtime_command: "start" }).where("job_id", "=", "job_dispatch").execute(),
+      /worker_jobs_runtime_command_intent_check/,
+    );
+  } finally {
+    await rm(legacyDirectory, { recursive: true, force: true });
+  }
+});
+
 test("modified applied migrations are rejected by checksum", async () => {
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "core-agent-migrations-"));
   await cp(migrationsDirectory, temporaryDirectory, { recursive: true });

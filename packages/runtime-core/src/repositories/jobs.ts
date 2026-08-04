@@ -3,25 +3,33 @@ import { sql, type Kysely } from "kysely";
 import type { RuntimeDatabase } from "../db/database.js";
 import { redactSummary, type Redactor } from "../domain/redaction.js";
 
-export interface ClaimedJob {
+interface ClaimedJobBase {
   tenantId: string;
   jobId: string;
-  jobKind: string;
   attemptCount: number;
   maxAttempts: number;
   payloadRef: string;
-  runtimeCommand: RuntimeCommandIntent | null;
   effectState: string;
   leaseExpiresAt: Date;
 }
 
+export const workerJobKinds = ["provision_runtime", "reconcile_runtime", "execute_agent_run", "dispatch_outbox"] as const;
+export type WorkerJobKind = (typeof workerJobKinds)[number];
 export const runtimeCommandIntents = ["start", "stop", "restart", "delete"] as const;
 export type RuntimeCommandIntent = (typeof runtimeCommandIntents)[number];
+export type ClaimedJob =
+  | (ClaimedJobBase & { jobKind: "reconcile_runtime"; runtimeCommand: RuntimeCommandIntent })
+  | (ClaimedJobBase & { jobKind: Exclude<WorkerJobKind, "reconcile_runtime">; runtimeCommand: null });
 
-function runtimeCommandIntent(value: string | null): RuntimeCommandIntent | null {
-  if (value === null) return null;
+function runtimeCommandIntent(value: string | null): RuntimeCommandIntent {
+  if (value === null) throw new Error("Stored worker job command intent is invalid");
   if (!runtimeCommandIntents.includes(value as RuntimeCommandIntent)) throw new Error("Stored runtime command intent is invalid");
   return value as RuntimeCommandIntent;
+}
+
+function nonReconcileJobKind(value: string): Exclude<WorkerJobKind, "reconcile_runtime"> {
+  if (value === "provision_runtime" || value === "execute_agent_run" || value === "dispatch_outbox") return value;
+  throw new Error("Stored worker job kind is invalid");
 }
 
 export interface ClaimJobsInput {
@@ -65,17 +73,22 @@ export async function claimJobs(db: Kysely<RuntimeDatabase>, input: ClaimJobsInp
     }).where("tenant_id", "=", input.tenantId).where("job_id", "in", jobIds)
       .returning(["tenant_id", "job_id", "job_kind", "attempt_count", "max_attempts", "payload_ref", "runtime_command", "effect_state", "lease_expires_at"])
       .execute();
-    return claimed.map((job) => ({
-      tenantId: job.tenant_id,
-      jobId: job.job_id,
-      jobKind: job.job_kind,
-      attemptCount: job.attempt_count,
-      maxAttempts: job.max_attempts,
-      payloadRef: job.payload_ref,
-      runtimeCommand: runtimeCommandIntent(job.runtime_command),
-      effectState: job.effect_state,
-      leaseExpiresAt: job.lease_expires_at!,
-    }));
+    return claimed.map((job): ClaimedJob => {
+      const base: ClaimedJobBase = {
+        tenantId: job.tenant_id,
+        jobId: job.job_id,
+        attemptCount: job.attempt_count,
+        maxAttempts: job.max_attempts,
+        payloadRef: job.payload_ref,
+        effectState: job.effect_state,
+        leaseExpiresAt: job.lease_expires_at!,
+      };
+      if (job.job_kind === "reconcile_runtime") {
+        return { ...base, jobKind: "reconcile_runtime", runtimeCommand: runtimeCommandIntent(job.runtime_command) };
+      }
+      if (job.runtime_command !== null) throw new Error("Stored worker job command intent is invalid");
+      return { ...base, jobKind: nonReconcileJobKind(job.job_kind), runtimeCommand: null };
+    });
   });
 }
 

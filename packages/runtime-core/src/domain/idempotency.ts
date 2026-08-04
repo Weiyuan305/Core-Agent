@@ -77,7 +77,7 @@ export function canonicalPayloadHash(value: unknown): string {
 
 export type IdempotencyAdmission<T> =
   | { kind: "acquired"; recordId: string }
-  | { kind: "replay"; response: T }
+  | { kind: "replay"; resultRef: string; response: T }
   | { kind: "in_progress" };
 
 export async function beginIdempotentCommand<T>(
@@ -107,7 +107,7 @@ export async function beginIdempotentCommand<T>(
   if (inserted !== undefined) return { kind: "acquired", recordId: input.key };
 
   const existing = await context.trx.selectFrom("idempotency_records")
-    .select(["payload_hash", "operation", "status", "response_json", "expires_at"])
+    .select(["payload_hash", "operation", "status", "result_ref", "response_json", "expires_at"])
     .where("tenant_id", "=", context.tenantId)
     .where("idempotency_key", "=", input.key)
     .forUpdate().executeTakeFirstOrThrow();
@@ -130,7 +130,8 @@ export async function beginIdempotentCommand<T>(
   }
   if (existing.status === "completed") {
     if (existing.response_json === null) throw new DomainError("INTERNAL_ERROR", "Completed idempotency record has no response");
-    return { kind: "replay", response: existing.response_json as T };
+    if (existing.result_ref === null) throw new DomainError("INTERNAL_ERROR", "Completed idempotency record has no result reference");
+    return { kind: "replay", resultRef: existing.result_ref, response: existing.response_json as T };
   }
   return { kind: "in_progress" };
 }

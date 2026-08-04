@@ -57,7 +57,8 @@ test.after(async () => { await db.destroy(); });
 test("same key and hash replay one result while a different hash conflicts", async () => {
   const first = await createSyntheticCommand("idem_1", `sha256:${"a".repeat(64)}`);
   const replay = await createSyntheticCommand("idem_1", `sha256:${"a".repeat(64)}`);
-  assert.deepEqual(replay, { kind: "replay", response: first.response });
+  assert.equal(first.kind, "acquired");
+  assert.deepEqual(replay, { kind: "replay", resultRef: "run_1", response: first.response });
   await assert.rejects(
     createSyntheticCommand("idem_1", `sha256:${"b".repeat(64)}`),
     /IDEMPOTENCY_CONFLICT/,
@@ -90,6 +91,13 @@ test("idempotency validates input, compares operation, reclaims expiry, and fail
   assert.equal(reclaimed.kind, "acquired");
 
   await db.updateTable("idempotency_records").set({ status: "completed", response_json: null })
+    .where("tenant_id", "=", "tenant_idempotency").where("idempotency_key", "=", "idem_operation").execute();
+  await assert.rejects(withTenantTransaction(db, "tenant_idempotency", (context) => beginIdempotentCommand(context, {
+    key: "idem_operation", payloadHash: `sha256:${"b".repeat(64)}`,
+    operation: "second_operation", expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+  })), /INTERNAL_ERROR/);
+
+  await db.updateTable("idempotency_records").set({ response_json: { run_id: "run_1" }, result_ref: null })
     .where("tenant_id", "=", "tenant_idempotency").where("idempotency_key", "=", "idem_operation").execute();
   await assert.rejects(withTenantTransaction(db, "tenant_idempotency", (context) => beginIdempotentCommand(context, {
     key: "idem_operation", payloadHash: `sha256:${"b".repeat(64)}`,

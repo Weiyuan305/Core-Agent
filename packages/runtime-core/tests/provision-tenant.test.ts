@@ -138,6 +138,24 @@ test("provisionTenant atomically creates one runtime and replays the completed r
   assert.equal(externalCalls, 0);
 });
 
+test("provision replay rejects a result reference that does not match the derived runtime", async () => {
+  const request = b2bRequest("tenant_tampered_provision_ref");
+  const context = {
+    tenantId: request.identity_graph.tenant.tenant_id,
+    requestId: "request_tampered_provision_ref", traceId: "trace_tampered_provision_ref",
+    actorId: "core_agent_provisioner" as const,
+    membershipId: "core_agent_provisioner_admin" as const,
+    effectiveRole: "admin" as const,
+  };
+  await provisionTenant({ db, providerCatalog, imageLock }, context, request);
+  await db.updateTable("idempotency_records").set({ result_ref: "runtime_attacker" })
+    .where("tenant_id", "=", context.tenantId).where("idempotency_key", "=", request.idempotency_key).execute();
+  await assert.rejects(
+    provisionTenant({ db, providerCatalog, imageLock }, context, request),
+    (error: unknown) => error instanceof DomainError && error.code === "INTERNAL_ERROR",
+  );
+});
+
 test("provisionTenant rejects invalid hashes and conflicts on a reused key with a different canonical payload", async () => {
   const original = b2bRequest("tenant_hash_a");
   const dependencies = { db, providerCatalog, imageLock };
@@ -311,6 +329,29 @@ test("runtime commands use expected versions atomically, preserve volume, and re
   assert.equal(unchanged.desired_state, "stopped");
   assert.equal(unchanged.volume_ref, before.volume_ref);
   assert.equal(await db.selectFrom("worker_jobs").selectAll().execute().then((rows) => rows.length), 2);
+});
+
+test("runtime command replay rejects a result reference that does not match the derived runtime", async () => {
+  const provisioning = b2bRequest("tenant_tampered_command_ref");
+  const context = {
+    tenantId: provisioning.identity_graph.tenant.tenant_id,
+    requestId: "request_tampered_command_ref", traceId: "trace_tampered_command_ref",
+    actorId: "core_agent_provisioner" as const,
+    membershipId: "core_agent_provisioner_admin" as const,
+    effectiveRole: "admin" as const,
+  };
+  await provisionTenant({ db, providerCatalog, imageLock }, context, provisioning);
+  const request = withHash({
+    schema_version: 1 as const, idempotency_key: "idem_tampered_command_ref",
+    expected_resource_version: 1, command: "stop" as const,
+  });
+  await commandRuntime({ db }, context, request);
+  await db.updateTable("idempotency_records").set({ result_ref: "runtime_attacker" })
+    .where("tenant_id", "=", context.tenantId).where("idempotency_key", "=", request.idempotency_key).execute();
+  await assert.rejects(
+    commandRuntime({ db }, context, request),
+    (error: unknown) => error instanceof DomainError && error.code === "INTERNAL_ERROR",
+  );
 });
 
 test("restart persists explicit durable reconcile intent while payload_ref remains the runtime", async () => {

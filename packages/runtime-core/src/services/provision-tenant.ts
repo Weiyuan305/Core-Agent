@@ -241,6 +241,9 @@ export async function provisionTenant(
       expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1_000),
     });
     if (admission.kind === "replay") {
+      if (admission.resultRef !== containerId) {
+        throw new DomainError("INTERNAL_ERROR", "Provisioning replay result reference is invalid");
+      }
       assertProvisioningResponse(admission.response, tenantId, containerId);
       return admission.response;
     }

@@ -164,6 +164,9 @@ export async function commandRuntime(
       expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1_000),
     });
     if (admission.kind === "replay") {
+      if (admission.resultRef !== containerId) {
+        throw new DomainError("INTERNAL_ERROR", "Runtime command replay result reference is invalid");
+      }
       assertResponse(admission.response, containerId, targetState);
       return admission.response;
     }

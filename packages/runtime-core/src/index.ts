@@ -50,6 +50,8 @@ export {
   type JobLeaseResult,
   runtimeCommandIntents,
   type RuntimeCommandIntent,
+  workerJobKinds,
+  type WorkerJobKind,
 } from "./repositories/jobs.js";
 export {
   appendProductEvents,
