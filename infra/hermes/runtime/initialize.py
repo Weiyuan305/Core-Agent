@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -22,9 +23,17 @@ DEFAULT_SECRET_ROOT = Path("/run/core-agent/secrets")
 APPROVED_MODEL_ID = "cywx/gpt-5.6-sol"
 MAX_PROFILES = 64
 MAX_SECRET_BYTES = 16_384
+MAX_MANIFEST_BYTES = 65_536
+MANIFEST_MODE = 0o644
+PRIVATE_DIRECTORY_MODE = 0o700
+LOCK_MODE = 0o600
+MANIFEST_NAME = "manifest.json"
+LOCK_NAME = "initialize.lock"
 OPAQUE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 PROFILE_REF = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 IMAGE_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*@sha256:[a-f0-9]{64}$")
+BUNDLE_HASH = re.compile(r"^sha256:[a-f0-9]{64}$")
+DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 
 class InitializerError(Exception):
@@ -41,17 +50,27 @@ def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
         if key in result:
-            raise InitializerError("Bundle contains a duplicate JSON property")
+            raise InitializerError("JSON contains a duplicate property")
         result[key] = value
     return result
 
 
-def load_json(path: Path) -> object:
+def parse_json(payload: bytes, label: str) -> object:
     try:
-        with path.open("r", encoding="utf-8") as stream:
-            return json.load(stream, object_pairs_hook=reject_duplicate_keys)
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise InitializerError("Bundle or manifest JSON is unavailable or invalid") from error
+        return json.loads(payload.decode("utf-8"), object_pairs_hook=reject_duplicate_keys)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise InitializerError(f"{label} JSON is invalid") from error
+
+
+def load_bundle(path: Path) -> object:
+    try:
+        with path.open("rb") as stream:
+            payload = stream.read(1_048_577)
+    except OSError as error:
+        raise InitializerError("Bundle JSON is unavailable") from error
+    if not payload or len(payload) > 1_048_576:
+        raise InitializerError("Bundle JSON is invalid")
+    return parse_json(payload, "Bundle")
 
 
 def require_string(value: object, label: str, maximum: int) -> str:
@@ -121,7 +140,7 @@ def validate_bundle(value: object) -> dict[str, object]:
         "image_ref",
         "profiles",
     }, "RuntimeBootstrapBundle")
-    if document["bundle_version"] != 1 or type(document["bundle_version"]) is not int:
+    if type(document["bundle_version"]) is not int or document["bundle_version"] != 1:
         raise InitializerError("bundle_version is invalid")
     tenant_id = require_id(document["tenant_id"], "tenant_id")
     runtime_id = require_id(document["runtime_id"], "runtime_id")
@@ -148,61 +167,6 @@ def validate_bundle(value: object) -> dict[str, object]:
         "image_ref": image_ref,
         "profiles": profiles,
     }
-
-
-def read_secret(secret_root: Path, requested_name: str) -> str:
-    root = Path(os.path.abspath(secret_root))
-    requested_path = Path(requested_name)
-    requested = Path(os.path.abspath(requested_path))
-    if (
-        not requested_path.is_absolute()
-        or requested.parent != root
-        or not requested.name
-        or "/" in requested.name
-    ):
-        raise InitializerError("Provider secret path is outside the fixed root")
-    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    try:
-        root_descriptor = os.open(root, directory_flags)
-    except OSError as error:
-        raise InitializerError("Provider secret root cannot be opened safely") from error
-    descriptor = -1
-    try:
-        descriptor = os.open(
-            requested.name,
-            os.O_RDONLY | os.O_NOFOLLOW,
-            dir_fd=root_descriptor,
-        )
-        metadata = os.fstat(descriptor)
-        mode = stat.S_IMODE(metadata.st_mode)
-        if not stat.S_ISREG(metadata.st_mode):
-            raise InitializerError("Provider secret is not a regular file")
-        if metadata.st_uid != os.geteuid():
-            raise InitializerError("Provider secret owner is invalid")
-        if mode not in (0o400, 0o600):
-            raise InitializerError("Provider secret mode is invalid")
-        if metadata.st_size < 1 or metadata.st_size > MAX_SECRET_BYTES:
-            raise InitializerError("Provider secret size is invalid")
-        content = bytearray()
-        while len(content) <= MAX_SECRET_BYTES:
-            chunk = os.read(descriptor, min(4_096, MAX_SECRET_BYTES + 1 - len(content)))
-            if not chunk:
-                break
-            content.extend(chunk)
-        if not content or len(content) > MAX_SECRET_BYTES:
-            raise InitializerError("Provider secret size is invalid")
-        if b"\x00" in content or b"\r" in content or b"\n" in content:
-            raise InitializerError("Provider secret contains invalid line data")
-        try:
-            return bytes(content).decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise InitializerError("Provider secret encoding is invalid") from error
-    except OSError as error:
-        raise InitializerError("Provider secret cannot be opened safely") from error
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        os.close(root_descriptor)
 
 
 def canonical_json(value: object) -> bytes:
@@ -246,93 +210,437 @@ def expected_manifest(bundle: dict[str, object]) -> dict[str, object]:
     }
 
 
-def existing_manifest_result(path: Path, expected: dict[str, object]) -> dict[str, object] | None:
-    if not path.exists():
-        return None
-    existing = load_json(path)
-    if type(existing) is not dict:
+def validate_manifest(value: object) -> dict[str, object]:
+    manifest = closed_object(value, {
+        "bundle_version",
+        "tenant_id",
+        "runtime_id",
+        "generation",
+        "image_ref",
+        "profiles",
+        "bundle_hash",
+    }, "Manifest")
+    if type(manifest["bundle_version"]) is not int or manifest["bundle_version"] != 1:
         raise InitializerError("Existing manifest is invalid")
-    if existing == expected:
-        return existing
-    existing_generation = existing.get("generation")
-    expected_generation = expected["generation"]
-    if type(existing_generation) is not int or existing_generation >= expected_generation:
-        raise InitializerError("Existing manifest conflicts with this generation")
-    return None
+    tenant_id = require_id(manifest["tenant_id"], "manifest tenant_id")
+    runtime_id = require_id(manifest["runtime_id"], "manifest runtime_id")
+    generation = manifest["generation"]
+    if type(generation) is not int or generation < 1 or generation > 2_147_483_647:
+        raise InitializerError("Existing manifest is invalid")
+    image_ref = require_string(manifest["image_ref"], "manifest image_ref", 512)
+    if IMAGE_REF.fullmatch(image_ref) is None:
+        raise InitializerError("Existing manifest is invalid")
+    bundle_hash = require_string(manifest["bundle_hash"], "manifest bundle_hash", 71)
+    if BUNDLE_HASH.fullmatch(bundle_hash) is None:
+        raise InitializerError("Existing manifest is invalid")
+    raw_profiles = manifest["profiles"]
+    if type(raw_profiles) is not list or not raw_profiles or len(raw_profiles) > MAX_PROFILES:
+        raise InitializerError("Existing manifest is invalid")
+    profiles: list[dict[str, str]] = []
+    for value_profile in raw_profiles:
+        profile = closed_object(value_profile, {"profile_id", "hermes_profile_ref"}, "Manifest Profile")
+        profile_id = require_id(profile["profile_id"], "manifest profile_id")
+        profile_ref = require_string(profile["hermes_profile_ref"], "manifest hermes_profile_ref", 63)
+        if PROFILE_REF.fullmatch(profile_ref) is None:
+            raise InitializerError("Existing manifest is invalid")
+        profiles.append({"profile_id": profile_id, "hermes_profile_ref": profile_ref})
+    if profiles != sorted(profiles, key=lambda item: (item["profile_id"], item["hermes_profile_ref"])):
+        raise InitializerError("Existing manifest is invalid")
+    if len({item["profile_id"] for item in profiles}) != len(profiles):
+        raise InitializerError("Existing manifest is invalid")
+    if len({item["hermes_profile_ref"] for item in profiles}) != len(profiles):
+        raise InitializerError("Existing manifest is invalid")
+    return {
+        "bundle_version": 1,
+        "tenant_id": tenant_id,
+        "runtime_id": runtime_id,
+        "generation": generation,
+        "image_ref": image_ref,
+        "profiles": profiles,
+        "bundle_hash": bundle_hash,
+    }
 
 
-def atomic_write(path: Path, payload: bytes, mode: int) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = path.parent / f".{path.name}.tmp.{os.getpid()}"
-    descriptor = -1
-    directory_descriptor = -1
+def file_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def validate_directory(metadata: os.stat_result, label: str, exact_mode: int | None = None) -> None:
+    mode = stat.S_IMODE(metadata.st_mode)
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid():
+        raise InitializerError(f"{label} directory is unsafe")
+    if exact_mode is not None:
+        if mode != exact_mode:
+            raise InitializerError(f"{label} directory mode is unsafe")
+    elif mode & 0o022:
+        raise InitializerError(f"{label} directory mode is unsafe")
+
+
+def open_root_directory(path: Path, label: str, exact_mode: int | None = None) -> tuple[int, tuple[int, int]]:
+    normalized = Path(os.path.abspath(path))
+    if not path.is_absolute():
+        raise InitializerError(f"{label} directory path is invalid")
     try:
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
-        with os.fdopen(descriptor, "wb", closefd=True) as stream:
-            descriptor = -1
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.chmod(temporary, mode)
-        os.replace(temporary, path)
-        directory_descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        os.fsync(directory_descriptor)
+        before = os.stat(normalized, follow_symlinks=False)
+        descriptor = os.open(normalized, DIRECTORY_FLAGS)
+    except OSError as error:
+        raise InitializerError(f"{label} directory cannot be opened safely") from error
+    try:
+        metadata = os.fstat(descriptor)
+        validate_directory(metadata, label, exact_mode)
+        if (before.st_dev, before.st_ino) != (metadata.st_dev, metadata.st_ino):
+            raise InitializerError(f"{label} directory changed while opening")
+        return descriptor, (metadata.st_dev, metadata.st_ino)
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def assert_root_directory(path: Path, descriptor: int, identity: tuple[int, int], label: str,
+                          exact_mode: int | None = None) -> None:
+    try:
+        metadata = os.fstat(descriptor)
+        named = os.stat(path, follow_symlinks=False)
+    except OSError as error:
+        raise InitializerError(f"{label} directory changed") from error
+    validate_directory(metadata, label, exact_mode)
+    if identity != (metadata.st_dev, metadata.st_ino) or identity != (named.st_dev, named.st_ino):
+        raise InitializerError(f"{label} directory changed")
+
+
+def assert_named_directory(parent_descriptor: int, name: str, descriptor: int, label: str) -> None:
+    try:
+        metadata = os.fstat(descriptor)
+        named = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except OSError as error:
+        raise InitializerError(f"{label} directory changed") from error
+    validate_directory(metadata, label, PRIVATE_DIRECTORY_MODE)
+    if (metadata.st_dev, metadata.st_ino) != (named.st_dev, named.st_ino):
+        raise InitializerError(f"{label} directory changed")
+
+
+def open_or_create_directory(parent_descriptor: int, name: str, label: str) -> int:
+    try:
+        os.mkdir(name, PRIVATE_DIRECTORY_MODE, dir_fd=parent_descriptor)
+    except FileExistsError:
+        pass
+    except OSError as error:
+        raise InitializerError(f"{label} directory cannot be created safely") from error
+    descriptor = -1
+    try:
+        descriptor = os.open(name, DIRECTORY_FLAGS, dir_fd=parent_descriptor)
+        assert_named_directory(parent_descriptor, name, descriptor, label)
+        return descriptor
+    except OSError as error:
+        raise InitializerError(f"{label} directory cannot be opened safely") from error
+    except BaseException:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise
+
+
+def read_secret(root_descriptor: int, root_path: Path, root_identity: tuple[int, int],
+                requested_name: str) -> str:
+    requested_path = Path(requested_name)
+    requested = Path(os.path.abspath(requested_path))
+    normalized_root = Path(os.path.abspath(root_path))
+    if (
+        not requested_path.is_absolute()
+        or requested.parent != normalized_root
+        or not requested.name
+        or "/" in requested.name
+    ):
+        raise InitializerError("Provider secret path is outside the fixed root")
+    descriptor = -1
+    try:
+        descriptor = os.open(requested.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_descriptor)
+        before = os.fstat(descriptor)
+        mode = stat.S_IMODE(before.st_mode)
+        if not stat.S_ISREG(before.st_mode):
+            raise InitializerError("Provider secret is not a regular file")
+        if before.st_uid != os.geteuid():
+            raise InitializerError("Provider secret owner is invalid")
+        if mode not in (0o400, 0o600):
+            raise InitializerError("Provider secret mode is invalid")
+        if before.st_size < 1 or before.st_size > MAX_SECRET_BYTES:
+            raise InitializerError("Provider secret size is invalid")
+        content = bytearray()
+        while len(content) <= MAX_SECRET_BYTES:
+            chunk = os.read(descriptor, min(4_096, MAX_SECRET_BYTES + 1 - len(content)))
+            if not chunk:
+                break
+            content.extend(chunk)
+        after = os.fstat(descriptor)
+        if file_identity(before) != file_identity(after) or len(content) != before.st_size:
+            raise InitializerError("Provider secret changed while reading")
+        assert_root_directory(root_path, root_descriptor, root_identity, "Provider secret root")
+        if not content or len(content) > MAX_SECRET_BYTES:
+            raise InitializerError("Provider secret size is invalid")
+        if b"\x00" in content or b"\r" in content or b"\n" in content:
+            raise InitializerError("Provider secret contains invalid line data")
+        try:
+            return bytes(content).decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise InitializerError("Provider secret encoding is invalid") from error
+    except OSError as error:
+        raise InitializerError("Provider secret cannot be opened safely") from error
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-        if directory_descriptor >= 0:
-            os.close(directory_descriptor)
+
+
+def validate_regular_file(metadata: os.stat_result, label: str, mode: int, maximum: int) -> None:
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != mode
+        or metadata.st_size < 1
+        or metadata.st_size > maximum
+    ):
+        raise InitializerError(f"{label} file is unsafe")
+
+
+def read_manifest(core_descriptor: int) -> dict[str, object] | None:
+    try:
+        descriptor = os.open(MANIFEST_NAME, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=core_descriptor)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise InitializerError("Existing manifest cannot be opened safely") from error
+    try:
+        before = os.fstat(descriptor)
+        validate_regular_file(before, "Existing manifest", MANIFEST_MODE, MAX_MANIFEST_BYTES)
+        payload = bytearray()
+        while len(payload) <= MAX_MANIFEST_BYTES:
+            chunk = os.read(descriptor, min(4_096, MAX_MANIFEST_BYTES + 1 - len(payload)))
+            if not chunk:
+                break
+            payload.extend(chunk)
+        after = os.fstat(descriptor)
+        if file_identity(before) != file_identity(after) or len(payload) != before.st_size:
+            raise InitializerError("Existing manifest changed while reading")
+        manifest = validate_manifest(parse_json(bytes(payload), "Existing manifest"))
+        if bytes(payload) != canonical_json(manifest) + b"\n":
+            raise InitializerError("Existing manifest is not canonical")
+        return manifest
+    finally:
+        os.close(descriptor)
+
+
+def open_lock(core_descriptor: int) -> int:
+    try:
+        descriptor = os.open(
+            LOCK_NAME,
+            os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+            LOCK_MODE,
+            dir_fd=core_descriptor,
+        )
+    except OSError as error:
+        raise InitializerError("Initializer lock cannot be opened safely") from error
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != LOCK_MODE
+        ):
+            raise InitializerError("Initializer lock file is unsafe")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        named = os.stat(LOCK_NAME, dir_fd=core_descriptor, follow_symlinks=False)
+        after = os.fstat(descriptor)
+        if (after.st_dev, after.st_ino) != (named.st_dev, named.st_ino):
+            raise InitializerError("Initializer lock file changed")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def atomic_write(core_descriptor: int, name: str, payload: bytes, mode: int) -> None:
+    temporary = f".{name}.tmp.{os.getpid()}"
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            mode,
+            dir_fd=core_descriptor,
+        )
+        os.fchmod(descriptor, mode)
+        offset = 0
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset:])
+            if written < 1:
+                raise InitializerError("Temporary output write failed")
+            offset += written
+        os.fsync(descriptor)
+        metadata = os.fstat(descriptor)
+        validate_regular_file(metadata, "Temporary output", mode, max(len(payload), 1))
+        os.close(descriptor)
+        descriptor = -1
+        os.rename(
+            temporary,
+            name,
+            src_dir_fd=core_descriptor,
+            dst_dir_fd=core_descriptor,
+        )
+        published = os.stat(name, dir_fd=core_descriptor, follow_symlinks=False)
+        if (published.st_dev, published.st_ino) != (metadata.st_dev, metadata.st_ino):
+            raise InitializerError("Published output changed")
+        os.fsync(core_descriptor)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
         try:
-            temporary.unlink()
+            os.unlink(temporary, dir_fd=core_descriptor)
         except FileNotFoundError:
             pass
 
 
-def configure_profile(data_root: Path, profile: dict[str, object], provider_key: str) -> None:
+def configure_profile(profiles_descriptor: int, profile: dict[str, object], provider_key: str) -> None:
     profile_ref = str(profile["hermes_profile_ref"])
     description = str(profile["description"])
-    show = subprocess.run(
-        ["hermes", "profile", "show", profile_ref],
-        check=False,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    if show.returncode == 0:
-        subprocess.run(
-            ["hermes", "profile", "describe", profile_ref, "--text", description],
-            check=True,
+    profile_descriptor = open_or_create_directory(profiles_descriptor, profile_ref, "Profile")
+    try:
+        show = subprocess.run(
+            ["hermes", "profile", "show", profile_ref],
+            check=False,
             stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
-    else:
-        subprocess.run(
-            [
-                "hermes", "profile", "create", profile_ref,
-                "--no-skills", "--no-alias", "--description", description,
-            ],
-            check=True,
-            stdin=subprocess.DEVNULL,
-        )
-    environment = (
-        f"OPENAI_API_KEY={provider_key}\n"
-        f"OPENAI_BASE_URL={profile['provider_base_url']}\n"
-        f"LLM_MODEL={profile['model_id']}\n"
-    ).encode("utf-8")
-    atomic_write(data_root / "profiles" / profile_ref / ".env", environment, 0o600)
+        if show.returncode == 0:
+            subprocess.run(
+                ["hermes", "profile", "describe", profile_ref, "--text", description],
+                check=True,
+                stdin=subprocess.DEVNULL,
+            )
+        else:
+            subprocess.run(
+                [
+                    "hermes", "profile", "create", profile_ref,
+                    "--no-skills", "--no-alias", "--description", description,
+                ],
+                check=True,
+                stdin=subprocess.DEVNULL,
+            )
+        assert_named_directory(profiles_descriptor, profile_ref, profile_descriptor, "Profile")
+        environment = (
+            f"OPENAI_API_KEY={provider_key}\n"
+            f"OPENAI_BASE_URL={profile['provider_base_url']}\n"
+            f"LLM_MODEL={profile['model_id']}\n"
+        ).encode("utf-8")
+        atomic_write(profile_descriptor, ".env", environment, 0o600)
+    finally:
+        os.close(profile_descriptor)
+
+
+def remove_profile_directory(profiles_descriptor: int, profile_ref: str) -> None:
+    try:
+        descriptor = os.open(profile_ref, DIRECTORY_FLAGS, dir_fd=profiles_descriptor)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise InitializerError("Removed Profile directory cannot be opened safely") from error
+    try:
+        assert_named_directory(profiles_descriptor, profile_ref, descriptor, "Removed Profile")
+        try:
+            environment = os.stat(".env", dir_fd=descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            environment = None
+        if environment is not None:
+            validate_regular_file(environment, "Removed Profile environment", 0o600, MAX_SECRET_BYTES + 4_096)
+            os.unlink(".env", dir_fd=descriptor)
+            os.fsync(descriptor)
+        if os.listdir(descriptor):
+            raise InitializerError("Removed Profile directory is not empty")
+        assert_named_directory(profiles_descriptor, profile_ref, descriptor, "Removed Profile")
+    finally:
+        os.close(descriptor)
+    os.rmdir(profile_ref, dir_fd=profiles_descriptor)
+    os.fsync(profiles_descriptor)
 
 
 def initialize(bundle_path: Path, data_root: Path, manifest_path: Path, secret_root: Path) -> dict[str, object]:
-    bundle = validate_bundle(load_json(bundle_path))
+    bundle = validate_bundle(load_bundle(bundle_path))
     manifest = expected_manifest(bundle)
-    existing = existing_manifest_result(manifest_path, manifest)
-    if existing is not None:
-        return existing
-    prepared = [(profile, read_secret(secret_root, str(profile["provider_secret_file"])))
-                for profile in bundle["profiles"]]
-    for profile, provider_key in prepared:
-        configure_profile(data_root, profile, provider_key)
-    atomic_write(manifest_path, canonical_json(manifest) + b"\n", 0o644)
-    return manifest
+    normalized_data_root = Path(os.path.abspath(data_root))
+    expected_manifest_path = normalized_data_root / ".core-agent" / MANIFEST_NAME
+    if not manifest_path.is_absolute() or Path(os.path.abspath(manifest_path)) != expected_manifest_path:
+        raise InitializerError("Manifest path is outside the fixed data root")
+
+    data_descriptor, data_identity = open_root_directory(data_root, "Data root")
+    core_descriptor = -1
+    lock_descriptor = -1
+    profiles_descriptor = -1
+    secret_descriptor = -1
+    try:
+        core_descriptor = open_or_create_directory(data_descriptor, ".core-agent", "Core metadata")
+        lock_descriptor = open_lock(core_descriptor)
+        assert_root_directory(data_root, data_descriptor, data_identity, "Data root")
+        assert_named_directory(data_descriptor, ".core-agent", core_descriptor, "Core metadata")
+
+        existing = read_manifest(core_descriptor)
+        if existing == manifest:
+            return existing
+        if existing is not None:
+            if (
+                existing["bundle_version"] != manifest["bundle_version"]
+                or existing["tenant_id"] != manifest["tenant_id"]
+                or existing["runtime_id"] != manifest["runtime_id"]
+                or int(existing["generation"]) >= int(manifest["generation"])
+            ):
+                raise InitializerError("Existing manifest conflicts with this generation")
+
+        profiles_descriptor = open_or_create_directory(data_descriptor, "profiles", "Profiles")
+        secret_descriptor, secret_identity = open_root_directory(secret_root, "Provider secret root")
+        prepared = [
+            (profile, read_secret(
+                secret_descriptor,
+                secret_root,
+                secret_identity,
+                str(profile["provider_secret_file"]),
+            ))
+            for profile in bundle["profiles"]
+        ]
+        assert_root_directory(secret_root, secret_descriptor, secret_identity, "Provider secret root")
+
+        for profile, provider_key in prepared:
+            configure_profile(profiles_descriptor, profile, provider_key)
+
+        current_refs = {str(profile["hermes_profile_ref"]) for profile in bundle["profiles"]}
+        previous_refs = set()
+        if existing is not None:
+            previous_refs = {str(profile["hermes_profile_ref"]) for profile in existing["profiles"]}
+        for removed_ref in sorted(previous_refs - current_refs):
+            subprocess.run(
+                ["hermes", "profile", "delete", removed_ref, "--yes"],
+                check=True,
+                stdin=subprocess.DEVNULL,
+            )
+            remove_profile_directory(profiles_descriptor, removed_ref)
+
+        assert_root_directory(data_root, data_descriptor, data_identity, "Data root")
+        assert_named_directory(data_descriptor, ".core-agent", core_descriptor, "Core metadata")
+        assert_named_directory(data_descriptor, "profiles", profiles_descriptor, "Profiles")
+        atomic_write(core_descriptor, MANIFEST_NAME, canonical_json(manifest) + b"\n", MANIFEST_MODE)
+        return manifest
+    finally:
+        if secret_descriptor >= 0:
+            os.close(secret_descriptor)
+        if profiles_descriptor >= 0:
+            os.close(profiles_descriptor)
+        if lock_descriptor >= 0:
+            os.close(lock_descriptor)
+        if core_descriptor >= 0:
+            os.close(core_descriptor)
+        os.close(data_descriptor)
 
 
 def parse_arguments() -> argparse.Namespace:

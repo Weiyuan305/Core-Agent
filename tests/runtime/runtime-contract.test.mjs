@@ -170,13 +170,21 @@ test("development runtime is private and keeps state outside the image", () => {
   );
   assert.match(composeConfig, /cap_drop:\s*\n\s+- ALL/);
   assert.doesNotMatch(composeConfig, /docker\.sock/);
-});
-
-test("API server cannot start without an explicit key", () => {
+  assert.doesNotMatch(composeConfig, /^\s+command:/m);
+  assert.doesNotMatch(composeConfig, /API_SERVER_KEY/);
   assert.match(
     composeConfig,
-    /CORE_AGENT_API_SERVER_KEY:\?set CORE_AGENT_API_SERVER_KEY/
+    /    secrets:\n      - source: hermes_ingress\n        target: hermes_ingress/
   );
+  assert.match(
+    composeConfig,
+    /  hermes_ingress:\n    file: \$\{CORE_AGENT_HERMES_INGRESS_SECRET_FILE:\?set CORE_AGENT_HERMES_INGRESS_SECRET_FILE\}/
+  );
+});
+
+test("API server ingress is sourced only from the configured secret file", () => {
+  assert.match(composeConfig, /CORE_AGENT_HERMES_INGRESS_SECRET_FILE:\?set/);
+  assert.doesNotMatch(composeConfig, /CORE_AGENT_API_SERVER_KEY/);
 });
 
 test("CI validates runtime contracts without building or publishing images", async () => {
@@ -192,7 +200,7 @@ test("CI validates runtime contracts without building or publishing images", asy
   assert.match(workflow, /github\.event\.pull_request\.base\.sha \|\| github\.event\.before/);
   assert.match(
     workflow,
-    /^\s+CORE_AGENT_API_SERVER_KEY: ci-contract-test-only-not-a-secret-0000000000000000$/m
+    /^\s+CORE_AGENT_HERMES_INGRESS_SECRET_FILE: \/dev\/null$/m
   );
   assert.match(
     workflow,
@@ -224,4 +232,5 @@ test("CI validates runtime contracts without building or publishing images", asy
   ]);
   assert.doesNotMatch(workflow, /docker\s+build|docker\s+compose\s+up/i);
   assert.doesNotMatch(workflow, /\$\{\{\s*secrets\./i);
+  assert.doesNotMatch(workflow, /CORE_AGENT_API_SERVER_KEY/);
 });

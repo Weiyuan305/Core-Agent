@@ -3,15 +3,14 @@ name: core-agent-company-demo
 services:
   hermes:
     image: ${CORE_AGENT_HERMES_IMAGE:-core-agent/hermes-runtime:dev}
-    command:
-      - gateway
-      - run
     environment:
       API_SERVER_ENABLED: "true"
       API_SERVER_HOST: "0.0.0.0"
       API_SERVER_PORT: "8642"
-      API_SERVER_KEY: ${CORE_AGENT_API_SERVER_KEY:?set CORE_AGENT_API_SERVER_KEY}
       GATEWAY_MULTIPLEX_PROFILES: "true"
+    secrets:
+      - source: hermes_ingress
+        target: hermes_ingress
     ports:
       - "127.0.0.1:${CORE_AGENT_API_SERVER_PORT:-18642}:8642"
     volumes:
@@ -49,6 +48,10 @@ services:
 volumes:
   company-demo-hermes-data:
     name: core-agent-company-demo-hermes-data
+
+secrets:
+  hermes_ingress:
+    file: ${CORE_AGENT_HERMES_INGRESS_SECRET_FILE:?set CORE_AGENT_HERMES_INGRESS_SECRET_FILE}
 
 networks:
   core-agent-backplane:

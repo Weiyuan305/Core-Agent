@@ -41,5 +41,5 @@ jobs:
 
       - name: Validate Compose configuration
         env:
-          CORE_AGENT_API_SERVER_KEY: ci-contract-test-only-not-a-secret-0000000000000000
+          CORE_AGENT_HERMES_INGRESS_SECRET_FILE: /dev/null
         run: docker compose -f infra/hermes/compose.dev.yaml config --quiet
