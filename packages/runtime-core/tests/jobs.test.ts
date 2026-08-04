@@ -30,6 +30,7 @@ async function insertJob(): Promise<void> {
     tenant_id: "tenant_jobs", job_id: "job_1", job_kind: "dispatch_outbox", status: "queued",
     attempt_count: 0, max_attempts: 3, lease_owner: null, lease_expires_at: null,
     next_attempt_at: new Date(0), payload_ref: "payload_1", effect_state: "pre_effect",
+    runtime_command: null,
     last_error_summary: null, run_id: null, container_id: null,
     created_at: new Date("2026-08-03T00:00:00.000Z"), updated_at: new Date("2026-08-03T00:00:00.000Z"),
   }).execute();

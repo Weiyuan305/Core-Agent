@@ -9,7 +9,7 @@
     "check": "npm run build"
   },
   "dependencies": {
-    "@core-agent/contracts": "0.2.0",
+    "@core-agent/contracts": "0.3.0",
     "@core-agent/runtime-core": "0.1.0"
   }
 }

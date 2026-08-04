@@ -256,8 +256,34 @@ const RuntimeStatusChangedEventSchema = createEventBranch(
   },
 );
 
+function createRuntimeCommandAcceptedBranch<
+  const Command extends "start" | "stop" | "restart" | "delete",
+  const DesiredState extends "running" | "stopped" | "deleted",
+>(command: Command, desiredState: DesiredState) {
+  return createEventBranch(
+    "runtime.command_accepted",
+    {
+      container_id: OpaqueIdSchema,
+      command: Type.Literal(command),
+      desired_state: Type.Literal(desiredState),
+    },
+  );
+}
+
+const RuntimeCommandAcceptedEventBranches = [
+  createRuntimeCommandAcceptedBranch("start", "running"),
+  createRuntimeCommandAcceptedBranch("stop", "stopped"),
+  createRuntimeCommandAcceptedBranch("restart", "running"),
+  createRuntimeCommandAcceptedBranch("delete", "deleted"),
+] as const;
+
+export const RuntimeCommandAcceptedEventSchema = Type.Union(
+  [...RuntimeCommandAcceptedEventBranches],
+  { $id: "core-agent://v1/runtime-command-accepted-event" },
+);
+
 export const RuntimeEventSchema = Type.Union(
-  [RuntimeStatusChangedEventSchema],
+  [RuntimeStatusChangedEventSchema, ...RuntimeCommandAcceptedEventBranches],
   { $id: "core-agent://v1/runtime-event", "x-extensible-union": true },
 );
 
@@ -295,6 +321,7 @@ const ProductEventBranchSchemas = [
   ToolSucceededEventSchema,
   ToolFailedEventSchema,
   RuntimeStatusChangedEventSchema,
+  ...RuntimeCommandAcceptedEventBranches,
   ErrorReportedEventBranchSchema,
   MessageCreatedEventBranchSchema,
 ] as const;

@@ -203,6 +203,41 @@ test("provisionTenant rejects profile gaps, invalid identity authority, reserved
   assert.equal(await db.selectFrom("idempotency_records").selectAll().execute().then((rows) => rows.length), 0);
 });
 
+test("B2B provisioning requires at least one consultant profile", async () => {
+  const base = b2bRequest("tenant_empty_b2b");
+  const request = rehash({
+    ...base,
+    identity_graph: { ...base.identity_graph, profiles: [] },
+    profile_runtime_config: [],
+  });
+  await assert.rejects(
+    provisionTenant({ db, providerCatalog, imageLock }, {
+      tenantId: request.identity_graph.tenant.tenant_id,
+      requestId: "request_empty_b2b", traceId: "trace_empty_b2b",
+      actorId: "core_agent_provisioner", membershipId: "core_agent_provisioner_admin", effectiveRole: "admin",
+    }, request),
+    (error: unknown) => error instanceof DomainError && error.code === "INVALID_REQUEST",
+  );
+  assert.equal(await db.selectFrom("tenants").selectAll().execute().then((rows) => rows.length), 0);
+});
+
+test("provisioning validates the complete managed image lock before writing", async () => {
+  const request = b2bRequest("tenant_partial_image_lock");
+  const partialImageLock = {
+    ...imageLock,
+    platforms: { "linux/amd64": imageLock.platforms["linux/amd64"] },
+  };
+  await assert.rejects(
+    provisionTenant({ db, providerCatalog, imageLock: partialImageLock }, {
+      tenantId: request.identity_graph.tenant.tenant_id,
+      requestId: "request_partial_lock", traceId: "trace_partial_lock",
+      actorId: "core_agent_provisioner", membershipId: "core_agent_provisioner_admin", effectiveRole: "admin",
+    }, request),
+    (error: unknown) => error instanceof DomainError && error.code === "INVALID_REQUEST",
+  );
+  assert.equal(await db.selectFrom("tenants").selectAll().execute().then((rows) => rows.length), 0);
+});
+
 test("concurrent identical provisioning commands converge on one completed result", async () => {
   const request = b2bRequest("tenant_concurrent_a");
   const context = {
@@ -250,6 +285,13 @@ test("runtime commands use expected versions atomically, preserve volume, and re
   assert.equal(after.volume_ref, before.volume_ref);
   assert.equal(after.desired_state, "stopped");
   assert.equal(await db.selectFrom("worker_jobs").selectAll().execute().then((rows) => rows.length), 2);
+  const commandEvent = await db.selectFrom("product_events").select(["event_type", "payload"])
+    .where("tenant_id", "=", context.tenantId).where("event_id", "like", "event_runtime_command_%")
+    .executeTakeFirstOrThrow();
+  assert.deepEqual(commandEvent, {
+    event_type: "runtime.command_accepted",
+    payload: { container_id: first.runtime.container_id, command: "stop", desired_state: "stopped" },
+  });
   assert.equal(await db.selectFrom("product_events").selectAll().execute().then((rows) => rows.length), 2);
   assert.equal(await db.selectFrom("audit_events").selectAll().execute().then((rows) => rows.length), 2);
   assert.equal(await db.selectFrom("outbox").selectAll().execute().then((rows) => rows.length), 2);
@@ -269,6 +311,83 @@ test("runtime commands use expected versions atomically, preserve volume, and re
   assert.equal(unchanged.desired_state, "stopped");
   assert.equal(unchanged.volume_ref, before.volume_ref);
   assert.equal(await db.selectFrom("worker_jobs").selectAll().execute().then((rows) => rows.length), 2);
+});
+
+test("restart persists explicit durable reconcile intent while payload_ref remains the runtime", async () => {
+  const provisioning = b2bRequest("tenant_restart_intent");
+  const context = {
+    tenantId: provisioning.identity_graph.tenant.tenant_id,
+    requestId: "request_restart", traceId: "trace_restart",
+    actorId: "core_agent_provisioner" as const,
+    membershipId: "core_agent_provisioner_admin" as const,
+    effectiveRole: "admin" as const,
+  };
+  const accepted = await provisionTenant({ db, providerCatalog, imageLock }, context, provisioning);
+  const restart = withHash({
+    schema_version: 1 as const, idempotency_key: "idem_restart",
+    expected_resource_version: 1, command: "restart" as const,
+  });
+  await commandRuntime({ db }, context, restart);
+  const job = await db.selectFrom("worker_jobs").selectAll()
+    .where("tenant_id", "=", context.tenantId).where("job_kind", "=", "reconcile_runtime")
+    .executeTakeFirstOrThrow();
+  assert.equal((job as typeof job & { runtime_command?: string }).runtime_command, "restart");
+  assert.equal(job.payload_ref, accepted.runtime.container_id);
+});
+
+for (const terminalField of ["desired_state", "observed_state"] as const) {
+  test(`runtime command rejects terminal ${terminalField} before every write`, async () => {
+    const provisioning = b2bRequest(`tenant_terminal_${terminalField}`);
+    const context = {
+      tenantId: provisioning.identity_graph.tenant.tenant_id,
+      requestId: `request_terminal_${terminalField}`, traceId: `trace_terminal_${terminalField}`,
+      actorId: "core_agent_provisioner" as const,
+      membershipId: "core_agent_provisioner_admin" as const,
+      effectiveRole: "admin" as const,
+    };
+    const accepted = await provisionTenant({ db, providerCatalog, imageLock }, context, provisioning);
+    await db.updateTable("runtime_containers").set({ [terminalField]: "deleted", resource_version: 2 })
+      .where("tenant_id", "=", context.tenantId).where("container_id", "=", accepted.runtime.container_id).execute();
+    const command = withHash({
+      schema_version: 1 as const, idempotency_key: `idem_terminal_${terminalField}`,
+      expected_resource_version: 2, command: "start" as const,
+    });
+    await assert.rejects(
+      commandRuntime({ db }, context, command),
+      (error: unknown) => error instanceof DomainError && error.code === "INVALID_STATE_TRANSITION",
+    );
+    const runtime = await getTenantRuntime(db, context.tenantId, context.tenantId);
+    assert.equal(runtime.resource_version, 2);
+    assert.equal(runtime[terminalField], "deleted");
+    assert.equal(await db.selectFrom("worker_jobs").selectAll().execute().then((rows) => rows.length), 1);
+    assert.equal(await db.selectFrom("idempotency_records").selectAll().execute().then((rows) => rows.length), 1);
+  });
+}
+
+test("runtime command rejects unsafe expected resource versions before repository work", async () => {
+  const provisioning = b2bRequest("tenant_unsafe_version");
+  const context = {
+    tenantId: provisioning.identity_graph.tenant.tenant_id,
+    requestId: "request_unsafe_version", traceId: "trace_unsafe_version",
+    actorId: "core_agent_provisioner" as const,
+    membershipId: "core_agent_provisioner_admin" as const,
+    effectiveRole: "admin" as const,
+  };
+  await provisionTenant({ db, providerCatalog, imageLock }, context, provisioning);
+  for (const expected_resource_version of [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1]) {
+    const command = withHash({
+      schema_version: 1 as const, idempotency_key: `idem_unsafe_${expected_resource_version}`,
+      expected_resource_version, command: "stop" as const,
+    });
+    await assert.rejects(
+      commandRuntime({ db }, context, command),
+      (error: unknown) => error instanceof DomainError && error.code === "INVALID_REQUEST",
+    );
+  }
+  const runtime = await getTenantRuntime(db, context.tenantId, context.tenantId);
+  assert.equal(runtime.resource_version, 1);
+  assert.equal(await db.selectFrom("worker_jobs").selectAll().execute().then((rows) => rows.length), 1);
+  assert.equal(await db.selectFrom("idempotency_records").selectAll().execute().then((rows) => rows.length), 1);
 });
 
 test("runtime query returns the same generic not-found error for absent and cross-tenant paths", async () => {

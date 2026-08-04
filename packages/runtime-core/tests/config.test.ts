@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { loadProviderCatalog, loadRuntimeEnvironment } from "../src/index.js";
+import { loadProviderCatalog, loadRuntimeEnvironment, loadRuntimeImageLock } from "../src/index.js";
 
 const runtimeEnvironment = {
   CONTROL_PLANE_DATABASE_URL: "postgres://runtime:runtime@127.0.0.1/runtime",
@@ -137,4 +137,26 @@ test("provider catalog rejects duplicate IDs and invalid operational limits", ()
     () => loadProviderCatalog([{ ...provider, max_safe_retries: 4 }]),
     /max_safe_retries/,
   );
+});
+
+test("runtime image lock validation is closed, complete, and canonical", () => {
+  const valid = {
+    schemaVersion: 1,
+    repository: "managed/runtime",
+    tag: "v1",
+    platforms: {
+      "linux/amd64": { reference: `managed/runtime:v1@sha256:${"a".repeat(64)}` },
+      "linux/arm64": { reference: `managed/runtime:v1@sha256:${"b".repeat(64)}` },
+    },
+  };
+  assert.deepEqual(loadRuntimeImageLock(valid), valid);
+  for (const invalid of [
+    { ...valid, extra: true },
+    { ...valid, schemaVersion: 2 },
+    { ...valid, repository: "" },
+    { ...valid, tag: "" },
+    { ...valid, platforms: { "linux/amd64": valid.platforms["linux/amd64"] } },
+    { ...valid, platforms: { ...valid.platforms, "linux/arm64": { ...valid.platforms["linux/arm64"], extra: true } } },
+    { ...valid, platforms: { ...valid.platforms, "linux/arm64": { reference: `other/runtime:v1@sha256:${"b".repeat(64)}` } } },
+  ]) assert.throws(() => loadRuntimeImageLock(invalid), /Managed image lock is invalid/);
 });

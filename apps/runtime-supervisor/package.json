@@ -10,7 +10,7 @@
     "check": "npm run build && npm test"
   },
   "dependencies": {
-    "@core-agent/contracts": "0.2.0",
+    "@core-agent/contracts": "0.3.0",
     "@core-agent/runtime-core": "0.1.0",
     "dockerode": "5.0.1"
   },

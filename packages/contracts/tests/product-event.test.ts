@@ -64,6 +64,7 @@ const knownEvents = [
   { event_type: "tool.succeeded", payload: { tool_call_id: "tool_call_demo", tool_name: "eduapply.match", status: "succeeded", summary: "Matched" } },
   { event_type: "tool.failed", payload: { tool_call_id: "tool_call_demo", tool_name: "eduapply.match", status: "failed" } },
   { event_type: "runtime.status_changed", payload: { container_id: "container_demo", observed_state: "ready" } },
+  { event_type: "runtime.command_accepted", payload: { container_id: "container_demo", command: "restart", desired_state: "running" } },
   { event_type: "error.reported", payload: { error_id: "error_demo", code: "APPROVAL_REQUIRED", category: "authorization" } },
 ] as const;
 
@@ -75,8 +76,8 @@ test("accepts a typed message delta and rejects hidden reasoning", () => {
   assert.equal(validator.Check({ ...event, payload: { ...event.payload, chain_of_thought: "private" } }), false);
 });
 
-test("accepts all 21 approved event types across ten strict families", () => {
-  assert.equal(new Set(knownEvents.map(({ event_type }) => event_type)).size, 21);
+test("accepts all 22 approved event types across ten strict families", () => {
+  assert.equal(new Set(knownEvents.map(({ event_type }) => event_type)).size, 22);
   const validator = Schema.Compile(ProductEventSchema);
   for (const event of knownEvents) {
     assert.equal(validator.Check({ ...base, ...event }), true, event.event_type);
@@ -138,6 +139,22 @@ test("accepts the deliberately variable status event branches", () => {
       event_type: "runtime.status_changed",
       payload: { container_id: "container_demo", observed_state },
     }), true, `runtime.status_changed ${observed_state}`);
+  }
+});
+
+test("runtime command acceptance binds each command to its truthful desired state", () => {
+  const validator = Schema.Compile(ProductEventSchema);
+  for (const [command, desired_state] of [
+    ["start", "running"], ["restart", "running"], ["stop", "stopped"], ["delete", "deleted"],
+  ] as const) {
+    const event = {
+      ...base,
+      event_type: "runtime.command_accepted",
+      payload: { container_id: "container_demo", command, desired_state },
+    };
+    assert.equal(validator.Check(event), true, command);
+    const contradictoryState = desired_state === "running" ? "stopped" : "running";
+    assert.equal(validator.Check({ ...event, payload: { ...event.payload, desired_state: contradictoryState } }), false, command);
   }
 });
 

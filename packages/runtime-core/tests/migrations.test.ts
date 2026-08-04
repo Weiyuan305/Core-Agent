@@ -90,13 +90,19 @@ test.after(async () => {
   await db.destroy();
 });
 
-test("empty database migrates exactly to schema version 3", async () => {
+test("empty database migrates exactly to schema version 4 with durable runtime command intent", async () => {
   await applyMigrations(pool, migrationsDirectory);
 
+  assert.equal(EXPECTED_SCHEMA_VERSION, 4);
   assert.equal(await readSchemaVersion(db), EXPECTED_SCHEMA_VERSION);
   await assert.doesNotReject(assertSchemaVersion(db, EXPECTED_SCHEMA_VERSION));
-  await assert.rejects(assertSchemaVersion(db, 2), /ahead/);
-  await assert.rejects(assertSchemaVersion(db, 4), /behind/);
+  await assert.rejects(assertSchemaVersion(db, 3), /ahead/);
+  await assert.rejects(assertSchemaVersion(db, 5), /behind/);
+  const runtimeCommandColumn = await sql<{ column_name: string }>`
+    select column_name from information_schema.columns
+    where table_schema = 'public' and table_name = 'worker_jobs' and column_name = 'runtime_command'
+  `.execute(db);
+  assert.deepEqual(runtimeCommandColumn.rows, [{ column_name: "runtime_command" }]);
 });
 
 test("modified applied migrations are rejected by checksum", async () => {

@@ -2,6 +2,7 @@ import {
   assertSchemaVersion,
   DomainError,
   EXPECTED_SCHEMA_VERSION,
+  loadRuntimeImageLock,
   redactSummary,
   type ProviderCatalog,
   type Redactor,
@@ -28,25 +29,6 @@ export interface HealthDependencies {
   };
 }
 
-const repositoryPattern = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]{1,5})?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/;
-const imageTagPattern = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
-const imageDigestPattern = /^[a-f0-9]{64}$/;
-
-function exactRecord(value: unknown, keys: readonly string[]): asserts value is Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) {
-    throw new Error("Managed configuration is invalid");
-  }
-  const actual = Reflect.ownKeys(value);
-  if (
-    actual.length !== keys.length
-    || actual.some((key) => typeof key !== "string" || !keys.includes(key))
-    || keys.some((key) => {
-      const descriptor = Object.getOwnPropertyDescriptor(value, key);
-      return descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable;
-    })
-  ) throw new Error("Managed configuration is invalid");
-}
-
 function validateManagedConfiguration(providerCatalog: ProviderCatalog, imageLock: unknown): void {
   if (providerCatalog.entries.length < 1) throw new Error("Managed configuration is invalid");
   for (const provider of providerCatalog.entries) {
@@ -54,29 +36,7 @@ function validateManagedConfiguration(providerCatalog: ProviderCatalog, imageLoc
     for (const model of provider.model_ids) providerCatalog.require(provider.provider_config_id, model);
   }
 
-  exactRecord(imageLock, ["schemaVersion", "repository", "tag", "platforms"]);
-  if (
-    imageLock.schemaVersion !== 1
-    || typeof imageLock.repository !== "string"
-    || !repositoryPattern.test(imageLock.repository)
-    || typeof imageLock.tag !== "string"
-    || !imageTagPattern.test(imageLock.tag)
-  ) {
-    throw new Error("Managed configuration is invalid");
-  }
-  const expectedReferencePrefix = `${imageLock.repository}:${imageLock.tag}@sha256:`;
-  exactRecord(imageLock.platforms, ["linux/amd64", "linux/arm64"]);
-  for (const platform of ["linux/amd64", "linux/arm64"] as const) {
-    exactRecord(imageLock.platforms[platform], ["reference"]);
-    const reference = imageLock.platforms[platform].reference;
-    if (
-      typeof reference !== "string"
-      || !reference.startsWith(expectedReferencePrefix)
-      || !imageDigestPattern.test(reference.slice(expectedReferencePrefix.length))
-    ) {
-      throw new Error("Managed configuration is invalid");
-    }
-  }
+  loadRuntimeImageLock(imageLock);
 }
 
 function ownDataValue(value: unknown, key: string): unknown {

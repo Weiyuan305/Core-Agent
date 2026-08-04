@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.0 - 2026-08-04
+
+- Add the `runtime.command_accepted` ProductEvent branch with command-specific
+  desired-state bindings.
+
 ## 0.2.0 - 2026-08-03
 
 - Add bounded Message and CreateAgentRunRequest contracts plus the

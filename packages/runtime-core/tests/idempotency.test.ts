@@ -8,6 +8,7 @@ import { Pool } from "pg";
 import {
   applyMigrations,
   beginIdempotentCommand,
+  completeIdempotentCommand,
   createRuntimeDatabase,
   withTenantTransaction,
 } from "../src/index.js";
@@ -106,4 +107,27 @@ test("concurrent idempotency admission acquires one record and leaves one caller
     }),
   )));
   assert.deepEqual(admissions.map((admission) => admission.kind).sort(), ["acquired", "in_progress"]);
+});
+
+test("idempotency completion matches the admitted hash and operation", async () => {
+  const payloadHash = `sha256:${"d".repeat(64)}`;
+  await db.insertInto("idempotency_records").values({
+    tenant_id: "tenant_idempotency", idempotency_key: "idem_complete", payload_hash: payloadHash,
+    operation: "runtime.command", status: "in_progress", result_ref: null, response_json: null,
+    expires_at: new Date(Date.now() + 60_000), created_at: new Date(), updated_at: new Date(),
+  }).execute();
+  for (const mismatch of [
+    { payloadHash: `sha256:${"e".repeat(64)}`, operation: "runtime.command" },
+    { payloadHash, operation: "tenant.provision" },
+  ]) {
+    await assert.rejects(withTenantTransaction(db, "tenant_idempotency", (context) => (
+      completeIdempotentCommand(context, {
+        key: "idem_complete", ...mismatch, resultRef: "runtime_a", response: { accepted: true },
+      })
+    )), /INTERNAL_ERROR/);
+  }
+  const unchanged = await db.selectFrom("idempotency_records").select(["status", "response_json"])
+    .where("tenant_id", "=", "tenant_idempotency").where("idempotency_key", "=", "idem_complete")
+    .executeTakeFirstOrThrow();
+  assert.deepEqual(unchanged, { status: "in_progress", response_json: null });
 });

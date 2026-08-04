@@ -6,11 +6,12 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/server.js",
-    "test": "node --import tsx --test --test-concurrency=1 tests/*.test.ts",
+    "test": "node --import tsx --test --test-concurrency=1 tests/auth.test.ts tests/health.test.ts tests/lifecycle.test.ts",
+    "test:postgres": "node --import tsx --test --test-concurrency=1 tests/provisioning.test.ts tests/runtime.test.ts",
     "check": "npm run build && npm test"
   },
   "dependencies": {
-    "@core-agent/contracts": "0.2.0",
+    "@core-agent/contracts": "0.3.0",
     "@core-agent/runtime-core": "0.1.0",
     "fastify": "5.11.2",
     "kysely": "0.29.4",

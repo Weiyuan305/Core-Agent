@@ -40,3 +40,10 @@ test("canonical payload hashing rejects sparse arrays and has locale-independent
   const second = { "e\u0301": 2, "é": 1 };
   assert.equal(canonicalPayloadHash(first), canonicalPayloadHash(second));
 });
+
+test("canonical payload hashing allows only the protocol ingress reference exception", () => {
+  assert.doesNotThrow(() => canonicalPayloadHash({ ingress_secret_ref: "ingress_reference_a" }));
+  for (const key of ["provider_secret_ref", "arbitrary_secret_ref", "attacker_secret_ref", "password_secret_ref"]) {
+    assert.throws(() => canonicalPayloadHash({ [key]: "opaque-looking-value" }), /INVALID_REQUEST/);
+  }
+});

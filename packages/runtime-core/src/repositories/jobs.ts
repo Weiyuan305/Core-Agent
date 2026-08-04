@@ -10,8 +10,18 @@ export interface ClaimedJob {
   attemptCount: number;
   maxAttempts: number;
   payloadRef: string;
+  runtimeCommand: RuntimeCommandIntent | null;
   effectState: string;
   leaseExpiresAt: Date;
+}
+
+export const runtimeCommandIntents = ["start", "stop", "restart", "delete"] as const;
+export type RuntimeCommandIntent = (typeof runtimeCommandIntents)[number];
+
+function runtimeCommandIntent(value: string | null): RuntimeCommandIntent | null {
+  if (value === null) return null;
+  if (!runtimeCommandIntents.includes(value as RuntimeCommandIntent)) throw new Error("Stored runtime command intent is invalid");
+  return value as RuntimeCommandIntent;
 }
 
 export interface ClaimJobsInput {
@@ -53,7 +63,7 @@ export async function claimJobs(db: Kysely<RuntimeDatabase>, input: ClaimJobsInp
       lease_expires_at: leaseExpiresAt,
       updated_at: databaseNow,
     }).where("tenant_id", "=", input.tenantId).where("job_id", "in", jobIds)
-      .returning(["tenant_id", "job_id", "job_kind", "attempt_count", "max_attempts", "payload_ref", "effect_state", "lease_expires_at"])
+      .returning(["tenant_id", "job_id", "job_kind", "attempt_count", "max_attempts", "payload_ref", "runtime_command", "effect_state", "lease_expires_at"])
       .execute();
     return claimed.map((job) => ({
       tenantId: job.tenant_id,
@@ -62,6 +72,7 @@ export async function claimJobs(db: Kysely<RuntimeDatabase>, input: ClaimJobsInp
       attemptCount: job.attempt_count,
       maxAttempts: job.max_attempts,
       payloadRef: job.payload_ref,
+      runtimeCommand: runtimeCommandIntent(job.runtime_command),
       effectState: job.effect_state,
       leaseExpiresAt: job.lease_expires_at!,
     }));

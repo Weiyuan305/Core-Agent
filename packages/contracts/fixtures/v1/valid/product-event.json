@@ -11,7 +11,7 @@
     "trace_id": "trace_demo",
     "correlation_id": "correlation_demo",
     "causation_id": "causation_demo",
-    "event_type": "message.delta",
-    "payload": { "message_id": "message_demo", "delta": "Synthetic message" }
+    "event_type": "runtime.command_accepted",
+    "payload": { "container_id": "runtime_demo", "command": "restart", "desired_state": "running" }
   }
 }

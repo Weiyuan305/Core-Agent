@@ -7,9 +7,15 @@ import type { Kysely, Transaction } from "kysely";
 
 import type { RuntimeDatabase } from "../db/database.js";
 import { assertTenantId, type TenantTransaction } from "../db/transaction.js";
-import { beginIdempotentCommand, canonicalPayloadHash, DomainError } from "../domain/idempotency.js";
+import {
+  beginIdempotentCommand,
+  canonicalPayloadHash,
+  completeIdempotentCommand,
+  DomainError,
+} from "../domain/idempotency.js";
 import { appendAuditEvent, appendProductEvents } from "../repositories/events.js";
 import { ResourceRepositories } from "../repositories/index.js";
+import { safeContractInteger } from "../repositories/resources.js";
 import { deriveRuntimeContainerId, type ProvisioningContext } from "./provision-tenant.js";
 
 const idSchema = Type.String({ minLength: 1, maxLength: 255 });
@@ -18,7 +24,7 @@ export const RuntimeCommandRequestSchema = Type.Object({
   schema_version: Type.Literal(1),
   idempotency_key: idSchema,
   payload_hash: Type.String({ pattern: "^sha256:[a-f0-9]{64}$" }),
-  expected_resource_version: Type.Integer({ minimum: 1 }),
+  expected_resource_version: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER - 1 }),
   command: Type.Union([
     Type.Literal("start"), Type.Literal("stop"), Type.Literal("restart"), Type.Literal("delete"),
   ]),
@@ -132,7 +138,11 @@ export async function commandRuntime(
   if (!requestValidator.Check(input)) invalid("Runtime command does not satisfy its contract");
   const request = input as RuntimeCommandRequest;
   assertTenantId(context.tenantId);
-  if (request.expected_resource_version === Number.MAX_SAFE_INTEGER) invalid("Expected resource version cannot be incremented");
+  if (
+    !Number.isSafeInteger(request.expected_resource_version)
+    || request.expected_resource_version < 1
+    || request.expected_resource_version >= Number.MAX_SAFE_INTEGER
+  ) invalid("Expected resource version must be safely incrementable");
   if (request.payload_hash !== canonicalPayloadHash(payloadWithoutHash(request))) invalid("Payload hash does not match the canonical request");
 
   const tenantId = context.tenantId;
@@ -142,9 +152,11 @@ export async function commandRuntime(
     const now = dependencies.now?.() ?? new Date();
     const nowIso = now.toISOString();
     const tenantTransaction: TenantTransaction = { tenantId, trx };
-    const runtimeExists = await trx.selectFrom("runtime_containers").select("container_id")
-      .where("tenant_id", "=", tenantId).where("container_id", "=", containerId).executeTakeFirst();
-    if (runtimeExists === undefined) notFound();
+    const runtimeSnapshot = await trx.selectFrom("runtime_containers")
+      .select(["container_id", "resource_version", "desired_state", "observed_state"])
+      .where("tenant_id", "=", tenantId).where("container_id", "=", containerId)
+      .forUpdate().executeTakeFirst();
+    if (runtimeSnapshot === undefined) notFound();
     const admission = await beginIdempotentCommand<CommandRuntimeResponse>(tenantTransaction, {
       key: request.idempotency_key,
       payloadHash: request.payload_hash,
@@ -156,14 +168,17 @@ export async function commandRuntime(
       return admission.response;
     }
     if (admission.kind === "in_progress") throw new DomainError("IDEMPOTENCY_CONFLICT", "Runtime command is already in progress");
+    if (safeContractInteger(runtimeSnapshot.resource_version) !== request.expected_resource_version) {
+      throw new DomainError("RESOURCE_VERSION_CONFLICT", "Runtime version has changed");
+    }
+    if (runtimeSnapshot.desired_state === "deleted" || runtimeSnapshot.observed_state === "deleted") {
+      throw new DomainError("INVALID_STATE_TRANSITION", "Deleted runtime state is terminal");
+    }
 
     const runtimeRepository = new ResourceRepositories(dependencies.db).forTransaction(tenantTransaction).runtimes;
     const result = await runtimeRepository.updateDesiredState(containerId, targetState, request.expected_resource_version);
     if (result.kind === "not_found") notFound();
     if (result.kind === "version_conflict") throw new DomainError("RESOURCE_VERSION_CONFLICT", "Runtime version has changed");
-    const runtime = await runtimeRepository.find(containerId);
-    if (runtime === undefined) throw new DomainError("INTERNAL_ERROR", "Updated runtime could not be read");
-
     const jobId = deriveId("job_reconcile", tenantId, request.idempotency_key);
     const eventId = deriveId("event_runtime_command", tenantId, request.idempotency_key);
     const auditEventId = deriveId("audit_runtime_command", tenantId, request.idempotency_key);
@@ -171,18 +186,26 @@ export async function commandRuntime(
       tenant_id: tenantId, job_id: jobId, job_kind: "reconcile_runtime", status: "queued",
       attempt_count: 0, max_attempts: 5, lease_owner: null, lease_expires_at: null,
       next_attempt_at: now, payload_ref: containerId, effect_state: "pre_effect",
+      runtime_command: request.command,
       last_error_summary: null, run_id: null, container_id: containerId, created_at: now, updated_at: now,
     }).execute();
+    const eventBase = {
+      schema_version: 1 as const, event_id: eventId, occurred_at: nowIso,
+      tenant_id: tenantId, request_id: context.requestId, trace_id: context.traceId,
+      correlation_id: request.idempotency_key, causation_id: jobId,
+      event_type: "runtime.command_accepted" as const,
+    };
+    const commandEvent = request.command === "start"
+      ? { ...eventBase, payload: { container_id: containerId, command: "start" as const, desired_state: "running" as const } }
+      : request.command === "restart"
+        ? { ...eventBase, payload: { container_id: containerId, command: "restart" as const, desired_state: "running" as const } }
+        : request.command === "stop"
+          ? { ...eventBase, payload: { container_id: containerId, command: "stop" as const, desired_state: "stopped" as const } }
+          : { ...eventBase, payload: { container_id: containerId, command: "delete" as const, desired_state: "deleted" as const } };
     await appendProductEvents(tenantTransaction, {
       streamId: `runtime_${containerId}`,
       deliveryTarget: "internal_event_stream",
-      events: [{
-        schema_version: 1, event_id: eventId, occurred_at: nowIso,
-        tenant_id: tenantId, request_id: context.requestId, trace_id: context.traceId,
-        correlation_id: request.idempotency_key, causation_id: jobId,
-        event_type: "runtime.status_changed",
-        payload: { container_id: containerId, observed_state: runtime.observed_state },
-      }],
+      events: [commandEvent],
     });
     await appendAuditEvent(tenantTransaction, {
       schema_version: 1, audit_event_id: auditEventId, occurred_at: nowIso, tenant_id: tenantId,
@@ -195,11 +218,14 @@ export async function commandRuntime(
       schema_version: 1, status: "accepted",
       runtime: { container_id: containerId, resource_version: result.resource_version, desired_state: targetState },
     };
-    const completed = await trx.updateTable("idempotency_records").set({
-      status: "completed", result_ref: containerId, response_json: response, updated_at: now,
-    }).where("tenant_id", "=", tenantId).where("idempotency_key", "=", request.idempotency_key)
-      .where("status", "=", "in_progress").executeTakeFirst();
-    if (Number(completed.numUpdatedRows) !== 1) throw new DomainError("INTERNAL_ERROR", "Idempotency completion failed");
+    await completeIdempotentCommand(tenantTransaction, {
+      key: request.idempotency_key,
+      payloadHash: request.payload_hash,
+      operation: "runtime.command",
+      resultRef: containerId,
+      response,
+      updatedAt: now,
+    });
     return response;
   });
 }

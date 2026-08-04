@@ -108,7 +108,7 @@ After regenerating schemas and passing the compatibility check, append one exact
 ```bash
 npm run contracts:schemas
 npm run contracts:check
-npm exec -w @core-agent/contracts -- tsx scripts/check-compatibility.ts --accept-v1-release 0.2.0
+npm exec -w @core-agent/contracts -- tsx scripts/check-compatibility.ts --accept-v1-release 0.3.0
 ```
 
 The accept command refuses to overwrite an existing version and writes to

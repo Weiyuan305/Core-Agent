@@ -9,8 +9,14 @@ import { safeContractInteger } from "./resources.js";
 export interface AppendProductEventsInput {
   streamId: string;
   deliveryTarget: "internal_event_stream" | "webhook";
-  events: readonly Omit<ProductEvent, "sequence">[];
+  events: readonly ProductEventWithoutSequence[];
 }
+
+export type ProductEventWithoutSequence = ProductEvent extends infer Event
+  ? Event extends { sequence: number }
+    ? Omit<Event, "sequence">
+    : never
+  : never;
 
 export async function enqueueOutbox(
   context: TenantTransaction,

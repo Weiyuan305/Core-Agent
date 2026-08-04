@@ -4,6 +4,7 @@ export {
   type ProviderCatalog,
   type ProviderConfig,
 } from "./config/provider-catalog.js";
+export { loadRuntimeImageLock, type ManagedImageLock } from "./config/image-lock.js";
 export {
   createRuntimeDatabase,
   type NullableRuntimeBigInt,
@@ -47,16 +48,20 @@ export {
   type ClaimedJob,
   type ClaimJobsInput,
   type JobLeaseResult,
+  runtimeCommandIntents,
+  type RuntimeCommandIntent,
 } from "./repositories/jobs.js";
 export {
   appendProductEvents,
   appendAuditEvent,
   enqueueOutbox,
   type AppendProductEventsInput,
+  type ProductEventWithoutSequence,
 } from "./repositories/events.js";
 export {
   canonicalPayloadHash,
   beginIdempotentCommand,
+  completeIdempotentCommand,
   DomainError,
   type DependencyFailure,
   type IdempotencyAdmission,
@@ -110,7 +115,6 @@ export {
   deriveRuntimeContainerId,
   deriveRuntimeVolumeRef,
   provisionTenant,
-  type ManagedImageLock,
   type ProvisioningContext,
   type ProvisionTenantDependencies,
   type ProvisionTenantResponse,

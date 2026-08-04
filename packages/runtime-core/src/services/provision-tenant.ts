@@ -11,13 +11,19 @@ import Schema from "typebox/schema";
 import type { Kysely, Transaction } from "kysely";
 
 import type { ProviderCatalog } from "../config/provider-catalog.js";
+import { loadRuntimeImageLock } from "../config/image-lock.js";
 import type { RuntimeDatabase } from "../db/database.js";
 import { assertTenantId, type TenantTransaction } from "../db/transaction.js";
 import { appendAuditEvent, appendProductEvents } from "../repositories/events.js";
 import { ResourceRepositories } from "../repositories/index.js";
 import { SecretReferenceRepository } from "../repositories/secret-references.js";
 import { assertSecretReferenceId } from "../secrets/secret-store.js";
-import { beginIdempotentCommand, canonicalPayloadHash, DomainError } from "../domain/idempotency.js";
+import {
+  beginIdempotentCommand,
+  canonicalPayloadHash,
+  completeIdempotentCommand,
+  DomainError,
+} from "../domain/idempotency.js";
 
 const idSchema = Type.String({ minLength: 1, maxLength: 255 });
 const secretReferenceIdSchema = Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$" });
@@ -51,13 +57,6 @@ export interface ProvisioningContext {
   readonly actorId: "core_agent_provisioner";
   readonly membershipId: "core_agent_provisioner_admin";
   readonly effectiveRole: "admin";
-}
-
-export interface ManagedImageLock {
-  readonly schemaVersion: 1;
-  readonly repository: string;
-  readonly tag: string;
-  readonly platforms: Readonly<Record<"linux/amd64" | "linux/arm64", { readonly reference: string }>>;
 }
 
 export interface ProvisionTenantDependencies {
@@ -110,6 +109,9 @@ function assertUnique(values: readonly string[], label: string): void {
 
 function validateIdentityRequest(graph: IdentityGraph): void {
   if (validateIdentityGraph(graph).length > 0) invalid("Identity graph is inconsistent");
+  if (graph.tenant.tenant_mode === "b2b" && graph.profiles.length < 1) {
+    invalid("B2B provisioning requires a consultant profile");
+  }
   validateInitialMetadata(graph);
   if (graph.actors.some((actor) => actor.actor_kind !== "human")) invalid("Provisioning accepts human actors only");
   const clientResourceIds = [
@@ -169,17 +171,6 @@ function assertProvisioningResponse(
   ) throw new DomainError("INTERNAL_ERROR", "Stored provisioning response is invalid");
 }
 
-function imageReference(imageLock: unknown, platform: TenantProvisioningRequest["runtime"]["platform"]): string {
-  if (typeof imageLock !== "object" || imageLock === null || Array.isArray(imageLock)) invalid("Managed image lock is invalid");
-  const platforms = (imageLock as { platforms?: unknown }).platforms;
-  if (typeof platforms !== "object" || platforms === null || Array.isArray(platforms)) invalid("Managed image lock is invalid");
-  const entry = (platforms as Record<string, unknown>)[platform];
-  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) invalid("Managed image lock is invalid");
-  const reference = (entry as { reference?: unknown }).reference;
-  if (typeof reference !== "string") invalid("Managed image lock is invalid");
-  return reference;
-}
-
 function isRetryableSerializationFailure(error: unknown): boolean {
   return typeof error === "object" && error !== null
     && ["40001", "40P01"].includes(String((error as { code?: unknown }).code));
@@ -217,7 +208,13 @@ export async function provisionTenant(
   } catch {
     invalid("Managed provider, model, or secret reference is invalid");
   }
-  if (request.runtime.image_ref !== imageReference(dependencies.imageLock, request.runtime.platform)) {
+  let managedImageLock;
+  try {
+    managedImageLock = loadRuntimeImageLock(dependencies.imageLock);
+  } catch {
+    invalid("Managed image lock is invalid");
+  }
+  if (request.runtime.image_ref !== managedImageLock.platforms[request.runtime.platform].reference) {
     invalid("Runtime image is not the managed pinned image for the platform");
   }
   if (provider.credential_secret_ref === request.runtime.ingress_secret_ref) invalid("Secret references must have distinct purposes");
@@ -299,6 +296,7 @@ export async function provisionTenant(
       tenant_id: tenantId, job_id: jobId, job_kind: "provision_runtime", status: "queued",
       attempt_count: 0, max_attempts: 5, lease_owner: null, lease_expires_at: null,
       next_attempt_at: now, payload_ref: containerId, effect_state: "pre_effect",
+      runtime_command: null,
       last_error_summary: null, run_id: null, container_id: containerId, created_at: now, updated_at: now,
     }).execute();
     await appendProductEvents(tenantTransaction, {
@@ -323,11 +321,14 @@ export async function provisionTenant(
       tenant: { tenant_id: tenantId, resource_version: 1 },
       runtime: { container_id: containerId, resource_version: 1 },
     };
-    const completed = await trx.updateTable("idempotency_records").set({
-      status: "completed", result_ref: containerId, response_json: response, updated_at: now,
-    }).where("tenant_id", "=", tenantId).where("idempotency_key", "=", request.idempotency_key)
-      .where("status", "=", "in_progress").executeTakeFirst();
-    if (Number(completed.numUpdatedRows) !== 1) throw new DomainError("INTERNAL_ERROR", "Idempotency completion failed");
+    await completeIdempotentCommand(tenantTransaction, {
+      key: request.idempotency_key,
+      payloadHash: request.payload_hash,
+      operation,
+      resultRef: containerId,
+      response,
+      updatedAt: now,
+    });
     return response;
   });
 }

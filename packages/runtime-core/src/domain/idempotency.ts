@@ -134,3 +134,36 @@ export async function beginIdempotentCommand<T>(
   }
   return { kind: "in_progress" };
 }
+
+export async function completeIdempotentCommand(
+  context: TenantTransaction,
+  input: {
+    key: string;
+    payloadHash: string;
+    operation: string;
+    resultRef: string;
+    response: unknown;
+    updatedAt?: Date;
+  },
+): Promise<void> {
+  if (input.key.length < 1 || input.key.length > 255) throw new DomainError("INVALID_REQUEST", "Idempotency key is invalid");
+  if (!/^sha256:[a-f0-9]{64}$/.test(input.payloadHash)) throw new DomainError("INVALID_REQUEST", "Payload hash is invalid");
+  if (input.operation.length < 1 || input.operation.length > 200) throw new DomainError("INVALID_REQUEST", "Operation is invalid");
+  if (input.resultRef.length < 1 || input.resultRef.length > 500) throw new DomainError("INVALID_REQUEST", "Result reference is invalid");
+  const updatedAt = input.updatedAt ?? new Date();
+  if (!Number.isFinite(updatedAt.getTime())) throw new DomainError("INVALID_REQUEST", "Completion timestamp is invalid");
+  const completed = await context.trx.updateTable("idempotency_records").set({
+    status: "completed",
+    result_ref: input.resultRef,
+    response_json: input.response,
+    updated_at: updatedAt,
+  }).where("tenant_id", "=", context.tenantId)
+    .where("idempotency_key", "=", input.key)
+    .where("payload_hash", "=", input.payloadHash)
+    .where("operation", "=", input.operation)
+    .where("status", "=", "in_progress")
+    .executeTakeFirst();
+  if (Number(completed.numUpdatedRows) !== 1) {
+    throw new DomainError("INTERNAL_ERROR", "Idempotency completion did not match the admitted command");
+  }
+}

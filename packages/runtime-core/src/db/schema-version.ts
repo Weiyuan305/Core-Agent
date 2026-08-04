@@ -2,7 +2,7 @@ import type { Kysely } from "kysely";
 
 import type { RuntimeDatabase } from "./database.js";
 
-export const EXPECTED_SCHEMA_VERSION = 3;
+export const EXPECTED_SCHEMA_VERSION = 4;
 
 export async function readSchemaVersion(db: Kysely<RuntimeDatabase>): Promise<number> {
   const row = await db.selectFrom("core_agent_schema_migrations")
