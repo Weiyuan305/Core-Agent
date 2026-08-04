@@ -50,25 +50,39 @@ test("environment refuses public API binding and invalid ports", () => {
 });
 
 test("environment requires every server-managed value", () => {
-  const missing = { ...runtimeEnvironment };
-  delete missing.CONTROL_PLANE_WORKER_ID;
+  const requiredNames = [
+    "CONTROL_PLANE_DATABASE_URL",
+    "CONTROL_PLANE_BOOTSTRAP_KEY_FILE",
+    "CONTROL_PLANE_SECRET_ROOT",
+    "CONTROL_PLANE_SUPERVISOR_SOCKET",
+    "CONTROL_PLANE_PROVIDER_CATALOG_FILE",
+    "CONTROL_PLANE_WORKER_ID",
+  ] as const;
 
-  assert.throws(() => loadRuntimeEnvironment(missing), /CONTROL_PLANE_WORKER_ID is required/);
+  for (const name of requiredNames) {
+    const missing = { ...runtimeEnvironment };
+    delete missing[name];
+
+    assert.throws(() => loadRuntimeEnvironment(missing), new RegExp(`${name} is required`));
+  }
 });
 
 test("provider catalog parses server-managed provider allowlists", () => {
   assert.deepEqual(loadProviderCatalog([provider]), [provider]);
 });
 
-test("provider catalog rejects client-controlled protocols and models", () => {
+test("provider catalog rejects client-controlled protocols", () => {
   assert.throws(
     () => loadProviderCatalog([{
       ...provider,
       base_url: "http://169.254.169.254/latest",
-      model_ids: [""],
     }]),
     /HTTPS/,
   );
+});
+
+test("provider catalog rejects empty model allowlists", () => {
+  assert.throws(() => loadProviderCatalog([{ ...provider, model_ids: [""] }]), /model_ids/);
 });
 
 test("provider catalog rejects unsafe URLs without echoing untrusted values", () => {
@@ -76,8 +90,11 @@ test("provider catalog rejects unsafe URLs without echoing untrusted values", ()
     "https://user:password@api.example/v1",
     "https://api.example/v1#untrusted-fragment",
     "https://localhost/v1",
+    "https://localhost./v1",
+    "https://foo.localhost./v1",
     "https://169.254.169.254/latest",
     "https://[fe80::1]/v1",
+    "https://[::ffff:169.254.169.254]/latest",
   ];
 
   for (const baseUrl of unsafeUrls) {

@@ -36,15 +36,45 @@ function isIntegerInRange(value: unknown, minimum: number, maximum: number): val
   return typeof value === "number" && Number.isInteger(value) && value >= minimum && value <= maximum;
 }
 
-function isLinkLocalHostname(hostname: string): boolean {
-  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  const ipv4 = normalized.split(".");
+function canonicalizeHostname(hostname: string): string {
+  return hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.+$/, "");
+}
+
+function isLinkLocalIpv4(hostname: string): boolean {
+  const ipv4 = hostname.split(".");
   if (
     ipv4.length === 4
     && ipv4.every((part) => /^\d+$/.test(part))
+    && ipv4.every((part) => Number(part) <= 255)
     && Number(ipv4[0]) === 169
     && Number(ipv4[1]) === 254
   ) {
+    return true;
+  }
+
+  return false;
+}
+
+function isIpv4MappedLinkLocalIpv6(hostname: string): boolean {
+  const mappedIpv4 = hostname.match(/^::ffff:(.+)$/i)?.[1];
+  if (mappedIpv4 === undefined) {
+    return false;
+  }
+  if (isLinkLocalIpv4(mappedIpv4)) {
+    return true;
+  }
+
+  const hextets = mappedIpv4.split(":");
+  if (hextets.length !== 2 || !hextets.every((part) => /^[0-9a-f]{1,4}$/i.test(part))) {
+    return false;
+  }
+  const firstHextet = Number.parseInt(hextets[0]!, 16);
+  return (firstHextet >>> 8) === 169 && (firstHextet & 0xff) === 254;
+}
+
+function isLinkLocalHostname(hostname: string): boolean {
+  const normalized = canonicalizeHostname(hostname);
+  if (isLinkLocalIpv4(normalized) || isIpv4MappedLinkLocalIpv6(normalized)) {
     return true;
   }
 
@@ -73,8 +103,8 @@ function validateBaseUrl(value: unknown): string {
     || url.username.length > 0
     || url.password.length > 0
     || url.hash.length > 0
-    || url.hostname === "localhost"
-    || url.hostname.endsWith(".localhost")
+    || canonicalizeHostname(url.hostname) === "localhost"
+    || canonicalizeHostname(url.hostname).endsWith(".localhost")
     || isLinkLocalHostname(url.hostname)
   ) {
     throw catalogError("base_url must be an HTTPS URL without unsafe routing");
