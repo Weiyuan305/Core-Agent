@@ -293,3 +293,27 @@ test("sentinel scanner emits identifiers only when the complete output is sentin
     );
   }
 });
+
+test("sentinel scanner contains unreadable-directory errors without uncaught output", async () => {
+  const sentinel = "scanner-error-sentinel";
+  const controlByte = "\u001b";
+  const unreadableDirectory = join(temporaryDirectory, `unreadable-${sentinel}-${controlByte}`);
+  await mkdir(unreadableDirectory, { mode: 0o700 });
+  await chmod(unreadableDirectory, 0o000);
+
+  const result = await (async () => {
+    try {
+      return spawnSync(process.execPath, [scannerPath, sentinel, unreadableDirectory], {
+        cwd: repositoryRoot,
+      });
+    } finally {
+      await chmod(unreadableDirectory, 0o700);
+    }
+  })();
+
+  assert.equal(result.status, 2);
+  const output = Buffer.concat([result.stdout, result.stderr]);
+  assert.equal(output.includes(Buffer.from(sentinel)), false);
+  assert.equal(output.includes(Buffer.from(controlByte)), false);
+  assert.doesNotMatch(output.toString("utf8"), /node:internal|verify-no-secret|Error:/);
+});

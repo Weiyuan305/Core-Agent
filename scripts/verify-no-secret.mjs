@@ -4,9 +4,18 @@ import { basename, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const [sentinel, ...explicitArtifactPaths] = process.argv.slice(2);
-if (sentinel === undefined || sentinel.length === 0 || Buffer.byteLength(sentinel) > 1024) {
+try {
+  await main();
+} catch {
+  // Never delegate scanner failures to Node's uncaught-exception formatter.
   process.exitCode = 2;
-} else {
+}
+
+async function main() {
+  if (sentinel === undefined || sentinel.length === 0 || Buffer.byteLength(sentinel) > 1024) {
+    process.exitCode = 2;
+    return;
+  }
   const sentinelBuffer = Buffer.from(sentinel);
   const repositoryRoot = resolve(import.meta.dirname, "..");
   const tracked = trackedArtifactPaths(repositoryRoot);
@@ -85,9 +94,14 @@ async function collectArtifact(path, identifier, output) {
     process.exit(2);
   }
 
-  const directory = await opendir(path);
-  for await (const entry of directory) {
-    await collectArtifact(resolve(path, entry.name), resolve(identifier, entry.name), output);
+  try {
+    const directory = await opendir(path);
+    for await (const entry of directory) {
+      await collectArtifact(resolve(path, entry.name), resolve(identifier, entry.name), output);
+    }
+  } catch {
+    emitIdentifiers([basename(identifier)], sentinel, Buffer.from(sentinel));
+    process.exit(2);
   }
 }
 
