@@ -41,6 +41,19 @@ test("Dockerfile requires an externally resolved immutable base image", () => {
   );
 });
 
+test("product image has fixed initializer and gateway entrypoints", () => {
+  assert.match(dockerfile, /COPY infra\/hermes\/runtime\/initialize\.py \/opt\/core-agent\/initialize\.py/);
+  assert.match(dockerfile, /COPY infra\/hermes\/runtime\/gateway-entrypoint\.sh \/opt\/core-agent\/gateway-entrypoint\.sh/);
+  assert.match(dockerfile, /ENTRYPOINT \["\/opt\/core-agent\/gateway-entrypoint\.sh"\]/);
+  assert.match(dockerfile, /ENV API_SERVER_ENABLED=true/);
+  assert.match(dockerfile, /API_SERVER_HOST=0\.0\.0\.0/);
+  assert.match(dockerfile, /API_SERVER_PORT=8642/);
+  assert.match(dockerfile, /GATEWAY_MULTIPLEX_PROFILES=true/);
+  assert.match(dockerfile, /chown root:root \/opt\/core-agent\/initialize\.py \/opt\/core-agent\/gateway-entrypoint\.sh/);
+  assert.match(dockerfile, /chmod 0555 \/opt\/core-agent\/initialize\.py \/opt\/core-agent\/gateway-entrypoint\.sh/);
+  assert.doesNotMatch(dockerfile, /API_SERVER_KEY=/);
+});
+
 test("managed config starts with a deliberately narrow tool surface", () => {
   assert.equal(managedConfig, `gateway:
   multiplex_profiles: true
