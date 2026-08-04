@@ -198,6 +198,32 @@ export class WorkerRuntimeRepository {
     });
   }
 
+  public async markReconcileEffectDispatched(
+    job: RuntimeWorkerJobRef,
+    command: "start" | "stop" | "restart" | "delete",
+    targetCommandVersion: number,
+  ): Promise<boolean> {
+    return this.db.transaction().execute(async (trx) => {
+      const claimed = await trx.selectFrom("worker_jobs").select(["job_kind", "runtime_command", "target_command_version", "effect_state"])
+        .where("tenant_id", "=", job.tenantId).where("job_id", "=", job.jobId)
+        .where("lease_owner", "=", job.workerId).where("status", "=", "running")
+        .where("lease_expires_at", ">", sql<Date>`clock_timestamp()`).forUpdate().executeTakeFirst();
+      if (claimed === undefined || claimed.job_kind !== "reconcile_runtime" || claimed.runtime_command !== command
+        || claimed.target_command_version === null || safeContractInteger(claimed.target_command_version) !== targetCommandVersion
+        || claimed.effect_state !== "pre_effect") return false;
+      const runtime = await trx.selectFrom("runtime_containers").select("command_version")
+        .where("tenant_id", "=", job.tenantId).where("container_id", "=", job.runtimeId).forUpdate().executeTakeFirst();
+      if (runtime === undefined || !await ownsLease(trx, job) || safeContractInteger(runtime.command_version) !== targetCommandVersion) return false;
+      const result = await trx.updateTable("worker_jobs").set({ effect_state: "unsafe_to_replay", updated_at: this.now() })
+        .where("tenant_id", "=", job.tenantId).where("job_id", "=", job.jobId)
+        .where("job_kind", "=", "reconcile_runtime").where("runtime_command", "=", command)
+        .where("target_command_version", "=", String(targetCommandVersion)).where("effect_state", "=", "pre_effect")
+        .where("lease_owner", "=", job.workerId).where("status", "=", "running")
+        .where("lease_expires_at", ">", sql<Date>`clock_timestamp()`).executeTakeFirst();
+      return Number(result.numUpdatedRows) === 1;
+    });
+  }
+
   public async finishReconcile(job: RuntimeWorkerJobRef, command: "start" | "stop" | "restart" | "delete", targetCommandVersion: number, observation: RuntimeObservation): Promise<boolean> {
     return fencedTransaction(this.db, async (trx) => {
       await requireLease(trx, job, true);

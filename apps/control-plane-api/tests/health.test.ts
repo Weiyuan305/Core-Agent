@@ -8,6 +8,7 @@ import { ErrorEnvelopeSchema } from "@core-agent/contracts";
 import {
   createRedactor,
   DomainError,
+  EXPECTED_SCHEMA_VERSION,
   loadProviderCatalog,
   type StableDomainErrorCode,
   type RuntimeDatabase,
@@ -51,7 +52,7 @@ interface FakeDatabase {
   readonly statements: string[];
 }
 
-function fakeDatabase(schemaVersion = 4, failure?: Error): FakeDatabase {
+function fakeDatabase(schemaVersion = EXPECTED_SCHEMA_VERSION, failure?: Error): FakeDatabase {
   const statements: string[] = [];
   const client = {
     async query(sql: string) {

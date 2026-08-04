@@ -9,7 +9,6 @@ interface ClaimedJobBase {
   attemptCount: number;
   maxAttempts: number;
   payloadRef: string;
-  effectState: string;
   leaseExpiresAt: Date;
 }
 
@@ -17,9 +16,19 @@ export const workerJobKinds = ["provision_runtime", "reconcile_runtime", "execut
 export type WorkerJobKind = (typeof workerJobKinds)[number];
 export const runtimeCommandIntents = ["start", "stop", "restart", "delete"] as const;
 export type RuntimeCommandIntent = (typeof runtimeCommandIntents)[number];
+export const workerEffectStates = ["pre_effect", "unsafe_to_replay"] as const;
+export type WorkerEffectState = (typeof workerEffectStates)[number];
+export type ReconcileEffectState = WorkerEffectState;
+export type AgentRunEffectState = WorkerEffectState;
 export type ClaimedJob =
-  | (ClaimedJobBase & { jobKind: "reconcile_runtime"; runtimeCommand: RuntimeCommandIntent; targetCommandVersion: number })
-  | (ClaimedJobBase & { jobKind: Exclude<WorkerJobKind, "reconcile_runtime">; runtimeCommand: null; targetCommandVersion: null });
+  | (ClaimedJobBase & { jobKind: "reconcile_runtime"; runtimeCommand: RuntimeCommandIntent; targetCommandVersion: number; effectState: ReconcileEffectState })
+  | (ClaimedJobBase & { jobKind: "execute_agent_run"; runtimeCommand: null; targetCommandVersion: null; effectState: AgentRunEffectState })
+  | (ClaimedJobBase & { jobKind: "provision_runtime" | "dispatch_outbox"; runtimeCommand: null; targetCommandVersion: null; effectState: "pre_effect" });
+
+function workerEffectState(value: string): WorkerEffectState {
+  if (!workerEffectStates.includes(value as WorkerEffectState)) throw new Error("Stored worker job effect state is invalid");
+  return value as WorkerEffectState;
+}
 
 function runtimeCommandIntent(value: string | null): RuntimeCommandIntent {
   if (value === null) throw new Error("Stored worker job command intent is invalid");
@@ -86,16 +95,19 @@ export async function claimJobs(db: Kysely<RuntimeDatabase>, input: ClaimJobsInp
         attemptCount: job.attempt_count,
         maxAttempts: job.max_attempts,
         payloadRef: job.payload_ref,
-        effectState: job.effect_state,
         leaseExpiresAt: job.lease_expires_at!,
       };
+      const effectState = workerEffectState(job.effect_state);
       if (job.job_kind === "reconcile_runtime") {
         if (job.target_command_version === null) throw new Error("Stored reconcile target command version is invalid");
-        return { ...base, jobKind: "reconcile_runtime", runtimeCommand: runtimeCommandIntent(job.runtime_command), targetCommandVersion: safeTargetVersion(job.target_command_version) };
+        return { ...base, jobKind: "reconcile_runtime", runtimeCommand: runtimeCommandIntent(job.runtime_command), targetCommandVersion: safeTargetVersion(job.target_command_version), effectState };
       }
       if (job.runtime_command !== null) throw new Error("Stored worker job command intent is invalid");
       if (job.target_command_version !== null) throw new Error("Stored worker job target command version is invalid");
-      return { ...base, jobKind: nonReconcileJobKind(job.job_kind), runtimeCommand: null, targetCommandVersion: null };
+      const jobKind = nonReconcileJobKind(job.job_kind);
+      if (jobKind === "execute_agent_run") return { ...base, jobKind, runtimeCommand: null, targetCommandVersion: null, effectState };
+      if (effectState !== "pre_effect") throw new Error("Stored worker job effect state is invalid for job kind");
+      return { ...base, jobKind, runtimeCommand: null, targetCommandVersion: null, effectState };
     });
   });
 }
@@ -121,15 +133,21 @@ export async function claimPlatformWorkerJobs(
       const row = await trx.updateTable("worker_jobs").set({ status: "running", attempt_count: sql<number>`attempt_count + 1`, lease_owner: input.workerId, lease_expires_at: leaseExpiresAt, updated_at: databaseNow })
         .where("tenant_id", "=", candidate.tenant_id).where("job_id", "=", candidate.job_id)
         .returning(["tenant_id", "job_id", "job_kind", "attempt_count", "max_attempts", "payload_ref", "runtime_command", "target_command_version", "effect_state", "lease_expires_at"]).executeTakeFirstOrThrow();
-      const base: ClaimedJobBase = { tenantId: row.tenant_id, jobId: row.job_id, attemptCount: row.attempt_count, maxAttempts: row.max_attempts, payloadRef: row.payload_ref, effectState: row.effect_state, leaseExpiresAt: row.lease_expires_at! };
+      const base: ClaimedJobBase = { tenantId: row.tenant_id, jobId: row.job_id, attemptCount: row.attempt_count, maxAttempts: row.max_attempts, payloadRef: row.payload_ref, leaseExpiresAt: row.lease_expires_at! };
+      const effectState = workerEffectState(row.effect_state);
       if (row.job_kind === "reconcile_runtime") {
         if (row.target_command_version === null) throw new Error("Stored reconcile target command version is invalid");
-        claimed.push({ ...base, jobKind: "reconcile_runtime", runtimeCommand: runtimeCommandIntent(row.runtime_command), targetCommandVersion: safeTargetVersion(row.target_command_version) });
+        claimed.push({ ...base, jobKind: "reconcile_runtime", runtimeCommand: runtimeCommandIntent(row.runtime_command), targetCommandVersion: safeTargetVersion(row.target_command_version), effectState });
       }
       else {
         if (row.runtime_command !== null) throw new Error("Stored worker job command intent is invalid");
         if (row.target_command_version !== null) throw new Error("Stored worker job target command version is invalid");
-        claimed.push({ ...base, jobKind: nonReconcileJobKind(row.job_kind), runtimeCommand: null, targetCommandVersion: null });
+        const jobKind = nonReconcileJobKind(row.job_kind);
+        if (jobKind === "execute_agent_run") claimed.push({ ...base, jobKind, runtimeCommand: null, targetCommandVersion: null, effectState });
+        else {
+          if (effectState !== "pre_effect") throw new Error("Stored worker job effect state is invalid for job kind");
+          claimed.push({ ...base, jobKind, runtimeCommand: null, targetCommandVersion: null, effectState });
+        }
       }
     }
     return claimed;

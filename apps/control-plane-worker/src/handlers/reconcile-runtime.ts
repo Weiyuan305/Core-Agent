@@ -6,13 +6,15 @@ import type { HandlerResult } from "../dispatch-job.js";
 import { validatePrivateHermesOrigin } from "./provision-runtime.js";
 
 type RuntimeCommand = "start" | "stop" | "restart" | "delete";
-interface ReconcileJob { readonly tenantId: string; readonly jobId: string; readonly attemptCount: number; readonly maxAttempts: number; readonly targetCommandVersion: number; readonly command: RuntimeCommand }
+type ReconcileEffectState = "pre_effect" | "unsafe_to_replay";
+interface ReconcileJob { readonly tenantId: string; readonly jobId: string; readonly attemptCount: number; readonly maxAttempts: number; readonly targetCommandVersion: number; readonly command: RuntimeCommand; readonly effectState: ReconcileEffectState }
 interface ReconcileFacts { readonly tenantId: string; readonly runtimeId: string; readonly generation: number; readonly imageRef: string; readonly commandVersion: number; readonly observedState: string; readonly desiredState: string }
 export interface ReconcileRuntimePort {
   loadFacts(job: ReconcileJob): Promise<ReconcileFacts>;
   supervisor(request: SupervisorRequestV1, signal: AbortSignal): Promise<SupervisorResponseV1>;
   reprovision(job: ReconcileJob, signal: AbortSignal): Promise<SupervisorResponseV1>;
   isCurrent(job: ReconcileJob): Promise<boolean>;
+  markEffectDispatched(job: ReconcileJob): Promise<boolean>;
   succeed(job: ReconcileJob, response?: SupervisorResponseV1): Promise<boolean>;
   retry(job: ReconcileJob, summary: string): Promise<boolean>;
   fail(job: ReconcileJob, summary: string): Promise<boolean>;
@@ -56,10 +58,20 @@ function inspectionAllowsEffect(command: RuntimeCommand, response: Extract<Super
   if (command === "restart") return observation.exists && observation.lifecycle === "running";
   return observation.exists && ["created", "stopped"].includes(observation.lifecycle);
 }
-async function unhealthyRunningResult(port: ReconcileRuntimePort, job: ReconcileJob): Promise<HandlerResult> {
+async function unhealthyRunningResult(port: ReconcileRuntimePort, job: ReconcileJob, markDispatched = false): Promise<HandlerResult> {
   const text = "Supervisor reports the running runtime is not healthy";
-  if (job.attemptCount < job.maxAttempts) { await port.retry(job, text); return { kind: "retry", summary: text }; }
-  await port.fail(job, text); return { kind: "failed", summary: text };
+  if (markDispatched && !await port.markEffectDispatched(job)) return { kind: "failed", summary: "Worker job lease lost" };
+  if (job.attemptCount < job.maxAttempts) {
+    if (!await port.retry(job, text)) return { kind: "failed", summary: "Worker job lease lost" };
+    return { kind: "retry", summary: text };
+  }
+  if (!await port.fail(job, text)) return { kind: "failed", summary: "Worker job lease lost" };
+  return { kind: "failed", summary: text };
+}
+async function failClosedObservation(port: ReconcileRuntimePort, job: ReconcileJob): Promise<HandlerResult> {
+  const text = "Supervisor observation contradicts the dispatched runtime effect";
+  if (!await port.fail(job, text)) return { kind: "failed", summary: "Worker job lease lost" };
+  return { kind: "failed", summary: text };
 }
 
 export async function handleReconcileRuntime(port: ReconcileRuntimePort, job: ReconcileJob, signal: AbortSignal): Promise<HandlerResult> {
@@ -76,6 +88,13 @@ export async function handleReconcileRuntime(port: ReconcileRuntimePort, job: Re
       await port.fail(job, text); return { kind: "failed", summary: text };
     }
     if (!compatible(facts, inspected)) throw new Error("Supervisor inspect observation does not match stored runtime identity");
+    if (job.effectState === "unsafe_to_replay") {
+      if (!effectMatches(job.command, inspected)) return failClosedObservation(port, job);
+      if (inspected.observation.lifecycle === "running") validatePrivateHermesOrigin(inspected.observation.private_origin);
+      if (inspected.observation.lifecycle === "running" && inspected.observation.health !== "healthy") return unhealthyRunningResult(port, job);
+      if (!await port.succeed(job, inspected)) return { kind: "failed", summary: "Worker job lease lost" };
+      return { kind: "succeeded" };
+    }
     if (inspectionAlreadySatisfies(job.command, inspected)) {
       if (inspected.observation.lifecycle === "running") validatePrivateHermesOrigin(inspected.observation.private_origin);
       if (inspected.observation.lifecycle === "running" && inspected.observation.health !== "healthy") return unhealthyRunningResult(port, job);
@@ -97,7 +116,7 @@ export async function handleReconcileRuntime(port: ReconcileRuntimePort, job: Re
     }
     if (!compatible(facts, effected) || !effectMatches(job.command, effected)) throw new Error("Supervisor lifecycle observation does not match requested operation");
     if (effected.observation.lifecycle === "running") validatePrivateHermesOrigin(effected.observation.private_origin);
-    if (effected.observation.lifecycle === "running" && effected.observation.health !== "healthy") return unhealthyRunningResult(port, job);
+    if (effected.observation.lifecycle === "running" && effected.observation.health !== "healthy") return unhealthyRunningResult(port, job, true);
     if (!await port.succeed(job, effected)) return { kind: "failed", summary: "Worker job lease lost" };
     return { kind: "succeeded" };
   } catch (error) {

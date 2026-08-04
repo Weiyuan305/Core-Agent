@@ -92,6 +92,24 @@ health is `healthy` and whose private Hermes origin passes policy validation.
 `unknown`, `degraded`, and `unhealthy` running observations retry within the
 bounded attempt budget and eventually fail; they never advance readiness.
 
+An accepted running effect that is not yet healthy advances the durable
+reconcile job from `pre_effect` to `unsafe_to_replay` before retry. This phase
+does not mean the command is abandoned: it means the command's external effect
+was dispatched and subsequent attempts must use attempt-specific `inspect`
+operations only. A healthy running inspection completes start or restart;
+continued non-healthy running observations consume the bounded retry budget;
+removed or command-contradicting observations fail closed. Stop and delete use
+the same observe-only rule after marking, although their accepted effect
+normally already supplies a terminal observation.
+
+The phase mark and retry update are intentionally separate recoverable writes.
+A crash between them leaves an expired `running` job whose
+`unsafe_to_replay` value survives reclaim, preventing a stable Supervisor
+journal response from trapping restart in a replay loop. The identically named
+phase on `execute_agent_run` has a different job-kind contract: it records that
+the model execution boundary cannot be automatically replayed, not that a
+runtime lifecycle effect should be polled.
+
 ### Schema-v3 upgrade
 
 Schema v3 cannot distinguish a queued start from a queued restart because both
@@ -156,6 +174,8 @@ explicit `test:postgres` gate.
 - Supervisor, Worker, and their tests import the removed-runtime sentinel from
   the shared runtime-core contract so the absence representation cannot drift.
 - A running but non-healthy Hermes container is observable but is not ready.
+- Delayed health after restart or reprovision causes inspect-only recovery, not
+  a replay of the previously accepted lifecycle effect.
 - An upgrade may terminalize ambiguous active schema-v3 reconcile work; it will
   not rewrite completed history or execute a guessed command.
 

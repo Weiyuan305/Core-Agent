@@ -473,6 +473,39 @@ test("runtime command admission waits for the Worker runtime lock without blocki
   assert.deepEqual(stored, { runtime_command: "stop", target_command_version: "1" });
 });
 
+test("markReconcileEffectDispatched fences tenant lease command and current command version", async () => {
+  const provisioning = b2bRequest("tenant_effect_phase");
+  const context = { tenantId: provisioning.identity_graph.tenant.tenant_id, requestId: "request_effect_phase", traceId: "trace_effect_phase", actorId: "core_agent_provisioner" as const, membershipId: "core_agent_provisioner_admin" as const, effectiveRole: "admin" as const };
+  const accepted = await provisionTenant({ db, providerCatalog, imageLock }, context, provisioning);
+  await commandRuntime({ db }, context, withHash({ schema_version: 1 as const, idempotency_key: "idem_effect_restart", expected_resource_version: 1, command: "restart" as const }));
+  const row = await db.selectFrom("worker_jobs").select(["job_id", "target_command_version"]).where("tenant_id", "=", context.tenantId).where("job_kind", "=", "reconcile_runtime").executeTakeFirstOrThrow();
+  const provisionJob = await db.selectFrom("worker_jobs").select("job_id").where("tenant_id", "=", context.tenantId).where("job_kind", "=", "provision_runtime").executeTakeFirstOrThrow();
+  await db.updateTable("worker_jobs").set({ status: "running", lease_owner: "worker_effect", lease_expires_at: sql<Date>`clock_timestamp() + interval '30 seconds'` }).where("tenant_id", "=", context.tenantId).where("job_id", "=", row.job_id).execute();
+  await db.updateTable("worker_jobs").set({ status: "running", lease_owner: "worker_effect", lease_expires_at: sql<Date>`clock_timestamp() + interval '30 seconds'` }).where("tenant_id", "=", context.tenantId).where("job_id", "=", provisionJob.job_id).execute();
+  const repository = new WorkerRuntimeRepository(db, createRedactor([]));
+  const ref = { tenantId: context.tenantId, runtimeId: accepted.runtime.container_id, jobId: row.job_id, workerId: "worker_effect" };
+  const targetVersion = Number(row.target_command_version);
+
+  assert.equal(await repository.markReconcileEffectDispatched({ ...ref, tenantId: "tenant_other" }, "restart", targetVersion), false);
+  assert.equal(await repository.markReconcileEffectDispatched({ ...ref, workerId: "worker_other" }, "restart", targetVersion), false);
+  assert.equal(await repository.markReconcileEffectDispatched({ ...ref, jobId: provisionJob.job_id }, "restart", targetVersion), false);
+  assert.equal(await repository.markReconcileEffectDispatched(ref, "start", targetVersion), false);
+  assert.equal(await repository.markReconcileEffectDispatched(ref, "restart", targetVersion + 1), false);
+  assert.equal((await db.selectFrom("worker_jobs").select("effect_state").where("tenant_id", "=", context.tenantId).where("job_id", "=", row.job_id).executeTakeFirstOrThrow()).effect_state, "pre_effect");
+
+  assert.equal(await repository.markReconcileEffectDispatched(ref, "restart", targetVersion), true);
+  assert.equal((await db.selectFrom("worker_jobs").select("effect_state").where("tenant_id", "=", context.tenantId).where("job_id", "=", row.job_id).executeTakeFirstOrThrow()).effect_state, "unsafe_to_replay");
+  assert.equal(await repository.markReconcileEffectDispatched(ref, "restart", targetVersion), false);
+  assert.equal((await db.selectFrom("worker_jobs").select("effect_state").where("tenant_id", "=", context.tenantId).where("job_id", "=", row.job_id).executeTakeFirstOrThrow()).effect_state, "unsafe_to_replay");
+
+  await db.updateTable("worker_jobs").set({ effect_state: "pre_effect", lease_expires_at: sql<Date>`clock_timestamp() - interval '1 second'` }).where("tenant_id", "=", context.tenantId).where("job_id", "=", row.job_id).execute();
+  assert.equal(await repository.markReconcileEffectDispatched(ref, "restart", targetVersion), false);
+  await db.updateTable("worker_jobs").set({ lease_expires_at: sql<Date>`clock_timestamp() + interval '30 seconds'` }).where("tenant_id", "=", context.tenantId).where("job_id", "=", row.job_id).execute();
+  await commandRuntime({ db }, context, withHash({ schema_version: 1 as const, idempotency_key: "idem_effect_new_start", expected_resource_version: 2, command: "start" as const }));
+  assert.equal(await repository.markReconcileEffectDispatched(ref, "restart", targetVersion), false);
+  assert.equal((await db.selectFrom("worker_jobs").select("effect_state").where("tenant_id", "=", context.tenantId).where("job_id", "=", row.job_id).executeTakeFirstOrThrow()).effect_state, "pre_effect");
+});
+
 test("finishReconcile cannot complete as an old owner after its lease expires while waiting for a row lock", async () => {
   const provisioning = b2bRequest("tenant_finish_lock_expiry");
   const context = { tenantId: provisioning.identity_graph.tenant.tenant_id, requestId: "request_finish_lock_expiry", traceId: "trace_finish_lock_expiry", actorId: "core_agent_provisioner" as const, membershipId: "core_agent_provisioner_admin" as const, effectiveRole: "admin" as const };

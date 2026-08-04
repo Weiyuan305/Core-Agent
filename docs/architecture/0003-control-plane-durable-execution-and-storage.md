@@ -70,6 +70,28 @@ whole transaction, including runtime transitions, events, audit, and job
 completion. Transaction-stable `now()` is deliberately not used for this
 authorization decision because it can predate time spent waiting on a lock.
 
+`worker_jobs.effect_state` is interpreted by job kind rather than as one
+generic retry flag:
+
+- for `reconcile_runtime`, `pre_effect` permits one Supervisor lifecycle effect
+  or reprovision decision; `unsafe_to_replay` means an accepted effect has been
+  dispatched but its healthy terminal observation is still pending, so every
+  later claim is inspect-only;
+- for `execute_agent_run`, `unsafe_to_replay` retains its separate meaning that
+  an outbound model-call boundary was crossed and automatic execution replay is
+  prohibited;
+- provisioning and Outbox jobs do not claim an unsafe phase in Runtime v1.
+
+After an accepted reconcile effect returns a running but non-healthy
+observation, the Worker marks `unsafe_to_replay` before rescheduling. That mark
+locks the owned job and runtime rows and atomically fences tenant, job kind,
+lease owner/expiry, persisted command, target command version, and current
+runtime command version. If the Worker crashes after the mark but before retry,
+the expired running job is reclaimable with its inspect-only phase intact. If
+it loses the lease before the mark, it cannot write either the phase or retry
+state; the Supervisor journal remains the idempotency authority for an
+uncommitted replay attempt.
+
 Internal infrastructure jobs are distinct from the contract Task resource,
 which belongs to an Agent Run.
 
@@ -122,6 +144,8 @@ repeatedly require lower-level SQL escape hatches.
   runtime, while commands for other runtimes remain independent.
 - A stale Worker cannot publish a terminal transition after losing its lease,
   even when the loss happens while it waits for another row lock.
+- A reconciler never replays an accepted restart merely because readiness was
+  delayed; it observes the dispatched effect until healthy or bounded failure.
 - If a later workload justifies Redis or a broker, it must consume a committed
   Outbox and cannot become the resource authority.
 

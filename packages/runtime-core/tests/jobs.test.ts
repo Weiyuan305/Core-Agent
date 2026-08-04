@@ -106,6 +106,14 @@ test("claimed jobs discriminate reconcile command intent and fail closed on inva
     }
   }
 
+  await db.updateTable("worker_jobs").set({ next_attempt_at: new Date("2100-01-01T00:00:00.000Z") })
+    .where("tenant_id", "=", "tenant_jobs").where("job_id", "=", "job_1").execute();
+  await db.updateTable("worker_jobs").set({ status: "queued", lease_owner: null, lease_expires_at: null, next_attempt_at: new Date(0), effect_state: "unsafe_to_replay" })
+    .where("tenant_id", "=", "tenant_jobs").where("job_id", "=", "job_reconcile").execute();
+  const [observeOnly] = await claimJobs(db, { tenantId: "tenant_jobs", workerId: "worker_observe", limit: 1, leaseMs: 30_000 });
+  assert.equal(observeOnly?.jobKind, "reconcile_runtime");
+  if (observeOnly?.jobKind === "reconcile_runtime") assert.equal(observeOnly.effectState, "unsafe_to_replay");
+
   await db.schema.alterTable("worker_jobs").dropConstraint("worker_jobs_runtime_command_intent_check").execute();
   await db.updateTable("worker_jobs").set({
     status: "queued", lease_owner: null, lease_expires_at: null, next_attempt_at: new Date(0), runtime_command: "start",

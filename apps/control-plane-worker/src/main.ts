@@ -72,12 +72,13 @@ async function dispatchRuntimeJob(dependencies: WorkerDependencies, job: Claimed
       return response;
     },
     isCurrent: () => dependencies.repositories.runtimes.isCurrentCommand(ref, job.targetCommandVersion),
+    markEffectDispatched: () => dependencies.repositories.runtimes.markReconcileEffectDispatched(ref, job.runtimeCommand, job.targetCommandVersion),
     succeed: async (_job, response) => response?.outcome === "accepted"
       ? dependencies.repositories.runtimes.finishReconcile(ref, job.runtimeCommand, job.targetCommandVersion, response.observation)
       : dependencies.repositories.runtimes.completeSuperseded(ref),
     retry: async (_job, summary) => { const retry = nextAttempt(dependencies, job, summary); return dependencies.repositories.runtimes.retryJob(ref, retry.summary, retry.at); },
     fail: (_job, summary) => dependencies.repositories.runtimes.failRuntimeJob(ref, summary),
-  }, { tenantId: job.tenantId, jobId: job.jobId, attemptCount: job.attemptCount, maxAttempts: job.maxAttempts, targetCommandVersion: job.targetCommandVersion, command: job.runtimeCommand }, signal));
+  }, { tenantId: job.tenantId, jobId: job.jobId, attemptCount: job.attemptCount, maxAttempts: job.maxAttempts, targetCommandVersion: job.targetCommandVersion, command: job.runtimeCommand, effectState: job.effectState }, signal));
   if (job.jobKind === "dispatch_outbox") {
     await pollOutbox(dependencies);
     await completeJob(dependencies.db, { tenantId: job.tenantId, jobId: job.jobId, workerId: dependencies.workerId });
