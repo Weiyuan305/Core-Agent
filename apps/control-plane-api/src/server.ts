@@ -10,6 +10,7 @@ import {
   loadRuntimeEnvironment,
 } from "@core-agent/runtime-core";
 import type { FastifyBaseLogger } from "fastify";
+import type { FastifyInstance } from "fastify";
 import { Pool } from "pg";
 
 import { buildControlPlaneApp } from "./app.js";
@@ -46,8 +47,9 @@ export async function startControlPlaneServer(environment: NodeJS.ProcessEnv = p
   const pool = new Pool({ connectionString: configuration.databaseUrl });
   const db = createRuntimeDatabase(pool);
   const logger = createPinoLogger();
+  let app: FastifyInstance | undefined;
   try {
-    const app = await buildControlPlaneApp({
+    app = await buildControlPlaneApp({
       environment: configuration,
       db,
       providerCatalog: loadProviderCatalog(await readJson(configuration.providerCatalogFile)),
@@ -59,6 +61,7 @@ export async function startControlPlaneServer(environment: NodeJS.ProcessEnv = p
     await app.listen({ host: configuration.apiHost, port: configuration.apiPort });
     return app;
   } catch (error) {
+    await app?.close().catch(() => undefined);
     await db.destroy().catch(() => undefined);
     throw error;
   }

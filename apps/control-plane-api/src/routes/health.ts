@@ -28,7 +28,9 @@ export interface HealthDependencies {
   };
 }
 
-const immutableImagePattern = /^[A-Za-z0-9][A-Za-z0-9./:_-]{0,511}@sha256:[a-f0-9]{64}$/;
+const repositoryPattern = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]{1,5})?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/;
+const imageTagPattern = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
+const imageDigestPattern = /^[a-f0-9]{64}$/;
 
 function exactRecord(value: unknown, keys: readonly string[]): asserts value is Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) {
@@ -53,14 +55,25 @@ function validateManagedConfiguration(providerCatalog: ProviderCatalog, imageLoc
   }
 
   exactRecord(imageLock, ["schemaVersion", "repository", "tag", "platforms"]);
-  if (imageLock.schemaVersion !== 1 || typeof imageLock.repository !== "string" || typeof imageLock.tag !== "string") {
+  if (
+    imageLock.schemaVersion !== 1
+    || typeof imageLock.repository !== "string"
+    || !repositoryPattern.test(imageLock.repository)
+    || typeof imageLock.tag !== "string"
+    || !imageTagPattern.test(imageLock.tag)
+  ) {
     throw new Error("Managed configuration is invalid");
   }
+  const expectedReferencePrefix = `${imageLock.repository}:${imageLock.tag}@sha256:`;
   exactRecord(imageLock.platforms, ["linux/amd64", "linux/arm64"]);
   for (const platform of ["linux/amd64", "linux/arm64"] as const) {
     exactRecord(imageLock.platforms[platform], ["reference"]);
     const reference = imageLock.platforms[platform].reference;
-    if (typeof reference !== "string" || !immutableImagePattern.test(reference)) {
+    if (
+      typeof reference !== "string"
+      || !reference.startsWith(expectedReferencePrefix)
+      || !imageDigestPattern.test(reference.slice(expectedReferencePrefix.length))
+    ) {
       throw new Error("Managed configuration is invalid");
     }
   }

@@ -185,6 +185,24 @@ test("ready validates managed configuration without blocking on Supervisor or He
   assert.equal(unavailable.body.includes("extra"), false);
   await invalid.app.close();
   await invalid.database.db.destroy();
+
+  for (const imageLock of [
+    { ...validImageLock, repository: "" },
+    { ...validImageLock, tag: "" },
+    {
+      ...validImageLock,
+      platforms: {
+        ...validImageLock.platforms,
+        "linux/amd64": { reference: `other/runtime:v1@sha256:${"a".repeat(64)}` },
+      },
+    },
+  ]) {
+    const mismatched = await buildTestApp({ imageLock });
+    const mismatchedResponse = await mismatched.app.inject({ method: "GET", url: "/health/ready" });
+    assert.equal(mismatchedResponse.statusCode, 503);
+    await mismatched.app.close();
+    await mismatched.database.db.destroy();
+  }
 });
 
 test("bootstrap authentication derives server authority and enforces tenant scope", async () => {
@@ -200,6 +218,17 @@ test("bootstrap authentication derives server authority and enforces tenant scop
   });
   assert.equal(invalid.statusCode, 401);
   assert.equal(invalid.body.includes(bootstrapKey), false);
+
+  const duplicateAuthorization = await app.inject({
+    method: "POST",
+    url: "/internal/v1/test-auth",
+    headers: {
+      authorization: [`Bearer ${bootstrapKey}`, `Bearer ${bootstrapKey}`] as unknown as string,
+      "x-core-agent-tenant-id": "tenant_a",
+    },
+    payload: { ping: "ok" },
+  });
+  assert.equal(duplicateAuthorization.statusCode, 401);
 
   const authorized = await app.inject({
     method: "POST",
@@ -321,6 +350,10 @@ test("every DomainError maps to its exact non-leaking ErrorEnvelope status", () 
     assert.equal(mapped.envelope.category, category);
     assert.equal(mapped.envelope.code, code);
     assert.equal(mapped.envelope.message.includes("sentinel"), false);
+    assert.equal(
+      mapped.envelope.retryable,
+      code === "DEPENDENCY_UNAVAILABLE" || code === "DEPENDENCY_TIMEOUT",
+    );
     assert.equal(Schema.Compile(ErrorEnvelopeSchema).Check(mapped.envelope), true);
     assert.equal(mapped.internalError === undefined, code !== "INTERNAL_ERROR");
   }

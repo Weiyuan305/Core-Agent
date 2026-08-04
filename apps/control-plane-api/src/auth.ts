@@ -22,9 +22,43 @@ export interface ApiRequestContext {
 interface AuthenticationInput {
   readonly configuredDigest: Buffer;
   readonly headers: unknown;
+  readonly rawHeaders: unknown;
   readonly tenantScoped: boolean;
   readonly requestId: string;
   readonly traceId: string;
+}
+
+const headerNamePattern = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+
+function rawAuthorizationCount(rawHeaders: unknown): number {
+  if (!Array.isArray(rawHeaders) || Object.getPrototypeOf(rawHeaders) !== Array.prototype || rawHeaders.length % 2 !== 0) {
+    throw new DomainError("INVALID_REQUEST", "Raw request headers are invalid");
+  }
+  const keys = Reflect.ownKeys(rawHeaders);
+  if (
+    keys.length !== rawHeaders.length + 1
+    || keys.some((key) => key !== "length" && (typeof key !== "string" || !/^\d+$/.test(key)))
+  ) throw new DomainError("INVALID_REQUEST", "Raw request headers are invalid");
+
+  let authorizationCount = 0;
+  for (let index = 0; index < rawHeaders.length; index += 2) {
+    const nameDescriptor = Object.getOwnPropertyDescriptor(rawHeaders, String(index));
+    const valueDescriptor = Object.getOwnPropertyDescriptor(rawHeaders, String(index + 1));
+    if (
+      nameDescriptor === undefined
+      || valueDescriptor === undefined
+      || !("value" in nameDescriptor)
+      || !("value" in valueDescriptor)
+      || !nameDescriptor.enumerable
+      || !valueDescriptor.enumerable
+      || typeof nameDescriptor.value !== "string"
+      || typeof valueDescriptor.value !== "string"
+      || !headerNamePattern.test(nameDescriptor.value)
+      || /[\u0000\r\n]/u.test(valueDescriptor.value)
+    ) throw new DomainError("INVALID_REQUEST", "Raw request headers are invalid");
+    if (nameDescriptor.value.toLowerCase() === "authorization") authorizationCount += 1;
+  }
+  return authorizationCount;
 }
 
 function invalidKeyFile(): Error {
@@ -148,6 +182,9 @@ function ownHeader(headers: unknown, name: string): string | undefined {
 }
 
 export function authenticateBootstrapRequest(input: AuthenticationInput): ApiRequestContext {
+  if (rawAuthorizationCount(input.rawHeaders) !== 1) {
+    throw new DomainError("UNAUTHENTICATED", "Bootstrap authentication failed");
+  }
   const authorization = ownHeader(input.headers, "authorization");
   if (!verifyBootstrapKey(input.configuredDigest, authorization)) {
     throw new DomainError("UNAUTHENTICATED", "Bootstrap authentication failed");

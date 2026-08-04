@@ -96,9 +96,39 @@ test("bootstrap authentication rejects accessor-backed headers without invoking 
   assert.throws(() => authenticateBootstrapRequest({
     configuredDigest: digest,
     headers,
+    rawHeaders: ["Authorization", `Bearer ${validKey}`],
     tenantScoped: false,
     requestId: "request_a",
     traceId: "trace_a",
   }), /INVALID_REQUEST/);
   assert.equal(reads, 0);
+});
+
+test("bootstrap authentication requires one well-formed raw Authorization occurrence", async () => {
+  const fixture = await makeKeyFile();
+  const digest = await loadBootstrapKeyDigest(fixture.path);
+  const input = {
+    configuredDigest: digest,
+    headers: { authorization: `Bearer ${validKey}` },
+    tenantScoped: false,
+    requestId: "request_a",
+    traceId: "trace_a",
+  };
+
+  assert.equal(authenticateBootstrapRequest({
+    ...input,
+    rawHeaders: ["aUtHoRiZaTiOn", `Bearer ${validKey}`],
+  }).actorId, "core_agent_provisioner");
+
+  for (const rawHeaders of [
+    ["Authorization", `Bearer ${validKey}`, "authorization", `Bearer ${validKey}`],
+    ["Authorization"],
+    ["", `Bearer ${validKey}`],
+    ["Authorization", 1],
+  ]) {
+    assert.throws(
+      () => authenticateBootstrapRequest({ ...input, rawHeaders }),
+      /INVALID_REQUEST|UNAUTHENTICATED/,
+    );
+  }
 });

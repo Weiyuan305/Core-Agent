@@ -105,7 +105,8 @@ export function mapApiError(error: unknown, context: ApiErrorMappingContext): Ma
   try {
     if (error instanceof DomainError) {
       code = error.code;
-      retryable = error.retryable;
+      retryable = (code === "DEPENDENCY_UNAVAILABLE" || code === "DEPENDENCY_TIMEOUT")
+        && error.retryable === true;
     } else if (isFastifyInvalidRequest(error)) {
       code = "INVALID_REQUEST";
     }
