@@ -16,11 +16,16 @@ export interface RuntimeSupervisorClientOptions {
   readonly timeoutMs?: number;
 }
 
-function clientError(code: "DEPENDENCY_UNAVAILABLE" | "DEPENDENCY_TIMEOUT"): Error {
+export class RuntimeSupervisorDependencyError extends Error {
+  public readonly retryable = true;
+  public constructor(public readonly code: "DEPENDENCY_UNAVAILABLE" | "DEPENDENCY_TIMEOUT", message: string) { super(message); }
+}
+
+function clientError(code: "DEPENDENCY_UNAVAILABLE" | "DEPENDENCY_TIMEOUT"): RuntimeSupervisorDependencyError {
   const message = code === "DEPENDENCY_TIMEOUT"
     ? "Runtime Supervisor request did not complete in time"
     : "Runtime Supervisor transport is unavailable";
-  return new Error(`${code}: ${message}`);
+  return new RuntimeSupervisorDependencyError(code, `${code}: ${message}`);
 }
 
 export class RuntimeSupervisorClient {

@@ -41,18 +41,23 @@ export {
 } from "./repositories/secret-references.js";
 export {
   claimJobs,
+  claimPlatformWorkerJobs,
   heartbeatJob,
   completeJob,
   rescheduleJob,
   failJob,
   type ClaimedJob,
   type ClaimJobsInput,
+  type PlatformWorkerClaimInput,
   type JobLeaseResult,
   runtimeCommandIntents,
   type RuntimeCommandIntent,
   workerJobKinds,
   type WorkerJobKind,
 } from "./repositories/jobs.js";
+export { withRuntimeAdvisoryLock } from "./repositories/runtime-lock.js";
+export { WorkerRuntimeRepository, type RuntimeWorkerJobRef, type StoredProvisionFacts, type StoredProvisionProfile, type StoredReconcileFacts } from "./repositories/worker-runtime.js";
+export { claimOutboxWakeups, failOutbox, markOutboxDelivered, rescheduleOutbox, type ClaimedOutboxWakeup, type ClaimOutboxInput } from "./repositories/outbox.js";
 export {
   appendProductEvents,
   appendAuditEvent,
@@ -107,7 +112,7 @@ export {
   type SupervisorRequestV1,
   type SupervisorResponseV1,
 } from "./supervisor/contracts.js";
-export { RuntimeSupervisorClient, type RuntimeSupervisorClientOptions } from "./supervisor/client.js";
+export { RuntimeSupervisorClient, RuntimeSupervisorDependencyError, type RuntimeSupervisorClientOptions } from "./supervisor/client.js";
 export {
   FakeRuntimeSupervisorServer,
   type FakeRuntimeSupervisorServerOptions,

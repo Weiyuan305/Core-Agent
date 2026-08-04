@@ -291,6 +291,8 @@ export async function provisionTenant(
       health_status: "unknown", created_at: nowIso, updated_at: nowIso,
     };
     await repositories.runtimes.insert(runtime);
+    await trx.updateTable("runtime_containers").set({ runtime_platform: request.runtime.platform })
+      .where("tenant_id", "=", tenantId).where("container_id", "=", containerId).execute();
 
     const jobId = deriveId("job_provision", `${tenantId}:${request.idempotency_key}`);
     const eventId = deriveId("event_runtime", `${tenantId}:${request.idempotency_key}`);
@@ -300,6 +302,7 @@ export async function provisionTenant(
       attempt_count: 0, max_attempts: 5, lease_owner: null, lease_expires_at: null,
       next_attempt_at: now, payload_ref: containerId, effect_state: "pre_effect",
       runtime_command: null,
+      target_command_version: null,
       last_error_summary: null, run_id: null, container_id: containerId, created_at: now, updated_at: now,
     }).execute();
     await appendProductEvents(tenantTransaction, {

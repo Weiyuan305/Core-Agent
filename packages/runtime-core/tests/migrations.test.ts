@@ -90,25 +90,36 @@ test.after(async () => {
   await db.destroy();
 });
 
-test("empty database migrates exactly to schema version 4 with durable runtime command intent", async () => {
+test("empty database migrates exactly to schema version 5 with durable Worker facts", async () => {
   await applyMigrations(pool, migrationsDirectory);
 
-  assert.equal(EXPECTED_SCHEMA_VERSION, 4);
+  assert.equal(EXPECTED_SCHEMA_VERSION, 5);
   assert.equal(await readSchemaVersion(db), EXPECTED_SCHEMA_VERSION);
   await assert.doesNotReject(assertSchemaVersion(db, EXPECTED_SCHEMA_VERSION));
   await assert.rejects(assertSchemaVersion(db, 3), /ahead/);
-  await assert.rejects(assertSchemaVersion(db, 5), /behind/);
+  await assert.rejects(assertSchemaVersion(db, 6), /behind/);
   const runtimeCommandColumn = await sql<{ column_name: string }>`
     select column_name from information_schema.columns
     where table_schema = 'public' and table_name = 'worker_jobs' and column_name = 'runtime_command'
   `.execute(db);
   assert.deepEqual(runtimeCommandColumn.rows, [{ column_name: "runtime_command" }]);
+  const workerFactColumns = await sql<{ column_name: string }>`
+    select column_name from information_schema.columns
+    where table_schema = 'public' and (
+      (table_name = 'runtime_containers' and column_name = 'runtime_platform') or
+      (table_name = 'runtime_containers' and column_name = 'command_version') or
+      (table_name = 'worker_jobs' and column_name = 'target_command_version') or
+      (table_name = 'outbox' and column_name in ('lease_owner', 'lease_expires_at', 'last_error_summary'))
+    ) order by column_name
+  `.execute(db);
+  assert.deepEqual(workerFactColumns.rows.map((row) => row.column_name), ["command_version", "last_error_summary", "lease_expires_at", "lease_owner", "runtime_platform", "target_command_version"]);
 });
 
 test("version 4 terminalizes ambiguous legacy reconcile jobs and enforces the job-kind invariant", async () => {
   const legacyDirectory = await mkdtemp(join(tmpdir(), "core-agent-v3-migrations-"));
   await cp(migrationsDirectory, legacyDirectory, { recursive: true });
   await rm(join(legacyDirectory, "004_runtime_command_intent.sql"));
+  await rm(join(legacyDirectory, "005_worker_runtime_facts.sql"));
   try {
     await applyMigrations(pool, legacyDirectory);
     await seedTenant("tenant_upgrade");

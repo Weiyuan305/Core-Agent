@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type { RuntimeContainer } from "@core-agent/contracts";
 import Type, { type Static } from "typebox";
 import Schema from "typebox/schema";
-import type { Kysely, Transaction } from "kysely";
+import { sql, type Kysely, type Transaction } from "kysely";
 
 import type { RuntimeDatabase } from "../db/database.js";
 import { assertTenantId, type TenantTransaction } from "../db/transaction.js";
@@ -185,11 +185,15 @@ export async function commandRuntime(
     const jobId = deriveId("job_reconcile", tenantId, request.idempotency_key);
     const eventId = deriveId("event_runtime_command", tenantId, request.idempotency_key);
     const auditEventId = deriveId("audit_runtime_command", tenantId, request.idempotency_key);
+    const commandVersionRow = await trx.updateTable("runtime_containers").set({ command_version: sql`command_version + 1` })
+      .where("tenant_id", "=", tenantId).where("container_id", "=", containerId).returning("command_version").executeTakeFirstOrThrow();
+    const commandVersion = safeContractInteger(commandVersionRow.command_version);
     await trx.insertInto("worker_jobs").values({
       tenant_id: tenantId, job_id: jobId, job_kind: "reconcile_runtime", status: "queued",
       attempt_count: 0, max_attempts: 5, lease_owner: null, lease_expires_at: null,
       next_attempt_at: now, payload_ref: containerId, effect_state: "pre_effect",
       runtime_command: request.command,
+      target_command_version: commandVersion,
       last_error_summary: null, run_id: null, container_id: containerId, created_at: now, updated_at: now,
     }).execute();
     const eventBase = {

@@ -24,12 +24,13 @@ function findRepositoryQuerySafetyViolations(file: string, source: string): stri
       continue;
     }
 
+    const authorityMarker = source.slice(Math.max(0, start - 120), start).includes("@platform-worker-cross-tenant-claim");
     if (operation === "insertInto" && tenantOwnedTables.has(table)) {
       const values = readMethodCall(chain, "values");
       if (values === undefined || !hasTopLevelTenantId(values)) {
         violations.push(`${file}: ${table} insert is missing an explicit tenant_id value`);
       }
-    } else if (operation !== "insertInto" && tenantOwnedTables.has(table) && !/\.where\s*\(\s*["'](?:[a-z_][a-z0-9_]*\.)?tenant_id["']/i.test(chain)) {
+    } else if (operation !== "insertInto" && tenantOwnedTables.has(table) && !authorityMarker && !/\.where\s*\(\s*["'](?:[a-z_][a-z0-9_]*\.)?tenant_id["']/i.test(chain)) {
       violations.push(`${file}: ${table} query is missing a tenant_id predicate`);
     }
 

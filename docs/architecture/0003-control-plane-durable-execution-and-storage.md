@@ -36,6 +36,24 @@ and Transactional Outbox rows.
 - Runtime reconciliation compares database desired state with Supervisor
   observed state.
 
+Runtime v1 schema version 5 records three Worker-only durability facts:
+
+- `runtime_platform` reconstructs a complete Supervisor provision request. It
+  remains nullable only for legacy rows because an image digest does not prove
+  an OCI platform; the Worker fails those rows closed rather than guessing.
+- `command_version` and the reconcile job's `target_command_version` bind a
+  lifecycle effect to the latest accepted command independently of ordinary
+  resource-version increments caused by observed-state transitions. A
+  superseded job completes without issuing its stale external effect.
+- Outbox lease owner, expiry, and redacted error summary support bounded,
+  restart-safe PostgreSQL wakeup delivery. The platform Worker owns an explicit
+  cross-tenant scheduler claim for jobs and Outbox rows; every subsequent
+  resource operation restores the returned tenant scope.
+
+Schema-v4 active reconcile jobs lack a command-version binding and are failed
+closed during upgrade. Existing runtime platforms stay unknown for the same
+reason: neither command intent ordering nor CPU architecture is fabricated.
+
 Internal infrastructure jobs are distinct from the contract Task resource,
 which belongs to an Agent Run.
 

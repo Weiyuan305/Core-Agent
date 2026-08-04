@@ -18,8 +18,8 @@ export type WorkerJobKind = (typeof workerJobKinds)[number];
 export const runtimeCommandIntents = ["start", "stop", "restart", "delete"] as const;
 export type RuntimeCommandIntent = (typeof runtimeCommandIntents)[number];
 export type ClaimedJob =
-  | (ClaimedJobBase & { jobKind: "reconcile_runtime"; runtimeCommand: RuntimeCommandIntent })
-  | (ClaimedJobBase & { jobKind: Exclude<WorkerJobKind, "reconcile_runtime">; runtimeCommand: null });
+  | (ClaimedJobBase & { jobKind: "reconcile_runtime"; runtimeCommand: RuntimeCommandIntent; targetCommandVersion: number })
+  | (ClaimedJobBase & { jobKind: Exclude<WorkerJobKind, "reconcile_runtime">; runtimeCommand: null; targetCommandVersion: null });
 
 function runtimeCommandIntent(value: string | null): RuntimeCommandIntent {
   if (value === null) throw new Error("Stored worker job command intent is invalid");
@@ -34,6 +34,12 @@ function nonReconcileJobKind(value: string): Exclude<WorkerJobKind, "reconcile_r
 
 export interface ClaimJobsInput {
   tenantId: string;
+  workerId: string;
+  limit: number;
+  leaseMs: number;
+}
+
+export interface PlatformWorkerClaimInput {
   workerId: string;
   limit: number;
   leaseMs: number;
@@ -71,7 +77,7 @@ export async function claimJobs(db: Kysely<RuntimeDatabase>, input: ClaimJobsInp
       lease_expires_at: leaseExpiresAt,
       updated_at: databaseNow,
     }).where("tenant_id", "=", input.tenantId).where("job_id", "in", jobIds)
-      .returning(["tenant_id", "job_id", "job_kind", "attempt_count", "max_attempts", "payload_ref", "runtime_command", "effect_state", "lease_expires_at"])
+      .returning(["tenant_id", "job_id", "job_kind", "attempt_count", "max_attempts", "payload_ref", "runtime_command", "target_command_version", "effect_state", "lease_expires_at"])
       .execute();
     return claimed.map((job): ClaimedJob => {
       const base: ClaimedJobBase = {
@@ -84,12 +90,57 @@ export async function claimJobs(db: Kysely<RuntimeDatabase>, input: ClaimJobsInp
         leaseExpiresAt: job.lease_expires_at!,
       };
       if (job.job_kind === "reconcile_runtime") {
-        return { ...base, jobKind: "reconcile_runtime", runtimeCommand: runtimeCommandIntent(job.runtime_command) };
+        if (job.target_command_version === null) throw new Error("Stored reconcile target command version is invalid");
+        return { ...base, jobKind: "reconcile_runtime", runtimeCommand: runtimeCommandIntent(job.runtime_command), targetCommandVersion: safeTargetVersion(job.target_command_version) };
       }
       if (job.runtime_command !== null) throw new Error("Stored worker job command intent is invalid");
-      return { ...base, jobKind: nonReconcileJobKind(job.job_kind), runtimeCommand: null };
+      if (job.target_command_version !== null) throw new Error("Stored worker job target command version is invalid");
+      return { ...base, jobKind: nonReconcileJobKind(job.job_kind), runtimeCommand: null, targetCommandVersion: null };
     });
   });
+}
+
+/** Narrow scheduler authority for the platform Worker; all returned tenant IDs
+ * are read from committed rows and every later operation must restore scope. */
+export async function claimPlatformWorkerJobs(
+  db: Kysely<RuntimeDatabase>, input: PlatformWorkerClaimInput,
+): Promise<ClaimedJob[]> {
+  assertClaimInput({ ...input, tenantId: "platform_scheduler" });
+  const databaseNow = sql<Date>`now()`;
+  const leaseExpiresAt = sql<Date>`now() + ${input.leaseMs} * interval '1 millisecond'`;
+  return db.transaction().execute(async (trx) => {
+    // @platform-worker-cross-tenant-claim reviewed scheduler authority
+    const candidates = await trx.selectFrom("worker_jobs").select(["tenant_id", "job_id"])
+      .where("next_attempt_at", "<=", databaseNow).whereRef("attempt_count", "<", "max_attempts")
+      .where((expression) => expression.or([
+        expression("status", "in", ["queued", "retrying"]),
+        expression.and([expression("status", "=", "running"), expression("lease_expires_at", "<", databaseNow)]),
+      ])).orderBy("created_at").limit(input.limit).forUpdate().skipLocked().execute();
+    const claimed: ClaimedJob[] = [];
+    for (const candidate of candidates) {
+      const row = await trx.updateTable("worker_jobs").set({ status: "running", attempt_count: sql<number>`attempt_count + 1`, lease_owner: input.workerId, lease_expires_at: leaseExpiresAt, updated_at: databaseNow })
+        .where("tenant_id", "=", candidate.tenant_id).where("job_id", "=", candidate.job_id)
+        .returning(["tenant_id", "job_id", "job_kind", "attempt_count", "max_attempts", "payload_ref", "runtime_command", "target_command_version", "effect_state", "lease_expires_at"]).executeTakeFirstOrThrow();
+      const base: ClaimedJobBase = { tenantId: row.tenant_id, jobId: row.job_id, attemptCount: row.attempt_count, maxAttempts: row.max_attempts, payloadRef: row.payload_ref, effectState: row.effect_state, leaseExpiresAt: row.lease_expires_at! };
+      if (row.job_kind === "reconcile_runtime") {
+        if (row.target_command_version === null) throw new Error("Stored reconcile target command version is invalid");
+        claimed.push({ ...base, jobKind: "reconcile_runtime", runtimeCommand: runtimeCommandIntent(row.runtime_command), targetCommandVersion: safeTargetVersion(row.target_command_version) });
+      }
+      else {
+        if (row.runtime_command !== null) throw new Error("Stored worker job command intent is invalid");
+        if (row.target_command_version !== null) throw new Error("Stored worker job target command version is invalid");
+        claimed.push({ ...base, jobKind: nonReconcileJobKind(row.job_kind), runtimeCommand: null, targetCommandVersion: null });
+      }
+    }
+    return claimed;
+  });
+}
+
+function safeTargetVersion(value: string): number {
+  if (!/^\d+$/.test(value)) throw new Error("Stored reconcile target command version is invalid");
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 1) throw new Error("Stored reconcile target command version is invalid");
+  return number;
 }
 
 async function updateOwnedLease(

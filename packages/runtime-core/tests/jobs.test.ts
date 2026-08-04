@@ -5,7 +5,7 @@ import test from "node:test";
 
 import { Pool } from "pg";
 
-import { applyMigrations, claimJobs, completeJob, createRedactor, createRuntimeDatabase, failJob, heartbeatJob, retryDecision } from "../src/index.js";
+import { applyMigrations, claimJobs, claimPlatformWorkerJobs, completeJob, createRedactor, createRuntimeDatabase, failJob, heartbeatJob, retryDecision, withRuntimeAdvisoryLock } from "../src/index.js";
 
 const databaseUrl = process.env.CONTROL_PLANE_TEST_DATABASE_URL;
 if (databaseUrl === undefined || !new URL(databaseUrl).pathname.slice(1).startsWith("core_agent_")) {
@@ -53,6 +53,29 @@ test("concurrent workers claim a job once and reclaim only after lease expiry", 
   })).length, 1);
 });
 
+test("platform Worker claims eligible jobs across tenants without duplicate ownership", async () => {
+  await insertJob();
+  await db.insertInto("tenants").values({ tenant_id: "tenant_jobs_b", schema_version: 1, resource_version: 1, tenant_mode: "b2b", status: "active", display_name: "B", created_at: new Date(0), updated_at: new Date(0) }).execute();
+  await db.insertInto("worker_jobs").values({ tenant_id: "tenant_jobs_b", job_id: "job_b", job_kind: "dispatch_outbox", status: "queued", attempt_count: 0, max_attempts: 3, lease_owner: null, lease_expires_at: null, next_attempt_at: new Date(0), payload_ref: "payload_b", runtime_command: null, effect_state: "pre_effect", last_error_summary: null, run_id: null, container_id: null, created_at: new Date(1), updated_at: new Date(1) }).execute();
+  const [left, right] = await Promise.all([
+    claimPlatformWorkerJobs(db, { workerId: "platform_a", limit: 8, leaseMs: 30_000 }),
+    claimPlatformWorkerJobs(db, { workerId: "platform_b", limit: 8, leaseMs: 30_000 }),
+  ]);
+  assert.deepEqual(new Set([...left, ...right].map((job) => job.tenantId)), new Set(["tenant_jobs", "tenant_jobs_b"]));
+  assert.equal(left.length + right.length, 2);
+});
+
+test("runtime advisory lock serializes external work for one tenant runtime", async () => {
+  let active = 0; let maximum = 0;
+  const work = () => withRuntimeAdvisoryLock(db, "tenant_jobs", "runtime_1", async () => {
+    active += 1; maximum = Math.max(maximum, active);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    active -= 1;
+  });
+  await Promise.all([work(), work()]);
+  assert.equal(maximum, 1);
+});
+
 test("claimed jobs discriminate reconcile command intent and fail closed on invalid storage", async () => {
   await insertJob();
   await db.insertInto("runtime_containers").values({
@@ -67,6 +90,7 @@ test("claimed jobs discriminate reconcile command intent and fail closed on inva
     attempt_count: 0, max_attempts: 3, lease_owner: null, lease_expires_at: null,
     next_attempt_at: new Date(0), payload_ref: "runtime_1", effect_state: "pre_effect",
     runtime_command: "restart", last_error_summary: null, run_id: null, container_id: "runtime_1",
+    target_command_version: 1,
     created_at: new Date(1), updated_at: new Date(1),
   }).execute();
   const jobs = await claimJobs(db, { tenantId: "tenant_jobs", workerId: "worker_shapes", limit: 2, leaseMs: 30_000 });
@@ -74,9 +98,11 @@ test("claimed jobs discriminate reconcile command intent and fail closed on inva
     if (job.jobKind === "reconcile_runtime") {
       const intent: "start" | "stop" | "restart" | "delete" = job.runtimeCommand;
       assert.equal(intent, "restart");
+      assert.equal(job.targetCommandVersion, 1);
     } else {
       const noIntent: null = job.runtimeCommand;
       assert.equal(noIntent, null);
+      assert.equal(job.targetCommandVersion, null);
     }
   }
 
