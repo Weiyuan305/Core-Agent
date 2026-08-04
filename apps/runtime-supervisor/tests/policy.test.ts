@@ -24,7 +24,7 @@ function provisionData(overrides: Partial<ProvisionRuntimeCommandDataV1["runtime
       generation: 7,
       image_ref: amd64Image,
       platform: "linux/amd64",
-      volume_ref: "volume_a",
+      volume_ref: "core-agent-data-f7451a3e701c28c5",
       ingress_secret_ref: { reference_id: "ingress_a", version: 1, purpose: "hermes_ingress" },
       profiles: [{
         profile_id: "profile_a",
@@ -66,6 +66,7 @@ test("policy rejects duplicate profiles, unbounded labels descriptions and gener
     provisionData({ profiles: [{ ...profile, hermes_profile_ref: "UPPERCASE" }] }),
     provisionData({ profiles: [{ ...profile, description: "x".repeat(2_001) }] }),
     provisionData({ tenant_id: "tenant/unsafe" }),
+    provisionData({ volume_ref: "client_selected_volume" }),
     provisionData({ generation: 2_147_483_648 }),
   ];
   for (const data of invalid) {

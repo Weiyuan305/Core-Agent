@@ -1,0 +1,162 @@
+import assert from "node:assert/strict";
+import { chmod, lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import test from "node:test";
+
+import {
+  RuntimeSupervisorClient,
+  canonicalSupervisorRequestHash,
+  validateSupervisorRequest,
+  type SupervisorRequestV1,
+  type SupervisorResponseV1,
+} from "@core-agent/runtime-core";
+
+import { OperationJournal } from "../src/operation-journal.js";
+import { RuntimeSupervisorServer } from "../src/server.js";
+
+const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+const imageRef = `managed/runtime@sha256:${"a".repeat(64)}`;
+
+function request(operationId: string): SupervisorRequestV1 {
+  const data = {
+    protocol_version: 1 as const,
+    operation_id: operationId,
+    kind: "inspect" as const,
+    tenant_id: "tenant_a",
+    runtime_id: "runtime_a",
+    generation: 1,
+  };
+  return { ...data, request_hash: canonicalSupervisorRequestHash(data) };
+}
+
+function accepted(operationId: string): SupervisorResponseV1 {
+  return {
+    protocol_version: 1,
+    operation_id: operationId,
+    outcome: "accepted",
+    observation: {
+      tenant_id: "tenant_a",
+      runtime_id: "runtime_a",
+      generation: 1,
+      exists: true,
+      lifecycle: "running",
+      health: "healthy",
+      image_ref: imageRef,
+      private_origin: "http://172.30.0.7:8642",
+    },
+  };
+}
+
+let temporaryRoot: string;
+let socketPath: string;
+
+test.beforeEach(async () => {
+  temporaryRoot = await mkdtemp(join(repositoryRoot, ".supervisor-server-test-"));
+  socketPath = join(temporaryRoot, "supervisor.sock");
+});
+
+test.afterEach(async () => {
+  await rm(temporaryRoot, { recursive: true, force: true });
+});
+
+function buildServer(
+  execute: (request: SupervisorRequestV1, signal: AbortSignal) => Promise<SupervisorResponseV1>,
+  options: { operationTimeoutMs?: number; shutdownTimeoutMs?: number } = {},
+) {
+  return new RuntimeSupervisorServer({
+    socketPath,
+    journal: new OperationJournal({ directory: join(temporaryRoot, "journal") }),
+    validateRequest: validateSupervisorRequest,
+    execute,
+    ...options,
+  });
+}
+
+test("Unix service validates, journals, frames one response, and creates a 0660 socket", async () => {
+  let dispatches = 0;
+  const server = buildServer(async (value) => {
+    dispatches += 1;
+    return accepted(value.operation_id);
+  });
+  await server.start();
+  try {
+    assert.equal((await lstat(socketPath)).mode & 0o777, 0o660);
+    const client = new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 });
+    const first = await client.execute(request("operation_server_replay"));
+    const replay = await client.execute(request("operation_server_replay"));
+    assert.deepEqual(replay, first);
+    assert.equal(dispatches, 1);
+  } finally {
+    await server.close();
+  }
+});
+
+test("Unix service refuses unsafe parents and never unlinks a non-socket", async () => {
+  await chmod(temporaryRoot, 0o777);
+  await assert.rejects(buildServer(async (value) => accepted(value.operation_id)).start(), /SUPERVISOR_REJECTED/);
+  await chmod(temporaryRoot, 0o700);
+
+  await writeFile(socketPath, "preserve-me", { mode: 0o600 });
+  await assert.rejects(buildServer(async (value) => accepted(value.operation_id)).start(), /SUPERVISOR_REJECTED/);
+  assert.equal(await readFile(socketPath, "utf8"), "preserve-me");
+});
+
+test("Unix service caps execution at four and applies an aborting operation deadline", async () => {
+  let active = 0;
+  let maximum = 0;
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const capped = buildServer(async (value) => {
+    active += 1;
+    maximum = Math.max(maximum, active);
+    await released;
+    active -= 1;
+    return accepted(value.operation_id);
+  });
+  await capped.start();
+  try {
+    const client = new RuntimeSupervisorClient({ socketPath, timeoutMs: 2_000 });
+    const responses = Array.from({ length: 5 }, (_, index) => client.execute(request(`operation_cap_${index}`)));
+    const deadline = Date.now() + 1_000;
+    while (maximum < 4 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(maximum, 4);
+    assert.equal(active, 4);
+    release();
+    assert.equal((await Promise.all(responses)).every((item) => item.outcome === "accepted"), true);
+    assert.equal(maximum, 4);
+  } finally {
+    release();
+    await capped.close();
+  }
+
+  socketPath = join(temporaryRoot, "deadline.sock");
+  let aborted = false;
+  const timed = buildServer(async (value, signal) => {
+    await new Promise<void>((resolve) => {
+      signal.addEventListener("abort", () => {
+        aborted = true;
+        resolve();
+      }, { once: true });
+    });
+    return accepted(value.operation_id);
+  }, { operationTimeoutMs: 25, shutdownTimeoutMs: 100 });
+  await timed.start();
+  try {
+    const response = await new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 })
+      .execute(request("operation_deadline"));
+    assert.deepEqual(response, {
+      protocol_version: 1,
+      operation_id: "operation_deadline",
+      outcome: "failed",
+      code: "DEPENDENCY_TIMEOUT",
+      retryable: true,
+      summary: "Runtime Supervisor operation timed out",
+    });
+    assert.equal(aborted, true);
+  } finally {
+    await timed.close();
+  }
+});

@@ -1,0 +1,944 @@
+import { createHash, randomBytes } from "node:crypto";
+import { constants } from "node:fs";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  open,
+  rename,
+  rm,
+  type FileHandle,
+} from "node:fs/promises";
+import { dirname, join, resolve, sep } from "node:path";
+
+import type Dockerode from "dockerode";
+
+import {
+  validateSupervisorRequest,
+  type ProviderCatalog,
+  type RuntimeObservation,
+  type SecretReference,
+  type SecretStore,
+  type SupervisorRequestV1,
+  type SupervisorResponseV1,
+} from "@core-agent/runtime-core";
+
+import { deriveRuntimeNames, validateSupervisorPolicy } from "./policy.js";
+import {
+  BoundedDockerError,
+  dockerFailure,
+  redactDockerError,
+} from "./redact-docker-error.js";
+
+const requestHashPattern = /^sha256:[a-f0-9]{64}$/;
+const maximumInitializerWaitMs = 120_000;
+
+interface DockerContainerLike {
+  inspect(): Promise<unknown>;
+  start(): Promise<unknown>;
+  stop(options?: unknown): Promise<unknown>;
+  restart(options?: unknown): Promise<unknown>;
+  wait(options?: unknown): Promise<unknown>;
+  logs(options?: unknown): Promise<Buffer | NodeJS.ReadableStream>;
+  remove(options?: Dockerode.ContainerRemoveOptions): Promise<unknown>;
+}
+
+interface DockerResourceLike {
+  inspect(): Promise<unknown>;
+}
+
+export interface DockerClientLike {
+  getContainer(name: string): DockerContainerLike;
+  createContainer(options: Dockerode.ContainerCreateOptions): Promise<DockerContainerLike>;
+  getVolume(name: string): DockerResourceLike;
+  createVolume(options: Dockerode.VolumeCreateOptions): Promise<unknown>;
+  getNetwork(name: string): DockerResourceLike;
+  createNetwork(options: Dockerode.NetworkCreateOptions): Promise<unknown>;
+}
+
+export interface DockerRuntimeAdapterOptions {
+  readonly docker: DockerClientLike;
+  readonly secretStore: SecretStore;
+  readonly imageLock: unknown;
+  readonly providerCatalog: ProviderCatalog;
+  readonly stagingRoot: string;
+  readonly ingressRoot: string;
+  readonly initializerTimeoutMs?: number;
+}
+
+type RuntimeNames = ReturnType<typeof deriveRuntimeNames>;
+type ProvisionRuntimeCommandV1 = Extract<SupervisorRequestV1, { readonly kind: "provision" }>;
+type LifecycleRuntimeCommandV1 = Exclude<SupervisorRequestV1, ProvisionRuntimeCommandV1>;
+
+interface ExistingResource<T> {
+  readonly handle: T;
+  readonly inspection?: unknown;
+}
+
+function rejected(): Error {
+  return new Error("SUPERVISOR_REJECTED: Docker resource did not match managed runtime metadata");
+}
+
+function dataProperty(value: unknown, key: string): unknown {
+  if (typeof value !== "object" || value === null) throw rejected();
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) throw rejected();
+  return descriptor.value;
+}
+
+function optionalDataProperty(value: unknown, key: string): unknown {
+  if (typeof value !== "object" || value === null) throw rejected();
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (descriptor === undefined) return undefined;
+  if (!("value" in descriptor) || !descriptor.enumerable) throw rejected();
+  return descriptor.value;
+}
+
+function stringProperty(value: unknown, key: string): string {
+  const item = dataProperty(value, key);
+  if (typeof item !== "string") throw rejected();
+  return item;
+}
+
+function booleanProperty(value: unknown, key: string): boolean {
+  const item = dataProperty(value, key);
+  if (typeof item !== "boolean") throw rejected();
+  return item;
+}
+
+function exactStringRecord(value: unknown, expected: Readonly<Record<string, string>>): void {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw rejected();
+  const keys = Reflect.ownKeys(value);
+  const expectedKeys = Object.keys(expected);
+  if (keys.length !== expectedKeys.length || keys.some((key) => typeof key !== "string" || !expectedKeys.includes(key))) {
+    throw rejected();
+  }
+  for (const [key, expectedValue] of Object.entries(expected)) {
+    if (stringProperty(value, key) !== expectedValue) throw rejected();
+  }
+}
+
+function safeStringArray(value: unknown): readonly string[] {
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) throw rejected();
+  const result: string[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable || typeof descriptor.value !== "string") {
+      throw rejected();
+    }
+    result.push(descriptor.value);
+  }
+  return result;
+}
+
+function equalStringArrays(value: unknown, expected: readonly string[]): void {
+  const actual = safeStringArray(value);
+  if (actual.length !== expected.length || actual.some((item, index) => item !== expected[index])) throw rejected();
+}
+
+function exactEmptyRecord(value: unknown): void {
+  if (typeof value !== "object" || value === null || Array.isArray(value) || Reflect.ownKeys(value).length !== 0) {
+    throw rejected();
+  }
+}
+
+function exactNumberProperty(value: unknown, key: string, expected: number): void {
+  if (dataProperty(value, key) !== expected) throw rejected();
+}
+
+function isNotFound(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const descriptor = Object.getOwnPropertyDescriptor(error, "code")
+    ?? Object.getOwnPropertyDescriptor(error, "statusCode");
+  return descriptor !== undefined && "value" in descriptor && (descriptor.value === 404 || descriptor.value === "ENOENT");
+}
+
+async function inspectOptional<T extends DockerResourceLike>(handle: T): Promise<ExistingResource<T>> {
+  try {
+    return { handle, inspection: await handle.inspect() };
+  } catch (error) {
+    if (isNotFound(error)) return { handle };
+    throw redactDockerError(error);
+  }
+}
+
+function resourceDigest(...parts: readonly string[]): string {
+  const hash = createHash("sha256");
+  for (const part of parts) hash.update(part).update("\0");
+  return hash.digest("hex");
+}
+
+function operationInitializerName(containerName: string, operationId: string): string {
+  return `${containerName}-initializer-${createHash("sha256").update(operationId).digest("hex").slice(0, 12)}`;
+}
+
+function runtimeLabels(request: ProvisionRuntimeCommandV1, names: RuntimeNames): Readonly<Record<string, string>> {
+  return Object.freeze({
+    "core-agent.managed": "runtime-v1",
+    "core-agent.resource": "runtime",
+    "core-agent.protocol-version": "1",
+    "core-agent.tenant-id": request.runtime.tenant_id,
+    "core-agent.runtime-id": request.runtime.runtime_id,
+    "core-agent.generation": String(request.runtime.generation),
+    "core-agent.image-ref": request.runtime.image_ref,
+    "core-agent.volume": names.volume,
+    "core-agent.network": names.network,
+    "core-agent.request-hash": request.request_hash,
+  });
+}
+
+function volumeLabels(
+  request: ProvisionRuntimeCommandV1 | { readonly tenant_id: string; readonly runtime_id: string },
+  names: RuntimeNames,
+): Readonly<Record<string, string>> {
+  const identity = "runtime" in request ? request.runtime : request;
+  return Object.freeze({
+    "core-agent.managed": "runtime-v1",
+    "core-agent.resource": "runtime-volume",
+    "core-agent.tenant-id": identity.tenant_id,
+    "core-agent.runtime-id": identity.runtime_id,
+    "core-agent.volume": names.volume,
+  });
+}
+
+function networkLabels(names: RuntimeNames): Readonly<Record<string, string>> {
+  return Object.freeze({
+    "core-agent.managed": "runtime-v1",
+    "core-agent.resource": "backplane",
+    "core-agent.network": names.network,
+  });
+}
+
+async function ensurePrivateDirectory(path: string): Promise<void> {
+  await mkdir(path, { recursive: true, mode: 0o700 });
+  const metadata = await lstat(path, { bigint: true });
+  const uid = process.getuid?.();
+  if (
+    uid === undefined
+    || !metadata.isDirectory()
+    || metadata.uid !== BigInt(uid)
+    || (metadata.mode & 0o7777n) !== 0o700n
+  ) throw dockerFailure("DEPENDENCY_UNAVAILABLE", "Supervisor private directory is unsafe");
+}
+
+async function writeExclusive(path: string, value: string): Promise<void> {
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(
+      path,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
+    await handle.writeFile(value, { encoding: "utf8" });
+    await handle.sync();
+  } catch {
+    throw dockerFailure("DEPENDENCY_UNAVAILABLE", "Supervisor staged file could not be written");
+  } finally {
+    if (handle !== undefined) await handle.close().catch(() => undefined);
+  }
+}
+
+async function atomicPrivateWrite(directory: string, filename: string, value: string): Promise<string> {
+  await ensurePrivateDirectory(directory);
+  const temporaryName = `.pending-${randomBytes(16).toString("hex")}`;
+  const temporaryPath = join(directory, temporaryName);
+  const finalPath = join(directory, filename);
+  try {
+    await writeExclusive(temporaryPath, value);
+    await rename(temporaryPath, finalPath);
+    const directoryHandle = await open(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    try {
+      await directoryHandle.sync();
+    } finally {
+      await directoryHandle.close();
+    }
+    return finalPath;
+  } finally {
+    await rm(temporaryPath, { force: true }).catch(() => undefined);
+  }
+}
+
+async function writeSecretMaterial(store: SecretStore, reference: SecretReference, path: string): Promise<void> {
+  const material = await store.get(reference);
+  try {
+    await writeExclusive(path, material.text());
+  } finally {
+    material.release();
+  }
+}
+
+function exactInitializerOptions(
+  request: ProvisionRuntimeCommandV1,
+  names: RuntimeNames,
+  initializerName: string,
+  bundlePath: string,
+  secretDirectory: string,
+): Dockerode.ContainerCreateOptions {
+  return {
+    name: initializerName,
+    Image: request.runtime.image_ref,
+    Entrypoint: ["/opt/hermes/.venv/bin/python", "/opt/core-agent/initialize.py"],
+    Cmd: [
+      "--bundle", "/run/core-agent/bootstrap/bundle.json",
+      "--data-root", "/opt/data",
+      "--manifest", "/opt/data/.core-agent/manifest.json",
+    ],
+    Env: [],
+    Labels: { ...runtimeLabels(request, names), "core-agent.resource": "runtime-initializer" },
+    HostConfig: {
+      AutoRemove: false,
+      NetworkMode: "none",
+      ReadonlyRootfs: true,
+      CapDrop: ["ALL"],
+      SecurityOpt: ["no-new-privileges:true"],
+      Binds: [
+        `${names.volume}:/opt/data`,
+        `${bundlePath}:/run/core-agent/bootstrap/bundle.json:ro`,
+        `${secretDirectory}:/run/core-agent/secrets:ro`,
+      ],
+      Tmpfs: {
+        "/tmp": "rw,noexec,nosuid,nodev,size=64m,mode=1777",
+        "/run/core-agent/output": "rw,noexec,nosuid,nodev,size=16m,mode=0700",
+      },
+      Memory: 1_073_741_824,
+      NanoCpus: 1_000_000_000,
+      PidsLimit: 256,
+    },
+  };
+}
+
+function exactGatewayOptions(
+  request: ProvisionRuntimeCommandV1,
+  names: RuntimeNames,
+  ingressSecretPath: string,
+): Dockerode.ContainerCreateOptions {
+  return {
+    name: names.container,
+    Image: request.runtime.image_ref,
+    Entrypoint: ["/opt/core-agent/gateway-entrypoint.sh"],
+    Cmd: [],
+    Env: [
+      "API_SERVER_ENABLED=true",
+      "API_SERVER_HOST=0.0.0.0",
+      "API_SERVER_PORT=8642",
+      "GATEWAY_MULTIPLEX_PROFILES=true",
+    ],
+    Labels: { ...runtimeLabels(request, names) },
+    ExposedPorts: { "8642/tcp": {} },
+    HostConfig: {
+      NetworkMode: names.network,
+      PortBindings: {},
+      ReadonlyRootfs: true,
+      CapDrop: ["ALL"],
+      SecurityOpt: ["no-new-privileges:true"],
+      Binds: [
+        `${names.volume}:/opt/data`,
+        `${ingressSecretPath}:/run/secrets/hermes_ingress:ro`,
+      ],
+      Tmpfs: {
+        "/run": "rw,nosuid,nodev,size=64m,mode=0755,exec",
+        "/tmp": "rw,nosuid,nodev,size=256m,mode=1777",
+        "/var/tmp": "rw,nosuid,nodev,size=64m,mode=1777",
+      },
+      Memory: 4_294_967_296,
+      NanoCpus: 2_000_000_000,
+      PidsLimit: 512,
+      RestartPolicy: { Name: "unless-stopped" },
+    },
+    Healthcheck: {
+      Test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1:8642/health >/dev/null || exit 1"],
+      Interval: 10_000_000_000,
+      Timeout: 5_000_000_000,
+      Retries: 12,
+      StartPeriod: 30_000_000_000,
+    },
+  };
+}
+
+function exactManifestVerifierOptions(
+  request: ProvisionRuntimeCommandV1,
+  names: RuntimeNames,
+  verifierName: string,
+  outputDirectory: string,
+): Dockerode.ContainerCreateOptions {
+  const uid = process.getuid?.();
+  const gid = process.getgid?.();
+  if (uid === undefined || gid === undefined) throw rejected();
+  return {
+    name: verifierName,
+    Image: request.runtime.image_ref,
+    User: `${uid}:${gid}`,
+    Entrypoint: ["/opt/hermes/.venv/bin/python"],
+    Cmd: [
+      "-c",
+      "import os; from pathlib import Path; data=Path('/opt/data/.core-agent/manifest.json').read_bytes(); fd=os.open('/run/core-agent/output/manifest.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600); os.write(fd,data); os.fsync(fd); os.close(fd)",
+    ],
+    Env: [],
+    Labels: { ...runtimeLabels(request, names), "core-agent.resource": "runtime-manifest-verifier" },
+    HostConfig: {
+      AutoRemove: false,
+      NetworkMode: "none",
+      ReadonlyRootfs: true,
+      CapDrop: ["ALL"],
+      SecurityOpt: ["no-new-privileges:true"],
+      Binds: [
+        `${names.volume}:/opt/data:ro`,
+        `${outputDirectory}:/run/core-agent/output`,
+      ],
+      Tmpfs: { "/tmp": "rw,noexec,nosuid,nodev,size=16m,mode=1777" },
+      Memory: 134_217_728,
+      NanoCpus: 500_000_000,
+      PidsLimit: 32,
+    },
+  };
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
+}
+
+function expectedManifest(request: ProvisionRuntimeCommandV1): unknown {
+  const profiles = [...request.runtime.profiles]
+    .sort((left, right) => left.profile_id.localeCompare(right.profile_id))
+    .map((profile) => ({
+      profile_id: profile.profile_id,
+      hermes_profile_ref: profile.hermes_profile_ref,
+      description: profile.description,
+      provider_base_url: profile.provider_base_url,
+      model_id: profile.model_id,
+      provider_secret_file: `/run/core-agent/secrets/provider-${resourceDigest(profile.profile_id).slice(0, 32)}`,
+    }));
+  const fields = {
+    bundle_version: 1,
+    tenant_id: request.runtime.tenant_id,
+    runtime_id: request.runtime.runtime_id,
+    generation: request.runtime.generation,
+    image_ref: request.runtime.image_ref,
+    profiles,
+  };
+  return {
+    bundle_version: 1,
+    tenant_id: request.runtime.tenant_id,
+    runtime_id: request.runtime.runtime_id,
+    generation: request.runtime.generation,
+    image_ref: request.runtime.image_ref,
+    profiles: profiles.map(({ profile_id, hermes_profile_ref }) => ({ profile_id, hermes_profile_ref })),
+    bundle_hash: `sha256:${createHash("sha256").update(canonicalJson(fields)).digest("hex")}`,
+  };
+}
+
+async function readPrivateManifest(path: string): Promise<unknown> {
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const before = await handle.stat({ bigint: true });
+    const uid = process.getuid?.();
+    if (
+      uid === undefined
+      || !before.isFile()
+      || before.uid !== BigInt(uid)
+      || (before.mode & 0o7777n) !== 0o600n
+      || before.size < 1n
+      || before.size > 65_536n
+    ) throw rejected();
+    const bytes = Buffer.alloc(Number(before.size));
+    let offset = 0;
+    while (offset < bytes.length) {
+      const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
+      if (bytesRead === 0) throw rejected();
+      offset += bytesRead;
+    }
+    const after = await handle.stat({ bigint: true });
+    const pathMetadata = await lstat(path, { bigint: true });
+    if (
+      before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size
+      || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs
+      || before.dev !== pathMetadata.dev || before.ino !== pathMetadata.ino
+    ) throw rejected();
+    return JSON.parse(bytes.toString("utf8")) as unknown;
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("SUPERVISOR_REJECTED:")) throw error;
+    throw rejected();
+  } finally {
+    if (handle !== undefined) await handle.close().catch(() => undefined);
+  }
+}
+
+function validateManifest(value: unknown, request: ProvisionRuntimeCommandV1): void {
+  if (canonicalJson(value) !== canonicalJson(expectedManifest(request))) throw rejected();
+}
+
+function validateVolumeInspection(
+  value: unknown,
+  request: ProvisionRuntimeCommandV1 | { readonly tenant_id: string; readonly runtime_id: string },
+  names: RuntimeNames,
+): void {
+  if (stringProperty(value, "Name") !== names.volume) throw rejected();
+  exactStringRecord(dataProperty(value, "Labels"), volumeLabels(request, names));
+  // Deliberately do not read Docker's volume Mountpoint/host-path field.
+}
+
+function validateNetworkInspection(value: unknown, names: RuntimeNames): void {
+  if (
+    stringProperty(value, "Name") !== names.network
+    || stringProperty(value, "Driver") !== "bridge"
+    || booleanProperty(value, "Internal") !== true
+    || booleanProperty(value, "Attachable") !== false
+  ) throw rejected();
+  exactStringRecord(dataProperty(value, "Labels"), networkLabels(names));
+}
+
+function validateGatewayInspection(
+  value: unknown,
+  request: ProvisionRuntimeCommandV1 | undefined,
+  identity: { readonly tenant_id: string; readonly runtime_id: string; readonly generation: number },
+  names: RuntimeNames,
+  ingressPath: string,
+): RuntimeObservation {
+  if (stringProperty(value, "Name") !== `/${names.container}`) throw rejected();
+  const config = dataProperty(value, "Config");
+  const labels = dataProperty(config, "Labels");
+  const requestHash = request === undefined
+    ? stringProperty(labels, "core-agent.request-hash")
+    : request.request_hash;
+  if (!requestHashPattern.test(requestHash)) throw rejected();
+  const imageRef = request === undefined
+    ? stringProperty(labels, "core-agent.image-ref")
+    : request.runtime.image_ref;
+  const expectedLabels = runtimeLabels({
+    protocol_version: 1,
+    operation_id: request?.operation_id ?? "lifecycle_adoption",
+    kind: "provision",
+    request_hash: requestHash,
+    runtime: {
+      ...identity,
+      image_ref: imageRef,
+      platform: "linux/amd64",
+      volume_ref: names.volume,
+      ingress_secret_ref: { reference_id: "placeholder", version: 1, purpose: "hermes_ingress" },
+      profiles: [],
+    },
+  }, names);
+  exactStringRecord(labels, expectedLabels);
+  if (stringProperty(config, "Image") !== imageRef) throw rejected();
+  equalStringArrays(dataProperty(config, "Env"), [
+    "API_SERVER_ENABLED=true",
+    "API_SERVER_HOST=0.0.0.0",
+    "API_SERVER_PORT=8642",
+    "GATEWAY_MULTIPLEX_PROFILES=true",
+  ]);
+  equalStringArrays(dataProperty(config, "Entrypoint"), ["/opt/core-agent/gateway-entrypoint.sh"]);
+  equalStringArrays(dataProperty(config, "Cmd"), []);
+  const exposedPorts = dataProperty(config, "ExposedPorts");
+  if (typeof exposedPorts !== "object" || exposedPorts === null || Reflect.ownKeys(exposedPorts).length !== 1) throw rejected();
+  exactEmptyRecord(dataProperty(exposedPorts, "8642/tcp"));
+
+  const hostConfig = dataProperty(value, "HostConfig");
+  if (stringProperty(hostConfig, "NetworkMode") !== names.network || booleanProperty(hostConfig, "ReadonlyRootfs") !== true) {
+    throw rejected();
+  }
+  equalStringArrays(dataProperty(hostConfig, "CapDrop"), ["ALL"]);
+  equalStringArrays(dataProperty(hostConfig, "SecurityOpt"), ["no-new-privileges:true"]);
+  exactEmptyRecord(dataProperty(hostConfig, "PortBindings"));
+  exactStringRecord(dataProperty(hostConfig, "Tmpfs"), {
+    "/run": "rw,nosuid,nodev,size=64m,mode=0755,exec",
+    "/tmp": "rw,nosuid,nodev,size=256m,mode=1777",
+    "/var/tmp": "rw,nosuid,nodev,size=64m,mode=1777",
+  });
+  exactNumberProperty(hostConfig, "Memory", 4_294_967_296);
+  exactNumberProperty(hostConfig, "NanoCpus", 2_000_000_000);
+  exactNumberProperty(hostConfig, "PidsLimit", 512);
+  if (stringProperty(dataProperty(hostConfig, "RestartPolicy"), "Name") !== "unless-stopped") throw rejected();
+  const binds = safeStringArray(dataProperty(hostConfig, "Binds"));
+  if (
+    binds.length !== 2
+    || binds[0] !== `${names.volume}:/opt/data`
+    || binds[1] !== `${ingressPath}:/run/secrets/hermes_ingress:ro`
+  ) throw rejected();
+
+  const healthcheck = dataProperty(config, "Healthcheck");
+  equalStringArrays(dataProperty(healthcheck, "Test"), [
+    "CMD-SHELL",
+    "curl --fail --silent http://127.0.0.1:8642/health >/dev/null || exit 1",
+  ]);
+  exactNumberProperty(healthcheck, "Interval", 10_000_000_000);
+  exactNumberProperty(healthcheck, "Timeout", 5_000_000_000);
+  exactNumberProperty(healthcheck, "Retries", 12);
+  exactNumberProperty(healthcheck, "StartPeriod", 30_000_000_000);
+
+  const state = dataProperty(value, "State");
+  const running = booleanProperty(state, "Running");
+  const healthValue = optionalDataProperty(state, "Health");
+  const dockerHealth = healthValue === undefined ? undefined : stringProperty(healthValue, "Status");
+  const health: RuntimeObservation["health"] = dockerHealth === "healthy"
+    ? "healthy"
+    : dockerHealth === "unhealthy"
+      ? "unhealthy"
+      : "unknown";
+  const networks = dataProperty(dataProperty(value, "NetworkSettings"), "Networks");
+  const network = dataProperty(networks, names.network);
+  const address = stringProperty(network, "IPAddress");
+  if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(address)) throw rejected();
+  return {
+    ...identity,
+    exists: true,
+    lifecycle: running ? "running" : "stopped",
+    health,
+    image_ref: imageRef,
+    private_origin: `http://${address}:8642`,
+  };
+}
+
+async function validatePersistentIngress(path: string): Promise<void> {
+  let metadata;
+  try {
+    metadata = await lstat(path, { bigint: true });
+  } catch {
+    throw rejected();
+  }
+  const uid = process.getuid?.();
+  if (
+    uid === undefined
+    || !metadata.isFile()
+    || metadata.uid !== BigInt(uid)
+    || (metadata.mode & 0o7777n) !== 0o600n
+  ) throw rejected();
+}
+
+function assertNotAborted(signal?: AbortSignal): void {
+  if (signal?.aborted === true) {
+    throw dockerFailure("DEPENDENCY_TIMEOUT", "Docker runtime operation timed out");
+  }
+}
+
+function boundedWait<T>(promise: Promise<T>, timeoutMs: number, signal?: AbortSignal): Promise<T> {
+  return new Promise<T>((resolvePromise, rejectPromise) => {
+    let settled = false;
+    const finish = (action: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      action();
+    };
+    const onAbort = (): void => finish(() => {
+      rejectPromise(dockerFailure("DEPENDENCY_TIMEOUT", "Docker runtime operation timed out"));
+    });
+    const timer = setTimeout(() => {
+      finish(() => rejectPromise(dockerFailure("DEPENDENCY_TIMEOUT", "Docker initializer timed out")));
+    }, timeoutMs);
+    timer.unref?.();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted === true) onAbort();
+    promise.then(
+      (value) => {
+        finish(() => resolvePromise(value));
+      },
+      () => {
+        finish(() => rejectPromise(dockerFailure("DEPENDENCY_UNAVAILABLE", "Docker initializer wait failed")));
+      },
+    );
+  });
+}
+
+function parseWaitStatus(value: unknown): number {
+  const status = dataProperty(value, "StatusCode");
+  if (typeof status !== "number" || !Number.isSafeInteger(status)) {
+    throw dockerFailure("DEPENDENCY_UNAVAILABLE", "Docker initializer returned an invalid status");
+  }
+  return status;
+}
+
+export class DockerRuntimeAdapter {
+  readonly #options: DockerRuntimeAdapterOptions;
+
+  public constructor(options: DockerRuntimeAdapterOptions) {
+    if (
+      options.initializerTimeoutMs !== undefined
+      && (!Number.isSafeInteger(options.initializerTimeoutMs)
+        || options.initializerTimeoutMs < 1
+        || options.initializerTimeoutMs > maximumInitializerWaitMs)
+    ) throw dockerFailure("DEPENDENCY_TIMEOUT", "Initializer timeout configuration is invalid");
+    this.#options = options;
+  }
+
+  public async execute(value: unknown, signal?: AbortSignal): Promise<SupervisorResponseV1> {
+    let request: SupervisorRequestV1;
+    try {
+      request = validateSupervisorPolicy(value, this.#options);
+    } catch {
+      return {
+        protocol_version: 1,
+        operation_id: this.#safeOperationId(value),
+        outcome: "rejected",
+        code: "SUPERVISOR_REJECTED",
+        retryable: false,
+        summary: "Runtime request did not match managed Supervisor policy",
+      };
+    }
+    try {
+      assertNotAborted(signal);
+      const observation = request.kind === "provision"
+        ? await this.#provisionValidated(request, signal)
+        : await this.#lifecycleValidated(request, signal);
+      return { protocol_version: 1, operation_id: request.operation_id, outcome: "accepted", observation };
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("SUPERVISOR_REJECTED:")) {
+        return {
+          protocol_version: 1,
+          operation_id: request.operation_id,
+          outcome: "rejected",
+          code: "SUPERVISOR_REJECTED",
+          retryable: false,
+          summary: "Docker resource did not match managed runtime metadata",
+        };
+      }
+      const failure = redactDockerError(error);
+      return {
+        protocol_version: 1,
+        operation_id: request.operation_id,
+        outcome: "failed",
+        code: failure.code,
+        retryable: true,
+        summary: failure.code === "DEPENDENCY_TIMEOUT"
+          ? "Docker runtime operation timed out"
+          : "Docker runtime dependency was unavailable",
+      };
+    }
+  }
+
+  public async provision(value: unknown): Promise<RuntimeObservation> {
+    const request = validateSupervisorPolicy(value, this.#options);
+    if (request.kind !== "provision") throw rejected();
+    return this.#provisionValidated(request);
+  }
+
+  async #provisionValidated(request: ProvisionRuntimeCommandV1, signal?: AbortSignal): Promise<RuntimeObservation> {
+    assertNotAborted(signal);
+    const names = deriveRuntimeNames(request.runtime);
+    const runtimeDigest = resourceDigest(request.runtime.tenant_id, request.runtime.runtime_id, String(request.runtime.generation));
+    const ingressDirectory = join(resolve(this.#options.ingressRoot), runtimeDigest);
+    const ingressPath = join(ingressDirectory, "hermes_ingress");
+    const initializerName = operationInitializerName(names.container, request.operation_id);
+    const verifierName = `${initializerName}-manifest`;
+
+    const gateway = await inspectOptional(this.#options.docker.getContainer(names.container));
+    const initializer = await inspectOptional(this.#options.docker.getContainer(initializerName));
+    const verifier = await inspectOptional(this.#options.docker.getContainer(verifierName));
+    const volume = await inspectOptional(this.#options.docker.getVolume(names.volume));
+    const network = await inspectOptional(this.#options.docker.getNetwork(names.network));
+
+    if (volume.inspection !== undefined) validateVolumeInspection(volume.inspection, request, names);
+    if (network.inspection !== undefined) validateNetworkInspection(network.inspection, names);
+    if (initializer.inspection !== undefined || verifier.inspection !== undefined) throw rejected();
+    if (gateway.inspection !== undefined) {
+      if (volume.inspection === undefined || network.inspection === undefined) throw rejected();
+      await validatePersistentIngress(ingressPath);
+      const observation = validateGatewayInspection(gateway.inspection, request, request.runtime, names, ingressPath);
+      await ensurePrivateDirectory(this.#options.stagingRoot);
+      const adoptionStage = await mkdtemp(join(resolve(this.#options.stagingRoot), "operation-"));
+      await chmod(adoptionStage, 0o700);
+      try {
+        await this.#verifyManifest(request, names, verifierName, adoptionStage, signal);
+      } finally {
+        await rm(adoptionStage, { recursive: true, force: true });
+      }
+      return observation;
+    }
+
+    if (volume.inspection === undefined) {
+      assertNotAborted(signal);
+      await this.#options.docker.createVolume({ Name: names.volume, Labels: { ...volumeLabels(request, names) } });
+    }
+    if (network.inspection === undefined) {
+      assertNotAborted(signal);
+      await this.#options.docker.createNetwork({
+        Name: names.network,
+        Driver: "bridge",
+        Internal: true,
+        Attachable: false,
+        Labels: { ...networkLabels(names) },
+      });
+    }
+
+    await ensurePrivateDirectory(this.#options.stagingRoot);
+    const stageDirectory = await mkdtemp(join(resolve(this.#options.stagingRoot), "operation-"));
+    await chmod(stageDirectory, 0o700);
+    try {
+      const secretDirectory = join(stageDirectory, "secrets");
+      await mkdir(secretDirectory, { mode: 0o700 });
+      const profiles = [];
+      for (const profile of [...request.runtime.profiles].sort((left, right) => left.profile_id.localeCompare(right.profile_id))) {
+        assertNotAborted(signal);
+        const secretFilename = `provider-${resourceDigest(profile.profile_id).slice(0, 32)}`;
+        await writeSecretMaterial(
+          this.#options.secretStore,
+          profile.provider_secret_ref,
+          join(secretDirectory, secretFilename),
+        );
+        profiles.push({
+          profile_id: profile.profile_id,
+          hermes_profile_ref: profile.hermes_profile_ref,
+          description: profile.description,
+          provider_base_url: profile.provider_base_url,
+          model_id: profile.model_id,
+          provider_secret_file: `/run/core-agent/secrets/${secretFilename}`,
+        });
+      }
+      const bundlePath = join(stageDirectory, "bundle.json");
+      await writeExclusive(bundlePath, `${JSON.stringify({
+        bundle_version: 1,
+        tenant_id: request.runtime.tenant_id,
+        runtime_id: request.runtime.runtime_id,
+        generation: request.runtime.generation,
+        image_ref: request.runtime.image_ref,
+        profiles,
+      })}\n`);
+
+      assertNotAborted(signal);
+      const initializerContainer = await this.#options.docker.createContainer(exactInitializerOptions(
+        request,
+        names,
+        initializerName,
+        bundlePath,
+        secretDirectory,
+      ));
+      try {
+        assertNotAborted(signal);
+        await initializerContainer.start();
+        const waited = await boundedWait(
+          initializerContainer.wait(),
+          this.#options.initializerTimeoutMs ?? maximumInitializerWaitMs,
+          signal,
+        );
+        if (parseWaitStatus(waited) !== 0) {
+          await initializerContainer.logs({ stdout: false, stderr: true, tail: 64 }).catch(() => Buffer.alloc(0));
+          throw dockerFailure("DEPENDENCY_UNAVAILABLE", "Docker initializer failed");
+        }
+      } finally {
+        await initializerContainer.remove({ force: true, v: false }).catch(() => undefined);
+      }
+
+      await this.#verifyManifest(request, names, verifierName, stageDirectory, signal);
+      assertNotAborted(signal);
+      const ingressMaterial = await this.#options.secretStore.get(request.runtime.ingress_secret_ref);
+      try {
+        assertNotAborted(signal);
+        await atomicPrivateWrite(ingressDirectory, "hermes_ingress", ingressMaterial.text());
+      } finally {
+        ingressMaterial.release();
+      }
+      assertNotAborted(signal);
+      const gatewayContainer = await this.#options.docker.createContainer(exactGatewayOptions(
+        request,
+        names,
+        ingressPath,
+      ));
+      assertNotAborted(signal);
+      await gatewayContainer.start();
+      return validateGatewayInspection(
+        await gatewayContainer.inspect(),
+        request,
+        request.runtime,
+        names,
+        ingressPath,
+      );
+    } catch (error) {
+      if (error instanceof BoundedDockerError || (error instanceof Error && error.message.startsWith("SUPERVISOR_REJECTED:"))) {
+        throw error;
+      }
+      throw redactDockerError(error);
+    } finally {
+      await rm(stageDirectory, { recursive: true, force: true });
+    }
+  }
+
+  async #verifyManifest(
+    request: ProvisionRuntimeCommandV1,
+    names: RuntimeNames,
+    verifierName: string,
+    stageDirectory: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    assertNotAborted(signal);
+    const outputDirectory = join(stageDirectory, "output");
+    await mkdir(outputDirectory, { mode: 0o700 });
+    const verifierContainer = await this.#options.docker.createContainer(exactManifestVerifierOptions(
+      request,
+      names,
+      verifierName,
+      outputDirectory,
+    ));
+    try {
+      assertNotAborted(signal);
+      await verifierContainer.start();
+      const waited = await boundedWait(
+        verifierContainer.wait(),
+        this.#options.initializerTimeoutMs ?? maximumInitializerWaitMs,
+        signal,
+      );
+      if (parseWaitStatus(waited) !== 0) {
+        throw dockerFailure("DEPENDENCY_UNAVAILABLE", "Docker manifest verifier failed");
+      }
+    } finally {
+      await verifierContainer.remove({ force: true, v: false }).catch(() => undefined);
+    }
+    assertNotAborted(signal);
+    validateManifest(await readPrivateManifest(join(outputDirectory, "manifest.json")), request);
+  }
+
+  async #lifecycleValidated(request: LifecycleRuntimeCommandV1, signal?: AbortSignal): Promise<RuntimeObservation> {
+    assertNotAborted(signal);
+    const names = deriveRuntimeNames(request);
+    const runtimeDigest = resourceDigest(request.tenant_id, request.runtime_id, String(request.generation));
+    const ingressPath = join(resolve(this.#options.ingressRoot), runtimeDigest, "hermes_ingress");
+    const [container, volume, network] = await Promise.all([
+      inspectOptional(this.#options.docker.getContainer(names.container)),
+      inspectOptional(this.#options.docker.getVolume(names.volume)),
+      inspectOptional(this.#options.docker.getNetwork(names.network)),
+    ]);
+    if (container.inspection === undefined) {
+      if (request.kind === "inspect" || request.kind === "delete") {
+        return {
+          tenant_id: request.tenant_id,
+          runtime_id: request.runtime_id,
+          generation: request.generation,
+          exists: false,
+          lifecycle: "removed",
+          health: "unknown",
+          image_ref: `managed/removed@sha256:${"0".repeat(64)}`,
+        };
+      }
+      throw rejected();
+    }
+    if (volume.inspection === undefined || network.inspection === undefined) throw rejected();
+    validateVolumeInspection(volume.inspection, request, names);
+    validateNetworkInspection(network.inspection, names);
+    await validatePersistentIngress(ingressPath);
+    const before = validateGatewayInspection(container.inspection, undefined, request, names, ingressPath);
+    if (request.kind === "inspect") return before;
+    assertNotAborted(signal);
+    if (request.kind === "start") await container.handle.start();
+    else if (request.kind === "stop") await container.handle.stop({ t: 30 });
+    else if (request.kind === "restart") await container.handle.restart({ t: 30 });
+    else {
+      await container.handle.remove({ force: true, v: false });
+      const { private_origin: _privateOrigin, ...withoutOrigin } = before;
+      return { ...withoutOrigin, exists: false, lifecycle: "removed", health: "unknown" };
+    }
+    return validateGatewayInspection(await container.handle.inspect(), undefined, request, names, ingressPath);
+  }
+
+  #safeOperationId(value: unknown): string {
+    try {
+      const request = validateSupervisorRequest(value);
+      return request.operation_id;
+    } catch {
+      return "invalid_request";
+    }
+  }
+}

@@ -83,8 +83,9 @@ export function validateSupervisorPolicy(
   const request = validateSupervisorRequest(value);
   if (request.kind !== "provision") return request;
   const runtime = request.runtime;
-  deriveRuntimeNames(runtime);
+  const names = deriveRuntimeNames(runtime);
   if (!labelPattern.test(runtime.volume_ref)) throw policyError();
+  if (runtime.volume_ref !== names.volume) throw policyError();
   const imageLock = parseImageLock(dependencies.imageLock);
   if (runtime.image_ref !== imageLock.platforms[runtime.platform].reference) throw policyError();
   if (runtime.ingress_secret_ref.purpose !== "hermes_ingress") throw policyError();
