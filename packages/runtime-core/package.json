@@ -13,8 +13,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node --import tsx --test tests/config.test.ts tests/repository-static-gate.test.ts",
-    "test:postgres": "node --import tsx --test --test-concurrency=1 tests/migrations.test.ts tests/tenant-isolation.test.ts tests/optimistic-concurrency.test.ts",
+    "test": "node --import tsx --test tests/config.test.ts tests/repository-static-gate.test.ts tests/redaction.test.ts",
+    "test:postgres": "node --import tsx --test --test-concurrency=1 tests/migrations.test.ts tests/tenant-isolation.test.ts tests/optimistic-concurrency.test.ts tests/idempotency.test.ts tests/jobs.test.ts tests/events.test.ts",
     "check": "npm run build && npm test"
   },
   "dependencies": {

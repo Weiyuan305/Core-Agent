@@ -30,6 +30,38 @@ export { RuntimeRepository, type VersionedWriteResult } from "./repositories/run
 export { ConversationRepository, SessionRepository } from "./repositories/conversation.js";
 export { AgentRunRepository, MessageRepository } from "./repositories/run.js";
 export {
+  claimJobs,
+  heartbeatJob,
+  completeJob,
+  rescheduleJob,
+  failJob,
+  type ClaimedJob,
+  type ClaimJobsInput,
+  type JobLeaseResult,
+} from "./repositories/jobs.js";
+export {
+  appendProductEvents,
+  appendAuditEvent,
+  enqueueOutbox,
+  type AppendProductEventsInput,
+} from "./repositories/events.js";
+export {
+  canonicalPayloadHash,
+  beginIdempotentCommand,
+  DomainError,
+  type DependencyFailure,
+  type IdempotencyAdmission,
+  type StableDomainErrorCode,
+} from "./domain/idempotency.js";
+export { classifyDependencyFailure, retryDecision, type RetryDecision } from "./domain/jobs.js";
+export { createRedactor, redactSummary, type Redactor } from "./domain/redaction.js";
+export { validateAuditEvent, validateProductEvent } from "./domain/events.js";
+export {
+  assertAgentRunTransition,
+  assertRuntimeObservedTransition,
+  redactedFailureSummary,
+} from "./domain/transitions.js";
+export {
   assertSchemaVersion,
   EXPECTED_SCHEMA_VERSION,
   readSchemaVersion,
