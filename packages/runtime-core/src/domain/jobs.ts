@@ -1,5 +1,5 @@
 import { DomainError, type DependencyFailure } from "./idempotency.js";
-import { redactSummary } from "./redaction.js";
+import { createRedactor, redactSummary, type Redactor } from "./redaction.js";
 
 export interface RetryDecision {
   disposition: "retry" | "permanent";
@@ -13,11 +13,17 @@ export function retryDecision(
   maxAttempts: number,
   now: Date,
   random: () => number,
+  redactor: Redactor = createRedactor([]),
 ): RetryDecision {
-  const summary = redactSummary(failure.summary, 1000);
+  if (!Number.isSafeInteger(attemptCount) || attemptCount < 1) throw new RangeError("attemptCount must be positive");
+  if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) throw new RangeError("maxAttempts must be positive");
+  if (!(now instanceof Date) || !Number.isFinite(now.getTime())) throw new RangeError("now must be a valid Date");
+  const randomValue = random();
+  if (!Number.isFinite(randomValue) || randomValue < 0 || randomValue >= 1) throw new RangeError("random must return a value from 0 inclusive through 1 exclusive");
+  const summary = redactSummary(failure.summary, 1000, redactor);
   if (!failure.retryable || attemptCount >= maxAttempts) return { disposition: "permanent", summary };
   const ceilingMs = Math.min(60_000, 500 * 2 ** Math.max(0, attemptCount - 1));
-  const jitterMs = Math.floor(ceilingMs * 0.25 * random());
+  const jitterMs = Math.floor(ceilingMs * 0.25 * randomValue);
   return { disposition: "retry", nextAttemptAt: new Date(now.getTime() + ceilingMs + jitterMs), summary };
 }
 

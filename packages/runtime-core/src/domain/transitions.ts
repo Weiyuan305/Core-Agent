@@ -6,7 +6,7 @@ import {
 } from "@core-agent/contracts";
 
 import { DomainError } from "./idempotency.js";
-import { redactSummary } from "./redaction.js";
+import { createRedactor, redactSummary } from "./redaction.js";
 
 export function assertRuntimeObservedTransition(
   from: RuntimeContainer["observed_state"],
@@ -24,5 +24,5 @@ export function assertAgentRunTransition(from: AgentRun["status"], to: AgentRun[
 }
 
 export function redactedFailureSummary(value: string): string {
-  return redactSummary(value, 1000);
+  return redactSummary(value, 1000, createRedactor([]));
 }

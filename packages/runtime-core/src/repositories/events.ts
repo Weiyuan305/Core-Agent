@@ -81,6 +81,10 @@ export async function appendProductEvents(
 
 export async function appendAuditEvent(context: TenantTransaction, event: AuditEvent): Promise<void> {
   validateAuditEvent(event, context.tenantId);
+  if (
+    event.resource_version !== undefined
+    && (!Number.isSafeInteger(event.resource_version) || event.resource_version < 1)
+  ) throw new DomainError("INVALID_REQUEST", "AuditEvent resource version is unsafe");
   await context.trx.insertInto("audit_events").values({
     tenant_id: event.tenant_id,
     audit_event_id: event.audit_event_id,

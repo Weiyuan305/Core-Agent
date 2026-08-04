@@ -41,14 +41,23 @@ function canonicalize(value: unknown): string {
     if (!Number.isFinite(value)) throw new DomainError("INVALID_REQUEST", "Payload contains a non-finite number");
     return JSON.stringify(value);
   }
-  if (Array.isArray(value)) return `[${value.map(canonicalize).join(",")}]`;
+  if (Array.isArray(value)) {
+    const items: string[] = [];
+    for (let index = 0; index < value.length; index += 1) {
+      if (!(index in value)) throw new DomainError("INVALID_REQUEST", "Payload contains a sparse array");
+      items.push(canonicalize(value[index]));
+    }
+    return `[${items.join(",")}]`;
+  }
   if (typeof value !== "object") throw new DomainError("INVALID_REQUEST", "Payload contains an unsupported value");
 
   const prototype = Object.getPrototypeOf(value);
   if (prototype !== Object.prototype && prototype !== null) {
     throw new DomainError("INVALID_REQUEST", "Payload contains a non-plain object");
   }
-  const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right));
+  const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) => (
+    left < right ? -1 : left > right ? 1 : 0
+  ));
   return `{${entries.map(([key, item]) => {
     if (secretKeyPattern.test(key)) throw new DomainError("INVALID_REQUEST", "Payload contains a secret-shaped key");
     if (item === undefined) throw new DomainError("INVALID_REQUEST", "Payload contains undefined");
@@ -69,6 +78,12 @@ export async function beginIdempotentCommand<T>(
   context: TenantTransaction,
   input: { key: string; payloadHash: string; operation: string; expiresAt: Date },
 ): Promise<IdempotencyAdmission<T>> {
+  if (input.key.length < 1 || input.key.length > 255) throw new DomainError("INVALID_REQUEST", "Idempotency key is invalid");
+  if (!/^sha256:[a-f0-9]{64}$/.test(input.payloadHash)) throw new DomainError("INVALID_REQUEST", "Payload hash is invalid");
+  if (input.operation.length < 1 || input.operation.length > 200) throw new DomainError("INVALID_REQUEST", "Operation is invalid");
+  if (!(input.expiresAt instanceof Date) || !Number.isFinite(input.expiresAt.getTime()) || input.expiresAt.getTime() <= Date.now()) {
+    throw new DomainError("INVALID_REQUEST", "Expiry is invalid");
+  }
   const now = new Date();
   const inserted = await context.trx.insertInto("idempotency_records").values({
     tenant_id: context.tenantId,
@@ -86,13 +101,30 @@ export async function beginIdempotentCommand<T>(
   if (inserted !== undefined) return { kind: "acquired", recordId: input.key };
 
   const existing = await context.trx.selectFrom("idempotency_records")
-    .select(["payload_hash", "status", "response_json"])
+    .select(["payload_hash", "operation", "status", "response_json", "expires_at"])
     .where("tenant_id", "=", context.tenantId)
     .where("idempotency_key", "=", input.key)
     .forUpdate().executeTakeFirstOrThrow();
-  if (existing.payload_hash !== input.payloadHash) {
+  if (existing.expires_at.getTime() <= Date.now()) {
+    const reset = await context.trx.updateTable("idempotency_records").set({
+      payload_hash: input.payloadHash,
+      operation: input.operation,
+      status: "in_progress",
+      result_ref: null,
+      response_json: null,
+      expires_at: input.expiresAt,
+      updated_at: new Date(),
+    }).where("tenant_id", "=", context.tenantId).where("idempotency_key", "=", input.key)
+      .where("expires_at", "<=", new Date()).returning("idempotency_key").executeTakeFirst();
+    if (reset !== undefined) return { kind: "acquired", recordId: input.key };
+    throw new DomainError("INTERNAL_ERROR", "Expired idempotency record could not be reset");
+  }
+  if (existing.payload_hash !== input.payloadHash || existing.operation !== input.operation) {
     throw new DomainError("IDEMPOTENCY_CONFLICT", "Idempotency key payload mismatch");
   }
-  if (existing.status === "completed") return { kind: "replay", response: existing.response_json as T };
+  if (existing.status === "completed") {
+    if (existing.response_json === null) throw new DomainError("INTERNAL_ERROR", "Completed idempotency record has no response");
+    return { kind: "replay", response: existing.response_json as T };
+  }
   return { kind: "in_progress" };
 }

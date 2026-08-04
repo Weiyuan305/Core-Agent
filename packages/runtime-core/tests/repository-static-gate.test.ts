@@ -7,6 +7,7 @@ import test from "node:test";
 const repositoryDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "repositories");
 const tenantOwnedTables = new Set([
   "tenants", "actors", "memberships", "profiles", "runtime_containers", "conversations", "sessions", "agent_runs", "messages",
+  "idempotency_records", "worker_jobs", "product_events", "audit_events", "outbox", "stream_sequences", "stream_cursors", "secret_references",
 ]);
 
 function findRepositoryQuerySafetyViolations(file: string, source: string): string[] {
