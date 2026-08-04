@@ -21,7 +21,9 @@ if (sentinel === undefined || sentinel.length === 0 || Buffer.byteLength(sentine
 
   if (matches.length > 0) {
     process.stderr.write("Secret sentinel detected in artifact identifiers:\n");
-    for (const identifier of matches.sort()) process.stderr.write(`- ${displayIdentifier(identifier, repositoryRoot)}\n`);
+    for (const identifier of matches.sort()) {
+      process.stderr.write(`- ${quoteIdentifier(displayIdentifier(identifier, repositoryRoot))}\n`);
+    }
     process.exitCode = 1;
   } else {
     process.stdout.write("No secret sentinel matches found\n");
@@ -69,11 +71,11 @@ async function collectArtifact(path, identifier, output) {
   try {
     metadata = await lstat(path);
   } catch {
-    process.stderr.write(`Artifact identifier is unavailable: ${basename(identifier)}\n`);
+    process.stderr.write(`Artifact identifier is unavailable: ${quoteIdentifier(basename(identifier))}\n`);
     process.exit(2);
   }
   if (metadata.isSymbolicLink()) {
-    process.stderr.write(`Artifact identifier must not be a symbolic link: ${basename(identifier)}\n`);
+    process.stderr.write(`Artifact identifier must not be a symbolic link: ${quoteIdentifier(basename(identifier))}\n`);
     process.exit(2);
   }
   if (metadata.isFile()) {
@@ -81,7 +83,7 @@ async function collectArtifact(path, identifier, output) {
     return;
   }
   if (!metadata.isDirectory()) {
-    process.stderr.write(`Artifact identifier must be a regular file or directory: ${basename(identifier)}\n`);
+    process.stderr.write(`Artifact identifier must be a regular file or directory: ${quoteIdentifier(basename(identifier))}\n`);
     process.exit(2);
   }
 
@@ -96,7 +98,7 @@ async function containsSentinel(path, sentinelBuffer) {
   try {
     const metadata = await lstat(path);
     if (!metadata.isFile() || metadata.isSymbolicLink()) {
-      process.stderr.write(`Tracked artifact identifier is not a regular file: ${basename(path)}\n`);
+      process.stderr.write(`Tracked artifact identifier is not a regular file: ${quoteIdentifier(basename(path))}\n`);
       process.exit(2);
     }
     for await (const chunk of createReadStream(path, { highWaterMark: 64 * 1024 })) {
@@ -108,9 +110,16 @@ async function containsSentinel(path, sentinelBuffer) {
     }
     return false;
   } catch {
-    process.stderr.write(`Unable to scan artifact identifier: ${basename(path)}\n`);
+    process.stderr.write(`Unable to scan artifact identifier: ${quoteIdentifier(basename(path))}\n`);
     process.exit(2);
   }
+}
+
+function quoteIdentifier(identifier) {
+  const redacted = sentinel === undefined
+    ? identifier
+    : identifier.split(sentinel).join("[REDACTED]");
+  return JSON.stringify(redacted);
 }
 
 function displayIdentifier(identifier, repositoryRoot) {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -115,6 +115,62 @@ test("file secret store rejects symlinks, non-0600 modes, and oversized files sa
   );
 });
 
+test("file secret store enforces exact bounded sizes", async () => {
+  const store = new FileSecretStore(secretRoot);
+  const cases = [
+    { reference_id: "empty", size: 0, error: /empty/ },
+    { reference_id: "maximum", size: 65_536 },
+    { reference_id: "oversized", size: 65_537, error: /64 KiB/ },
+  ] as const;
+
+  for (const entry of cases) {
+    const path = join(secretRoot, `${entry.reference_id}.v1`);
+    await writeFile(path, Buffer.alloc(entry.size, 0x61), { mode: 0o600 });
+    await chmod(path, 0o600);
+    if (entry.error !== undefined) {
+      await assert.rejects(
+        store.get({ reference_id: entry.reference_id, version: 1, purpose: "model_provider" }),
+        entry.error,
+      );
+    } else {
+      const material = await store.get({ reference_id: entry.reference_id, version: 1, purpose: "model_provider" });
+      assert.equal(material.text().length, 65_536);
+      material.release();
+    }
+  }
+});
+
+test("file secret store rejects unprotected or replaced canonical roots", async () => {
+  const unprotectedRoot = join(temporaryDirectory, "unprotected-root");
+  await mkdir(unprotectedRoot, { mode: 0o777 });
+  await chmod(unprotectedRoot, 0o777);
+  await writeFile(join(unprotectedRoot, "provider.v1"), "synthetic-secret", { mode: 0o600 });
+  await assert.rejects(
+    new FileSecretStore(unprotectedRoot).get({ reference_id: "provider", version: 1, purpose: "model_provider" }),
+    /root.*permissions/i,
+  );
+
+  const firstRoot = join(temporaryDirectory, "stable-first");
+  const secondRoot = join(temporaryDirectory, "stable-second");
+  const rootLink = join(temporaryDirectory, "stable-link");
+  for (const [root, value] of [[firstRoot, "first"], [secondRoot, "second"]] as const) {
+    await mkdir(root, { mode: 0o700 });
+    await writeFile(join(root, "provider.v1"), value, { mode: 0o600 });
+  }
+  await symlink(firstRoot, rootLink);
+  const store = new FileSecretStore(rootLink);
+  const material = await store.get({ reference_id: "provider", version: 1, purpose: "model_provider" });
+  assert.equal(material.text(), "first");
+  material.release();
+
+  await unlink(rootLink);
+  await symlink(secondRoot, rootLink);
+  await assert.rejects(
+    store.get({ reference_id: "provider", version: 1, purpose: "model_provider" }),
+    /root.*changed/i,
+  );
+});
+
 test("provider catalog is deeply frozen, indexed, and rejects duplicate models", async () => {
   const expected = [{
     provider_config_id: "tokenhub-main",
@@ -167,9 +223,11 @@ test("provider catalog require errors do not reflect untrusted or managed values
 test("sentinel scanner identifies artifacts without echoing matching bytes", async () => {
   const sentinel = "scanner-private-sentinel";
   const cleanArtifact = join(temporaryDirectory, "clean.log");
-  const matchingArtifact = join(temporaryDirectory, "docker-inspection.json");
+  const matchingArtifact = join(temporaryDirectory, `docker-inspection-${sentinel}.json`);
+  const controlArtifact = join(temporaryDirectory, "query-output-\n-\u001b[31m.log");
   await writeFile(cleanArtifact, "synthetic clean output");
   await writeFile(matchingArtifact, `{"field":"${sentinel}"}`);
+  await writeFile(controlArtifact, sentinel);
 
   const clean = spawnSync(process.execPath, [scannerPath, sentinel, cleanArtifact], {
     cwd: repositoryRoot,
@@ -178,11 +236,15 @@ test("sentinel scanner identifies artifacts without echoing matching bytes", asy
   assert.equal(clean.status, 0, clean.stderr);
   assert.doesNotMatch(clean.stdout + clean.stderr, new RegExp(sentinel));
 
-  const matching = spawnSync(process.execPath, [scannerPath, sentinel, matchingArtifact], {
+  const matching = spawnSync(process.execPath, [scannerPath, sentinel, matchingArtifact, controlArtifact], {
     cwd: repositoryRoot,
     encoding: "utf8",
   });
   assert.equal(matching.status, 1);
-  assert.match(matching.stdout + matching.stderr, new RegExp(basename(matchingArtifact)));
-  assert.doesNotMatch(matching.stdout + matching.stderr, new RegExp(sentinel));
+  const output = matching.stdout + matching.stderr;
+  assert.match(output, /\[REDACTED\]/);
+  assert.match(output, /query-output-\\n-\\u001b\[31m\.log/);
+  assert.doesNotMatch(output, new RegExp(sentinel));
+  assert.doesNotMatch(output, /\u001b|\x1b/);
+  assert.equal(output.split("\n").length, 4);
 });
