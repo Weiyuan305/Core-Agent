@@ -149,15 +149,27 @@ test("version 4 terminalizes ambiguous legacy reconcile jobs and enforces the jo
       ) values ($1, 'job_orphan', 'reconcile_runtime', 'running', 1, 3, 'legacy_worker', $2, $2, 'runtime_missing', 'pre_effect', null, null, null, $2, $2)`,
       ["tenant_upgrade", createdAt],
     );
+    const historicalUpdatedAt = new Date("2026-08-03T02:00:00.000Z");
+    for (const status of ["succeeded", "failed", "cancelled"] as const) {
+      await pool.query(
+        `insert into worker_jobs (
+          tenant_id, job_id, job_kind, status, attempt_count, max_attempts, lease_owner,
+          lease_expires_at, next_attempt_at, payload_ref, effect_state, last_error_summary,
+          run_id, container_id, created_at, updated_at
+        ) values ($1, $2, 'reconcile_runtime', $3, 2, 3, 'historical_worker', $4, $4, $5, 'pre_effect', $6, null, null, $4, $4)`,
+        ["tenant_upgrade", `job_historical_${status}`, status, historicalUpdatedAt, `runtime_historical_${status}`, `Historical ${status}`],
+      );
+    }
 
     await applyMigrations(pool, migrationsDirectory);
-    const legacyReconcileJobs = await db.selectFrom("worker_jobs")
+    const activeLegacyJobs = await db.selectFrom("worker_jobs")
       .select(["job_id", "status", "runtime_command", "lease_owner", "lease_expires_at", "last_error_summary"])
-      .where("job_kind", "=", "reconcile_runtime").orderBy("job_id").execute();
-    assert.deepEqual(legacyReconcileJobs.map((job) => job.job_id), [
+      .where("job_id", "in", ["job_deleted", "job_orphan", "job_running", "job_stopped"])
+      .orderBy("job_id").execute();
+    assert.deepEqual(activeLegacyJobs.map((job) => job.job_id), [
       "job_deleted", "job_orphan", "job_running", "job_stopped",
     ]);
-    for (const job of legacyReconcileJobs) {
+    for (const job of activeLegacyJobs) {
       assert.equal(job.status, "failed", job.job_id);
       assert.equal(job.runtime_command, null, job.job_id);
       assert.equal(job.lease_owner, null, job.job_id);
@@ -165,20 +177,35 @@ test("version 4 terminalizes ambiguous legacy reconcile jobs and enforces the jo
       assert.equal(job.last_error_summary, "Legacy reconcile intent unavailable after schema upgrade", job.job_id);
     }
     assert.equal(
-      legacyReconcileJobs.find((job) => job.job_id === "job_running")?.runtime_command,
+      activeLegacyJobs.find((job) => job.job_id === "job_running")?.runtime_command,
       null,
       "running desired state must not be fabricated into start or restart",
     );
+    const historicalJobs = await db.selectFrom("worker_jobs")
+      .select(["job_id", "status", "runtime_command", "attempt_count", "lease_owner", "lease_expires_at", "last_error_summary", "updated_at"])
+      .where("job_id", "like", "job_historical_%").orderBy("job_id").execute();
+    assert.deepEqual(historicalJobs, ["cancelled", "failed", "succeeded"].map((status) => ({
+      job_id: `job_historical_${status}`,
+      status,
+      runtime_command: null,
+      attempt_count: 2,
+      lease_owner: "historical_worker",
+      lease_expires_at: historicalUpdatedAt,
+      last_error_summary: `Historical ${status}`,
+      updated_at: historicalUpdatedAt,
+    })));
     for (const status of ["queued", "running", "retrying"] as const) {
       await assert.rejects(
         db.updateTable("worker_jobs").set({ status, runtime_command: null }).where("job_id", "=", "job_running").execute(),
         /worker_jobs_runtime_command_intent_check/,
       );
     }
-    await assert.doesNotReject(
-      db.updateTable("worker_jobs").set({ status: "cancelled", runtime_command: null })
-        .where("job_id", "=", "job_running").execute(),
-    );
+    for (const status of ["succeeded", "failed", "cancelled"] as const) {
+      await assert.doesNotReject(
+        db.updateTable("worker_jobs").set({ status, runtime_command: null })
+          .where("job_id", "=", "job_running").execute(),
+      );
+    }
     await assert.rejects(
       db.updateTable("worker_jobs").set({ runtime_command: "start" }).where("job_id", "=", "job_dispatch").execute(),
       /worker_jobs_runtime_command_intent_check/,

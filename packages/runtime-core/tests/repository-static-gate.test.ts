@@ -231,6 +231,6 @@ test("repository read and write queries retain a tenant scope", async () => {
 test("runtime command migration never fabricates ambiguous legacy intent", async () => {
   const migration = await readFile(runtimeCommandMigration, "utf8");
   assert.doesNotMatch(migration, /desired_state/);
-  assert.match(migration, /where job_kind = 'reconcile_runtime';/);
-  assert.match(migration, /status in \('failed', 'cancelled'\)/);
+  assert.match(migration, /where job_kind = 'reconcile_runtime'\s+and status in \('queued', 'running', 'retrying'\);/);
+  assert.match(migration, /status in \('succeeded', 'failed', 'cancelled'\)/);
 });

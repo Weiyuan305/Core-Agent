@@ -8,7 +8,8 @@ set status = 'failed',
     runtime_command = null,
     last_error_summary = 'Legacy reconcile intent unavailable after schema upgrade',
     updated_at = now()
-where job_kind = 'reconcile_runtime';
+where job_kind = 'reconcile_runtime'
+  and status in ('queued', 'running', 'retrying');
 
 alter table worker_jobs
   add constraint worker_jobs_runtime_command_intent_check
@@ -22,7 +23,7 @@ alter table worker_jobs
         )
         or (
           runtime_command is null
-          and status in ('failed', 'cancelled')
+          and status in ('succeeded', 'failed', 'cancelled')
         )
       )
     )
