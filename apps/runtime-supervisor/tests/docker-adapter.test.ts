@@ -153,6 +153,11 @@ class FakeContainer {
   ) {}
 
   public async inspect(): Promise<unknown> {
+    if (this.options === undefined && this.name.startsWith("core-agent-runtime-")) {
+      this.docker.gatewayInspections += 1;
+      this.docker.markGatewayInspection?.();
+      if (this.docker.gatewayInspectionBarrier !== undefined) await this.docker.gatewayInspectionBarrier;
+    }
     if (this.options === undefined || this.removed) throw missing();
     const network = this.options.HostConfig?.NetworkMode;
     return {
@@ -160,6 +165,7 @@ class FakeContainer {
       Name: `/${this.name}`,
       Config: {
         Image: this.options.Image,
+        User: this.options.User,
         Labels: this.options.Labels,
         Env: this.options.Env ?? [],
         Entrypoint: this.options.Entrypoint ?? [],
@@ -181,6 +187,9 @@ class FakeContainer {
       NetworkSettings: {
         Networks: network === "none" ? {} : {
           [String(network)]: { IPAddress: "172.30.0.7" },
+          ...(this.docker.attachExternalNetwork && this.options.Labels?.["core-agent.resource"] === "runtime"
+            ? { external: { IPAddress: "192.0.2.7" } }
+            : {}),
         },
       },
       State: {
@@ -195,6 +204,9 @@ class FakeContainer {
   public async start(): Promise<void> {
     this.actions.push("start");
     this.docker.mutations.push(`start:${this.name}`);
+    if (this.options?.Labels?.["core-agent.resource"] === "runtime" && this.docker.failGatewayStart) {
+      throw new Error("gateway start failed with untrusted details");
+    }
     this.running = true;
   }
 
@@ -218,7 +230,8 @@ class FakeContainer {
       const outputDirectory = outputBind.slice(0, -":/run/core-agent/output".length);
       await writeFile(
         join(outputDirectory, "manifest.json"),
-        `${JSON.stringify(this.docker.manifestOverride ?? manifestFor())}\n`,
+        this.docker.manifestRawOverride
+          ?? `${canonicalJson(this.docker.manifestOverride ?? manifestFor())}\n`,
         { encoding: "utf8", flag: "wx", mode: 0o600 },
       );
     }
@@ -267,6 +280,12 @@ class FakeDocker {
   public initializerExitCode = 0;
   public initializerLogs = "";
   public manifestOverride: unknown;
+  public manifestRawOverride: string | Uint8Array | undefined;
+  public attachExternalNetwork = false;
+  public failGatewayStart = false;
+  public gatewayInspections = 0;
+  public gatewayInspectionBarrier: Promise<void> | undefined;
+  public markGatewayInspection: (() => void) | undefined;
 
   public getContainer(name: string): FakeContainer {
     return this.containers.get(name) ?? new FakeContainer(this, name);
@@ -378,6 +397,10 @@ test("initializer and gateway use exact isolated options without secret bytes", 
     "GATEWAY_MULTIPLEX_PROFILES=true",
   ]);
   assert.equal(gateway.HostConfig?.NetworkMode, "core-agent-backplane");
+  assert.equal(gateway.User, "hermes");
+  assert.equal(gateway.HostConfig?.Privileged, false);
+  assert.deepEqual(gateway.HostConfig?.CapAdd, []);
+  assert.deepEqual(gateway.HostConfig?.Devices, []);
   assert.deepEqual(gateway.HostConfig?.PortBindings, {});
   assert.equal(gateway.HostConfig?.ReadonlyRootfs, true);
   assert.deepEqual(gateway.HostConfig?.RestartPolicy, { Name: "unless-stopped" });
@@ -408,6 +431,19 @@ test("provision validates the fixed non-secret manifest before starting the gate
   assert.equal(docker.created.some((created) => created.Labels?.["core-agent.resource"] === "runtime"), false);
   assert.equal(secretStore.materials.length, 1);
   assert.equal(secretStore.materials.every((material) => material.released), true);
+});
+
+test("manifest verification rejects noncanonical and malformed UTF-8 bytes", async () => {
+  for (const raw of [
+    `${JSON.stringify(manifestFor())}\n`,
+    Buffer.from([0xff, 0x0a]),
+  ]) {
+    const docker = new FakeDocker();
+    docker.manifestRawOverride = raw;
+    const { adapter } = buildAdapter(docker);
+    await assert.rejects(adapter.provision(signed()), /SUPERVISOR_REJECTED/);
+    assert.equal(docker.created.some((created) => created.Labels?.["core-agent.resource"] === "runtime"), false);
+  }
 });
 
 test("strict adoption rejects one mismatched managed label before secrets or mutations", async () => {
@@ -452,6 +488,8 @@ test("lifecycle operations validate the exact managed container and preserve its
   await adapter.provision(request);
   const names = deriveRuntimeNames(request.runtime);
   const gateway = docker.containers.get(names.container)!;
+  const ingressBind = gateway.options!.HostConfig!.Binds!.find((bind) => bind.endsWith(":/run/secrets/hermes_ingress:ro"))!;
+  const ingressPath = ingressBind.slice(0, -":/run/secrets/hermes_ingress:ro".length);
 
   const stopped = await adapter.execute(lifecycle("stop", "operation_stop_a"));
   assert.equal(stopped.outcome, "accepted");
@@ -471,6 +509,49 @@ test("lifecycle operations validate the exact managed container and preserve its
   }
   assert.equal(docker.volumes.has(names.volume), true);
   assert.match(gateway.actions.at(-1) ?? "", /"v":false/);
+  await assert.rejects(lstat(ingressPath), { code: "ENOENT" });
+});
+
+test("provision refuses a coexisting generation and resumes an exact stopped adoption", async () => {
+  const { adapter, docker, secretStore } = buildAdapter();
+  const request = signed();
+  await adapter.provision(request);
+  const names = deriveRuntimeNames(request.runtime);
+  const gateway = docker.containers.get(names.container)!;
+  gateway.running = false;
+
+  const resumed = await adapter.provision(request);
+  assert.equal(resumed.lifecycle, "running");
+  assert.equal(gateway.actions.filter((action) => action === "start").length, 2);
+
+  const baseNextData = provisionData();
+  const nextData = {
+    ...baseNextData,
+    operation_id: "operation_generation_8",
+    runtime: { ...baseNextData.runtime, generation: 8 },
+  };
+  const before = [...docker.mutations];
+  const materialsBefore = secretStore.materials.length;
+  const next = await adapter.execute(signed(nextData));
+  assert.equal(next.outcome, "rejected");
+  assert.deepEqual(docker.mutations, before);
+  assert.equal(secretStore.materials.length, materialsBefore);
+});
+
+test("delete cleans only the derived ingress credential when the container is already absent", async () => {
+  const { adapter, docker } = buildAdapter();
+  const request = signed();
+  await adapter.provision(request);
+  const names = deriveRuntimeNames(request.runtime);
+  const gateway = docker.containers.get(names.container)!;
+  const ingressBind = gateway.options!.HostConfig!.Binds!.find((bind) => bind.endsWith(":/run/secrets/hermes_ingress:ro"))!;
+  const ingressPath = ingressBind.slice(0, -":/run/secrets/hermes_ingress:ro".length);
+  docker.containers.delete(names.container);
+
+  const result = await adapter.execute(lifecycle("delete", "operation_delete_partial"));
+  assert.equal(result.outcome, "accepted");
+  await assert.rejects(lstat(ingressPath), { code: "ENOENT" });
+  assert.equal(docker.volumes.has(names.volume), true);
 });
 
 test("lifecycle refuses a network or bind mismatch before a Docker mutation", async () => {
@@ -517,4 +598,67 @@ test("lifecycle inspects exact volume, network, and secure container config befo
   response = await adapter.execute(lifecycle("stop", "operation_bad_network"));
   assert.equal(response.outcome, "rejected");
   assert.deepEqual(docker.mutations, before);
+});
+
+test("lifecycle rejects user privilege capability device and extra-network drift before action", async () => {
+  const mutations = [
+    (gateway: FakeContainer) => { gateway.options!.User = "root"; },
+    (gateway: FakeContainer) => { gateway.options!.HostConfig!.Privileged = true; },
+    (gateway: FakeContainer) => { gateway.options!.HostConfig!.CapAdd = ["SYS_ADMIN"]; },
+    (gateway: FakeContainer) => { gateway.options!.HostConfig!.Devices = [{ PathOnHost: "/dev/null" }]; },
+  ];
+  for (const mutate of mutations) {
+    const { adapter, docker } = buildAdapter();
+    const provision = signed();
+    await adapter.provision(provision);
+    mutate(docker.containers.get(deriveRuntimeNames(provision.runtime).container)!);
+    const before = [...docker.mutations];
+    const result = await adapter.execute(lifecycle("delete", `operation_secure_${before.length}`));
+    assert.equal(result.outcome, "rejected");
+    assert.deepEqual(docker.mutations, before);
+  }
+
+  const { adapter, docker } = buildAdapter();
+  await adapter.provision(signed());
+  docker.attachExternalNetwork = true;
+  const before = [...docker.mutations];
+  const result = await adapter.execute(lifecycle("restart", "operation_external_network"));
+  assert.equal(result.outcome, "rejected");
+  assert.deepEqual(docker.mutations, before);
+});
+
+test("adapter serializes different operation IDs for one stable runtime identity", async () => {
+  const docker = new FakeDocker();
+  let entered!: () => void;
+  const firstInspection = new Promise<void>((resolve) => { entered = resolve; });
+  let release!: () => void;
+  docker.gatewayInspectionBarrier = new Promise<void>((resolve) => { release = resolve; });
+  docker.markGatewayInspection = entered;
+  const { adapter } = buildAdapter(docker);
+  const firstRequest = signed();
+  const secondData = { ...provisionData(), operation_id: "operation_provision_b" };
+  const secondRequest = signed(secondData);
+
+  const first = adapter.execute(firstRequest);
+  await firstInspection;
+  const second = adapter.execute(secondRequest);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(docker.gatewayInspections, 1);
+  release();
+  const outcomes = await Promise.all([first, second]);
+  assert.equal(docker.mutations.filter((mutation) => mutation.startsWith("volume:")).length, 1);
+  assert.equal(outcomes[0].outcome, "accepted");
+  assert.equal(outcomes[1].outcome, "rejected");
+});
+
+test("failed gateway startup removes the new container and derived ingress credential", async () => {
+  const docker = new FakeDocker();
+  docker.failGatewayStart = true;
+  const { adapter } = buildAdapter(docker);
+  await assert.rejects(adapter.provision(signed()), /DEPENDENCY_UNAVAILABLE/);
+  const names = deriveRuntimeNames(signed().runtime);
+  assert.equal(docker.containers.has(names.container), false);
+  const ingressFiles = await readdir(join(temporaryRoot, "ingress"), { recursive: true }).catch(() => []);
+  assert.deepEqual(ingressFiles, []);
+  assert.equal(docker.volumes.has(names.volume), true);
 });

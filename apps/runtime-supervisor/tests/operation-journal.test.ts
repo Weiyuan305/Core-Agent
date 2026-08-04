@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -93,6 +93,31 @@ test("journal shares an in-flight hash and rejects a conflicting hash immediatel
   assert.equal(executions, 1);
 });
 
+test("two journal instances reserve one digest before either dispatches", async () => {
+  const firstJournal = new OperationJournal({ directory: journalRoot });
+  const secondJournal = new OperationJournal({ directory: journalRoot });
+  let executions = 0;
+  let entered!: () => void;
+  const firstEntered = new Promise<void>((resolve) => { entered = resolve; });
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const execute = async () => {
+    executions += 1;
+    entered();
+    await blocked;
+    return response();
+  };
+
+  const first = firstJournal.run(request(), execute);
+  await firstEntered;
+  const second = secondJournal.run(request(), execute);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(executions, 1);
+  release();
+  assert.deepEqual(await second, await first);
+  assert.equal(executions, 1);
+});
+
 test("journal atomically persists a bounded digest-named 0600 record and replays after restart", async () => {
   const original = new OperationJournal({ directory: journalRoot });
   let executions = 0;
@@ -152,4 +177,53 @@ test("journal refuses symlinked or permissive records before dispatch", async ()
     new OperationJournal({ directory: journalRoot }).run(request(), async () => response()),
     /SUPERVISOR_REJECTED/,
   );
+});
+
+test("journal rejects a writable ancestor before dispatch", async () => {
+  await chmod(temporaryRoot, 0o770);
+  let dispatched = false;
+  await assert.rejects(
+    new OperationJournal({ directory: journalRoot }).run(request(), async () => {
+      dispatched = true;
+      return response();
+    }),
+    /SUPERVISOR_REJECTED/,
+  );
+  assert.equal(dispatched, false);
+});
+
+test("journal recovers a digest-scoped stale reservation and bounds staleness beyond operations", async () => {
+  assert.throws(
+    () => new OperationJournal({ directory: journalRoot, reservationStaleMs: 120_000 }),
+    /SUPERVISOR_REJECTED/,
+  );
+  const digest = createHash("sha256").update(request().operation_id).digest("hex");
+  await new OperationJournal({ directory: journalRoot }).run(
+    { ...request(), operation_id: "prepare_journal", request_hash: canonicalSupervisorRequestHash({
+      protocol_version: 1,
+      operation_id: "prepare_journal",
+      kind: "inspect",
+      tenant_id: "tenant_a",
+      runtime_id: "runtime_a",
+      generation: 1,
+    }) },
+    async () => response("prepare_journal"),
+  );
+  const lockPath = join(journalRoot, `${digest}.lock`);
+  await writeFile(lockPath, `${JSON.stringify({
+    protocol_version: 1,
+    request_hash: request().request_hash,
+    owner_token: "a".repeat(64),
+  })}\n`, { mode: 0o600 });
+  const stale = new Date(Date.now() - 151_000);
+  await utimes(lockPath, stale, stale);
+
+  let executions = 0;
+  const result = await new OperationJournal({ directory: journalRoot }).run(request(), async () => {
+    executions += 1;
+    return response();
+  });
+  assert.equal(result.outcome, "accepted");
+  assert.equal(executions, 1);
+  await assert.rejects(lstat(lockPath), { code: "ENOENT" });
 });
