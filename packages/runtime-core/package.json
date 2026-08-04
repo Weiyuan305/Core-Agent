@@ -1,0 +1,28 @@
+{
+  "name": "@core-agent/runtime-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "check": "npm run build && npm test"
+  },
+  "dependencies": {
+    "@core-agent/contracts": "0.2.0",
+    "kysely": "0.29.4",
+    "pg": "8.22.0",
+    "pino": "10.3.1"
+  },
+  "devDependencies": {
+    "@types/pg": "8.20.3"
+  }
+}

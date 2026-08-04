@@ -1,0 +1,15 @@
+{
+  "name": "@core-agent/control-plane-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "check": "npm run build"
+  },
+  "dependencies": {
+    "@core-agent/contracts": "0.2.0",
+    "@core-agent/runtime-core": "0.1.0"
+  }
+}
