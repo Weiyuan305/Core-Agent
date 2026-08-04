@@ -224,11 +224,18 @@ interface SecretStore {
 The database stores only the opaque reference, purpose, version, status, and
 timestamps. It never stores secret bytes.
 
-The development adapter reads files under one configured secret root. File
-names are derived from validated opaque IDs, resolved paths must remain under
-that root, and files must have owner-only permissions (`0600`). API clients
-cannot provide a raw path. A production adapter may resolve the same reference
-from a cloud secret manager.
+The development adapter reads files under one configured secret root. The
+canonical root must be owned by the runtime uid with exact `0700` permissions.
+Every canonical ancestor through the filesystem root must be a directory owned
+by either root or the runtime uid and must prohibit group/other writes. This is
+a deployment precondition: untrusted workloads must not share the runtime uid,
+because a cooperating same-uid process cannot be contained by Unix permission
+checks. File names are derived from validated opaque IDs, resolved paths must
+remain under that root, and files must have owner-only permissions (`0600`). On
+Linux, the adapter opens the child through the held root directory descriptor;
+on macOS it retains protected-ancestor and root-identity checks around the
+child open and read. API clients cannot provide a raw path. A production
+adapter may resolve the same reference from a cloud secret manager.
 
 Secret material must be redacted from structured logs, Docker error messages,
 dependency failures, ProductEvents, AuditEvents, and ErrorEnvelopes. The

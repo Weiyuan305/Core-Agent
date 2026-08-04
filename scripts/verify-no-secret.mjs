@@ -5,9 +5,9 @@ import { spawnSync } from "node:child_process";
 
 const [sentinel, ...explicitArtifactPaths] = process.argv.slice(2);
 if (sentinel === undefined || sentinel.length === 0 || Buffer.byteLength(sentinel) > 1024) {
-  process.stderr.write("A non-empty bounded sentinel is required\n");
   process.exitCode = 2;
 } else {
+  const sentinelBuffer = Buffer.from(sentinel);
   const repositoryRoot = resolve(import.meta.dirname, "..");
   const tracked = trackedArtifactPaths(repositoryRoot);
   const explicit = await expandExplicitArtifacts(explicitArtifactPaths);
@@ -16,17 +16,16 @@ if (sentinel === undefined || sentinel.length === 0 || Buffer.byteLength(sentine
 
   const matches = [];
   for (const [path, identifier] of artifacts) {
-    if (await containsSentinel(path, Buffer.from(sentinel))) matches.push(identifier);
+    if (await containsSentinel(path, sentinelBuffer)) matches.push(identifier);
   }
 
   if (matches.length > 0) {
-    process.stderr.write("Secret sentinel detected in artifact identifiers:\n");
-    for (const identifier of matches.sort()) {
-      process.stderr.write(`- ${quoteIdentifier(displayIdentifier(identifier, repositoryRoot))}\n`);
-    }
+    emitIdentifiers(
+      matches.sort().map((identifier) => displayIdentifier(identifier, repositoryRoot)),
+      sentinel,
+      sentinelBuffer,
+    );
     process.exitCode = 1;
-  } else {
-    process.stdout.write("No secret sentinel matches found\n");
   }
 }
 
@@ -36,7 +35,6 @@ function trackedArtifactPaths(repositoryRoot) {
     maxBuffer: 16 * 1024 * 1024,
   });
   if (result.status !== 0) {
-    process.stderr.write("Unable to enumerate tracked artifact identifiers\n");
     process.exit(2);
   }
 
@@ -71,11 +69,11 @@ async function collectArtifact(path, identifier, output) {
   try {
     metadata = await lstat(path);
   } catch {
-    process.stderr.write(`Artifact identifier is unavailable: ${quoteIdentifier(basename(identifier))}\n`);
+    emitIdentifiers([basename(identifier)], sentinel, Buffer.from(sentinel));
     process.exit(2);
   }
   if (metadata.isSymbolicLink()) {
-    process.stderr.write(`Artifact identifier must not be a symbolic link: ${quoteIdentifier(basename(identifier))}\n`);
+    emitIdentifiers([basename(identifier)], sentinel, Buffer.from(sentinel));
     process.exit(2);
   }
   if (metadata.isFile()) {
@@ -83,7 +81,7 @@ async function collectArtifact(path, identifier, output) {
     return;
   }
   if (!metadata.isDirectory()) {
-    process.stderr.write(`Artifact identifier must be a regular file or directory: ${quoteIdentifier(basename(identifier))}\n`);
+    emitIdentifiers([basename(identifier)], sentinel, Buffer.from(sentinel));
     process.exit(2);
   }
 
@@ -98,7 +96,7 @@ async function containsSentinel(path, sentinelBuffer) {
   try {
     const metadata = await lstat(path);
     if (!metadata.isFile() || metadata.isSymbolicLink()) {
-      process.stderr.write(`Tracked artifact identifier is not a regular file: ${quoteIdentifier(basename(path))}\n`);
+      emitIdentifiers([basename(path)], sentinel, sentinelBuffer);
       process.exit(2);
     }
     for await (const chunk of createReadStream(path, { highWaterMark: 64 * 1024 })) {
@@ -110,16 +108,17 @@ async function containsSentinel(path, sentinelBuffer) {
     }
     return false;
   } catch {
-    process.stderr.write(`Unable to scan artifact identifier: ${quoteIdentifier(basename(path))}\n`);
+    emitIdentifiers([basename(path)], sentinel, sentinelBuffer);
     process.exit(2);
   }
 }
 
-function quoteIdentifier(identifier) {
-  const redacted = sentinel === undefined
-    ? identifier
-    : identifier.split(sentinel).join("[REDACTED]");
-  return JSON.stringify(redacted);
+function emitIdentifiers(identifiers, sentinelText, sentinelBuffer) {
+  const output = Buffer.from(`${identifiers
+    .map((identifier) => JSON.stringify(identifier.split(sentinelText).join("[REDACTED]")))
+    .join("\n")}\n`);
+  if (output.includes(sentinelBuffer)) return;
+  process.stderr.write(output);
 }
 
 function displayIdentifier(identifier, repositoryRoot) {

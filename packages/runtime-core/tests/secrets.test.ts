@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { chmod, mkdtemp, mkdir, readFile, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 import { FileSecretStore, loadProviderCatalog } from "../src/index.js";
+import { resolveSecretChildOpenPath } from "../src/secrets/file-secret-store.js";
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const scannerPath = join(repositoryRoot, "scripts", "verify-no-secret.mjs");
@@ -17,7 +17,7 @@ let secretRoot: string;
 let outsideFile: string;
 
 test.beforeEach(async () => {
-  temporaryDirectory = await mkdtemp(join(tmpdir(), "core-agent-secrets-"));
+  temporaryDirectory = await mkdtemp(join(repositoryRoot, ".core-agent-secrets-"));
   secretRoot = join(temporaryDirectory, "root");
   outsideFile = join(temporaryDirectory, "outside");
   await mkdir(secretRoot, { mode: 0o700 });
@@ -171,6 +171,39 @@ test("file secret store rejects unprotected or replaced canonical roots", async 
   );
 });
 
+test("file secret store rejects permissive roots and writable ancestors", async () => {
+  const permissiveRoot = join(temporaryDirectory, "permissive-root");
+  await mkdir(permissiveRoot, { mode: 0o750 });
+  await chmod(permissiveRoot, 0o750);
+  await writeFile(join(permissiveRoot, "provider.v1"), "synthetic-secret", { mode: 0o600 });
+  await assert.rejects(
+    new FileSecretStore(permissiveRoot).get({ reference_id: "provider", version: 1, purpose: "model_provider" }),
+    /root.*0700/i,
+  );
+
+  const writableParent = join(temporaryDirectory, "writable-parent");
+  const nestedRoot = join(writableParent, "root");
+  await mkdir(nestedRoot, { recursive: true, mode: 0o700 });
+  await chmod(writableParent, 0o777);
+  await chmod(nestedRoot, 0o700);
+  await writeFile(join(nestedRoot, "provider.v1"), "synthetic-secret", { mode: 0o600 });
+  await assert.rejects(
+    new FileSecretStore(nestedRoot).get({ reference_id: "provider", version: 1, purpose: "model_provider" }),
+    /ancestor.*permissions/i,
+  );
+});
+
+test("file secret store anchors Linux child opens through the held root descriptor", () => {
+  assert.equal(
+    resolveSecretChildOpenPath("linux", 42, "/managed/secrets", "provider.v1"),
+    "/proc/self/fd/42/provider.v1",
+  );
+  assert.equal(
+    resolveSecretChildOpenPath("darwin", 42, "/managed/secrets", "provider.v1"),
+    "/managed/secrets/provider.v1",
+  );
+});
+
 test("provider catalog is deeply frozen, indexed, and rejects duplicate models", async () => {
   const expected = [{
     provider_config_id: "tokenhub-main",
@@ -220,31 +253,43 @@ test("provider catalog require errors do not reflect untrusted or managed values
   }
 });
 
-test("sentinel scanner identifies artifacts without echoing matching bytes", async () => {
+test("sentinel scanner emits identifiers only when the complete output is sentinel-free", async () => {
   const sentinel = "scanner-private-sentinel";
   const cleanArtifact = join(temporaryDirectory, "clean.log");
-  const matchingArtifact = join(temporaryDirectory, `docker-inspection-${sentinel}.json`);
-  const controlArtifact = join(temporaryDirectory, "query-output-\n-\u001b[31m.log");
   await writeFile(cleanArtifact, "synthetic clean output");
-  await writeFile(matchingArtifact, `{"field":"${sentinel}"}`);
-  await writeFile(controlArtifact, sentinel);
 
   const clean = spawnSync(process.execPath, [scannerPath, sentinel, cleanArtifact], {
     cwd: repositoryRoot,
-    encoding: "utf8",
   });
-  assert.equal(clean.status, 0, clean.stderr);
-  assert.doesNotMatch(clean.stdout + clean.stderr, new RegExp(sentinel));
+  assert.equal(clean.status, 0, clean.stderr.toString("utf8"));
+  assert.equal(Buffer.concat([clean.stdout, clean.stderr]).length, 0);
 
-  const matching = spawnSync(process.execPath, [scannerPath, sentinel, matchingArtifact, controlArtifact], {
-    cwd: repositoryRoot,
-    encoding: "utf8",
-  });
-  assert.equal(matching.status, 1);
-  const output = matching.stdout + matching.stderr;
-  assert.match(output, /\[REDACTED\]/);
-  assert.match(output, /query-output-\\n-\\u001b\[31m\.log/);
-  assert.doesNotMatch(output, new RegExp(sentinel));
-  assert.doesNotMatch(output, /\u001b|\x1b/);
-  assert.equal(output.split("\n").length, 4);
+  const probes = [
+    { sentinel: "sentinel", emitsIdentifier: true },
+    { sentinel: "secret", emitsIdentifier: true },
+    { sentinel: "REDACTED", emitsIdentifier: false },
+    { sentinel: "e", emitsIdentifier: true },
+    { sentinel: "\n", emitsIdentifier: false },
+    { sentinel: "\u001b", emitsIdentifier: true },
+  ] as const;
+
+  for (const probe of probes) {
+    const artifact = join(temporaryDirectory, `query-output-${probe.sentinel}.log`);
+    await writeFile(artifact, Buffer.from(probe.sentinel));
+    const matching = spawnSync(process.execPath, [scannerPath, probe.sentinel, artifact], {
+      cwd: repositoryRoot,
+    });
+    assert.equal(matching.status, 1, matching.stderr.toString("utf8"));
+    const output = Buffer.concat([matching.stdout, matching.stderr]);
+    assert.equal(
+      output.includes(Buffer.from(probe.sentinel)),
+      false,
+      `scanner leaked sentinel bytes for ${JSON.stringify(probe.sentinel)}`,
+    );
+    assert.equal(
+      output.length > 0,
+      probe.emitsIdentifier,
+      `unexpected identifier output decision for ${JSON.stringify(probe.sentinel)}`,
+    );
+  }
 });

@@ -12,6 +12,17 @@ import {
 const maximumSecretBytes = 64 * 1024;
 const boundedReadBytes = maximumSecretBytes + 1;
 
+export function resolveSecretChildOpenPath(
+  platform: NodeJS.Platform,
+  rootFileDescriptor: number,
+  canonicalRoot: string,
+  filename: string,
+): string {
+  return platform === "linux"
+    ? join("/proc/self/fd", String(rootFileDescriptor), filename)
+    : join(canonicalRoot, filename);
+}
+
 interface RootIdentity {
   readonly canonicalPath: string;
   readonly device: bigint;
@@ -61,8 +72,48 @@ function validateRootMetadata(metadata: BigIntStats): void {
   if (currentUid === undefined || metadata.uid !== BigInt(currentUid)) {
     throw fixedFileError("Secret root must be owned by the current uid");
   }
-  if ((metadata.mode & 0o22n) !== 0n) {
-    throw fixedFileError("Secret root permissions must prohibit group and other writes");
+  if ((metadata.mode & 0o7777n) !== 0o700n) {
+    throw fixedFileError("Secret root permissions must be exactly 0700");
+  }
+}
+
+async function validateProtectedAncestors(canonicalRoot: string): Promise<void> {
+  const currentUid = process.getuid?.();
+  if (currentUid === undefined) {
+    throw fixedFileError("Secret root ownership cannot be verified");
+  }
+  const ownerUid = BigInt(currentUid);
+  let path = canonicalRoot;
+  let isSecretRoot = true;
+  while (true) {
+    let metadata: BigIntStats;
+    try {
+      metadata = await lstat(path, { bigint: true });
+    } catch {
+      throw fixedFileError(isSecretRoot
+        ? "Secret root metadata is unavailable"
+        : "Secret ancestor metadata is unavailable");
+    }
+    if (!metadata.isDirectory()) {
+      throw fixedFileError(isSecretRoot
+        ? "Secret root must be a directory"
+        : "Secret ancestor must be a directory");
+    }
+    if (isSecretRoot) {
+      validateRootMetadata(metadata);
+    } else {
+      if (metadata.uid !== 0n && metadata.uid !== ownerUid) {
+        throw fixedFileError("Secret ancestor must be owned by root or the current uid");
+      }
+      if ((metadata.mode & 0o22n) !== 0n) {
+        throw fixedFileError("Secret ancestor permissions must prohibit group and other writes");
+      }
+    }
+
+    const parent = dirname(path);
+    if (parent === path) return;
+    path = parent;
+    isSecretRoot = false;
   }
 }
 
@@ -112,6 +163,7 @@ export class FileSecretStore implements SecretStore {
     } catch {
       throw fixedFileError("Secret root is unavailable");
     }
+    await validateProtectedAncestors(canonicalRoot);
 
     let rootHandle: FileHandle;
     try {
@@ -135,7 +187,13 @@ export class FileSecretStore implements SecretStore {
 
       let fileHandle: FileHandle;
       try {
-        fileHandle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+        const openPath = resolveSecretChildOpenPath(
+          process.platform,
+          rootHandle.fd,
+          canonicalRoot,
+          filename,
+        );
+        fileHandle = await open(openPath, constants.O_RDONLY | constants.O_NOFOLLOW);
       } catch (error) {
         if (isNoFollowError(error)) {
           throw fixedFileError("Secret reference must resolve to a regular file");
