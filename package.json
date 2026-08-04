@@ -22,6 +22,7 @@
     "contracts:test": "npm run test -w @core-agent/contracts",
     "contracts:schemas": "npm run schemas -w @core-agent/contracts",
     "contracts:check": "npm run check -w @core-agent/contracts",
+    "db:migrate": "npm run build -w @core-agent/runtime-core && node scripts/migrate-runtime.mjs",
     "hermes:image-ref": "node scripts/resolve-hermes-image.mjs",
     "hermes:build": "node scripts/build-hermes-image.mjs",
     "hermes:bootstrap": "node scripts/bootstrap-demo-company.mjs",
@@ -33,5 +34,8 @@
     "ajv-formats": "3.0.1",
     "tsx": "4.23.5",
     "typescript": "7.0.2"
+  },
+  "dependencies": {
+    "pg": "8.22.0"
   }
 }

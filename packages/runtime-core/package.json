@@ -13,7 +13,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node --import tsx --test tests/*.test.ts",
+    "test": "node --import tsx --test tests/config.test.ts",
+    "test:postgres": "node --import tsx --test tests/migrations.test.ts",
     "check": "npm run build && npm test"
   },
   "dependencies": {
