@@ -1,6 +1,7 @@
 export {
   MAX_SUPERVISOR_FRAME_BYTES,
   MAX_SUPERVISOR_TIMEOUT_MS,
+  REMOVED_RUNTIME_IMAGE_REF,
   canonicalSupervisorRequestHash,
   decodeSupervisorFrame,
   encodeSupervisorFrame,

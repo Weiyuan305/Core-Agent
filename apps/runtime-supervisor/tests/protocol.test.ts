@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   MAX_SUPERVISOR_FRAME_BYTES,
+  REMOVED_RUNTIME_IMAGE_REF,
   canonicalSupervisorRequestHash,
   decodeSupervisorFrame,
   encodeSupervisorFrame,
@@ -74,6 +75,25 @@ test("Supervisor validation rejects inherited, null-prototype, unknown, and spar
   ]) {
     assert.throws(() => validateSupervisorRequest(value), /SUPERVISOR_REJECTED/);
   }
+});
+
+test("Supervisor removed-runtime observations use the shared immutable sentinel", () => {
+  const response = validateSupervisorResponse({
+    protocol_version: 1,
+    operation_id: "operation_removed_a",
+    outcome: "accepted",
+    observation: {
+      tenant_id: "tenant_a",
+      runtime_id: "runtime_a",
+      generation: 1,
+      exists: false,
+      lifecycle: "removed",
+      health: "unknown",
+      image_ref: REMOVED_RUNTIME_IMAGE_REF,
+    },
+  });
+  assert.equal(response.outcome, "accepted");
+  if (response.outcome === "accepted") assert.equal(response.observation.image_ref, REMOVED_RUNTIME_IMAGE_REF);
 });
 
 test("Supervisor validation rejects hidden and symbol own-property bags", () => {

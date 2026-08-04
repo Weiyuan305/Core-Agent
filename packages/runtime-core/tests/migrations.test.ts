@@ -226,6 +226,35 @@ test("version 4 terminalizes ambiguous legacy reconcile jobs and enforces the jo
   }
 });
 
+test("version 5 fails genuine active v4 command intent closed and preserves terminal v4 history", async () => {
+  const v4Directory = await mkdtemp(join(tmpdir(), "core-agent-v4-migrations-"));
+  await cp(migrationsDirectory, v4Directory, { recursive: true });
+  await rm(join(v4Directory, "005_worker_runtime_facts.sql"));
+  try {
+    await applyMigrations(pool, v4Directory);
+    await seedTenant("tenant_v4_worker_upgrade");
+    const timestamp = new Date("2026-08-04T00:00:00.000Z");
+    await pool.query(
+      `insert into worker_jobs (
+        tenant_id, job_id, job_kind, status, attempt_count, max_attempts, lease_owner,
+        lease_expires_at, next_attempt_at, payload_ref, runtime_command, effect_state,
+        last_error_summary, run_id, container_id, created_at, updated_at
+      ) values
+        ($1, 'job_v4_active', 'reconcile_runtime', 'running', 1, 5, 'worker_v4', $2, $2, 'runtime_v4', 'stop', 'pre_effect', null, null, null, $2, $2),
+        ($1, 'job_v4_terminal', 'reconcile_runtime', 'succeeded', 2, 5, null, null, $2, 'runtime_v4', 'restart', 'pre_effect', null, null, null, $2, $2)`,
+      ["tenant_v4_worker_upgrade", timestamp],
+    );
+    await applyMigrations(pool, migrationsDirectory);
+    const rows = await db.selectFrom("worker_jobs").select(["job_id", "status", "runtime_command", "target_command_version", "lease_owner", "lease_expires_at", "attempt_count", "last_error_summary"]).where("tenant_id", "=", "tenant_v4_worker_upgrade").orderBy("job_id").execute();
+    assert.deepEqual(rows, [
+      { job_id: "job_v4_active", status: "failed", runtime_command: "stop", target_command_version: null, lease_owner: null, lease_expires_at: null, attempt_count: 1, last_error_summary: "Legacy reconcile command version unavailable after schema upgrade" },
+      { job_id: "job_v4_terminal", status: "succeeded", runtime_command: "restart", target_command_version: null, lease_owner: null, lease_expires_at: null, attempt_count: 2, last_error_summary: null },
+    ]);
+  } finally {
+    await rm(v4Directory, { recursive: true, force: true });
+  }
+});
+
 test("modified applied migrations are rejected by checksum", async () => {
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "core-agent-migrations-"));
   await cp(migrationsDirectory, temporaryDirectory, { recursive: true });

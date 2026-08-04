@@ -69,6 +69,29 @@ consumers a truthful event.
 Desired or observed `deleted` state is terminal. Volume destruction remains a
 separate operator-only action; the delete command preserves the volume.
 
+### Effect admission and observation acceptance
+
+API command admission and the Worker's external-effect critical section share
+the same tenant-and-runtime PostgreSQL advisory-lock key. The Worker rechecks
+the persisted `command_version` while holding that lock and keeps it through
+the Supervisor call. The API takes the transaction-scoped form of the same lock
+before optimistic-version admission. A newer accepted command therefore either
+precedes the Worker's final check or waits until the older effect has finished;
+it cannot race into the interval between those two operations.
+
+Supervisor absence has one shared protocol representation:
+`REMOVED_RUNTIME_IMAGE_REF`, the immutable
+`managed/removed@sha256:` reference with a 64-zero digest. An observation with
+`exists=false` is compatible only when its lifecycle is `removed` and it uses
+that sentinel; it must not repeat the previously stored runtime image digest.
+An existing observation must continue to match the stored immutable image.
+
+For start, restart, or reprovision, `lifecycle=running` alone is insufficient.
+The Worker commits `ready` only from an identity-compatible observation whose
+health is `healthy` and whose private Hermes origin passes policy validation.
+`unknown`, `degraded`, and `unhealthy` running observations retry within the
+bounded attempt budget and eventually fail; they never advance readiness.
+
 ### Schema-v3 upgrade
 
 Schema v3 cannot distinguish a queued start from a queued restart because both
@@ -77,6 +100,12 @@ fails active ambiguous legacy reconcile jobs closed, clears their leases, and
 retains a bounded generic failure summary. Existing succeeded, failed, and
 cancelled history is preserved unchanged. Null legacy intent is permitted only
 for terminal reconcile rows that cannot be claimed.
+
+Schema v5 adds a monotonic runtime `command_version` and records the accepted
+version on each reconcile job. A genuine schema-v4 active reconcile row cannot
+prove that binding and is likewise failed closed during upgrade; its persisted
+command remains available for diagnosis, and terminal schema-v4 history is not
+rewritten.
 
 ## Alternatives considered
 
@@ -115,11 +144,18 @@ explicit `test:postgres` gate.
 
 ## Consequences
 
-- Task 12 can execute restart exactly rather than guess from desired state.
-- Database schema authority advances to version 4.
+- Runtime reconciliation can execute restart exactly and can suppress any job
+  whose target command version is no longer current.
+- Database schema authority advances through version 5; ambiguous active v3
+  intent and unbound active v4 intent both fail closed during their upgrades.
 - Contracts advance additively to 0.3.0 with a new immutable compatibility
   snapshot.
 - Provisioning and command acceptance remain asynchronous `202` operations.
+- Same-runtime command admission can wait for an in-flight Supervisor effect;
+  this is intentional serialization, not API/Worker process coupling.
+- Supervisor, Worker, and their tests import the removed-runtime sentinel from
+  the shared runtime-core contract so the absence representation cannot drift.
+- A running but non-healthy Hermes container is observable but is not ready.
 - An upgrade may terminalize ambiguous active schema-v3 reconcile work; it will
   not rewrite completed history or execute a guessed command.
 

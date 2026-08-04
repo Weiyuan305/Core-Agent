@@ -14,6 +14,7 @@ export interface DispatchPort {
 }
 
 export async function dispatchJob(port: DispatchPort, job: ClaimedJob, parentSignal: AbortSignal): Promise<void> {
+  if (parentSignal.aborted) return;
   const controller = new AbortController();
   const onParentAbort = () => controller.abort(parentSignal.reason);
   parentSignal.addEventListener("abort", onParentAbort, { once: true });

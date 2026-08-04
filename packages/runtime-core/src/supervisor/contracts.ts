@@ -4,6 +4,7 @@ import type { SecretReference } from "../secrets/secret-store.js";
 
 export const MAX_SUPERVISOR_FRAME_BYTES = 262_144;
 export const MAX_SUPERVISOR_TIMEOUT_MS = 10_000;
+export const REMOVED_RUNTIME_IMAGE_REF = `managed/removed@sha256:${"0".repeat(64)}` as const;
 
 export interface SupervisorEnvelopeDataV1 {
   readonly protocol_version: 1;

@@ -10,7 +10,9 @@ export interface WorkerLoopPort<Job extends WorkerLoopJob = WorkerLoopJob> {
 export async function runWorkerLoop<Job extends WorkerLoopJob>(port: WorkerLoopPort<Job>, signal: AbortSignal): Promise<void> {
   while (!signal.aborted) {
     await port.tick?.();
+    if (signal.aborted) break;
     const jobs = await port.claim(8);
+    if (signal.aborted) break;
     if (jobs.length > 8) throw new Error("Platform Worker claim exceeded process concurrency");
     if (jobs.length === 0) {
       if (!signal.aborted) await port.wait(250, signal);

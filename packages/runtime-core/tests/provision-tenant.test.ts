@@ -13,6 +13,8 @@ import { provisionTenant } from "../src/services/provision-tenant.js";
 import { commandRuntime, getTenantRuntime } from "../src/services/command-runtime.js";
 import { createRedactor } from "../src/domain/redaction.js";
 import { WorkerRuntimeRepository } from "../src/repositories/worker-runtime.js";
+import { acquireRuntimeTransactionAdvisoryLock, withRuntimeAdvisoryLock } from "../src/repositories/runtime-lock.js";
+import { sql } from "kysely";
 
 const databaseUrl = process.env.CONTROL_PLANE_TEST_DATABASE_URL;
 if (databaseUrl === undefined || !new URL(databaseUrl).pathname.slice(1).startsWith("core_agent_")) {
@@ -96,6 +98,26 @@ function b2bRequest(tenantId = "tenant_provision_a") {
 async function resetDatabase(): Promise<void> {
   await pool.query("drop schema public cascade; create schema public;");
   await applyMigrations(pool, migrationsDirectory);
+}
+
+async function holdRuntimeRowUntilLeaseExpires(
+  tenantId: string,
+  runtimeId: string,
+  jobId: string,
+  locked: () => void,
+): Promise<void> {
+  await db.transaction().execute(async (trx) => {
+    await trx.selectFrom("runtime_containers").select("container_id")
+      .where("tenant_id", "=", tenantId).where("container_id", "=", runtimeId)
+      .forUpdate().executeTakeFirstOrThrow();
+    locked();
+    await sql`select pg_sleep(greatest(extract(epoch from (lease_expires_at - clock_timestamp())) + 0.05, 0)::double precision)
+      from worker_jobs where tenant_id = ${tenantId} and job_id = ${jobId}`.execute(trx);
+    const barrier = await trx.selectFrom("worker_jobs")
+      .select(sql<boolean>`clock_timestamp() > lease_expires_at`.as("expired"))
+      .where("tenant_id", "=", tenantId).where("job_id", "=", jobId).executeTakeFirstOrThrow();
+    assert.equal(barrier.expired, true, "runtime row lock must be held until PostgreSQL observes lease expiry");
+  });
 }
 
 test.beforeEach(resetDatabase);
@@ -417,6 +439,128 @@ test("Worker terminal transaction makes no transition after lease loss", async (
   assert.equal(await repository.finishReconcile({ tenantId: context.tenantId, runtimeId: accepted.runtime.container_id, jobId: job.job_id, workerId: "worker_old" }, "stop", Number(job.target_command_version), { tenant_id: context.tenantId, runtime_id: accepted.runtime.container_id, generation: 1, exists: true, lifecycle: "stopped", health: "unknown", image_ref: imageLock.platforms["linux/amd64"].reference }), false);
   assert.deepEqual(await db.selectFrom("runtime_containers").select(["resource_version", "observed_state"]).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow(), before);
 });
+
+test("runtime command admission waits for the Worker runtime lock without blocking another runtime", async () => {
+  const provisioning = b2bRequest("tenant_command_lock");
+  const context = { tenantId: provisioning.identity_graph.tenant.tenant_id, requestId: "request_command_lock", traceId: "trace_command_lock", actorId: "core_agent_provisioner" as const, membershipId: "core_agent_provisioner_admin" as const, effectiveRole: "admin" as const };
+  const accepted = await provisionTenant({ db, providerCatalog, imageLock }, context, provisioning);
+  let entered!: () => void; const enteredPromise = new Promise<void>((resolve) => { entered = resolve; });
+  let release!: () => void; const releasePromise = new Promise<void>((resolve) => { release = resolve; });
+  const worker = withRuntimeAdvisoryLock(db, context.tenantId, accepted.runtime.container_id, async () => {
+    entered(); await releasePromise;
+    await db.updateTable("runtime_containers").set({ resource_version: sql`resource_version + 1` }).where("tenant_id", "=", context.tenantId).where("container_id", "=", accepted.runtime.container_id).execute();
+  });
+  await enteredPromise;
+
+  let commandSettled = false;
+  const command = commandRuntime({ db }, context, withHash({ schema_version: 1 as const, idempotency_key: "idem_locked_stop_stale", expected_resource_version: 1, command: "stop" as const })).then(
+    (value) => { commandSettled = true; return value; },
+    (error: unknown) => { commandSettled = true; return error; },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(commandSettled, false, "command must wait until the Worker external-effect critical section ends");
+
+  await assert.doesNotReject(db.transaction().execute(async (trx) => {
+    await acquireRuntimeTransactionAdvisoryLock(trx, context.tenantId, "runtime_other");
+  }), "a different runtime lock key must remain independent");
+
+  release(); await worker; const staleResult = await command;
+  assert.equal(staleResult instanceof DomainError && staleResult.code === "RESOURCE_VERSION_CONFLICT", true);
+  const latest = await getTenantRuntime(db, context.tenantId, context.tenantId);
+  const result = await commandRuntime({ db }, context, withHash({ schema_version: 1 as const, idempotency_key: "idem_locked_stop_latest", expected_resource_version: latest.resource_version, command: "stop" as const }));
+  assert.equal(result.runtime.desired_state, "stopped");
+  const stored = await db.selectFrom("worker_jobs").select(["runtime_command", "target_command_version"]).where("tenant_id", "=", context.tenantId).where("job_kind", "=", "reconcile_runtime").executeTakeFirstOrThrow();
+  assert.deepEqual(stored, { runtime_command: "stop", target_command_version: "1" });
+});
+
+test("finishReconcile cannot complete as an old owner after its lease expires while waiting for a row lock", async () => {
+  const provisioning = b2bRequest("tenant_finish_lock_expiry");
+  const context = { tenantId: provisioning.identity_graph.tenant.tenant_id, requestId: "request_finish_lock_expiry", traceId: "trace_finish_lock_expiry", actorId: "core_agent_provisioner" as const, membershipId: "core_agent_provisioner_admin" as const, effectiveRole: "admin" as const };
+  const accepted = await provisionTenant({ db, providerCatalog, imageLock }, context, provisioning);
+  await commandRuntime({ db }, context, withHash({ schema_version: 1 as const, idempotency_key: "idem_old_stop", expected_resource_version: 1, command: "stop" as const }));
+  await commandRuntime({ db }, context, withHash({ schema_version: 1 as const, idempotency_key: "idem_new_start", expected_resource_version: 2, command: "start" as const }));
+  const old = await db.selectFrom("worker_jobs").select(["job_id", "target_command_version"]).where("tenant_id", "=", context.tenantId).where("job_kind", "=", "reconcile_runtime").where("runtime_command", "=", "stop").executeTakeFirstOrThrow();
+  await db.updateTable("worker_jobs").set({ status: "running", lease_owner: "worker_old", lease_expires_at: sql<Date>`now() + interval '100 milliseconds'` }).where("tenant_id", "=", context.tenantId).where("job_id", "=", old.job_id).execute();
+
+  let locked!: () => void; const lockedPromise = new Promise<void>((resolve) => { locked = resolve; });
+  const rowLocker = holdRuntimeRowUntilLeaseExpires(context.tenantId, accepted.runtime.container_id, old.job_id, locked);
+  await lockedPromise;
+  const repository = new WorkerRuntimeRepository(db, createRedactor([]));
+  const finishing = repository.finishReconcile({ tenantId: context.tenantId, runtimeId: accepted.runtime.container_id, jobId: old.job_id, workerId: "worker_old" }, "stop", Number(old.target_command_version), { tenant_id: context.tenantId, runtime_id: accepted.runtime.container_id, generation: 1, exists: true, lifecycle: "stopped", health: "unknown", image_ref: imageLock.platforms["linux/amd64"].reference });
+  await rowLocker;
+  assert.equal(await finishing, false);
+  const job = await db.selectFrom("worker_jobs").select(["status", "lease_owner"]).where("tenant_id", "=", context.tenantId).where("job_id", "=", old.job_id).executeTakeFirstOrThrow();
+  assert.deepEqual(job, { status: "running", lease_owner: "worker_old" });
+});
+
+test("finishReconcile rolls back current-command transitions when lease expires during row-lock wait", async () => {
+  const provisioning = b2bRequest("tenant_finish_current_expiry");
+  const context = { tenantId: provisioning.identity_graph.tenant.tenant_id, requestId: "request_finish_current_expiry", traceId: "trace_finish_current_expiry", actorId: "core_agent_provisioner" as const, membershipId: "core_agent_provisioner_admin" as const, effectiveRole: "admin" as const };
+  const accepted = await provisionTenant({ db, providerCatalog, imageLock }, context, provisioning);
+  await db.updateTable("runtime_containers").set({ observed_state: "ready" }).where("tenant_id", "=", context.tenantId).execute();
+  await commandRuntime({ db }, context, withHash({ schema_version: 1 as const, idempotency_key: "idem_current_stop", expected_resource_version: 1, command: "stop" as const }));
+  const job = await db.selectFrom("worker_jobs").select(["job_id", "target_command_version"]).where("tenant_id", "=", context.tenantId).where("job_kind", "=", "reconcile_runtime").executeTakeFirstOrThrow();
+  await db.updateTable("worker_jobs").set({ status: "running", lease_owner: "worker_old", lease_expires_at: sql<Date>`now() + interval '100 milliseconds'` }).where("tenant_id", "=", context.tenantId).where("job_id", "=", job.job_id).execute();
+  let locked!: () => void; const lockedPromise = new Promise<void>((resolve) => { locked = resolve; });
+  const rowLocker = holdRuntimeRowUntilLeaseExpires(context.tenantId, accepted.runtime.container_id, job.job_id, locked);
+  await lockedPromise;
+  const before = await db.selectFrom("runtime_containers").select(["resource_version", "observed_state"]).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow();
+  const beforeEvents = await db.selectFrom("product_events").select(({ fn }) => fn.countAll<string>().as("count")).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow();
+  const repository = new WorkerRuntimeRepository(db, createRedactor([]));
+  const finishing = repository.finishReconcile({ tenantId: context.tenantId, runtimeId: accepted.runtime.container_id, jobId: job.job_id, workerId: "worker_old" }, "stop", Number(job.target_command_version), { tenant_id: context.tenantId, runtime_id: accepted.runtime.container_id, generation: 1, exists: true, lifecycle: "stopped", health: "unknown", image_ref: imageLock.platforms["linux/amd64"].reference });
+  await rowLocker;
+  assert.equal(await finishing, false);
+  assert.deepEqual(await db.selectFrom("runtime_containers").select(["resource_version", "observed_state"]).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow(), before);
+  assert.deepEqual(await db.selectFrom("product_events").select(({ fn }) => fn.countAll<string>().as("count")).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow(), beforeEvents);
+});
+
+test("beginProvision rolls back its transition and audit after lease expiry during row-lock wait", async () => {
+  const provisioning = b2bRequest("tenant_begin_expiry");
+  const context = { tenantId: provisioning.identity_graph.tenant.tenant_id, requestId: "request_begin_expiry", traceId: "trace_begin_expiry", actorId: "core_agent_provisioner" as const, membershipId: "core_agent_provisioner_admin" as const, effectiveRole: "admin" as const };
+  const accepted = await provisionTenant({ db, providerCatalog, imageLock }, context, provisioning);
+  const job = await db.selectFrom("worker_jobs").select("job_id").where("tenant_id", "=", context.tenantId).where("job_kind", "=", "provision_runtime").executeTakeFirstOrThrow();
+  await db.updateTable("worker_jobs").set({ status: "running", lease_owner: "worker_old", lease_expires_at: sql<Date>`now() + interval '100 milliseconds'` }).where("tenant_id", "=", context.tenantId).where("job_id", "=", job.job_id).execute();
+  let locked!: () => void; const lockedPromise = new Promise<void>((resolve) => { locked = resolve; });
+  const rowLocker = holdRuntimeRowUntilLeaseExpires(context.tenantId, accepted.runtime.container_id, job.job_id, locked);
+  await lockedPromise;
+  const beforeRuntime = await db.selectFrom("runtime_containers").select(["resource_version", "observed_state", "health_status", "failure_summary"]).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow();
+  const beforeEvents = await db.selectFrom("product_events").select(({ fn }) => fn.countAll<string>().as("count")).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow();
+  const beforeAudit = await db.selectFrom("audit_events").select(({ fn }) => fn.countAll<string>().as("count")).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow();
+  const repository = new WorkerRuntimeRepository(db, createRedactor([]));
+  const beginning = repository.beginProvision({ tenantId: context.tenantId, runtimeId: accepted.runtime.container_id, jobId: job.job_id, workerId: "worker_old" });
+  await rowLocker;
+  assert.equal(await beginning, false);
+  assert.deepEqual(await db.selectFrom("runtime_containers").select(["resource_version", "observed_state", "health_status", "failure_summary"]).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow(), beforeRuntime);
+  assert.deepEqual(await db.selectFrom("product_events").select(({ fn }) => fn.countAll<string>().as("count")).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow(), beforeEvents);
+  assert.deepEqual(await db.selectFrom("audit_events").select(({ fn }) => fn.countAll<string>().as("count")).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow(), beforeAudit);
+});
+
+for (const terminalOperation of ["finishProvision", "failRuntimeJob"] as const) {
+  test(`${terminalOperation} rolls back runtime events and audit after lease expiry during row-lock wait`, async () => {
+    const fixtureId = terminalOperation === "finishProvision" ? "finish_prov_expiry" : "fail_job_expiry";
+    const provisioning = b2bRequest(`tenant_${fixtureId}`);
+    const context = { tenantId: provisioning.identity_graph.tenant.tenant_id, requestId: `request_${fixtureId}`, traceId: `trace_${fixtureId}`, actorId: "core_agent_provisioner" as const, membershipId: "core_agent_provisioner_admin" as const, effectiveRole: "admin" as const };
+    const accepted = await provisionTenant({ db, providerCatalog, imageLock }, context, provisioning);
+    const job = await db.selectFrom("worker_jobs").select("job_id").where("tenant_id", "=", context.tenantId).where("job_kind", "=", "provision_runtime").executeTakeFirstOrThrow();
+    await db.updateTable("runtime_containers").set({ observed_state: "provisioning", resource_version: 2 }).where("tenant_id", "=", context.tenantId).execute();
+    await db.updateTable("worker_jobs").set({ status: "running", lease_owner: "worker_old", lease_expires_at: sql<Date>`now() + interval '100 milliseconds'` }).where("tenant_id", "=", context.tenantId).where("job_id", "=", job.job_id).execute();
+    let locked!: () => void; const lockedPromise = new Promise<void>((resolve) => { locked = resolve; });
+    const rowLocker = holdRuntimeRowUntilLeaseExpires(context.tenantId, accepted.runtime.container_id, job.job_id, locked);
+    await lockedPromise;
+    const beforeRuntime = await db.selectFrom("runtime_containers").select(["resource_version", "observed_state", "health_status", "failure_summary"]).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow();
+    const beforeEvents = await db.selectFrom("product_events").select(({ fn }) => fn.countAll<string>().as("count")).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow();
+    const beforeAudit = await db.selectFrom("audit_events").select(({ fn }) => fn.countAll<string>().as("count")).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow();
+    const repository = new WorkerRuntimeRepository(db, createRedactor([]));
+    const terminal = terminalOperation === "finishProvision"
+      ? repository.finishProvision({ tenantId: context.tenantId, runtimeId: accepted.runtime.container_id, jobId: job.job_id, workerId: "worker_old" })
+      : repository.failRuntimeJob({ tenantId: context.tenantId, runtimeId: accepted.runtime.container_id, jobId: job.job_id, workerId: "worker_old" }, "synthetic permanent failure", "runtime.provision");
+    await rowLocker;
+    assert.equal(await terminal, false);
+    assert.deepEqual(await db.selectFrom("runtime_containers").select(["resource_version", "observed_state", "health_status", "failure_summary"]).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow(), beforeRuntime);
+    assert.deepEqual(await db.selectFrom("product_events").select(({ fn }) => fn.countAll<string>().as("count")).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow(), beforeEvents);
+    assert.deepEqual(await db.selectFrom("audit_events").select(({ fn }) => fn.countAll<string>().as("count")).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow(), beforeAudit);
+  });
+}
 
 for (const terminalField of ["desired_state", "observed_state"] as const) {
   test(`runtime command rejects terminal ${terminalField} before every write`, async () => {

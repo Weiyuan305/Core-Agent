@@ -53,7 +53,7 @@ async function dispatchRuntimeJob(dependencies: WorkerDependencies, job: Claimed
     probe: (input, operationSignal) => dependencies.hermesClient.probe(input, operationSignal),
     succeed: () => dependencies.repositories.runtimes.finishProvision(ref),
     retry: async (_job, summary) => { const retry = nextAttempt(dependencies, job, summary); return dependencies.repositories.runtimes.retryJob(ref, retry.summary, retry.at); },
-    fail: (_job, summary) => dependencies.repositories.runtimes.failRuntimeJob(ref, summary),
+    fail: (_job, summary) => dependencies.repositories.runtimes.failRuntimeJob(ref, summary, "runtime.provision"),
   }, job, signal));
   if (job.jobKind === "reconcile_runtime") return withRuntimeAdvisoryLock(dependencies.db, job.tenantId, job.payloadRef, () => handleReconcileRuntime({
     loadFacts: () => dependencies.repositories.runtimes.loadReconcileFacts(job.tenantId, job.payloadRef),

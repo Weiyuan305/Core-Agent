@@ -19,6 +19,7 @@ import { dirname, join, resolve } from "node:path";
 import type Dockerode from "dockerode";
 
 import {
+  REMOVED_RUNTIME_IMAGE_REF,
   validateSupervisorRequest,
   type ProviderCatalog,
   type RuntimeObservation,
@@ -1029,7 +1030,7 @@ export class DockerRuntimeAdapter {
           exists: false,
           lifecycle: "removed",
           health: "unknown",
-          image_ref: `managed/removed@sha256:${"0".repeat(64)}`,
+          image_ref: REMOVED_RUNTIME_IMAGE_REF,
         };
       }
       throw rejected();
@@ -1048,7 +1049,7 @@ export class DockerRuntimeAdapter {
       await container.handle.remove({ force: true, v: false });
       await this.#removeIngressCredential(runtimeDigest, request.generation);
       const { private_origin: _privateOrigin, ...withoutOrigin } = before;
-      return { ...withoutOrigin, exists: false, lifecycle: "removed", health: "unknown" };
+      return { ...withoutOrigin, exists: false, lifecycle: "removed", health: "unknown", image_ref: REMOVED_RUNTIME_IMAGE_REF };
     }
     return validateGatewayInspection(await container.handle.inspect(), undefined, request, names, ingressPath);
   }

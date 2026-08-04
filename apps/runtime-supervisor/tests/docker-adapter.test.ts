@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
+  REMOVED_RUNTIME_IMAGE_REF,
   canonicalSupervisorRequestHash,
   loadProviderCatalog,
   type ProvisionRuntimeCommandDataV1,
@@ -506,6 +507,7 @@ test("lifecycle operations validate the exact managed container and preserve its
   if (deleted.outcome === "accepted") {
     assert.equal(deleted.observation.exists, false);
     assert.equal(deleted.observation.lifecycle, "removed");
+    assert.equal(deleted.observation.image_ref, REMOVED_RUNTIME_IMAGE_REF);
   }
   assert.equal(docker.volumes.has(names.volume), true);
   assert.match(gateway.actions.at(-1) ?? "", /"v":false/);
@@ -550,6 +552,7 @@ test("delete cleans only the derived ingress credential when the container is al
 
   const result = await adapter.execute(lifecycle("delete", "operation_delete_partial"));
   assert.equal(result.outcome, "accepted");
+  if (result.outcome === "accepted") assert.equal(result.observation.image_ref, REMOVED_RUNTIME_IMAGE_REF);
   await assert.rejects(lstat(ingressPath), { code: "ENOENT" });
   assert.equal(docker.volumes.has(names.volume), true);
 });

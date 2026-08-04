@@ -16,6 +16,7 @@ import {
 import { appendAuditEvent, appendProductEvents } from "../repositories/events.js";
 import { ResourceRepositories } from "../repositories/index.js";
 import { safeContractInteger } from "../repositories/resources.js";
+import { acquireRuntimeTransactionAdvisoryLock } from "../repositories/runtime-lock.js";
 import { deriveRuntimeContainerId, type ProvisioningContext } from "./provision-tenant.js";
 
 const idSchema = Type.String({ minLength: 1, maxLength: 255 });
@@ -152,6 +153,7 @@ export async function commandRuntime(
     const now = dependencies.now?.() ?? new Date();
     const nowIso = now.toISOString();
     const tenantTransaction: TenantTransaction = { tenantId, trx };
+    await acquireRuntimeTransactionAdvisoryLock(trx, tenantId, containerId);
     const runtimeSnapshot = await trx.selectFrom("runtime_containers")
       .select(["container_id", "resource_version", "desired_state", "observed_state"])
       .where("tenant_id", "=", tenantId).where("container_id", "=", containerId)

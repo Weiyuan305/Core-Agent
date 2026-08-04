@@ -54,6 +54,22 @@ Schema-v4 active reconcile jobs lack a command-version binding and are failed
 closed during upgrade. Existing runtime platforms stay unknown for the same
 reason: neither command intent ordering nor CPU architecture is fabricated.
 
+Runtime lifecycle serialization uses one tenant-and-runtime-scoped PostgreSQL
+advisory-lock key across both processes. The Worker holds the session lock from
+the final current-command check through the Supervisor effect. API command
+admission takes the transaction form of the same lock before reading the
+expected resource version and committing a newer intent. Therefore a command
+cannot be admitted in the gap between the Worker's check and external effect;
+different runtimes retain independent lock keys.
+
+Worker transactions that start or terminalize leased runtime work fence the
+lease before and after any runtime-row wait. They first lock the owned
+`worker_jobs` row, lock the runtime row, then re-check owner, running status,
+and expiry against PostgreSQL `clock_timestamp()`. A failed fence aborts the
+whole transaction, including runtime transitions, events, audit, and job
+completion. Transaction-stable `now()` is deliberately not used for this
+authorization decision because it can predate time spent waiting on a lock.
+
 Internal infrastructure jobs are distinct from the contract Task resource,
 which belongs to an Agent Run.
 
@@ -102,6 +118,10 @@ repeatedly require lower-level SQL escape hatches.
 - A missed notification cannot lose an event because consumers query durable
   rows.
 - Worker crashes require lease expiry and idempotent external operations.
+- Runtime command admission may wait for an in-flight effect on the same
+  runtime, while commands for other runtimes remain independent.
+- A stale Worker cannot publish a terminal transition after losing its lease,
+  even when the loss happens while it waits for another row lock.
 - If a later workload justifies Redis or a broker, it must consume a committed
   Outbox and cannot become the resource authority.
 

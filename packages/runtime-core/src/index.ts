@@ -55,7 +55,7 @@ export {
   workerJobKinds,
   type WorkerJobKind,
 } from "./repositories/jobs.js";
-export { withRuntimeAdvisoryLock } from "./repositories/runtime-lock.js";
+export { acquireRuntimeTransactionAdvisoryLock, runtimeAdvisoryLockKey, withRuntimeAdvisoryLock } from "./repositories/runtime-lock.js";
 export { WorkerRuntimeRepository, type RuntimeWorkerJobRef, type StoredProvisionFacts, type StoredProvisionProfile, type StoredReconcileFacts } from "./repositories/worker-runtime.js";
 export { claimOutboxWakeups, failOutbox, markOutboxDelivered, rescheduleOutbox, type ClaimedOutboxWakeup, type ClaimOutboxInput } from "./repositories/outbox.js";
 export {
@@ -100,6 +100,7 @@ export {
 export {
   MAX_SUPERVISOR_FRAME_BYTES,
   MAX_SUPERVISOR_TIMEOUT_MS,
+  REMOVED_RUNTIME_IMAGE_REF,
   canonicalSupervisorRequestHash,
   decodeSupervisorFrame,
   encodeSupervisorFrame,

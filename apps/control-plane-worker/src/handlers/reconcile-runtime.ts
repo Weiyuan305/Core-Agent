@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { canonicalSupervisorRequestHash, type LifecycleRuntimeCommandDataV1, type SupervisorRequestV1, type SupervisorResponseV1 } from "@core-agent/runtime-core";
+import { canonicalSupervisorRequestHash, REMOVED_RUNTIME_IMAGE_REF, type LifecycleRuntimeCommandDataV1, type SupervisorRequestV1, type SupervisorResponseV1 } from "@core-agent/runtime-core";
 
 import type { HandlerResult } from "../dispatch-job.js";
 import { validatePrivateHermesOrigin } from "./provision-runtime.js";
@@ -26,9 +26,12 @@ function operationId(job: ReconcileJob, suffix: string): string {
   return `op_${createHash("sha256").update(`${job.jobId}:${suffix}`, "utf8").digest("hex").slice(0, 48)}`;
 }
 function compatible(facts: ReconcileFacts, response: SupervisorResponseV1): boolean {
-  return response.outcome === "accepted" && response.observation.tenant_id === facts.tenantId
-    && response.observation.runtime_id === facts.runtimeId && response.observation.generation === facts.generation
-    && response.observation.image_ref === facts.imageRef;
+  if (response.outcome !== "accepted") return false;
+  const observation = response.observation;
+  if (observation.tenant_id !== facts.tenantId || observation.runtime_id !== facts.runtimeId || observation.generation !== facts.generation) return false;
+  return observation.exists
+    ? observation.image_ref === facts.imageRef
+    : observation.lifecycle === "removed" && observation.image_ref === REMOVED_RUNTIME_IMAGE_REF;
 }
 function summary(value: unknown): string { return (value instanceof Error ? value.message : String(value)).slice(0, 1000); }
 function retryable(error: unknown): boolean { return typeof error === "object" && error !== null && (error as { retryable?: unknown }).retryable === true; }
@@ -53,6 +56,11 @@ function inspectionAllowsEffect(command: RuntimeCommand, response: Extract<Super
   if (command === "restart") return observation.exists && observation.lifecycle === "running";
   return observation.exists && ["created", "stopped"].includes(observation.lifecycle);
 }
+async function unhealthyRunningResult(port: ReconcileRuntimePort, job: ReconcileJob): Promise<HandlerResult> {
+  const text = "Supervisor reports the running runtime is not healthy";
+  if (job.attemptCount < job.maxAttempts) { await port.retry(job, text); return { kind: "retry", summary: text }; }
+  await port.fail(job, text); return { kind: "failed", summary: text };
+}
 
 export async function handleReconcileRuntime(port: ReconcileRuntimePort, job: ReconcileJob, signal: AbortSignal): Promise<HandlerResult> {
   try {
@@ -70,6 +78,7 @@ export async function handleReconcileRuntime(port: ReconcileRuntimePort, job: Re
     if (!compatible(facts, inspected)) throw new Error("Supervisor inspect observation does not match stored runtime identity");
     if (inspectionAlreadySatisfies(job.command, inspected)) {
       if (inspected.observation.lifecycle === "running") validatePrivateHermesOrigin(inspected.observation.private_origin);
+      if (inspected.observation.lifecycle === "running" && inspected.observation.health !== "healthy") return unhealthyRunningResult(port, job);
       if (!await port.succeed(job, inspected)) return { kind: "failed", summary: "Worker job lease lost" };
       return { kind: "succeeded" };
     }
@@ -88,6 +97,7 @@ export async function handleReconcileRuntime(port: ReconcileRuntimePort, job: Re
     }
     if (!compatible(facts, effected) || !effectMatches(job.command, effected)) throw new Error("Supervisor lifecycle observation does not match requested operation");
     if (effected.observation.lifecycle === "running") validatePrivateHermesOrigin(effected.observation.private_origin);
+    if (effected.observation.lifecycle === "running" && effected.observation.health !== "healthy") return unhealthyRunningResult(port, job);
     if (!await port.succeed(job, effected)) return { kind: "failed", summary: "Worker job lease lost" };
     return { kind: "succeeded" };
   } catch (error) {
