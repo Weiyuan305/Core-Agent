@@ -3,7 +3,13 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { createRuntimeDatabase, ResourceRepositories, type Actor, type RuntimeContainer } from "@core-agent/runtime-core";
+import {
+  createRuntimeDatabase,
+  ResourceRepositories,
+  SecretReferenceRepository,
+  type Actor,
+  type RuntimeContainer,
+} from "@core-agent/runtime-core";
 import { Pool } from "pg";
 
 import { applyMigrations } from "../src/db/migrate.js";
@@ -138,4 +144,55 @@ test("repository inserts reject unsafe contract resource versions before writing
     "0",
   );
   assert.equal(await tenant.actors.find("actor_unsafe_input"), undefined);
+});
+
+test("secret reference repository stores tenant-scoped metadata only", async () => {
+  const tenantA = new SecretReferenceRepository({ tenantId: "tenant_a", db });
+  const tenantB = new SecretReferenceRepository({ tenantId: "tenant_b", db });
+  const metadata = [
+    { reference_id: "provider_tokenhub_main", purpose: "model_provider" as const },
+    { reference_id: "hermes_ingress_main", purpose: "hermes_ingress" as const },
+    { reference_id: "bootstrap_service_main", purpose: "bootstrap_service" as const },
+  ].map((reference) => ({
+    ...reference,
+    version: 1,
+    status: "active" as const,
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z",
+  }));
+
+  for (const reference of metadata) {
+    await tenantA.insert(reference);
+    assert.deepEqual(await tenantA.find(reference.reference_id), reference);
+    assert.equal(await tenantB.find(reference.reference_id), undefined);
+  }
+
+  const stored = await db.selectFrom("secret_references")
+    .selectAll()
+    .where("tenant_id", "=", "tenant_a")
+    .orderBy("reference_id", "asc")
+    .execute();
+  assert.deepEqual(stored.map((row) => [row.reference_id, row.purpose]), [
+    ["bootstrap_service_main", "bootstrap"],
+    ["hermes_ingress_main", "integration"],
+    ["provider_tokenhub_main", "provider_credential"],
+  ]);
+  assert.deepEqual(Object.keys(stored[0] ?? {}).sort(), [
+    "created_at",
+    "purpose",
+    "reference_id",
+    "status",
+    "tenant_id",
+    "updated_at",
+    "version",
+  ]);
+
+  await assert.rejects(
+    tenantA.insert({ ...metadata[0]!, reference_id: "unsafe_version", version: Number.MAX_SAFE_INTEGER + 1 }),
+    /positive safe integer/,
+  );
+  await assert.rejects(
+    tenantA.insert({ ...metadata[0]!, reference_id: "unsafe_purpose", purpose: "private" as never }),
+    /purpose/,
+  );
 });

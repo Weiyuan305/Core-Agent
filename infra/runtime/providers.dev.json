@@ -1,0 +1,10 @@
+[
+  {
+    "provider_config_id": "tokenhub-main",
+    "base_url": "https://tokenhub.infplacex.com/v1/chat/completions",
+    "model_ids": ["cywx/gpt-5.6-sol"],
+    "credential_secret_ref": "provider_tokenhub_main",
+    "timeout_ms": 90000,
+    "max_safe_retries": 1
+  }
+]

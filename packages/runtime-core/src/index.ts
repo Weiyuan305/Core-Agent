@@ -1,5 +1,9 @@
 export { loadRuntimeEnvironment, type RuntimeEnvironment } from "./config/environment.js";
-export { loadProviderCatalog, type ProviderConfig } from "./config/provider-catalog.js";
+export {
+  loadProviderCatalog,
+  type ProviderCatalog,
+  type ProviderConfig,
+} from "./config/provider-catalog.js";
 export {
   createRuntimeDatabase,
   type NullableRuntimeBigInt,
@@ -29,6 +33,11 @@ export {
 export { RuntimeRepository, type VersionedWriteResult } from "./repositories/runtime.js";
 export { ConversationRepository, SessionRepository } from "./repositories/conversation.js";
 export { AgentRunRepository, MessageRepository } from "./repositories/run.js";
+export {
+  SecretReferenceRepository,
+  type SecretReferenceMetadata,
+  type SecretReferenceStatus,
+} from "./repositories/secret-references.js";
 export {
   claimJobs,
   heartbeatJob,
@@ -61,6 +70,16 @@ export {
   assertRuntimeObservedTransition,
   redactedFailureSummary,
 } from "./domain/transitions.js";
+export { FileSecretStore } from "./secrets/file-secret-store.js";
+export {
+  assertSecretReference,
+  assertSecretReferenceId,
+  secretPurposes,
+  type SecretMaterial,
+  type SecretPurpose,
+  type SecretReference,
+  type SecretStore,
+} from "./secrets/secret-store.js";
 export {
   assertSchemaVersion,
   EXPECTED_SCHEMA_VERSION,

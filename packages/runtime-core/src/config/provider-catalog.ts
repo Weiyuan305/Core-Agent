@@ -7,6 +7,29 @@ export interface ProviderConfig {
   readonly max_safe_retries: number;
 }
 
+export interface ProviderCatalog {
+  readonly entries: readonly ProviderConfig[];
+  require(providerConfigId: string, modelId: string): ProviderConfig;
+}
+
+class ManagedProviderCatalog implements ProviderCatalog {
+  readonly #byId: ReadonlyMap<string, ProviderConfig>;
+  public readonly entries: readonly ProviderConfig[];
+
+  public constructor(entries: readonly ProviderConfig[]) {
+    this.entries = entries;
+    this.#byId = new Map(entries.map((entry) => [entry.provider_config_id, entry]));
+    Object.freeze(this);
+  }
+
+  public require(providerConfigId: string, modelId: string): ProviderConfig {
+    const provider = this.#byId.get(providerConfigId);
+    if (provider === undefined) throw catalogError("entry is unavailable");
+    if (!provider.model_ids.includes(modelId)) throw catalogError("model is unavailable");
+    return provider;
+  }
+}
+
 const providerConfigKeys = [
   "provider_config_id",
   "base_url",
@@ -133,13 +156,13 @@ function validateInput(value: unknown): ProviderConfigInput {
   return value as ProviderConfigInput;
 }
 
-export function loadProviderCatalog(value: unknown): readonly ProviderConfig[] {
+export function loadProviderCatalog(value: unknown): ProviderCatalog {
   if (!Array.isArray(value)) {
     throw catalogError("must be an array");
   }
 
   const providerIds = new Set<string>();
-  return value.map((entry) => {
+  const entries = value.map((entry) => {
     const input = validateInput(entry);
     if (!isNonEmptyString(input.provider_config_id)) {
       throw catalogError("provider_config_id must be a non-empty string");
@@ -154,6 +177,10 @@ export function loadProviderCatalog(value: unknown): readonly ProviderConfig[] {
     if (!Array.isArray(input.model_ids) || input.model_ids.length === 0 || !input.model_ids.every(isNonEmptyString)) {
       throw catalogError("model_ids must be a non-empty allowlist");
     }
+    const modelIds = input.model_ids.map((modelId) => modelId.trim());
+    if (new Set(modelIds).size !== modelIds.length) {
+      throw catalogError("contains a duplicate model_id");
+    }
     if (!isNonEmptyString(input.credential_secret_ref)) {
       throw catalogError("credential_secret_ref must be a non-empty string");
     }
@@ -164,13 +191,14 @@ export function loadProviderCatalog(value: unknown): readonly ProviderConfig[] {
       throw catalogError("max_safe_retries must be an integer from 0 through 3");
     }
 
-    return {
+    return Object.freeze({
       provider_config_id: providerConfigId,
       base_url: baseUrl,
-      model_ids: input.model_ids.map((modelId) => modelId.trim()),
+      model_ids: Object.freeze(modelIds),
       credential_secret_ref: input.credential_secret_ref.trim(),
       timeout_ms: input.timeout_ms,
       max_safe_retries: input.max_safe_retries,
-    };
+    });
   });
+  return new ManagedProviderCatalog(Object.freeze(entries));
 }

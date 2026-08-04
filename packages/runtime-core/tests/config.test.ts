@@ -68,7 +68,9 @@ test("environment requires every server-managed value", () => {
 });
 
 test("provider catalog parses server-managed provider allowlists", () => {
-  assert.deepEqual(loadProviderCatalog([provider]), [provider]);
+  const catalog = loadProviderCatalog([provider]);
+  assert.deepEqual(catalog.entries, [provider]);
+  assert.equal(catalog.require("openai", "gpt-5.6-sol"), catalog.entries[0]);
 });
 
 test("provider catalog rejects client-controlled protocols", () => {
