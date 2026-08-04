@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { chmod, lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -17,6 +18,7 @@ import { RuntimeSupervisorServer } from "../src/server.js";
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const imageRef = `managed/runtime@sha256:${"a".repeat(64)}`;
+const singletonLockName = ".core-agent-runtime-supervisor.lock";
 
 function request(operationId: string): SupervisorRequestV1 {
   const data = {
@@ -89,6 +91,78 @@ test("Unix service validates, journals, frames one response, and creates a 0660 
     assert.equal(dispatches, 1);
   } finally {
     await server.close();
+  }
+});
+
+test("concurrent Supervisor starts elect exactly one singleton owner before bind", async () => {
+  const first = buildServer(async (value) => accepted(value.operation_id));
+  const second = buildServer(async (value) => accepted(value.operation_id));
+  const starts = await Promise.allSettled([first.start(), second.start()]);
+  const winners = starts.flatMap((result, index) => result.status === "fulfilled" ? [index] : []);
+  const lockPath = join(temporaryRoot, singletonLockName);
+  try {
+    assert.equal(winners.length, 1);
+    assert.equal((await lstat(lockPath)).mode & 0o777, 0o600);
+    const owner = winners[0] === 0 ? first : second;
+    const reply = await new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 })
+      .execute(request("operation_singleton_winner"));
+    assert.equal(reply.outcome, "accepted");
+  } finally {
+    await Promise.allSettled([first.close(), second.close()]);
+  }
+  await assert.rejects(lstat(lockPath), { code: "ENOENT" });
+});
+
+test("a second Supervisor cannot disturb the first live owner or its socket", async () => {
+  const first = buildServer(async (value) => accepted(value.operation_id));
+  const second = buildServer(async (value) => accepted(value.operation_id));
+  await first.start();
+  try {
+    await assert.rejects(second.start(), /SUPERVISOR_REJECTED/);
+    const reply = await new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 })
+      .execute(request("operation_first_owner_survives"));
+    assert.equal(reply.outcome, "accepted");
+  } finally {
+    await second.close();
+    await first.close();
+  }
+});
+
+test("Supervisor recovers only a dead-PID singleton record and releases its nonce", async () => {
+  const lockPath = join(temporaryRoot, singletonLockName);
+  await writeFile(lockPath, `${JSON.stringify({
+    protocol_version: 1,
+    pid: 2_147_483_647,
+    nonce: "a".repeat(64),
+  })}\n`, { mode: 0o600 });
+  const server = buildServer(async (value) => accepted(value.operation_id));
+  await server.start();
+  const owned = JSON.parse(await readFile(lockPath, "utf8")) as { pid: number; nonce: string };
+  assert.equal(owned.pid, process.pid);
+  assert.notEqual(owned.nonce, "a".repeat(64));
+  await server.close();
+  await assert.rejects(lstat(lockPath), { code: "ENOENT" });
+});
+
+test("Supervisor never unlinks a connectable current-uid socket after stale-lock recovery", async () => {
+  const raw = createServer((socket) => socket.end());
+  await new Promise<void>((resolve, reject) => {
+    raw.once("error", reject);
+    raw.listen(socketPath, resolve);
+  });
+  const lockPath = join(temporaryRoot, singletonLockName);
+  await writeFile(lockPath, `${JSON.stringify({
+    protocol_version: 1,
+    pid: 2_147_483_647,
+    nonce: "b".repeat(64),
+  })}\n`, { mode: 0o600 });
+  const supervisor = buildServer(async (value) => accepted(value.operation_id));
+  try {
+    await assert.rejects(supervisor.start(), /SUPERVISOR_REJECTED/);
+    assert.equal((await lstat(socketPath)).isSocket(), true);
+  } finally {
+    await supervisor.close();
+    await new Promise<void>((resolve) => raw.close(() => resolve()));
   }
 });
 

@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, type BigIntStats } from "node:fs";
 import {
   chmod,
   lstat,
@@ -7,12 +7,14 @@ import {
   mkdtemp,
   open,
   readdir,
+  realpath,
   rename,
   rm,
   rmdir,
+  unlink,
   type FileHandle,
 } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import type Dockerode from "dockerode";
 
@@ -77,6 +79,17 @@ type LifecycleRuntimeCommandV1 = Exclude<SupervisorRequestV1, ProvisionRuntimeCo
 interface ExistingResource<T> {
   readonly handle: T;
   readonly inspection?: unknown;
+}
+
+interface HeldIngressDirectories {
+  readonly root: FileHandle;
+  readonly rootPath: string;
+  readonly parent: FileHandle;
+  readonly parentPath: string;
+  readonly parentName: string;
+  readonly generation: FileHandle;
+  readonly generationPath: string;
+  readonly generationName: string;
 }
 
 function rejected(): Error {
@@ -157,6 +170,12 @@ function isNotFound(error: unknown): boolean {
   return descriptor !== undefined && "value" in descriptor && (descriptor.value === 404 || descriptor.value === "ENOENT");
 }
 
+function errorCode(error: unknown): unknown {
+  if (typeof error !== "object" || error === null) return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(error, "code");
+  return descriptor !== undefined && "value" in descriptor ? descriptor.value : undefined;
+}
+
 async function inspectOptional<T extends DockerResourceLike>(handle: T): Promise<ExistingResource<T>> {
   try {
     return { handle, inspection: await handle.inspect() };
@@ -225,6 +244,48 @@ async function ensurePrivateDirectory(path: string): Promise<void> {
   ) throw dockerFailure("DEPENDENCY_UNAVAILABLE", "Supervisor private directory is unsafe");
 }
 
+function sameFileIdentity(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function childPath(parent: FileHandle, canonicalParent: string, name: string): string {
+  return process.platform === "linux"
+    ? join("/proc/self/fd", String(parent.fd), name)
+    : join(canonicalParent, name);
+}
+
+async function validateProtectedDirectoryAncestors(canonicalRoot: string): Promise<void> {
+  const uid = process.getuid?.();
+  if (uid === undefined) throw rejected();
+  let path = canonicalRoot;
+  let root = true;
+  while (true) {
+    const metadata = await lstat(path, { bigint: true }).catch(() => { throw rejected(); });
+    if (!metadata.isDirectory()) throw rejected();
+    if (root) {
+      if (metadata.uid !== BigInt(uid) || (metadata.mode & 0o7777n) !== 0o700n) throw rejected();
+    } else if (
+      (metadata.uid !== 0n && metadata.uid !== BigInt(uid))
+      || (metadata.mode & 0o22n) !== 0n
+    ) throw rejected();
+    const parent = dirname(path);
+    if (parent === path) return;
+    path = parent;
+    root = false;
+  }
+}
+
+async function assertHeldPrivateDirectory(handle: FileHandle, namedPath: string): Promise<BigIntStats> {
+  const held = await handle.stat({ bigint: true });
+  const named = await lstat(namedPath, { bigint: true }).catch(() => { throw rejected(); });
+  const uid = process.getuid?.();
+  if (
+    uid === undefined || !held.isDirectory() || held.uid !== BigInt(uid)
+    || (held.mode & 0o7777n) !== 0o700n || !sameFileIdentity(held, named)
+  ) throw rejected();
+  return held;
+}
+
 async function writeExclusive(path: string, value: string): Promise<void> {
   let handle: FileHandle | undefined;
   try {
@@ -239,26 +300,6 @@ async function writeExclusive(path: string, value: string): Promise<void> {
     throw dockerFailure("DEPENDENCY_UNAVAILABLE", "Supervisor staged file could not be written");
   } finally {
     if (handle !== undefined) await handle.close().catch(() => undefined);
-  }
-}
-
-async function atomicPrivateWrite(directory: string, filename: string, value: string): Promise<string> {
-  await ensurePrivateDirectory(directory);
-  const temporaryName = `.pending-${randomBytes(16).toString("hex")}`;
-  const temporaryPath = join(directory, temporaryName);
-  const finalPath = join(directory, filename);
-  try {
-    await writeExclusive(temporaryPath, value);
-    await rename(temporaryPath, finalPath);
-    const directoryHandle = await open(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-    try {
-      await directoryHandle.sync();
-    } finally {
-      await directoryHandle.close();
-    }
-    return finalPath;
-  } finally {
-    await rm(temporaryPath, { force: true }).catch(() => undefined);
   }
 }
 
@@ -775,7 +816,7 @@ export class DockerRuntimeAdapter {
     const volume = await inspectOptional(this.#options.docker.getVolume(names.volume));
     const network = await inspectOptional(this.#options.docker.getNetwork(names.network));
 
-    await this.#validateIngressGeneration(ingressParent, request.runtime.generation);
+    await this.#validateIngressGeneration(runtimeDigest, request.runtime.generation);
 
     if (volume.inspection !== undefined) validateVolumeInspection(volume.inspection, request, names);
     if (network.inspection !== undefined) validateNetworkInspection(network.inspection, names);
@@ -884,7 +925,7 @@ export class DockerRuntimeAdapter {
       const ingressMaterial = await this.#options.secretStore.get(request.runtime.ingress_secret_ref);
       try {
         assertNotAborted(signal);
-        await atomicPrivateWrite(ingressDirectory, "hermes_ingress", ingressMaterial.text());
+        await this.#writeIngressCredential(runtimeDigest, request.runtime.generation, ingressMaterial.text());
       } finally {
         ingressMaterial.release();
       }
@@ -911,7 +952,7 @@ export class DockerRuntimeAdapter {
         if (gatewayContainer !== undefined) {
           await gatewayContainer.remove({ force: true, v: false }).catch(() => undefined);
         }
-        await this.#removeIngressCredential(ingressParent, ingressDirectory, ingressPath);
+        await this.#removeIngressCredential(runtimeDigest, request.runtime.generation);
         throw error;
       }
     } catch (error) {
@@ -970,7 +1011,7 @@ export class DockerRuntimeAdapter {
     const ingressParent = join(resolve(this.#options.ingressRoot), runtimeDigest);
     const ingressDirectory = join(ingressParent, `g-${request.generation}`);
     const ingressPath = join(ingressDirectory, "hermes_ingress");
-    await this.#validateIngressGeneration(ingressParent, request.generation);
+    await this.#validateIngressGeneration(runtimeDigest, request.generation);
     const [container, volume, network] = await Promise.all([
       inspectOptional(this.#options.docker.getContainer(names.container)),
       inspectOptional(this.#options.docker.getVolume(names.volume)),
@@ -978,7 +1019,7 @@ export class DockerRuntimeAdapter {
     ]);
     if (container.inspection === undefined) {
       if (request.kind === "delete") {
-        await this.#removeIngressCredential(ingressParent, ingressDirectory, ingressPath);
+        await this.#removeIngressCredential(runtimeDigest, request.generation);
       }
       if (request.kind === "inspect" || request.kind === "delete") {
         return {
@@ -1005,40 +1046,165 @@ export class DockerRuntimeAdapter {
     else if (request.kind === "restart") await container.handle.restart({ t: 30 });
     else {
       await container.handle.remove({ force: true, v: false });
-      await this.#removeIngressCredential(ingressParent, ingressDirectory, ingressPath);
+      await this.#removeIngressCredential(runtimeDigest, request.generation);
       const { private_origin: _privateOrigin, ...withoutOrigin } = before;
       return { ...withoutOrigin, exists: false, lifecycle: "removed", health: "unknown" };
     }
     return validateGatewayInspection(await container.handle.inspect(), undefined, request, names, ingressPath);
   }
 
-  async #validateIngressGeneration(parent: string, generation: number): Promise<void> {
-    let entries: string[];
-    try {
-      const metadata = await lstat(parent, { bigint: true });
-      const uid = process.getuid?.();
-      if (
-        uid === undefined || !metadata.isDirectory() || metadata.uid !== BigInt(uid)
-        || (metadata.mode & 0o7777n) !== 0o700n
-      ) throw rejected();
-      entries = await readdir(parent);
-    } catch (error) {
-      if (isNotFound(error)) return;
-      if (error instanceof Error && error.message.startsWith("SUPERVISOR_REJECTED:")) throw error;
-      throw rejected();
-    }
-    const expected = `g-${generation}`;
-    if (entries.some((entry) => entry !== expected)) throw rejected();
+  async #validateIngressGeneration(runtimeDigest: string, generation: number): Promise<void> {
+    const held = await this.#openIngressDirectories(runtimeDigest, generation, false);
+    if (held !== undefined) await this.#closeIngressDirectories(held);
   }
 
-  async #removeIngressCredential(parent: string, directory: string, path: string): Promise<void> {
-    await rm(path, { force: true });
-    await rmdir(directory).catch((error) => {
-      if (!isNotFound(error)) throw rejected();
-    });
-    await rmdir(parent).catch((error) => {
-      if (!isNotFound(error)) throw rejected();
-    });
+  async #openIngressDirectories(
+    runtimeDigest: string,
+    generation: number,
+    create: boolean,
+  ): Promise<HeldIngressDirectories | undefined> {
+    const rootPath = resolve(this.#options.ingressRoot);
+    if (create) await ensurePrivateDirectory(rootPath);
+    let canonicalRoot: string;
+    try {
+      canonicalRoot = await realpath(rootPath);
+    } catch (error) {
+      if (!create && isNotFound(error)) return undefined;
+      throw rejected();
+    }
+    if (canonicalRoot !== rootPath) throw rejected();
+    await validateProtectedDirectoryAncestors(canonicalRoot);
+    let root: FileHandle;
+    try {
+      root = await open(rootPath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    } catch {
+      throw rejected();
+    }
+    const parentName = runtimeDigest;
+    const parentPath = join(rootPath, parentName);
+    const generationName = `g-${generation}`;
+    const generationPath = join(parentPath, generationName);
+    let parent: FileHandle | undefined;
+    let generationHandle: FileHandle | undefined;
+    try {
+      await assertHeldPrivateDirectory(root, rootPath);
+      if (create) {
+        await mkdir(childPath(root, rootPath, parentName), { mode: 0o700 }).catch((error) => {
+          if (errorCode(error) !== "EEXIST") throw rejected();
+        });
+      }
+      try {
+        parent = await open(
+          childPath(root, rootPath, parentName),
+          constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+        );
+      } catch (error) {
+        if (!create && isNotFound(error)) return undefined;
+        throw rejected();
+      }
+      await assertHeldPrivateDirectory(parent, childPath(root, rootPath, parentName));
+      const entries = await readdir(process.platform === "linux" ? join("/proc/self/fd", String(parent.fd)) : parentPath);
+      if (entries.some((entry) => entry !== generationName)) throw rejected();
+      if (create) {
+        await mkdir(childPath(parent, parentPath, generationName), { mode: 0o700 }).catch((error) => {
+          if (errorCode(error) !== "EEXIST") throw rejected();
+        });
+      }
+      try {
+        generationHandle = await open(
+          childPath(parent, parentPath, generationName),
+          constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+        );
+      } catch (error) {
+        if (!create && isNotFound(error)) return undefined;
+        throw rejected();
+      }
+      await assertHeldPrivateDirectory(generationHandle, childPath(parent, parentPath, generationName));
+      return {
+        root,
+        rootPath,
+        parent,
+        parentPath,
+        parentName,
+        generation: generationHandle,
+        generationPath,
+        generationName,
+      };
+    } catch (error) {
+      await generationHandle?.close().catch(() => undefined);
+      await parent?.close().catch(() => undefined);
+      await root.close().catch(() => undefined);
+      if (error instanceof Error && error.message.startsWith("SUPERVISOR_REJECTED:")) throw error;
+      throw rejected();
+    } finally {
+      if (generationHandle === undefined) await parent?.close().catch(() => undefined);
+      if (generationHandle === undefined) await root.close().catch(() => undefined);
+    }
+  }
+
+  async #writeIngressCredential(runtimeDigest: string, generation: number, value: string): Promise<string> {
+    const held = await this.#openIngressDirectories(runtimeDigest, generation, true);
+    if (held === undefined) throw rejected();
+    const temporaryName = `.pending-${randomBytes(16).toString("hex")}`;
+    const temporaryPath = childPath(held.generation, held.generationPath, temporaryName);
+    const finalPath = childPath(held.generation, held.generationPath, "hermes_ingress");
+    try {
+      await writeExclusive(temporaryPath, value);
+      await assertHeldPrivateDirectory(held.root, held.rootPath);
+      await assertHeldPrivateDirectory(held.parent, childPath(held.root, held.rootPath, held.parentName));
+      await assertHeldPrivateDirectory(held.generation, childPath(held.parent, held.parentPath, held.generationName));
+      await rename(temporaryPath, finalPath);
+      await held.generation.sync();
+      return join(held.generationPath, "hermes_ingress");
+    } finally {
+      await unlink(temporaryPath).catch(() => undefined);
+      await this.#closeIngressDirectories(held);
+    }
+  }
+
+  async #removeIngressCredential(runtimeDigest: string, generation: number): Promise<void> {
+    const held = await this.#openIngressDirectories(runtimeDigest, generation, false);
+    if (held === undefined) return;
+    try {
+      const credentialPath = childPath(held.generation, held.generationPath, "hermes_ingress");
+      let credential: FileHandle | undefined;
+      try {
+        credential = await open(credentialPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      } catch (error) {
+        if (!isNotFound(error)) throw rejected();
+      }
+      if (credential !== undefined) {
+        try {
+          const heldFile = await credential.stat({ bigint: true });
+          const namedFile = await lstat(credentialPath, { bigint: true });
+          const uid = process.getuid?.();
+          if (
+            uid === undefined || !heldFile.isFile() || heldFile.uid !== BigInt(uid)
+            || (heldFile.mode & 0o7777n) !== 0o600n || !sameFileIdentity(heldFile, namedFile)
+          ) throw rejected();
+          await unlink(credentialPath);
+        } finally {
+          await credential.close().catch(() => undefined);
+        }
+      }
+      await assertHeldPrivateDirectory(held.root, held.rootPath);
+      await assertHeldPrivateDirectory(held.parent, childPath(held.root, held.rootPath, held.parentName));
+      await assertHeldPrivateDirectory(held.generation, childPath(held.parent, held.parentPath, held.generationName));
+      await rmdir(childPath(held.parent, held.parentPath, held.generationName));
+      await rmdir(childPath(held.root, held.rootPath, held.parentName));
+      await held.root.sync();
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("SUPERVISOR_REJECTED:")) throw error;
+      throw rejected();
+    } finally {
+      await this.#closeIngressDirectories(held);
+    }
+  }
+
+  async #closeIngressDirectories(held: HeldIngressDirectories): Promise<void> {
+    await held.generation.close().catch(() => undefined);
+    await held.parent.close().catch(() => undefined);
+    await held.root.close().catch(() => undefined);
   }
 
   #safeOperationId(value: unknown): string {

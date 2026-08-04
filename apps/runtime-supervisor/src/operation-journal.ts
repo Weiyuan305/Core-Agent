@@ -109,6 +109,13 @@ function safeJsonParse(payload: Buffer): unknown {
   }
 }
 
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
+}
+
 function parseRecord(value: unknown): JournalRecordV1 {
   exactDataRecord(value, ["protocol_version", "operation_id", "request_hash", "completed_at", "response"]);
   if (
@@ -366,6 +373,12 @@ export class OperationJournal {
       try {
         const record = parseRecord(safeJsonParse(payload));
         if (record.operation_id !== operationId) throw journalError();
+        const expected = Buffer.from(`${canonicalJson(record)}\n`, "utf8");
+        try {
+          if (!payload.equals(expected)) throw journalError();
+        } finally {
+          expected.fill(0);
+        }
         return record;
       } finally {
         payload.fill(0);
@@ -500,7 +513,7 @@ export class OperationJournal {
   }
 
   async #write(directory: FileHandle, record: JournalRecordV1): Promise<void> {
-    const payload = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
+    const payload = Buffer.from(`${canonicalJson(record)}\n`, "utf8");
     if (payload.length === 0 || payload.length > maximumRecordBytes) throw journalError();
     const temporaryName = `.pending-${randomBytes(16).toString("hex")}`;
     const finalName = `${this.#digest(record.operation_id)}.json`;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { lstat, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, rmdir, stat, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -552,6 +552,30 @@ test("delete cleans only the derived ingress credential when the container is al
   assert.equal(result.outcome, "accepted");
   await assert.rejects(lstat(ingressPath), { code: "ENOENT" });
   assert.equal(docker.volumes.has(names.volume), true);
+});
+
+test("delete refuses a symlinked generation directory without touching its outside sentinel", async () => {
+  const { adapter, docker } = buildAdapter();
+  const request = signed();
+  await adapter.provision(request);
+  const names = deriveRuntimeNames(request.runtime);
+  const gateway = docker.containers.get(names.container)!;
+  const ingressBind = gateway.options!.HostConfig!.Binds!.find((bind) => bind.endsWith(":/run/secrets/hermes_ingress:ro"))!;
+  const ingressPath = ingressBind.slice(0, -":/run/secrets/hermes_ingress:ro".length);
+  const generationDirectory = dirname(ingressPath);
+  await rm(ingressPath);
+  await rmdir(generationDirectory);
+  const outside = join(temporaryRoot, "outside-ingress");
+  await mkdir(outside, { mode: 0o700 });
+  const sentinel = join(outside, "hermes_ingress");
+  await writeFile(sentinel, "outside-sentinel", { mode: 0o600 });
+  await symlink(outside, generationDirectory, "dir");
+  docker.containers.delete(names.container);
+
+  const result = await adapter.execute(lifecycle("delete", "operation_delete_symlink"));
+  assert.equal(result.outcome, "rejected");
+  assert.equal(await readFile(sentinel, "utf8"), "outside-sentinel");
+  assert.equal((await lstat(generationDirectory)).isSymbolicLink(), true);
 });
 
 test("lifecycle refuses a network or bind mismatch before a Docker mutation", async () => {

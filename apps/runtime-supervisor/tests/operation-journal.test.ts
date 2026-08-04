@@ -179,6 +179,40 @@ test("journal refuses symlinked or permissive records before dispatch", async ()
   );
 });
 
+test("journal rejects duplicate reordered or whitespace-varied record bytes before dispatch", async () => {
+  const digest = createHash("sha256").update(request().operation_id).digest("hex");
+  await new OperationJournal({ directory: journalRoot }).run(request(), async () => response());
+  const recordPath = join(journalRoot, `${digest}.json`);
+  const record = JSON.parse(await readFile(recordPath, "utf8")) as Record<string, unknown>;
+  const reordered = {
+    response: record.response,
+    request_hash: record.request_hash,
+    protocol_version: record.protocol_version,
+    operation_id: record.operation_id,
+    completed_at: record.completed_at,
+  };
+  const variants = [
+    `${JSON.stringify(record, null, 2)}\n`,
+    `${JSON.stringify(reordered)}\n`,
+    `${JSON.stringify(record).replace(
+      '{"completed_at":',
+      `{"completed_at":${JSON.stringify(record.completed_at)},"completed_at":`,
+    )}\n`,
+  ];
+  for (const variant of variants) {
+    await writeFile(recordPath, variant, { encoding: "utf8", mode: 0o600 });
+    let dispatched = false;
+    await assert.rejects(
+      new OperationJournal({ directory: journalRoot }).run(request(), async () => {
+        dispatched = true;
+        return response();
+      }),
+      /SUPERVISOR_REJECTED/,
+    );
+    assert.equal(dispatched, false);
+  }
+});
+
 test("journal rejects a writable ancestor before dispatch", async () => {
   await chmod(temporaryRoot, 0o770);
   let dispatched = false;
