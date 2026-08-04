@@ -115,6 +115,101 @@ test("Supervisor fake replays the same operation hash and rejects a changed hash
   }
 });
 
+test("Supervisor fake reserves an operation before concurrent dispatch completes", async () => {
+  let dispatches = 0;
+  let enterDispatch!: () => void;
+  let releaseDispatch!: () => void;
+  const dispatchEntered = new Promise<void>((resolve) => {
+    enterDispatch = resolve;
+  });
+  const dispatchReleased = new Promise<void>((resolve) => {
+    releaseDispatch = resolve;
+  });
+  const server = new FakeRuntimeSupervisorServer({
+    socketPath,
+    dispatch: async (request) => {
+      dispatches += 1;
+      enterDispatch();
+      await dispatchReleased;
+      return {
+        protocol_version: 1,
+        operation_id: request.operation_id,
+        outcome: "rejected",
+        code: "DEPENDENCY_UNAVAILABLE",
+        retryable: true,
+        summary: "Synthetic dependency outage",
+      };
+    },
+  });
+  await server.start();
+  try {
+    const client = new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 });
+    const request = signed();
+    const firstPromise = client.execute(request);
+    await dispatchEntered;
+
+    const replayPromise = client.execute(request);
+    const changedData = provisionData({ generation: 2 });
+    const changed = signed({ ...changedData, operation_id: request.operation_id });
+    const changedPromise = client.execute(changed);
+    const stillWaiting = Symbol("still waiting");
+    const changedBeforeRelease = await Promise.race([
+      changedPromise,
+      new Promise<typeof stillWaiting>((resolve) => setTimeout(() => resolve(stillWaiting), 100)),
+    ]);
+    const dispatchesBeforeRelease = dispatches;
+
+    releaseDispatch();
+    const [first, replay, changedResponse] = await Promise.all([firstPromise, replayPromise, changedPromise]);
+    assert.notEqual(changedBeforeRelease, stillWaiting);
+    assert.equal(dispatchesBeforeRelease, 1);
+    assert.deepEqual(replay, first);
+    assert.deepEqual(changedResponse, {
+      protocol_version: 1,
+      operation_id: request.operation_id,
+      outcome: "rejected",
+      code: "SUPERVISOR_REJECTED",
+      retryable: false,
+      summary: "Operation ID was already used for different request metadata",
+    });
+    assert.equal(dispatches, 1);
+    assert.equal(server.requests.length, 1);
+  } finally {
+    releaseDispatch();
+    await server.close();
+  }
+});
+
+test("Supervisor fake finalizes a rejected dispatch as one replayable failure", async () => {
+  let dispatches = 0;
+  const server = new FakeRuntimeSupervisorServer({
+    socketPath,
+    dispatch: async () => {
+      dispatches += 1;
+      throw new Error("sentinel dispatch failure");
+    },
+  });
+  await server.start();
+  try {
+    const client = new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 });
+    const request = signed();
+    const [first, replay] = await Promise.all([client.execute(request), client.execute(request)]);
+    assert.deepEqual(first, {
+      protocol_version: 1,
+      operation_id: request.operation_id,
+      outcome: "failed",
+      code: "DEPENDENCY_UNAVAILABLE",
+      retryable: true,
+      summary: "Synthetic Supervisor dispatch failed",
+    });
+    assert.deepEqual(replay, first);
+    assert.equal(dispatches, 1);
+    assert.equal(server.requests.length, 1);
+  } finally {
+    await server.close();
+  }
+});
+
 test("Supervisor client applies a bounded timeout and redacts transport details", async () => {
   const acceptedSockets = new Set<Socket>();
   const server = createServer((socket) => {

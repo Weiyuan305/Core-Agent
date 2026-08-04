@@ -98,6 +98,15 @@ function exactRecord(value: unknown, keys: readonly string[]): asserts value is 
   }
 }
 
+function ownEnumerableDataValue(value: unknown, key: string): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) {
+    throw rejected();
+  }
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) throw rejected();
+  return descriptor.value;
+}
+
 function exactArray(value: unknown, minimum: number, maximum: number): asserts value is unknown[] {
   if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype || value.length < minimum || value.length > maximum) {
     throw rejected();
@@ -166,8 +175,7 @@ function validateRuntime(value: unknown): void {
 }
 
 function validateRequestData(value: unknown): asserts value is SupervisorRequestDataV1 {
-  if (typeof value !== "object" || value === null || !Object.hasOwn(value, "kind")) throw rejected();
-  const kind = (value as { kind?: unknown }).kind;
+  const kind = ownEnumerableDataValue(value, "kind");
   if (kind === "provision") {
     exactRecord(value, ["protocol_version", "operation_id", "kind", "runtime"]);
     if (value.protocol_version !== 1) throw rejected();
@@ -222,8 +230,7 @@ export function canonicalSupervisorRequestHash(value: unknown): string {
 }
 
 export function validateSupervisorRequest(value: unknown): SupervisorRequestV1 {
-  if (typeof value !== "object" || value === null || !Object.hasOwn(value, "request_hash")) throw rejected();
-  const requestHash = (value as { request_hash?: unknown }).request_hash;
+  const requestHash = ownEnumerableDataValue(value, "request_hash");
   if (typeof requestHash !== "string" || !requestHashPattern.test(requestHash)) throw rejected();
   const data = requestDataFromUnknown(value);
   if (requestHash !== canonicalSupervisorRequestHash(data)) throw rejected();
@@ -247,8 +254,7 @@ function validateObservation(value: unknown): void {
 }
 
 export function validateSupervisorResponse(value: unknown): SupervisorResponseV1 {
-  if (typeof value !== "object" || value === null || !Object.hasOwn(value, "outcome")) throw rejected();
-  const outcome = (value as { outcome?: unknown }).outcome;
+  const outcome = ownEnumerableDataValue(value, "outcome");
   if (outcome === "accepted") {
     exactRecord(value, ["protocol_version", "operation_id", "outcome", "observation"]);
     if (value.protocol_version !== 1) throw rejected();

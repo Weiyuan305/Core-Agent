@@ -17,10 +17,19 @@ export interface FakeRuntimeSupervisorServerOptions {
   readonly dispatch?: (request: SupervisorRequestV1) => SupervisorResponseV1 | Promise<SupervisorResponseV1>;
 }
 
-interface JournalEntry {
+interface InFlightJournalEntry {
   readonly requestHash: string;
+  readonly state: "in_flight";
+  readonly response: Promise<SupervisorResponseV1>;
+}
+
+interface CompleteJournalEntry {
+  readonly requestHash: string;
+  readonly state: "complete";
   readonly response: SupervisorResponseV1;
 }
+
+type JournalEntry = InFlightJournalEntry | CompleteJournalEntry;
 
 function serverError(): Error {
   return new Error("Runtime Supervisor fake server failed");
@@ -41,6 +50,17 @@ function defaultResponse(request: SupervisorRequestV1): SupervisorResponseV1 {
       health: "unknown",
       image_ref: request.kind === "provision" ? request.runtime.image_ref : `managed/unknown@sha256:${"0".repeat(64)}`,
     },
+  };
+}
+
+function dispatchFailure(request: SupervisorRequestV1): SupervisorResponseV1 {
+  return {
+    protocol_version: 1,
+    operation_id: request.operation_id,
+    outcome: "failed",
+    code: "DEPENDENCY_UNAVAILABLE",
+    retryable: true,
+    summary: "Synthetic Supervisor dispatch failed",
   };
 }
 
@@ -118,7 +138,7 @@ export class FakeRuntimeSupervisorServer {
       let response: SupervisorResponseV1;
       if (prior !== undefined) {
         response = prior.requestHash === request.request_hash
-          ? prior.response
+          ? await prior.response
           : {
             protocol_version: 1,
             operation_id: request.operation_id,
@@ -129,10 +149,31 @@ export class FakeRuntimeSupervisorServer {
           };
       } else {
         const recorded = cloneRequest(request);
+        const responsePromise = Promise.resolve().then(async () => {
+          try {
+            const dispatched = await (this.#options.dispatch?.(recorded) ?? defaultResponse(recorded));
+            const validated = validateSupervisorResponse(dispatched);
+            if (validated.operation_id !== request.operation_id) throw serverError();
+            return validated;
+          } catch {
+            return dispatchFailure(recorded);
+          }
+        });
+        const reservation: InFlightJournalEntry = {
+          requestHash: request.request_hash,
+          state: "in_flight",
+          response: responsePromise,
+        };
+        this.#journal.set(request.operation_id, reservation);
         this.#requests.push(recorded);
-        response = validateSupervisorResponse(await (this.#options.dispatch?.(recorded) ?? defaultResponse(recorded)));
-        if (response.operation_id !== request.operation_id) throw serverError();
-        this.#journal.set(request.operation_id, { requestHash: request.request_hash, response });
+        response = await responsePromise;
+        if (this.#journal.get(request.operation_id) === reservation) {
+          this.#journal.set(request.operation_id, {
+            requestHash: request.request_hash,
+            state: "complete",
+            response,
+          });
+        }
       }
       const frame = encodeSupervisorFrame(response);
       const chunkBytes = this.#options.responseChunkBytes ?? frame.length;

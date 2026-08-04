@@ -7,6 +7,7 @@ import {
   decodeSupervisorFrame,
   encodeSupervisorFrame,
   validateSupervisorRequest,
+  validateSupervisorResponse,
   type ProvisionRuntimeCommandDataV1,
 } from "../src/protocol.js";
 
@@ -92,6 +93,52 @@ test("Supervisor validation rejects hidden and symbol own-property bags", () => 
   ] as const) {
     assert.throws(() => validateSupervisorRequest(value), /SUPERVISOR_REJECTED/, name);
   }
+});
+
+test("Supervisor validation rejects discriminator accessors without invoking them", () => {
+  let requestHashReads = 0;
+  const requestHashAccessor = signed();
+  Object.defineProperty(requestHashAccessor, "request_hash", {
+    get: () => {
+      requestHashReads += 1;
+      return `sha256:${"a".repeat(64)}`;
+    },
+    enumerable: true,
+  });
+
+  let kindReads = 0;
+  const kindAccessor = signed();
+  Object.defineProperty(kindAccessor, "kind", {
+    get: () => {
+      kindReads += 1;
+      return "provision";
+    },
+    enumerable: true,
+  });
+
+  let outcomeReads = 0;
+  const outcomeAccessor = {
+    protocol_version: 1,
+    operation_id: "operation_a",
+    outcome: "failed",
+    code: "DEPENDENCY_UNAVAILABLE",
+    retryable: true,
+    summary: "Synthetic failure",
+  };
+  Object.defineProperty(outcomeAccessor, "outcome", {
+    get: () => {
+      outcomeReads += 1;
+      return "failed";
+    },
+    enumerable: true,
+  });
+
+  assert.throws(() => validateSupervisorRequest(requestHashAccessor), /SUPERVISOR_REJECTED/);
+  assert.throws(() => validateSupervisorRequest(kindAccessor), /SUPERVISOR_REJECTED/);
+  assert.throws(() => validateSupervisorResponse(outcomeAccessor), /SUPERVISOR_REJECTED/);
+  assert.equal(requestHashReads, 0);
+  assert.equal(kindReads, 0);
+  assert.equal(outcomeReads, 0);
 });
 
 test("Supervisor request hashing is canonical, excludes request_hash, and permits opaque secret metadata", () => {
