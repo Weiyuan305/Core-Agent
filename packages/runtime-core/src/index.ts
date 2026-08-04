@@ -85,3 +85,23 @@ export {
   EXPECTED_SCHEMA_VERSION,
   readSchemaVersion,
 } from "./db/schema-version.js";
+export {
+  MAX_SUPERVISOR_FRAME_BYTES,
+  MAX_SUPERVISOR_TIMEOUT_MS,
+  canonicalSupervisorRequestHash,
+  decodeSupervisorFrame,
+  encodeSupervisorFrame,
+  validateSupervisorRequest,
+  validateSupervisorResponse,
+  type LifecycleRuntimeCommandDataV1,
+  type ProvisionRuntimeCommandDataV1,
+  type RuntimeObservation,
+  type SupervisorRequestDataV1,
+  type SupervisorRequestV1,
+  type SupervisorResponseV1,
+} from "./supervisor/contracts.js";
+export { RuntimeSupervisorClient, type RuntimeSupervisorClientOptions } from "./supervisor/client.js";
+export {
+  FakeRuntimeSupervisorServer,
+  type FakeRuntimeSupervisorServerOptions,
+} from "./supervisor/fake-server.js";
