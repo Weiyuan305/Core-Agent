@@ -105,3 +105,22 @@ export {
   FakeRuntimeSupervisorServer,
   type FakeRuntimeSupervisorServerOptions,
 } from "./supervisor/fake-server.js";
+export {
+  TenantProvisioningRequestSchema,
+  deriveRuntimeContainerId,
+  deriveRuntimeVolumeRef,
+  provisionTenant,
+  type ManagedImageLock,
+  type ProvisioningContext,
+  type ProvisionTenantDependencies,
+  type ProvisionTenantResponse,
+  type TenantProvisioningRequest,
+} from "./services/provision-tenant.js";
+export {
+  RuntimeCommandRequestSchema,
+  commandRuntime,
+  getTenantRuntime,
+  type CommandRuntimeDependencies,
+  type CommandRuntimeResponse,
+  type RuntimeCommandRequest,
+} from "./services/command-runtime.js";

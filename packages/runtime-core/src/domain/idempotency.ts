@@ -34,6 +34,10 @@ export interface DependencyFailure {
 
 const secretKeyPattern = /(?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|secret|credential|token)/i;
 
+function isOpaqueSecretReferenceKey(key: string): boolean {
+  return key === "ingress_secret_ref";
+}
+
 function canonicalize(value: unknown): string {
   if (value === null) return "null";
   if (typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
@@ -59,7 +63,9 @@ function canonicalize(value: unknown): string {
     left < right ? -1 : left > right ? 1 : 0
   ));
   return `{${entries.map(([key, item]) => {
-    if (secretKeyPattern.test(key)) throw new DomainError("INVALID_REQUEST", "Payload contains a secret-shaped key");
+    if (secretKeyPattern.test(key) && !isOpaqueSecretReferenceKey(key)) {
+      throw new DomainError("INVALID_REQUEST", "Payload contains a secret-shaped key");
+    }
     if (item === undefined) throw new DomainError("INVALID_REQUEST", "Payload contains undefined");
     return `${JSON.stringify(key)}:${canonicalize(item)}`;
   }).join(",")}}`;
