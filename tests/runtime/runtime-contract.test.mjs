@@ -7,6 +7,247 @@ import {
   runBuild
 } from "../../scripts/build-hermes-image.mjs";
 import { resolveHermesImage } from "../../scripts/resolve-hermes-image.mjs";
+import {
+  SMOKE_OUTPUT_KEYS,
+  assertManagedContainerInspection,
+  canonicalPayloadHash,
+  parseSmokeArguments,
+  readProtectedSecret,
+  runBoundedChild,
+  runControlPlaneSmoke,
+  validateSmokeEnvironment,
+  validateSyntheticIdentifiers,
+} from "../../scripts/smoke-control-plane.mjs";
+
+const smokeSource = await readFile(
+  new URL("../../scripts/smoke-control-plane.mjs", import.meta.url),
+  "utf8"
+);
+
+const smokeEnvironment = Object.freeze({
+  CORE_AGENT_REAL_HERMES_SMOKE: "1",
+  CORE_AGENT_PLATFORM: "linux/arm64",
+  CORE_AGENT_NODE_IMAGE: "node:22-bookworm-slim@sha256:" + "a".repeat(64),
+  CORE_AGENT_POSTGRES_IMAGE: "postgres:17-bookworm@sha256:" + "b".repeat(64),
+  CORE_AGENT_BOOTSTRAP_KEY_FILE: "/safe/bootstrap/key",
+  CORE_AGENT_PROVIDER_SECRET_ROOT: "/safe/provider",
+  CORE_AGENT_INGRESS_SECRET_ROOT: "/safe/ingress",
+  CORE_AGENT_SUPERVISOR_SOCKET_ROOT: "/safe/socket",
+  CORE_AGENT_SUPERVISOR_STATE_ROOT: "/safe/state",
+  CORE_AGENT_RUNTIME_UID: "501",
+  CORE_AGENT_RUNTIME_GID: "20",
+  CORE_AGENT_SUPERVISOR_SOCKET_GID: "20",
+  CORE_AGENT_DOCKER_GID: "100",
+});
+
+test("smoke output is an allowlist of IDs, states, event types, and counts", () => {
+  assert.deepEqual([...SMOKE_OUTPUT_KEYS].sort(), [
+    "assistant_message_count",
+    "conversation_id",
+    "event_types",
+    "profile_id",
+    "run_id",
+    "run_status",
+    "runtime_id",
+    "runtime_state",
+    "tenant_id",
+  ]);
+  assert.doesNotMatch(smokeSource, /console\.(?:log|error)\([^)]*(?:prompt|content|key|secret|authorization)/i);
+  assert.doesNotMatch(smokeSource, /fixtures\/(?:customer|student|production|real)/i);
+});
+
+test("REAL_HERMES smoke is explicit and rejects CLI and environment extras", () => {
+  assert.throws(
+    () => validateSmokeEnvironment({ ...smokeEnvironment, CORE_AGENT_REAL_HERMES_SMOKE: "0" }),
+    /SMOKE_OPT_IN_REQUIRED/,
+  );
+  assert.throws(
+    () => validateSmokeEnvironment({ ...smokeEnvironment, CORE_AGENT_SMOKE_CUSTOMER_FIXTURE: "customer.json" }),
+    /SMOKE_ENVIRONMENT_INVALID/,
+  );
+  assert.deepEqual(parseSmokeArguments(["--keep-runtime"]), { keepRuntime: true });
+  assert.throws(() => parseSmokeArguments(["--keep-runtime", "--keep-runtime"]), /SMOKE_ARGUMENT_INVALID/);
+  assert.throws(() => parseSmokeArguments(["--tenant", "anything"]), /SMOKE_ARGUMENT_INVALID/);
+});
+
+test("REAL_HERMES smoke accepts only fixed synthetic identifiers", () => {
+  assert.doesNotThrow(() => validateSyntheticIdentifiers({
+    tenantId: "synthetic-runtime-v1-tenant",
+    tenantDisplayName: "synthetic-runtime-v1-tenant",
+    actorId: "synthetic-runtime-v1-actor",
+    actorDisplayName: "synthetic-runtime-v1-consultant",
+    membershipId: "synthetic-runtime-v1-membership",
+    profileId: "synthetic-runtime-v1-profile",
+    profileDescription: "synthetic-runtime-v1-consultant",
+    hermesProfileRef: "synthetic-runtime-v1-profile",
+    promptIdentifier: "synthetic-runtime-v1-smoke",
+  }));
+  for (const [field, value] of [
+    ["tenantId", "customer-1"],
+    ["tenantDisplayName", "Example Company"],
+    ["profileId", "consultant-1"],
+    ["promptIdentifier", "hello"],
+  ]) {
+    assert.throws(
+      () => validateSyntheticIdentifiers({
+        tenantId: "synthetic-runtime-v1-tenant",
+        tenantDisplayName: "synthetic-runtime-v1-tenant",
+        actorId: "synthetic-runtime-v1-actor",
+        actorDisplayName: "synthetic-runtime-v1-consultant",
+        membershipId: "synthetic-runtime-v1-membership",
+        profileId: "synthetic-runtime-v1-profile",
+        profileDescription: "synthetic-runtime-v1-consultant",
+        hermesProfileRef: "synthetic-runtime-v1-profile",
+        promptIdentifier: "synthetic-runtime-v1-smoke",
+        [field]: value,
+      }),
+      /SMOKE_SYNTHETIC_INPUT_REQUIRED/,
+    );
+  }
+});
+
+test("REAL_HERMES secret reader requires owner-only single-link regular files and clears its read buffer", async () => {
+  const bytes = Buffer.from("synthetic-secret-sentinel-00000001\n", "utf8");
+  const snapshots = [];
+  const metadata = {
+    dev: 1n, ino: 2n, nlink: 1n, uid: BigInt(process.getuid()),
+    mode: 0o100600n, size: BigInt(bytes.length), mtimeNs: 3n, ctimeNs: 4n,
+    isFile: () => true, isDirectory: () => false,
+  };
+  const result = await readProtectedSecret("/safe/bootstrap/key", {
+    getuid: () => process.getuid(),
+    lstat: async (path) => path === "/safe/bootstrap/key"
+      ? metadata
+      : { ...metadata, uid: 0n, mode: 0o040755n, isFile: () => false, isDirectory: () => true },
+    open: async () => ({
+      stat: async () => metadata,
+      read: async (target) => {
+        bytes.copy(target);
+        snapshots.push(target);
+        return { bytesRead: bytes.length };
+      },
+      close: async () => undefined,
+    }),
+  });
+  assert.equal(result.toString("utf8"), "synthetic-secret-sentinel-00000001");
+  result.fill(0);
+  assert.equal(snapshots.length, 1);
+  assert(snapshots[0].every((value) => value === 0));
+
+  for (const changed of [
+    { mode: 0o100644n },
+    { nlink: 2n },
+    { uid: BigInt(process.getuid()) + 1n },
+    { isFile: () => false },
+  ]) {
+    await assert.rejects(
+      readProtectedSecret("/safe/bootstrap/key", {
+        getuid: () => process.getuid(),
+        lstat: async (path) => path === "/safe/bootstrap/key"
+          ? { ...metadata, ...changed }
+          : { ...metadata, uid: 0n, mode: 0o040755n, isFile: () => false, isDirectory: () => true },
+        open: async () => assert.fail("unsafe file must not be opened"),
+      }),
+      /SMOKE_SECRET_FILE_INVALID/,
+    );
+  }
+});
+
+test("REAL_HERMES child seam is argv-only, bounded, and abortable", async () => {
+  let invocation;
+  const output = await runBoundedChild("docker", ["compose", "version"], {
+    timeoutMs: 1_000,
+    maxOutputBytes: 128,
+    run: async (command, args, options) => {
+      invocation = { command, args, options };
+      return { stdout: "ok\n", stderr: "" };
+    },
+  });
+  assert.equal(output, "ok\n");
+  assert.deepEqual(invocation.command, "docker");
+  assert.deepEqual(invocation.args, ["compose", "version"]);
+  assert.equal(invocation.options.shell, false);
+  assert.equal(invocation.options.timeout, 1_000);
+  assert.equal(invocation.options.maxBuffer, 128);
+  await assert.rejects(
+    runBoundedChild("sh", ["-c", "docker ps"], { run: async () => assert.fail("must not run") }),
+    /SMOKE_CHILD_COMMAND_INVALID/,
+  );
+});
+
+test("REAL_HERMES managed container inspection enforces digest labels private network and closed command", () => {
+  const imageRef = "core-agent/hermes-runtime:v1@sha256:" + "c".repeat(64);
+  const inspected = {
+    Config: {
+      Image: imageRef,
+      Env: ["API_SERVER_ENABLED=true"],
+      Entrypoint: ["/opt/core-agent/gateway-entrypoint.sh"],
+      Cmd: [],
+      Labels: {
+        "core-agent.managed": "runtime-v1",
+        "core-agent.resource": "runtime",
+        "core-agent.tenant-id": "synthetic-runtime-v1-tenant",
+        "core-agent.runtime-id": "runtime-1",
+        "core-agent.image-ref": imageRef,
+        "core-agent.network": "core-agent-backplane",
+      },
+    },
+    HostConfig: { NetworkMode: "core-agent-backplane", PortBindings: {} },
+    NetworkSettings: { Ports: {}, Networks: { "core-agent-backplane": {} } },
+  };
+  assert.doesNotThrow(() => assertManagedContainerInspection(inspected, {
+    imageRef,
+    tenantId: "synthetic-runtime-v1-tenant",
+    runtimeId: "runtime-1",
+    secretValues: [Buffer.from("synthetic-secret-sentinel-00000001")],
+  }));
+  assert.throws(
+    () => assertManagedContainerInspection({
+      ...inspected,
+      Config: { ...inspected.Config, Cmd: ["sh", "-c", "anything"] },
+    }, {
+      imageRef,
+      tenantId: "synthetic-runtime-v1-tenant",
+      runtimeId: "runtime-1",
+      secretValues: [],
+    }),
+    /SMOKE_CONTAINER_INVALID/,
+  );
+});
+
+test("REAL_HERMES workflow uses exact Compose project and cleans up after failure", async () => {
+  const calls = [];
+  const dependencies = {
+    validatePrerequisites: async () => calls.push("validate"),
+    startTopology: async () => calls.push("start:core-agent-runtime-v1-smoke"),
+    provision: async () => {
+      calls.push("provision");
+      throw new Error("synthetic stage failure");
+    },
+    deleteRuntime: async () => calls.push("delete"),
+    waitForContainerRemoval: async () => calls.push("wait-delete"),
+    stopTopology: async ({ projectName, removeVolumes }) => calls.push(`stop:${projectName}:${removeVolumes}`),
+    emit: () => assert.fail("failure must not emit stdout"),
+    stage: () => undefined,
+  };
+  await assert.rejects(
+    runControlPlaneSmoke({ environment: smokeEnvironment, argv: [], dependencies }),
+    /SMOKE_STAGE_FAILED/,
+  );
+  assert.deepEqual(calls, [
+    "validate",
+    "start:core-agent-runtime-v1-smoke",
+    "provision",
+    "stop:core-agent-runtime-v1-smoke:false",
+  ]);
+});
+
+test("canonical smoke payload hashing is key-order deterministic", () => {
+  assert.equal(
+    canonicalPayloadHash({ b: [2, 1], a: { z: true, y: null } }),
+    canonicalPayloadHash({ a: { y: null, z: true }, b: [2, 1] }),
+  );
+});
 
 const dockerfile = await readFile(
   new URL("../../infra/hermes/Dockerfile", import.meta.url),
