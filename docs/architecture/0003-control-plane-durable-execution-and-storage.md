@@ -102,8 +102,10 @@ generic retry flag:
 After an accepted reconcile effect returns a running but non-healthy
 observation, the Worker marks `unsafe_to_replay` before rescheduling. That mark
 locks the owned job and runtime rows and atomically fences tenant, job kind,
-lease owner/expiry, persisted command, target command version, and current
-runtime command version. If the Worker crashes after the mark but before retry,
+lease owner/expiry, both persisted Runtime identities (`payload_ref` and
+`container_id`), persisted command, target command version, effect phase, and
+current runtime command version. The final phase-update CAS repeats both
+Runtime identities. If the Worker crashes after the mark but before retry,
 the expired running job is reclaimable with its inspect-only phase intact. If
 it loses the lease before the mark, it cannot write either the phase or retry
 state; the Supervisor journal remains the idempotency authority for an

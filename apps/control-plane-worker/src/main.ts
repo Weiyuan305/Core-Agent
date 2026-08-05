@@ -89,7 +89,12 @@ async function dispatchRuntimeJob(dependencies: WorkerDependencies, job: Claimed
     isCurrent: () => dependencies.repositories.runtimes.isCurrentCommand(ref, job.targetCommandVersion),
     markEffectDispatched: () => dependencies.repositories.runtimes.markReconcileEffectDispatched(ref, job.runtimeCommand, job.targetCommandVersion),
     succeed: async (_job, success) => success.kind === "superseded"
-      ? dependencies.repositories.runtimes.completeSuperseded(ref, job.targetCommandVersion)
+      ? dependencies.repositories.runtimes.completeSuperseded(ref, {
+        runtimeId: job.payloadRef,
+        targetCommandVersion: job.targetCommandVersion,
+        command: job.runtimeCommand,
+        effectState: job.effectState,
+      })
       : dependencies.repositories.runtimes.finishReconcile(ref, { ...success, targetCommandVersion: job.targetCommandVersion }),
     retry: async (_job, summary) => { const retry = nextAttempt(dependencies, job, summary); return dependencies.repositories.runtimes.retryReconcile(ref, job.targetCommandVersion, retry.summary, retry.at); },
     fail: (_job, summary) => dependencies.repositories.runtimes.failReconcile(ref, job.targetCommandVersion, summary),

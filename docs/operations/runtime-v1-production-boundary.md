@@ -61,6 +61,14 @@ while the job remains `pre_effect`. `effect_dispatched` requires the job to be
 phase first, and a failed phase mark must produce no external call. Wrong job
 kind, payload/container identity, command, target, effect phase, attempt, owner,
 status, or lease is a lease-loss disposition with zero terminal writes.
+The success proof is runtime-validated as an exact accessor-free record;
+unknown proof kinds, malformed observations, and `inspect_proved` restart are
+also lease loss with zero writes. Superseded completion must carry and match
+the claimed Runtime identity, command, target, and exact `pre_effect` or
+`unsafe_to_replay` phase. The effect-phase mark both locks and repeats
+`payload_ref = container_id = runtime_id` in its final update CAS; either
+identity mismatch prevents the mark and therefore prevents the external
+effect.
 
 Outbox delivery has a hard limit of 10 notification attempts. Each polling
 transaction first locks at most 100 exhausted pending rows in deterministic

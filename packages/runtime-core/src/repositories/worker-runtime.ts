@@ -8,7 +8,7 @@ import type { RuntimeDatabase } from "../db/database.js";
 import type { TenantTransaction } from "../db/transaction.js";
 import { assertRuntimeObservedTransition } from "../domain/transitions.js";
 import { redactSummary, type Redactor } from "../domain/redaction.js";
-import type { RuntimeObservation } from "../supervisor/contracts.js";
+import { validateSupervisorResponse, type RuntimeObservation } from "../supervisor/contracts.js";
 import type { SecretReference } from "../secrets/secret-store.js";
 import { appendAuditEvent, appendProductEvents } from "./events.js";
 import { safeContractInteger } from "./resources.js";
@@ -31,6 +31,12 @@ export type ReconcileFailureResult = { readonly kind: "failed" | "superseded" | 
 export type ReconcileSuccessIntent =
   | { readonly kind: "inspect_proved"; readonly command: "start" | "stop" | "delete"; readonly targetCommandVersion: number; readonly observation: RuntimeObservation }
   | { readonly kind: "effect_dispatched"; readonly command: "start" | "stop" | "restart" | "delete"; readonly targetCommandVersion: number; readonly observation: RuntimeObservation };
+export interface ReconcileClaimedIntent {
+  readonly runtimeId: string;
+  readonly targetCommandVersion: number;
+  readonly command: "start" | "stop" | "restart" | "delete";
+  readonly effectState: "pre_effect" | "unsafe_to_replay";
+}
 export interface StoredProvisionProfile {
   readonly profileId: string; readonly hermesProfileRef: string; readonly description: string;
   readonly providerConfigId: string; readonly providerBaseUrl: string; readonly modelId: string;
@@ -53,6 +59,54 @@ function id(prefix: string, ...parts: string[]): string {
   return `${prefix}_${createHash("sha256").update(parts.join(":"), "utf8").digest("hex").slice(0, 32)}`;
 }
 class LeaseFenceLost extends Error {}
+
+function exactOwnDataValues(value: unknown, keys: readonly string[]): Record<string, unknown> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return undefined;
+  const actual = Reflect.ownKeys(value);
+  if (actual.length !== keys.length || actual.some((key) => typeof key !== "string" || !keys.includes(key))) return undefined;
+  const result: Record<string, unknown> = {};
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) return undefined;
+    result[key] = descriptor.value;
+  }
+  return result;
+}
+
+function parseReconcileSuccessIntent(value: unknown): ReconcileSuccessIntent | undefined {
+  try {
+    const intent = exactOwnDataValues(value, ["kind", "command", "targetCommandVersion", "observation"]);
+    if (intent === undefined) return undefined;
+    const { kind, command, targetCommandVersion, observation } = intent;
+    if (kind !== "inspect_proved" && kind !== "effect_dispatched") return undefined;
+    if (command !== "start" && command !== "stop" && command !== "restart" && command !== "delete") return undefined;
+    if (typeof targetCommandVersion !== "number" || !Number.isSafeInteger(targetCommandVersion) || targetCommandVersion < 1) return undefined;
+    const response = validateSupervisorResponse({ protocol_version: 1, operation_id: "intent_validation", outcome: "accepted", observation });
+    if (response.outcome !== "accepted") return undefined;
+    if (kind === "inspect_proved") {
+      if (command === "restart") return undefined;
+      return { kind, command, targetCommandVersion, observation: response.observation };
+    }
+    return { kind, command, targetCommandVersion, observation: response.observation };
+  } catch {
+    return undefined;
+  }
+}
+
+function parseReconcileClaimedIntent(value: unknown): ReconcileClaimedIntent | undefined {
+  try {
+    const intent = exactOwnDataValues(value, ["runtimeId", "targetCommandVersion", "command", "effectState"]);
+    if (intent === undefined) return undefined;
+    const { runtimeId, targetCommandVersion, command, effectState } = intent;
+    if (typeof runtimeId !== "string" || runtimeId.length < 1) return undefined;
+    if (typeof targetCommandVersion !== "number" || !Number.isSafeInteger(targetCommandVersion) || targetCommandVersion < 1) return undefined;
+    if (command !== "start" && command !== "stop" && command !== "restart" && command !== "delete") return undefined;
+    if (effectState !== "pre_effect" && effectState !== "unsafe_to_replay") return undefined;
+    return { runtimeId, targetCommandVersion, command, effectState };
+  } catch {
+    return undefined;
+  }
+}
 
 async function ownsLease(trx: Transaction<RuntimeDatabase>, job: RuntimeWorkerJobRef, lock = false): Promise<boolean> {
   if (lock) {
@@ -272,16 +326,19 @@ export class WorkerRuntimeRepository {
     return { tenantId, runtimeId, generation: row.generation, imageRef: row.image_ref, commandVersion: safeContractInteger(row.command_version), observedState: row.observed_state as RuntimeContainer["observed_state"], desiredState: row.desired_state as RuntimeContainer["desired_state"] };
   }
 
-  public async completeSuperseded(job: RuntimeWorkerJobRef, targetCommandVersion: number): Promise<boolean> {
+  public async completeSuperseded(job: RuntimeWorkerJobRef, value: ReconcileClaimedIntent): Promise<boolean> {
+    const intent = parseReconcileClaimedIntent(value);
+    if (intent === undefined || intent.runtimeId !== job.runtimeId) return false;
     return fencedTransaction(this.db, async (trx) => {
-      const claimed = await trx.selectFrom("worker_jobs").select(["job_kind", "payload_ref", "container_id", "target_command_version"])
+      const claimed = await trx.selectFrom("worker_jobs").select(["job_kind", "payload_ref", "container_id", "runtime_command", "target_command_version", "effect_state"])
         .where("tenant_id", "=", job.tenantId).where("job_id", "=", job.jobId)
         .where("attempt_count", "=", job.attemptCount).where("lease_owner", "=", job.workerId)
         .where("status", "=", "running").where("lease_expires_at", ">", sql<Date>`clock_timestamp()`)
         .forUpdate().executeTakeFirst();
-      if (claimed === undefined || claimed.job_kind !== "reconcile_runtime" || claimed.payload_ref !== job.runtimeId
-        || claimed.container_id !== job.runtimeId || claimed.target_command_version === null
-        || safeContractInteger(claimed.target_command_version) !== targetCommandVersion) throw new LeaseFenceLost();
+      if (claimed === undefined || claimed.job_kind !== "reconcile_runtime" || claimed.payload_ref !== intent.runtimeId
+        || claimed.container_id !== intent.runtimeId || claimed.runtime_command !== intent.command
+        || claimed.target_command_version === null || safeContractInteger(claimed.target_command_version) !== intent.targetCommandVersion
+        || claimed.effect_state !== intent.effectState) throw new LeaseFenceLost();
       await finishOwnedJob(trx, job, { status: "succeeded", lease_owner: null, lease_expires_at: null, last_error_summary: "Superseded by a newer runtime command", updated_at: this.now() });
     });
   }
@@ -300,11 +357,12 @@ export class WorkerRuntimeRepository {
     targetCommandVersion: number,
   ): Promise<boolean> {
     return this.db.transaction().execute(async (trx) => {
-      const claimed = await trx.selectFrom("worker_jobs").select(["job_kind", "runtime_command", "target_command_version", "effect_state"])
+      const claimed = await trx.selectFrom("worker_jobs").select(["job_kind", "payload_ref", "container_id", "runtime_command", "target_command_version", "effect_state"])
         .where("tenant_id", "=", job.tenantId).where("job_id", "=", job.jobId)
         .where("attempt_count", "=", job.attemptCount).where("lease_owner", "=", job.workerId).where("status", "=", "running")
         .where("lease_expires_at", ">", sql<Date>`clock_timestamp()`).forUpdate().executeTakeFirst();
-      if (claimed === undefined || claimed.job_kind !== "reconcile_runtime" || claimed.runtime_command !== command
+      if (claimed === undefined || claimed.job_kind !== "reconcile_runtime" || claimed.payload_ref !== job.runtimeId
+        || claimed.container_id !== job.runtimeId || claimed.runtime_command !== command
         || claimed.target_command_version === null || safeContractInteger(claimed.target_command_version) !== targetCommandVersion
         || claimed.effect_state !== "pre_effect") return false;
       const runtime = await trx.selectFrom("runtime_containers").select("command_version")
@@ -312,6 +370,7 @@ export class WorkerRuntimeRepository {
       if (runtime === undefined || !await ownsLease(trx, job) || safeContractInteger(runtime.command_version) !== targetCommandVersion) return false;
       const result = await trx.updateTable("worker_jobs").set({ effect_state: "unsafe_to_replay", updated_at: this.now() })
         .where("tenant_id", "=", job.tenantId).where("job_id", "=", job.jobId)
+        .where("payload_ref", "=", job.runtimeId).where("container_id", "=", job.runtimeId)
         .where("job_kind", "=", "reconcile_runtime").where("runtime_command", "=", command)
         .where("target_command_version", "=", String(targetCommandVersion)).where("effect_state", "=", "pre_effect")
         .where("attempt_count", "=", job.attemptCount).where("lease_owner", "=", job.workerId).where("status", "=", "running")
@@ -320,7 +379,9 @@ export class WorkerRuntimeRepository {
     });
   }
 
-  public async finishReconcile(job: RuntimeWorkerJobRef, intent: ReconcileSuccessIntent): Promise<boolean> {
+  public async finishReconcile(job: RuntimeWorkerJobRef, value: ReconcileSuccessIntent): Promise<boolean> {
+    const intent = parseReconcileSuccessIntent(value);
+    if (intent === undefined) return false;
     return fencedTransaction(this.db, async (trx) => {
       const claimed = await trx.selectFrom("worker_jobs").select(["job_kind", "payload_ref", "container_id", "runtime_command", "target_command_version", "effect_state"])
         .where("tenant_id", "=", job.tenantId).where("job_id", "=", job.jobId)

@@ -20,7 +20,8 @@ test("runtime success terminalization locks and validates complete persisted job
 
   assert.match(source, /export type ReconcileSuccessIntent =[\s\S]*kind: "inspect_proved"[\s\S]*command: "start" \| "stop" \| "delete"[\s\S]*kind: "effect_dispatched"/);
   assert.match(source, /export interface ReconcileClaimedIntent[\s\S]*runtimeId: string[\s\S]*targetCommandVersion: number[\s\S]*command:[\s\S]*effectState:/);
-  assert.match(source, /function parseReconcileSuccessIntent\(value: unknown\)[\s\S]*Object\.getOwnPropertyDescriptor[\s\S]*kind === "inspect_proved"[\s\S]*command === "restart"/);
+  assert.match(source, /function exactOwnDataValues\(value: unknown[\s\S]*Object\.getOwnPropertyDescriptor/);
+  assert.match(source, /function parseReconcileSuccessIntent\(value: unknown\)[\s\S]*kind === "inspect_proved"[\s\S]*command === "restart"/);
   assert.match(provision, /select\(\["job_kind", "payload_ref", "container_id", "effect_state"\]\)[\s\S]*\.forUpdate\(\)/);
   assert.match(provision, /claimed\.job_kind !== "provision_runtime"[\s\S]*claimed\.payload_ref !== job\.runtimeId[\s\S]*claimed\.container_id !== job\.runtimeId[\s\S]*claimed\.effect_state !== "pre_effect"/);
   assert.match(reconcile, /select\(\["job_kind", "payload_ref", "container_id", "runtime_command", "target_command_version", "effect_state"\]\)[\s\S]*\.forUpdate\(\)/);

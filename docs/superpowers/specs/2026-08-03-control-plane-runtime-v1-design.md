@@ -555,9 +555,15 @@ Reconcile success uses a discriminated proof: `inspect_proved` is limited to
 start/stop/delete and requires persisted `pre_effect`; `effect_dispatched`
 requires persisted `unsafe_to_replay` and is mandatory for lifecycle,
 restart, and reprovision effects. The Worker persists that unsafe phase before
-the external effect and performs no effect if the mark loses its lease fence.
-Superseded completion validates reconcile kind, both Runtime identities, target
-version, running status, attempt, owner, and live lease before changing the job.
+the external effect and performs no effect if the mark loses its lease fence;
+the locked read and final update CAS both require `payload_ref` and
+`container_id` to equal the claimed Runtime. The repository runtime-validates
+the proof as an exact accessor-free data record and rejects unknown kinds,
+malformed observations, and `inspect_proved` restart before writes. Superseded
+completion accepts one structured claim containing Runtime identity, command,
+target version, and captured effect phase, and validates those exact values
+with reconcile kind, running status, attempt, owner, and live lease before
+changing the job. Either legal phase is accepted only when captured exactly.
 
 ## 10. Provisioning flow
 

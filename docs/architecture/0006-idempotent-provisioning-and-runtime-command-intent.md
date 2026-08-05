@@ -187,8 +187,15 @@ event, audit, or job state. Reconcile success locks and validates kind, both
 Runtime identities, command, target version, and effect phase. Its API separates
 an `inspect_proved` start/stop/delete completion, which requires `pre_effect`,
 from `effect_dispatched`, which requires `unsafe_to_replay` and includes every
-restart or reprovision completion. Superseded success independently locks and
-validates reconcile kind, identities, target, status, attempt, owner, and lease.
+restart or reprovision completion. The boundary validates this discriminated
+intent again at runtime as an exact, accessor-free data record, including the
+nested Supervisor observation; unknown proof kinds and `inspect_proved`
+restart fail as lease loss before any write. Superseded success receives the
+claim's Runtime identity, command, target, and captured effect phase as one
+structured intent, then independently locks and validates all four persisted
+values plus reconcile kind, status, attempt, owner, and lease. Both
+`pre_effect` and `unsafe_to_replay` are legal only when the caller's captured
+phase exactly matches the locked row.
 
 `CONTROL_PLANE_WORKER_ID` is a bounded operator-configured prefix, not the
 durable lease identity. Each Worker process appends one fresh cryptographic
