@@ -70,7 +70,7 @@ export {
   withAgentRunConversationLock,
   type AgentRunConversationLockInput,
 } from "./repositories/agent-run-conversation-lock.js";
-export { WorkerRuntimeRepository, type ProvisionAdmissionResult, type ProvisionCompletionResult, type ProvisionFailureResult, type ReconcileFailureResult, type ReconcileRetryResult, type RuntimeWorkerJobRef, type StoredProvisionFacts, type StoredProvisionProfile, type StoredReconcileFacts } from "./repositories/worker-runtime.js";
+export { WorkerRuntimeRepository, type ProvisionAdmissionResult, type ProvisionCompletionResult, type ProvisionFailureResult, type ReconcileFailureResult, type ReconcileRetryResult, type ReconcileSuccessIntent, type RuntimeWorkerJobRef, type StoredProvisionFacts, type StoredProvisionProfile, type StoredReconcileFacts } from "./repositories/worker-runtime.js";
 export {
   WorkerAgentRunRepository,
   type AgentRunBeginResult,

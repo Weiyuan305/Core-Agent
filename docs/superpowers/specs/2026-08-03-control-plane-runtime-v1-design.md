@@ -548,6 +548,17 @@ locked job's persisted kind and target version against the claimed target before
 any Runtime mutation. The repository intentionally has no generic retry or
 Runtime-failure method shared by both job kinds.
 
+Runtime success is also intent-authoritative. The repository locks the complete
+owned job identity before any terminal write. Provision success requires the
+persisted provision kind, matching payload/container identity, and `pre_effect`.
+Reconcile success uses a discriminated proof: `inspect_proved` is limited to
+start/stop/delete and requires persisted `pre_effect`; `effect_dispatched`
+requires persisted `unsafe_to_replay` and is mandatory for lifecycle,
+restart, and reprovision effects. The Worker persists that unsafe phase before
+the external effect and performs no effect if the mark loses its lease fence.
+Superseded completion validates reconcile kind, both Runtime identities, target
+version, running status, attempt, owner, and live lease before changing the job.
+
 ## 10. Provisioning flow
 
 1. API authenticates the bootstrap key, derives the provisioner service

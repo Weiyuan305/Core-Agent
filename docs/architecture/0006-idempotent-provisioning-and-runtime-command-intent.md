@@ -110,15 +110,15 @@ health is `healthy` and whose private Hermes origin passes policy validation.
 `unknown`, `degraded`, and `unhealthy` running observations retry within the
 bounded attempt budget and eventually fail; they never advance readiness.
 
-An accepted running effect that is not yet healthy advances the durable
-reconcile job from `pre_effect` to `unsafe_to_replay` before retry. This phase
-does not mean the command is abandoned: it means the command's external effect
-was dispatched and subsequent attempts must use attempt-specific `inspect`
-operations only. A healthy running inspection completes start or restart;
-continued non-healthy running observations consume the bounded retry budget;
-removed or command-contradicting observations fail closed. Stop and delete use
-the same observe-only rule after marking, although their accepted effect
-normally already supplies a terminal observation.
+Before every lifecycle or reprovision effect, the Worker atomically advances
+the durable reconcile job from `pre_effect` to `unsafe_to_replay`. A lost phase
+mark admits no external call. This phase does not mean the command is abandoned:
+it means a later attempt must use attempt-specific `inspect` operations only.
+A healthy running inspection completes start or restart; continued non-healthy
+running observations consume the bounded retry budget; removed or
+command-contradicting observations fail closed. Stop and delete use the same
+observe-only rule after marking, although their effect normally supplies a
+terminal observation immediately.
 
 The phase mark and retry update are intentionally separate recoverable writes.
 A crash between them leaves an expired `running` job whose
@@ -179,6 +179,16 @@ job row and requires `job_kind = 'reconcile_runtime'`, a non-null persisted
 claimed target. A missing, wrong-kind, or mismatched claim fails as lease loss
 before the Runtime is locked or mutated; there is no generic Runtime-failure
 entry point that can bypass this command-aware disposition.
+
+Successful terminalization has the same persisted-intent boundary. Provision
+success locks the owned job and requires provision kind, matching `payload_ref`
+and `container_id`, and `pre_effect` before touching Runtime, Tenant, Profile,
+event, audit, or job state. Reconcile success locks and validates kind, both
+Runtime identities, command, target version, and effect phase. Its API separates
+an `inspect_proved` start/stop/delete completion, which requires `pre_effect`,
+from `effect_dispatched`, which requires `unsafe_to_replay` and includes every
+restart or reprovision completion. Superseded success independently locks and
+validates reconcile kind, identities, target, status, attempt, owner, and lease.
 
 `CONTROL_PLANE_WORKER_ID` is a bounded operator-configured prefix, not the
 durable lease identity. Each Worker process appends one fresh cryptographic

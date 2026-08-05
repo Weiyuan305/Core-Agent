@@ -9,6 +9,10 @@ type RuntimeCommand = "start" | "stop" | "restart" | "delete";
 type ReconcileEffectState = "pre_effect" | "unsafe_to_replay";
 interface ReconcileJob { readonly tenantId: string; readonly jobId: string; readonly attemptCount: number; readonly maxAttempts: number; readonly targetCommandVersion: number; readonly command: RuntimeCommand; readonly effectState: ReconcileEffectState; readonly recoveryOnly: boolean }
 interface ReconcileFacts { readonly tenantId: string; readonly runtimeId: string; readonly generation: number; readonly imageRef: string; readonly commandVersion: number; readonly observedState: string; readonly desiredState: string }
+type ReconcileSuccessDisposition =
+  | { readonly kind: "superseded" }
+  | { readonly kind: "inspect_proved"; readonly command: "start" | "stop" | "delete"; readonly observation: Extract<SupervisorResponseV1, { outcome: "accepted" }>["observation"] }
+  | { readonly kind: "effect_dispatched"; readonly command: RuntimeCommand; readonly observation: Extract<SupervisorResponseV1, { outcome: "accepted" }>["observation"] };
 type RetryDisposition = boolean | { readonly kind: "retried" | "superseded" | "lease_lost" };
 type FailureDisposition = boolean | { readonly kind: "failed" | "superseded" | "lease_lost" };
 export interface ReconcileRuntimePort {
@@ -17,7 +21,7 @@ export interface ReconcileRuntimePort {
   reprovision(job: ReconcileJob, signal: AbortSignal): Promise<SupervisorResponseV1>;
   isCurrent(job: ReconcileJob): Promise<boolean>;
   markEffectDispatched(job: ReconcileJob): Promise<boolean>;
-  succeed(job: ReconcileJob, response?: SupervisorResponseV1): Promise<boolean>;
+  succeed(job: ReconcileJob, success: ReconcileSuccessDisposition): Promise<boolean>;
   retry(job: ReconcileJob, summary: string): Promise<RetryDisposition>;
   fail(job: ReconcileJob, summary: string): Promise<FailureDisposition>;
 }
@@ -73,9 +77,8 @@ function inspectionAllowsEffect(command: RuntimeCommand, response: Extract<Super
   if (command === "restart") return observation.exists && observation.lifecycle === "running";
   return observation.exists && ["created", "stopped"].includes(observation.lifecycle);
 }
-async function unhealthyRunningResult(port: ReconcileRuntimePort, job: ReconcileJob, markDispatched = false): Promise<HandlerResult> {
+async function unhealthyRunningResult(port: ReconcileRuntimePort, job: ReconcileJob): Promise<HandlerResult> {
   const text = "Supervisor reports the running runtime is not healthy";
-  if (markDispatched && !await port.markEffectDispatched(job)) return { kind: "failed", summary: "Worker job lease lost" };
   if (job.attemptCount < job.maxAttempts) return retryResult(port, job, text);
   return failureResult(port, job, text);
 }
@@ -93,12 +96,19 @@ async function finishRecoveryObservation(
   port: ReconcileRuntimePort,
   job: ReconcileJob,
   inspected: Extract<SupervisorResponseV1, { outcome: "accepted" }>,
+  proof: "inspect_proved" | "effect_dispatched",
 ): Promise<HandlerResult> {
   if (inspected.observation.lifecycle === "running") {
     validatePrivateHermesOrigin(inspected.observation.private_origin);
     if (inspected.observation.health !== "healthy") return failClosedRecovery(port, job);
   }
-  if (!await port.succeed(job, inspected)) return { kind: "failed", summary: "Worker job lease lost" };
+  let success: ReconcileSuccessDisposition;
+  if (proof === "effect_dispatched") success = { kind: "effect_dispatched", command: job.command, observation: inspected.observation };
+  else {
+    if (job.command === "restart") throw new Error("Restart cannot complete from a pre-effect inspection");
+    success = { kind: "inspect_proved", command: job.command, observation: inspected.observation };
+  }
+  if (!await port.succeed(job, success)) return { kind: "failed", summary: "Worker job lease lost" };
   return { kind: "succeeded" };
 }
 
@@ -109,17 +119,17 @@ async function recoverWithoutReplay(
 ): Promise<HandlerResult> {
   if (job.effectState === "unsafe_to_replay") {
     if (!effectMatches(job.command, inspected)) return failClosedRecovery(port, job);
-    return finishRecoveryObservation(port, job, inspected);
+    return finishRecoveryObservation(port, job, inspected, "effect_dispatched");
   }
   if (job.command === "restart" || !inspectionAlreadySatisfies(job.command, inspected)) return failClosedRecovery(port, job);
-  return finishRecoveryObservation(port, job, inspected);
+  return finishRecoveryObservation(port, job, inspected, "inspect_proved");
 }
 
 export async function handleReconcileRuntime(port: ReconcileRuntimePort, job: ReconcileJob, signal: AbortSignal): Promise<HandlerResult> {
   try {
     const facts = await port.loadFacts(job);
     if (facts.commandVersion !== job.targetCommandVersion) {
-      if (!await port.succeed(job)) return { kind: "failed", summary: "Worker job lease lost" };
+      if (!await port.succeed(job, { kind: "superseded" })) return { kind: "failed", summary: "Worker job lease lost" };
       return { kind: "succeeded" };
     }
     const inspected = await port.supervisor(request(facts, "inspect", operationId(job, `attempt-${job.attemptCount}-inspect`)), signal);
@@ -136,20 +146,22 @@ export async function handleReconcileRuntime(port: ReconcileRuntimePort, job: Re
       if (!effectMatches(job.command, inspected)) return failClosedObservation(port, job);
       if (inspected.observation.lifecycle === "running") validatePrivateHermesOrigin(inspected.observation.private_origin);
       if (inspected.observation.lifecycle === "running" && inspected.observation.health !== "healthy") return unhealthyRunningResult(port, job);
-      if (!await port.succeed(job, inspected)) return { kind: "failed", summary: "Worker job lease lost" };
+      if (!await port.succeed(job, { kind: "effect_dispatched", command: job.command, observation: inspected.observation })) return { kind: "failed", summary: "Worker job lease lost" };
       return { kind: "succeeded" };
     }
     if (inspectionAlreadySatisfies(job.command, inspected)) {
       if (inspected.observation.lifecycle === "running") validatePrivateHermesOrigin(inspected.observation.private_origin);
       if (inspected.observation.lifecycle === "running" && inspected.observation.health !== "healthy") return unhealthyRunningResult(port, job);
-      if (!await port.succeed(job, inspected)) return { kind: "failed", summary: "Worker job lease lost" };
+      if (job.command === "restart") throw new Error("Restart cannot complete from a pre-effect inspection");
+      if (!await port.succeed(job, { kind: "inspect_proved", command: job.command, observation: inspected.observation })) return { kind: "failed", summary: "Worker job lease lost" };
       return { kind: "succeeded" };
     }
     if (inspected.observation.exists && !inspectionAllowsEffect(job.command, inspected)) throw new Error("Supervisor inspection is incompatible with requested operation");
     if (!await port.isCurrent(job)) {
-      if (!await port.succeed(job)) return { kind: "failed", summary: "Worker job lease lost" };
+      if (!await port.succeed(job, { kind: "superseded" })) return { kind: "failed", summary: "Worker job lease lost" };
       return { kind: "succeeded" };
     }
+    if (!await port.markEffectDispatched(job)) return { kind: "failed", summary: "Worker job lease lost" };
     const effected = !inspected.observation.exists && facts.desiredState === "running"
       ? await port.reprovision(job, signal)
       : await port.supervisor(request(facts, job.command, operationId(job, `effect-${job.command}`)), signal);
@@ -162,8 +174,8 @@ export async function handleReconcileRuntime(port: ReconcileRuntimePort, job: Re
     }
     if (!compatible(facts, effected) || !effectMatches(job.command, effected)) throw new Error("Supervisor lifecycle observation does not match requested operation");
     if (effected.observation.lifecycle === "running") validatePrivateHermesOrigin(effected.observation.private_origin);
-    if (effected.observation.lifecycle === "running" && effected.observation.health !== "healthy") return unhealthyRunningResult(port, job, true);
-    if (!await port.succeed(job, effected)) return { kind: "failed", summary: "Worker job lease lost" };
+    if (effected.observation.lifecycle === "running" && effected.observation.health !== "healthy") return unhealthyRunningResult(port, job);
+    if (!await port.succeed(job, { kind: "effect_dispatched", command: job.command, observation: effected.observation })) return { kind: "failed", summary: "Worker job lease lost" };
     return { kind: "succeeded" };
   } catch (error) {
     const text = summary(error);

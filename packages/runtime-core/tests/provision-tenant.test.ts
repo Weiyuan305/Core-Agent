@@ -572,6 +572,10 @@ test("reconcile success and superseded completion reject mismatched persisted in
   assert.equal(await repository.finishReconcile(ref, { kind: "inspect_proved", command: "start", targetCommandVersion: 1, observation }), false);
   assert.equal(await repository.completeSuperseded(ref, 1), false);
   assert.deepEqual(await runtimeTerminalSnapshot(tenantId), beforeMissingContainer);
+  await db.updateTable("worker_jobs").set({ container_id: accepted.runtime.container_id, status: "retrying" }).where("tenant_id", "=", tenantId).where("job_id", "=", job.job_id).execute();
+  const beforeWrongStatus = await runtimeTerminalSnapshot(tenantId);
+  assert.equal(await repository.completeSuperseded(ref, 1), false);
+  assert.deepEqual(await runtimeTerminalSnapshot(tenantId), beforeWrongStatus);
 });
 
 test("reconcile success accepts only the matching explicit proof and durable effect phase", async () => {

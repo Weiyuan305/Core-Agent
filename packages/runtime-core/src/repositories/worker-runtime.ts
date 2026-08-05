@@ -28,6 +28,9 @@ export type ProvisionCompletionResult = { readonly kind: "completed" | "supersed
 export type ProvisionFailureResult = { readonly kind: "failed" | "superseded" | "lease_lost" };
 export type ReconcileRetryResult = { readonly kind: "retried" | "superseded" | "lease_lost" };
 export type ReconcileFailureResult = { readonly kind: "failed" | "superseded" | "lease_lost" };
+export type ReconcileSuccessIntent =
+  | { readonly kind: "inspect_proved"; readonly command: "start" | "stop" | "delete"; readonly targetCommandVersion: number; readonly observation: RuntimeObservation }
+  | { readonly kind: "effect_dispatched"; readonly command: "start" | "stop" | "restart" | "delete"; readonly targetCommandVersion: number; readonly observation: RuntimeObservation };
 export interface StoredProvisionProfile {
   readonly profileId: string; readonly hermesProfileRef: string; readonly description: string;
   readonly providerConfigId: string; readonly providerBaseUrl: string; readonly modelId: string;
@@ -165,7 +168,13 @@ export class WorkerRuntimeRepository {
 
   public async finishProvision(job: RuntimeWorkerJobRef): Promise<ProvisionCompletionResult> {
     return provisionTransaction(this.db, async (trx) => {
-      await requireLease(trx, job, true);
+      const claimed = await trx.selectFrom("worker_jobs").select(["job_kind", "payload_ref", "container_id", "effect_state"])
+        .where("tenant_id", "=", job.tenantId).where("job_id", "=", job.jobId)
+        .where("attempt_count", "=", job.attemptCount).where("lease_owner", "=", job.workerId)
+        .where("status", "=", "running").where("lease_expires_at", ">", sql<Date>`clock_timestamp()`)
+        .forUpdate().executeTakeFirst();
+      if (claimed === undefined || claimed.job_kind !== "provision_runtime" || claimed.payload_ref !== job.runtimeId
+        || claimed.container_id !== job.runtimeId || claimed.effect_state !== "pre_effect") throw new LeaseFenceLost();
       const current = await trx.selectFrom("runtime_containers").select(["observed_state", "command_version"]).where("tenant_id", "=", job.tenantId).where("container_id", "=", job.runtimeId).forUpdate().executeTakeFirstOrThrow();
       await requireLease(trx, job);
       if (safeContractInteger(current.command_version) > 0) {
@@ -263,10 +272,18 @@ export class WorkerRuntimeRepository {
     return { tenantId, runtimeId, generation: row.generation, imageRef: row.image_ref, commandVersion: safeContractInteger(row.command_version), observedState: row.observed_state as RuntimeContainer["observed_state"], desiredState: row.desired_state as RuntimeContainer["desired_state"] };
   }
 
-  public async completeSuperseded(job: RuntimeWorkerJobRef): Promise<boolean> {
-    const result = await this.db.updateTable("worker_jobs").set({ status: "succeeded", lease_owner: null, lease_expires_at: null, last_error_summary: "Superseded by a newer runtime command", updated_at: this.now() })
-      .where("tenant_id", "=", job.tenantId).where("job_id", "=", job.jobId).where("attempt_count", "=", job.attemptCount).where("lease_owner", "=", job.workerId).where("lease_expires_at", ">", sql<Date>`clock_timestamp()`).executeTakeFirst();
-    return Number(result.numUpdatedRows) === 1;
+  public async completeSuperseded(job: RuntimeWorkerJobRef, targetCommandVersion: number): Promise<boolean> {
+    return fencedTransaction(this.db, async (trx) => {
+      const claimed = await trx.selectFrom("worker_jobs").select(["job_kind", "payload_ref", "container_id", "target_command_version"])
+        .where("tenant_id", "=", job.tenantId).where("job_id", "=", job.jobId)
+        .where("attempt_count", "=", job.attemptCount).where("lease_owner", "=", job.workerId)
+        .where("status", "=", "running").where("lease_expires_at", ">", sql<Date>`clock_timestamp()`)
+        .forUpdate().executeTakeFirst();
+      if (claimed === undefined || claimed.job_kind !== "reconcile_runtime" || claimed.payload_ref !== job.runtimeId
+        || claimed.container_id !== job.runtimeId || claimed.target_command_version === null
+        || safeContractInteger(claimed.target_command_version) !== targetCommandVersion) throw new LeaseFenceLost();
+      await finishOwnedJob(trx, job, { status: "succeeded", lease_owner: null, lease_expires_at: null, last_error_summary: "Superseded by a newer runtime command", updated_at: this.now() });
+    });
   }
 
   public async isCurrentCommand(job: RuntimeWorkerJobRef, targetCommandVersion: number): Promise<boolean> {
@@ -303,15 +320,27 @@ export class WorkerRuntimeRepository {
     });
   }
 
-  public async finishReconcile(job: RuntimeWorkerJobRef, command: "start" | "stop" | "restart" | "delete", targetCommandVersion: number, observation: RuntimeObservation): Promise<boolean> {
+  public async finishReconcile(job: RuntimeWorkerJobRef, intent: ReconcileSuccessIntent): Promise<boolean> {
     return fencedTransaction(this.db, async (trx) => {
-      await requireLease(trx, job, true);
+      const claimed = await trx.selectFrom("worker_jobs").select(["job_kind", "payload_ref", "container_id", "runtime_command", "target_command_version", "effect_state"])
+        .where("tenant_id", "=", job.tenantId).where("job_id", "=", job.jobId)
+        .where("attempt_count", "=", job.attemptCount).where("lease_owner", "=", job.workerId)
+        .where("status", "=", "running").where("lease_expires_at", ">", sql<Date>`clock_timestamp()`)
+        .forUpdate().executeTakeFirst();
+      if (claimed === undefined) throw new LeaseFenceLost();
+      const wrongEffectState = intent.kind === "inspect_proved"
+        ? claimed.effect_state !== "pre_effect"
+        : claimed.effect_state !== "unsafe_to_replay";
+      if (claimed.job_kind !== "reconcile_runtime" || claimed.payload_ref !== job.runtimeId
+        || claimed.container_id !== job.runtimeId || claimed.runtime_command !== intent.command || claimed.target_command_version === null
+        || safeContractInteger(claimed.target_command_version) !== intent.targetCommandVersion || wrongEffectState) throw new LeaseFenceLost();
       const row = await trx.selectFrom("runtime_containers").select(["resource_version", "command_version", "observed_state", "health_status"]).where("tenant_id", "=", job.tenantId).where("container_id", "=", job.runtimeId).forUpdate().executeTakeFirstOrThrow();
       await requireLease(trx, job);
-      if (safeContractInteger(row.command_version) !== targetCommandVersion) {
+      if (safeContractInteger(row.command_version) !== intent.targetCommandVersion) {
         await finishOwnedJob(trx, job, { status: "succeeded", lease_owner: null, lease_expires_at: null, last_error_summary: "Superseded by a newer runtime command", updated_at: this.now() });
         return;
       }
+      const { command, observation } = intent;
       const validObservation = command === "delete"
         ? !observation.exists && observation.lifecycle === "removed"
         : command === "stop"

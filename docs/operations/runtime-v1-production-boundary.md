@@ -54,6 +54,14 @@ Worker's claim, is reported as lease loss and must make no Runtime mutation.
 Treat repeated occurrences as a Worker contract or data-integrity alert; do not
 retry them through a generic Runtime failure path.
 
+Successful Runtime terminalization must expose one of the persisted proof
+classes. `inspect_proved` is a no-effect completion for start, stop, or delete
+while the job remains `pre_effect`. `effect_dispatched` requires the job to be
+`unsafe_to_replay`; every lifecycle/restart/reprovision call must persist that
+phase first, and a failed phase mark must produce no external call. Wrong job
+kind, payload/container identity, command, target, effect phase, attempt, owner,
+status, or lease is a lease-loss disposition with zero terminal writes.
+
 Outbox delivery has a hard limit of 10 notification attempts. Each polling
 transaction first locks at most 100 exhausted pending rows in deterministic
 creation-and-identity order with `FOR UPDATE SKIP LOCKED`. It rechecks each
