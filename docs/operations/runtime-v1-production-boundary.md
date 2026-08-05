@@ -41,6 +41,13 @@ replace a Worker process after a lease expiry; the prior process can no longer
 heartbeat, retry, complete, fail, or apply a Runtime/Agent Run/Outbox terminal
 update for the reclaimed attempt.
 
+Reconcile retry/failure records with the fixed summary `Superseded by a newer
+runtime command` are successful disposal of obsolete work, not current Runtime
+failures. They must not be accompanied by a Runtime failure transition or
+failure event/audit entry. Current-command failure alerts therefore require a
+matching `target_command_version`; investigate any mismatch as a broken Worker
+transaction boundary.
+
 Outbox delivery has a hard limit of 10 notification attempts. Each polling
 transaction first locks at most 100 exhausted pending rows in deterministic
 creation-and-identity order with `FOR UPDATE SKIP LOCKED`. It rechecks each

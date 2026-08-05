@@ -159,6 +159,18 @@ Outbox paths, matches tenant, row ID, lease owner, unexpired lease, and the
 captured attempt. A delayed process therefore cannot change a row reclaimed by
 another process, even if a configured Worker ID were accidentally reused.
 
+Every reconcile retry and failure terminalization also locks the Runtime and
+compares its current `command_version` with the claimed job's persisted
+`target_command_version`. This check occurs after a rejected Supervisor result,
+transport throw or timeout, unhealthy/contradictory observation, and final
+attempt recovery, regardless of whether the job is `pre_effect` or
+`unsafe_to_replay`. If a newer command won while the old effect was in flight,
+the transaction completes only the old job as `succeeded` with the fixed
+superseded summary. It does not mutate current Runtime desired, observed,
+health, or failure state and emits no failure ProductEvent or AuditEvent. The
+Worker reports that disposition as succeeded; only a matching command version
+may retry or publish current-command failure history.
+
 `CONTROL_PLANE_WORKER_ID` is a bounded operator-configured prefix, not the
 durable lease identity. Each Worker process appends one fresh cryptographic
 UUID for its lifetime. The derived identity is used only for lease ownership;

@@ -91,8 +91,8 @@ async function dispatchRuntimeJob(dependencies: WorkerDependencies, job: Claimed
     succeed: async (_job, response) => response?.outcome === "accepted"
       ? dependencies.repositories.runtimes.finishReconcile(ref, job.runtimeCommand, job.targetCommandVersion, response.observation)
       : dependencies.repositories.runtimes.completeSuperseded(ref),
-    retry: async (_job, summary) => { const retry = nextAttempt(dependencies, job, summary); return dependencies.repositories.runtimes.retryJob(ref, retry.summary, retry.at); },
-    fail: (_job, summary) => dependencies.repositories.runtimes.failRuntimeJob(ref, summary),
+    retry: async (_job, summary) => { const retry = nextAttempt(dependencies, job, summary); return dependencies.repositories.runtimes.retryReconcileJob(ref, job.targetCommandVersion, retry.summary, retry.at); },
+    fail: (_job, summary) => dependencies.repositories.runtimes.failReconcileJob(ref, job.targetCommandVersion, summary),
   }, { tenantId: job.tenantId, jobId: job.jobId, attemptCount: job.attemptCount, maxAttempts: job.maxAttempts, targetCommandVersion: job.targetCommandVersion, command: job.runtimeCommand, effectState: job.effectState, recoveryOnly: job.recoveryOnly }, signal));
   if (job.jobKind === "execute_agent_run") return withAgentRunConversationLock(
     dependencies.db,

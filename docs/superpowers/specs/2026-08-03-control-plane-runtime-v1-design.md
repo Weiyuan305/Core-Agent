@@ -534,6 +534,15 @@ successful notification with a lost durable delivered acknowledgement may
 later follow this failure path; ProductEvent database polling remains
 authoritative and discoverable.
 
+Reconcile failure handling is command-version authoritative. Each retry or
+failure transaction locks the owned job and Runtime, rechecks the claim attempt
+and lease, and compares the Runtime `command_version` with the job's
+`target_command_version`. A mismatch terminalizes only the old job as
+superseded-success, with no Runtime mutation and no failure ProductEvent or
+AuditEvent. This applies to rejected, thrown, timed-out, contradictory, and
+final-attempt results from both pre-effect and already-dispatched work. A
+matching version retains the bounded retry and terminal failure behavior.
+
 ## 10. Provisioning flow
 
 1. API authenticates the bootstrap key, derives the provisioner service

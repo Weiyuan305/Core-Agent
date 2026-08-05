@@ -9,6 +9,8 @@ type RuntimeCommand = "start" | "stop" | "restart" | "delete";
 type ReconcileEffectState = "pre_effect" | "unsafe_to_replay";
 interface ReconcileJob { readonly tenantId: string; readonly jobId: string; readonly attemptCount: number; readonly maxAttempts: number; readonly targetCommandVersion: number; readonly command: RuntimeCommand; readonly effectState: ReconcileEffectState; readonly recoveryOnly: boolean }
 interface ReconcileFacts { readonly tenantId: string; readonly runtimeId: string; readonly generation: number; readonly imageRef: string; readonly commandVersion: number; readonly observedState: string; readonly desiredState: string }
+type RetryDisposition = boolean | { readonly kind: "retried" | "superseded" | "lease_lost" };
+type FailureDisposition = boolean | { readonly kind: "failed" | "superseded" | "lease_lost" };
 export interface ReconcileRuntimePort {
   loadFacts(job: ReconcileJob): Promise<ReconcileFacts>;
   supervisor(request: SupervisorRequestV1, signal: AbortSignal): Promise<SupervisorResponseV1>;
@@ -16,8 +18,21 @@ export interface ReconcileRuntimePort {
   isCurrent(job: ReconcileJob): Promise<boolean>;
   markEffectDispatched(job: ReconcileJob): Promise<boolean>;
   succeed(job: ReconcileJob, response?: SupervisorResponseV1): Promise<boolean>;
-  retry(job: ReconcileJob, summary: string): Promise<boolean>;
-  fail(job: ReconcileJob, summary: string): Promise<boolean>;
+  retry(job: ReconcileJob, summary: string): Promise<RetryDisposition>;
+  fail(job: ReconcileJob, summary: string): Promise<FailureDisposition>;
+}
+
+async function retryResult(port: ReconcileRuntimePort, job: ReconcileJob, text: string): Promise<HandlerResult> {
+  const result = await port.retry(job, text);
+  if (result === false || (typeof result === "object" && result.kind === "lease_lost")) return { kind: "failed", summary: "Worker job lease lost" };
+  if (typeof result === "object" && result.kind === "superseded") return { kind: "succeeded" };
+  return { kind: "retry", summary: text };
+}
+async function failureResult(port: ReconcileRuntimePort, job: ReconcileJob, text: string): Promise<HandlerResult> {
+  const result = await port.fail(job, text);
+  if (result === false || (typeof result === "object" && result.kind === "lease_lost")) return { kind: "failed", summary: "Worker job lease lost" };
+  if (typeof result === "object" && result.kind === "superseded") return { kind: "succeeded" };
+  return { kind: "failed", summary: text };
 }
 
 function request(facts: ReconcileFacts, kind: "inspect" | RuntimeCommand, operationId: string): SupervisorRequestV1 {
@@ -61,23 +76,17 @@ function inspectionAllowsEffect(command: RuntimeCommand, response: Extract<Super
 async function unhealthyRunningResult(port: ReconcileRuntimePort, job: ReconcileJob, markDispatched = false): Promise<HandlerResult> {
   const text = "Supervisor reports the running runtime is not healthy";
   if (markDispatched && !await port.markEffectDispatched(job)) return { kind: "failed", summary: "Worker job lease lost" };
-  if (job.attemptCount < job.maxAttempts) {
-    if (!await port.retry(job, text)) return { kind: "failed", summary: "Worker job lease lost" };
-    return { kind: "retry", summary: text };
-  }
-  if (!await port.fail(job, text)) return { kind: "failed", summary: "Worker job lease lost" };
-  return { kind: "failed", summary: text };
+  if (job.attemptCount < job.maxAttempts) return retryResult(port, job, text);
+  return failureResult(port, job, text);
 }
 async function failClosedObservation(port: ReconcileRuntimePort, job: ReconcileJob): Promise<HandlerResult> {
   const text = "Supervisor observation contradicts the dispatched runtime effect";
-  if (!await port.fail(job, text)) return { kind: "failed", summary: "Worker job lease lost" };
-  return { kind: "failed", summary: text };
+  return failureResult(port, job, text);
 }
 
 async function failClosedRecovery(port: ReconcileRuntimePort, job: ReconcileJob): Promise<HandlerResult> {
   const text = "Final-attempt recovery cannot safely replay the runtime effect";
-  if (!await port.fail(job, text)) return { kind: "failed", summary: "Worker job lease lost" };
-  return { kind: "failed", summary: text };
+  return failureResult(port, job, text);
 }
 
 async function finishRecoveryObservation(
@@ -117,11 +126,9 @@ export async function handleReconcileRuntime(port: ReconcileRuntimePort, job: Re
     if (inspected.outcome !== "accepted") {
       const text = summary(inspected.summary);
       if (!job.recoveryOnly && inspected.retryable && job.attemptCount < job.maxAttempts) {
-        if (!await port.retry(job, text)) return { kind: "failed", summary: "Worker job lease lost" };
-        return { kind: "retry", summary: text };
+        return retryResult(port, job, text);
       }
-      if (!await port.fail(job, text)) return { kind: "failed", summary: "Worker job lease lost" };
-      return { kind: "failed", summary: text };
+      return failureResult(port, job, text);
     }
     if (!compatible(facts, inspected)) throw new Error("Supervisor inspect observation does not match stored runtime identity");
     if (job.recoveryOnly) return recoverWithoutReplay(port, job, inspected);
@@ -149,11 +156,9 @@ export async function handleReconcileRuntime(port: ReconcileRuntimePort, job: Re
     if (effected.outcome !== "accepted") {
       const text = summary(effected.summary);
       if (effected.retryable && job.attemptCount < job.maxAttempts) {
-        if (!await port.retry(job, text)) return { kind: "failed", summary: "Worker job lease lost" };
-        return { kind: "retry", summary: text };
+        return retryResult(port, job, text);
       }
-      if (!await port.fail(job, text)) return { kind: "failed", summary: "Worker job lease lost" };
-      return { kind: "failed", summary: text };
+      return failureResult(port, job, text);
     }
     if (!compatible(facts, effected) || !effectMatches(job.command, effected)) throw new Error("Supervisor lifecycle observation does not match requested operation");
     if (effected.observation.lifecycle === "running") validatePrivateHermesOrigin(effected.observation.private_origin);
@@ -164,10 +169,8 @@ export async function handleReconcileRuntime(port: ReconcileRuntimePort, job: Re
     const text = summary(error);
     if (signal.aborted) return { kind: "failed", summary: "Worker job lease lost" };
     if (!job.recoveryOnly && job.attemptCount < job.maxAttempts && retryable(error)) {
-      if (!await port.retry(job, text)) return { kind: "failed", summary: "Worker job lease lost" };
-      return { kind: "retry", summary: text };
+      return retryResult(port, job, text);
     }
-    if (!await port.fail(job, text)) return { kind: "failed", summary: "Worker job lease lost" };
-    return { kind: "failed", summary: text };
+    return failureResult(port, job, text);
   }
 }
