@@ -1,3 +1,5 @@
+import { OUTBOX_MAX_ATTEMPTS } from "@core-agent/runtime-core";
+
 interface OutboxWakeup { readonly tenantId: string; readonly outboxId: string; readonly streamId: string; readonly lastSequence: number; readonly attemptCount: number }
 export interface OutboxDispatchPort {
   claim(workerId: string, limit: number): Promise<readonly OutboxWakeup[]>;
@@ -8,7 +10,7 @@ export interface OutboxDispatchPort {
 export async function dispatchOutbox(port: OutboxDispatchPort, workerId: string): Promise<{ delivered: number; retried: number }> {
   let delivered = 0; let retried = 0;
   for (const row of await port.claim(workerId, 64)) {
-    if (!Number.isSafeInteger(row.attemptCount) || row.attemptCount < 1) {
+    if (!Number.isSafeInteger(row.attemptCount) || row.attemptCount < 1 || row.attemptCount > OUTBOX_MAX_ATTEMPTS) {
       throw new Error("Outbox claimed row attemptCount is invalid");
     }
     try {

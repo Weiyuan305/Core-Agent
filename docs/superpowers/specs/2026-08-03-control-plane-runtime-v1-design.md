@@ -520,6 +520,15 @@ together. A dispatcher may use PostgreSQL `LISTEN/NOTIFY` as a wake-up hint, but
 notifications are not durable. Dispatchers always query undelivered rows, so a
 missed notification or restart cannot lose an event.
 
+The dispatcher permits at most 10 notification attempts. In the same
+transaction and before ordinary claims, it terminalizes pending exhausted rows
+whose lease is absent or expired as `failed`, clears the lease, and records a
+fixed redacted-safe summary using the database clock. It neither sends a
+recovery notification nor creates attempt 11, and it does not disturb a live
+tenth-attempt lease. A successful notification with a lost durable delivered
+acknowledgement may later follow this failure path; ProductEvent database
+polling remains authoritative and discoverable.
+
 ## 10. Provisioning flow
 
 1. API authenticates the bootstrap key, derives the provisioner service

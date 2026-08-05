@@ -1,6 +1,7 @@
 import {
   claimOutboxWakeups, claimPlatformWorkerJobs, completeJob, createRedactor, failOutbox,
   heartbeatJob, markOutboxDelivered, rescheduleOutbox, retryDecision,
+  OUTBOX_MAX_ATTEMPTS,
   withAgentRunConversationLock, withRuntimeAdvisoryLock, WorkerAgentRunRepository, WorkerRuntimeRepository,
   type ClaimedJob, type HermesChatInput, type ProviderCatalog, type Redactor, type RuntimeDatabase,
   type RuntimeSupervisorClient, type SecretStore,
@@ -134,7 +135,7 @@ async function pollOutbox(dependencies: WorkerDependencies): Promise<void> {
     claim: (workerId, limit) => claimOutboxWakeups(dependencies.db, { workerId, limit, leaseMs: 30_000 }),
     notify: async (payload) => { await sql`select pg_notify('core_agent_events', ${payload})`.execute(dependencies.db); },
     delivered: async (row, workerId) => (await markOutboxDelivered(dependencies.db, { tenantId: row.tenantId, outboxId: row.outboxId, workerId, attemptCount: row.attemptCount })).kind === "updated",
-    retry: async (row, workerId, summary) => row.attemptCount >= 10
+    retry: async (row, workerId, summary) => row.attemptCount >= OUTBOX_MAX_ATTEMPTS
       ? (await failOutbox(dependencies.db, { tenantId: row.tenantId, outboxId: row.outboxId, workerId, attemptCount: row.attemptCount, lastErrorSummary: summary, redactor: dependencies.repositories.redactor })).kind === "updated"
       : (await rescheduleOutbox(dependencies.db, { tenantId: row.tenantId, outboxId: row.outboxId, workerId, attemptCount: row.attemptCount, nextAttemptAt: new Date(dependencies.clock.now().getTime() + Math.min(60_000, 500 * 2 ** Math.max(0, row.attemptCount - 1))), lastErrorSummary: summary, redactor: dependencies.repositories.redactor })).kind === "updated",
   }, dependencies.workerId);

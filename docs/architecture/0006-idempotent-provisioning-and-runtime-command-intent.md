@@ -164,6 +164,22 @@ durable lease identity. Each Worker process appends one fresh cryptographic
 UUID for its lifetime. The derived identity is used only for lease ownership;
 it contains no credential material and is not a security principal.
 
+### Exhausted Outbox recovery
+
+Outbox attempt 10 is the final notification attempt. Before admitting ordinary
+claims, the claim transaction changes any pending row at or above that limit
+with an absent or expired lease to `failed`, clears its lease, and stores a
+fixed redacted-safe summary using the PostgreSQL clock. A live tenth-attempt
+lease remains authoritative. Recovery sends no notification and never creates
+attempt 11.
+
+A notification can succeed while its durable delivered acknowledgement loses
+the lease race. The stale acknowledgement is non-authoritative; after expiry,
+the same recovery rule terminalizes the row as failed. `delivered` therefore
+means the acknowledgement was durably fenced, not merely that `pg_notify`
+returned. ProductEvent rows remain the source of truth and stay discoverable by
+database polling even when a wake-up acknowledgement is lost.
+
 ## Alternatives considered
 
 ### Trust a provisioning tenant header

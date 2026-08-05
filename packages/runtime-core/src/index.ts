@@ -77,7 +77,16 @@ export {
   type AgentRunWorkerJobRef,
   type StoredAgentRunExecutionFacts,
 } from "./repositories/worker-agent-run.js";
-export { claimOutboxWakeups, failOutbox, markOutboxDelivered, rescheduleOutbox, type ClaimedOutboxWakeup, type ClaimOutboxInput } from "./repositories/outbox.js";
+export {
+  claimOutboxWakeups,
+  failOutbox,
+  markOutboxDelivered,
+  OUTBOX_EXHAUSTED_SUMMARY,
+  OUTBOX_MAX_ATTEMPTS,
+  rescheduleOutbox,
+  type ClaimedOutboxWakeup,
+  type ClaimOutboxInput,
+} from "./repositories/outbox.js";
 export {
   appendProductEvents,
   appendAuditEvent,

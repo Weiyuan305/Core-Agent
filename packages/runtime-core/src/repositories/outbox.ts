@@ -1,4 +1,4 @@
-import { sql, type Kysely } from "kysely";
+import { sql, type Kysely, type Transaction } from "kysely";
 import type { RuntimeDatabase } from "../db/database.js";
 import { redactSummary, type Redactor } from "../domain/redaction.js";
 import type { JobLeaseResult } from "./jobs.js";
@@ -6,17 +6,39 @@ import { safeContractInteger } from "./resources.js";
 
 export interface ClaimedOutboxWakeup { readonly tenantId: string; readonly outboxId: string; readonly streamId: string; readonly lastSequence: number; readonly attemptCount: number }
 export interface ClaimOutboxInput { readonly workerId: string; readonly limit: number; readonly leaseMs: number }
+export const OUTBOX_MAX_ATTEMPTS = 10;
+export const OUTBOX_EXHAUSTED_SUMMARY = "Outbox delivery attempt budget exhausted";
+
+async function recoverExhaustedOutboxWakeups(trx: Transaction<RuntimeDatabase>): Promise<void> {
+  // @platform-worker-cross-tenant-claim reviewed Outbox dispatcher recovery authority
+  await trx.updateTable("outbox").set({
+    status: "failed",
+    lease_owner: null,
+    lease_expires_at: null,
+    last_error_summary: OUTBOX_EXHAUSTED_SUMMARY,
+    updated_at: sql<Date>`clock_timestamp()`,
+  })
+    .where("status", "=", "pending")
+    .where("attempt_count", ">=", OUTBOX_MAX_ATTEMPTS)
+    .where((expression) => expression.or([
+      expression("lease_owner", "is", null),
+      expression("lease_expires_at", "is", null),
+      expression("lease_expires_at", "<=", sql<Date>`clock_timestamp()`),
+    ]))
+    .execute();
+}
 
 export async function claimOutboxWakeups(db: Kysely<RuntimeDatabase>, input: ClaimOutboxInput): Promise<ClaimedOutboxWakeup[]> {
   if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) throw new RangeError("limit must be bounded");
   if (!Number.isSafeInteger(input.leaseMs) || input.leaseMs < 1 || input.leaseMs > 300_000) throw new RangeError("leaseMs must be bounded");
   return db.transaction().execute(async (trx) => {
+    await recoverExhaustedOutboxWakeups(trx);
     // @platform-worker-cross-tenant-claim reviewed Outbox dispatcher authority
     const candidates = await trx.selectFrom("outbox").innerJoin("product_events", (join) => join.onRef("product_events.tenant_id", "=", "outbox.tenant_id").onRef("product_events.event_id", "=", "outbox.event_id"))
       .innerJoin("stream_sequences", (join) => join.onRef("stream_sequences.tenant_id", "=", "product_events.tenant_id").onRef("stream_sequences.stream_id", "=", "product_events.stream_id"))
       .select(["outbox.tenant_id", "outbox.outbox_id", "product_events.stream_id", "stream_sequences.last_sequence"])
       .where("outbox.delivery_target", "=", "internal_event_stream").where("outbox.next_attempt_at", "<=", sql<Date>`now()`)
-      .where("outbox.attempt_count", "<", 10)
+      .where("outbox.attempt_count", "<", OUTBOX_MAX_ATTEMPTS)
       .where((expression) => expression.or([expression("outbox.status", "=", "pending"), expression.and([expression("outbox.status", "=", "pending"), expression("outbox.lease_expires_at", "<", sql<Date>`now()`)] )]))
       .where((expression) => expression.or([expression("outbox.lease_owner", "is", null), expression("outbox.lease_expires_at", "<", sql<Date>`now()`)]))
       .orderBy("outbox.created_at").limit(input.limit).forUpdate("outbox").skipLocked().execute();
