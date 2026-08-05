@@ -41,8 +41,8 @@ RUN groupadd --gid 12000 core-agent-api \
     && groupadd --gid 12002 core-agent-runtime \
     && useradd --uid 12001 --gid 12002 --no-create-home --shell /usr/sbin/nologin core-agent-worker \
     && useradd --uid 12002 --gid 12002 --no-create-home --shell /usr/sbin/nologin core-agent-supervisor \
-    && mkdir -p /run/core-agent/supervisor /var/lib/core-agent/supervisor/journal \
-    && chown -R 12002:12002 /run/core-agent/supervisor /var/lib/core-agent/supervisor
+    && install -d -m 0700 -o 12002 -g 12002 /run/core-agent/supervisor \
+    && install -d -m 0700 -o 12002 -g 12002 /var/lib/core-agent/supervisor/journal
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/apps/control-plane-api/package.json ./apps/control-plane-api/package.json

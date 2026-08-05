@@ -25,6 +25,7 @@
     "db:migrate": "npm run build -w @core-agent/runtime-core && node scripts/migrate-runtime.mjs",
     "runtime:images": "node scripts/resolve-runtime-images.mjs",
     "runtime:network": "node scripts/prepare-runtime-network.mjs",
+    "runtime:paths": "node scripts/prepare-runtime-paths.mjs",
     "hermes:image-ref": "node scripts/resolve-hermes-image.mjs",
     "hermes:build": "node scripts/build-hermes-image.mjs",
     "hermes:bootstrap": "node scripts/bootstrap-demo-company.mjs",

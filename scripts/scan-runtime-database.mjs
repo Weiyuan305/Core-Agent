@@ -17,6 +17,7 @@ function quotedIdentifier(value) {
 }
 
 function validateInput(databaseUrl, sentinel) {
+  if (typeof databaseUrl !== "string" || databaseUrl.includes("%")) throw scanError();
   let url;
   try {
     url = new URL(databaseUrl);
@@ -26,13 +27,26 @@ function validateInput(databaseUrl, sentinel) {
   if (
     !["postgres:", "postgresql:"].includes(url.protocol)
     || !["127.0.0.1", "[::1]"].includes(url.hostname)
+    || url.password !== ""
+    || url.search !== ""
+    || url.hash !== ""
     || !principalPattern.test(url.username)
     || !principalPattern.test(url.pathname.slice(1))
+    || url.pathname !== `/${url.pathname.slice(1)}`
+    || (url.port !== "" && !/^\d{1,5}$/u.test(url.port))
     || typeof sentinel !== "string"
     || sentinel.length < 16
     || Buffer.byteLength(sentinel) > 256
     || /[\u0000-\u001f\u007f]/u.test(sentinel)
   ) throw scanError();
+  const port = url.port === "" ? 5432 : Number(url.port);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) throw scanError();
+  return {
+    host: url.hostname === "[::1]" ? "::1" : "127.0.0.1",
+    port,
+    user: url.username,
+    database: url.pathname.slice(1),
+  };
 }
 
 export async function scanRuntimeDatabase({
@@ -40,9 +54,9 @@ export async function scanRuntimeDatabase({
   sentinel,
   createClient = (configuration) => new Client(configuration),
 }) {
-  validateInput(databaseUrl, sentinel);
+  const connection = validateInput(databaseUrl, sentinel);
   const client = createClient({
-    connectionString: databaseUrl,
+    ...connection,
     connectionTimeoutMillis: 5_000,
     query_timeout: 5_000,
     statement_timeout: 5_000,

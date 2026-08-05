@@ -413,6 +413,9 @@ test("runtime Dockerfile has locked bases and exact non-root service targets", a
   ];
   assert(buildCommands.every((command) => buildRun.includes(command)));
   assert.deepEqual(buildCommands.map((command) => buildRun.indexOf(command)), [...buildCommands].map((command) => buildRun.indexOf(command)).sort((a, b) => a - b));
+  const runtimeRun = values("runtime", "RUN").join(" ");
+  assert.match(runtimeRun, /install -d -m 0700 -o 12002 -g 12002 \/run\/core-agent\/supervisor/u);
+  assert.match(runtimeRun, /install -d -m 0700 -o 12002 -g 12002 \/var\/lib\/core-agent\/supervisor\/journal/u);
   const targets = {
     api: { user: "12000:12000", entrypoint: ["node", "apps/control-plane-api/dist/src/server.js"] },
     worker: { user: "12001:12002", entrypoint: ["node", "apps/control-plane-worker/dist/src/server.js"] },

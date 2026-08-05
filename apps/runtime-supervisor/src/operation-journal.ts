@@ -290,7 +290,14 @@ export class OperationJournal {
           }
         }
 
-        const active = await this.#readReservation(directory, request.operation_id);
+        let active;
+        try {
+          active = await this.#readReservation(directory, request.operation_id);
+        } catch (error) {
+          const completedDuringRelease = await this.#read(directory, request.operation_id);
+          if (completedDuringRelease !== undefined) return this.#replay(request, completedDuringRelease);
+          throw error;
+        }
         if (active !== undefined && active.record.request_hash !== request.request_hash) return conflict(request.operation_id);
         if (active !== undefined && Date.now() - Number(active.metadata.mtimeMs) > this.#reservationStaleMs) {
           await this.#removeStaleReservation(directory, request.operation_id, active.metadata);

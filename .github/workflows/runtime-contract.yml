@@ -67,12 +67,14 @@ jobs:
     services:
       postgres:
         image: postgres:17-bookworm@sha256:6e5a6518f9d2ff9e9f4cba2a5a87d8f41b0f067f6f92ac847c344351a6c8d923
+        ports:
+          - 5432:5432
         env:
-          POSTGRES_DB: core_agent_control
+          POSTGRES_DB: postgres
           POSTGRES_HOST_AUTH_METHOD: trust
-          POSTGRES_USER: core_agent_ci
+          POSTGRES_USER: postgres
         options: >-
-          --health-cmd "pg_isready -U core_agent_ci -d core_agent_control"
+          --health-cmd "pg_isready -U postgres -d postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
@@ -88,6 +90,11 @@ jobs:
 
       - name: Install pinned dependencies
         run: npm ci
+
+      - name: Create least-privilege CI database role
+        run: |
+          docker exec "${{ job.services.postgres.id }}" psql --username postgres --dbname postgres --set ON_ERROR_STOP=1 --command "CREATE ROLE core_agent_ci LOGIN NOSUPERUSER CREATEDB NOCREATEROLE"
+          docker exec "${{ job.services.postgres.id }}" psql --username postgres --dbname postgres --set ON_ERROR_STOP=1 --command "CREATE DATABASE core_agent_control OWNER core_agent_ci"
 
       - name: Run real PostgreSQL suites
         run: npm run test:postgres
@@ -101,12 +108,14 @@ jobs:
     services:
       postgres:
         image: postgres:17-bookworm@sha256:6e5a6518f9d2ff9e9f4cba2a5a87d8f41b0f067f6f92ac847c344351a6c8d923
+        ports:
+          - 5432:5432
         env:
-          POSTGRES_DB: core_agent_control
+          POSTGRES_DB: postgres
           POSTGRES_HOST_AUTH_METHOD: trust
-          POSTGRES_USER: core_agent_ci
+          POSTGRES_USER: postgres
         options: >-
-          --health-cmd "pg_isready -U core_agent_ci -d core_agent_control"
+          --health-cmd "pg_isready -U postgres -d postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
@@ -122,6 +131,11 @@ jobs:
 
       - name: Install pinned dependencies
         run: npm ci
+
+      - name: Create least-privilege CI database role
+        run: |
+          docker exec "${{ job.services.postgres.id }}" psql --username postgres --dbname postgres --set ON_ERROR_STOP=1 --command "CREATE ROLE core_agent_ci LOGIN NOSUPERUSER CREATEDB NOCREATEROLE"
+          docker exec "${{ job.services.postgres.id }}" psql --username postgres --dbname postgres --set ON_ERROR_STOP=1 --command "CREATE DATABASE core_agent_control OWNER core_agent_ci"
 
       - name: Run fake Supervisor and Hermes full slice
         run: npm run test:integration
@@ -161,6 +175,8 @@ jobs:
           CORE_AGENT_INGRESS_SECRET_ROOT: /tmp/core-agent-ingress-path-only
           CORE_AGENT_PLATFORM: linux/amd64
           CORE_AGENT_PROVIDER_SECRET_ROOT: /tmp/core-agent-provider-path-only
+          CORE_AGENT_SUPERVISOR_SOCKET_ROOT: /tmp/core-agent-runtime-socket-path-only
+          CORE_AGENT_SUPERVISOR_STATE_ROOT: /tmp/core-agent-runtime-state-path-only
         run: docker compose -f infra/runtime/compose.dev.yaml config --quiet
 
       - name: Run static topology assertions

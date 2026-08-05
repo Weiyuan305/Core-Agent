@@ -11,6 +11,56 @@ DONE
   - implementation commit containing this report
 - Scope: Task 17 only; no Task 18 implementation, push, merge, Compose startup, or external-network mutation.
 
+## Independent review correction
+
+An independent review rejected the first implementation with zero Critical and
+four Important findings. Two additional RED commits preserve the evidence:
+
+- `dfc83ec` `test(runtime): reproduce topology review gaps` — focused review
+  suite failed 8/8 across volume ownership, bootstrap mode, scanner URL
+  reconstruction, and PostgreSQL role separation.
+- `c5ee214` `test(runtime): pin preflight defaults and CI access` — focused
+  follow-up failed 2/2 because the pure default `12002` preflight policy and CI
+  PostgreSQL host port were not yet represented.
+- final review-correction implementation commit containing this updated report.
+
+The corrected development topology replaces Supervisor socket/state named
+volumes with caller-named bind roots. `npm run runtime:paths` creates only an
+absent leaf and otherwise fails closed unless both roots are exact `0700`
+directories owned by the resolved Supervisor UID/GID. Its pure policy resolves
+no override to Supervisor `12002:12002` and API `12000:12000`; a host UID
+override is reused by Compose and preflight, so the bind owner and effective
+container UID cannot drift. Worker and Supervisor deliberately share the dev
+effective UID, while the production Docker targets remain distinct
+`12000`/`12001`/`12002`. Migration receives neither runtime root.
+
+The same preflight rejects bootstrap symlinks, non-regular files, wrong owner,
+and any mode other than `0600`, using metadata only. Compose's target mode is
+also `0600`. The database scanner now rejects passwords, query, fragment, and
+percent-encoded ambiguity, then constructs the `pg.Client` configuration only
+from validated host, port, user, and database fields; it never forwards the
+original connection string.
+
+Development PostgreSQL now uses an official-image bootstrap identity only for
+initialization, a `NOSUPERUSER NOCREATEDB NOCREATEROLE` migrator owner, and a
+separate equally restricted application role for API/Worker. Default table and
+sequence privileges are granted from migrator to application. CI uses the
+official `postgres` identity only in an explicit bootstrap step, then creates
+`core_agent_ci LOGIN NOSUPERUSER CREATEDB NOCREATEROLE` plus its owned control
+database. This preserves Task 16 per-file CREATE/DROP without making the test
+role a superuser. Local trust remains isolated-development convenience;
+production requires TLS and managed credentials.
+
+During the required full gate, the pre-existing cross-instance operation
+journal test twice exposed one deterministic release/read race signature. A
+waiting instance could open the reservation, the owner could durably publish
+the completed record and unlink the reservation, and the waiter then treated
+the missing reservation pathname as unsafe. The narrow correction does not
+relax reservation validation: after that exact failure it replays only if the
+same operation's completed record passes the existing owner, mode, inode,
+bounded-read, canonical-JSON, operation-ID, and request-hash checks. Without a
+valid completed record the original unsafe error is rethrown.
+
 ## RED evidence
 
 The topology contract was committed before implementation. The first focused
@@ -81,13 +131,22 @@ assertions.
 
 - Genuine topology RED: 11 expected failures before implementation.
 - Development UID/GID RED: 3 expected failures before the compatibility wiring.
-- `node --test tests/runtime/control-plane-compose.test.mjs`: 13/13 pass.
+- `node --test tests/runtime/control-plane-compose.test.mjs`: 14/14 pass.
+- Independent-review focused RED: expected 8/8 failures, then 8/8 pass.
+- Default-policy/CI-access follow-up RED: expected 2/2 failures, then 2/2 pass.
+- Operation-journal release/read race: same unsafe-record failure reproduced in
+  two full-suite runs; after the narrow correction, focused parallel pressure
+  passed 8/8 and the complete Supervisor suite passed 40/40 including unsafe
+  record, symlink, permissive mode, ancestor, and stale-reservation coverage.
 - Real arm64 lock references plus synthetic path/ID inputs:
   `docker compose -f infra/runtime/compose.dev.yaml config --quiet`: exit 0.
 - `npm run check`: exit 0; contracts 143/143, runtime-core 51/51, API 13/13,
   Worker 60/60, Supervisor 40/40, and all builds/schema/fixture/compat gates pass.
-- Fresh `npm test`: exit 0; runtime 43/43, contracts 143/143, runtime-core 51/51
-  (237 tests total).
+- Fresh review-correction `npm run check`: exit 0; contracts 143/143,
+  runtime-core 51/51, API 13/13, Worker 60/60, Supervisor 40/40, and all
+  builds/schema/fixture/compat gates pass.
+- Fresh review-correction `npm test`: exit 0; runtime 44/44, contracts 143/143,
+  runtime-core 51/51 (238 tests total).
 - `node scripts/verify-no-secret.mjs synthetic-leak-sentinel-4d83f17f` after
   staging every Task 17 artifact: exit 0 with no output.
 - `git diff --cached --check`: exit 0.

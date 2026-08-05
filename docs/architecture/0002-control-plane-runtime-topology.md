@@ -79,14 +79,38 @@ it never receives the bootstrap key. The provider catalog and image lock are
 non-secret managed configuration, not substitutes for either projection.
 
 The image targets retain dedicated non-root identities: API `12000`, Worker
-`12001`, and Supervisor `12002`. Development Compose permits an explicit
-numeric `CORE_AGENT_RUNTIME_UID` override for macOS/Colima bind-mounted `0600`
-files, plus `CORE_AGENT_RUNTIME_GID` for API projections and
-`CORE_AGENT_SUPERVISOR_SOCKET_GID` as the Worker's and Supervisor's common UDS
-group. Their unset defaults preserve the dedicated image identities. This is
-strictly a local-development compatibility mechanism: production must keep
-dedicated service UIDs and use the real orchestrator's ownership-aware secret
-projection instead of converging services onto a host user.
+`12001`, and Supervisor `12002`. Development Compose deliberately runs Worker
+and Supervisor with the same `${CORE_AGENT_RUNTIME_UID:-12002}` effective UID
+so both can traverse one owner-only UDS root; API remains `12000` by default.
+An explicit numeric host UID override makes all three development processes
+compatible with macOS/Colima file projection, while `CORE_AGENT_RUNTIME_GID`
+controls the bootstrap projection and `CORE_AGENT_SUPERVISOR_SOCKET_GID`
+controls the private runtime roots.
+
+The socket and Supervisor-state mounts are caller-named bind roots, never
+Docker named volumes. Before Compose, `npm run runtime:paths` creates an absent
+leaf or rejects it unless it is a non-symlink directory owned by the exact
+effective Supervisor UID/GID with mode `0700`. With no override this means
+`12002:12002`; a caller who cannot create that ownership must prepare it
+explicitly rather than receive a silent chmod/chown. With a host override the
+same numeric value drives both the container user and preflight policy. Worker
+mounts only the socket root and mounts it read-only; migration never receives
+either runtime root. The bootstrap source is separately rejected unless it is
+a non-symlink regular file owned by the exact effective API UID/GID with mode
+`0600`; preflight opens only metadata and never reads key bytes.
+
+This UID convergence is strictly a local-development compatibility mechanism.
+Production must keep dedicated API `12000`, Worker `12001`, and Supervisor
+`12002` identities and use the real orchestrator's ownership-aware secret,
+state, and UDS projections instead of converging services onto a host user.
+
+Development PostgreSQL trust authentication is permitted only on the isolated
+internal control bridge. The official-image bootstrap superuser is not given
+to an application process: a non-superuser migrator owns the database/schema
+and grants default table/sequence privileges to a distinct non-superuser
+application role used by API and Worker. Production must replace local trust
+with TLS and managed credentials while retaining these least-privilege role
+boundaries.
 
 ## Alternatives considered
 
