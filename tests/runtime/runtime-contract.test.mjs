@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rmdir, stat, unlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
@@ -7,6 +9,7 @@ import {
   runBuild
 } from "../../scripts/build-hermes-image.mjs";
 import { resolveHermesImage } from "../../scripts/resolve-hermes-image.mjs";
+import * as smokeModule from "../../scripts/smoke-control-plane.mjs";
 import {
   SMOKE_OUTPUT_KEYS,
   assertManagedContainerInspection,
@@ -19,6 +22,12 @@ import {
   validateSmokeEnvironment,
   validateSyntheticIdentifiers,
 } from "../../scripts/smoke-control-plane.mjs";
+
+const {
+  createSmokeChildEnvironment,
+  readSmokeEvents,
+  stageProductImageLockSnapshot,
+} = smokeModule;
 
 const smokeSource = await readFile(
   new URL("../../scripts/smoke-control-plane.mjs", import.meta.url),
@@ -242,6 +251,296 @@ test("REAL_HERMES workflow uses exact Compose project and cleans up after failur
     "provision",
     "stop:core-agent-runtime-v1-smoke:false",
   ]);
+});
+
+const successfulContext = Object.freeze({
+  tenantId: "synthetic-runtime-v1-tenant-success",
+  tenantDisplayName: "synthetic-runtime-v1-tenant-success",
+  actorId: "synthetic-runtime-v1-actor-success",
+  actorDisplayName: "synthetic-runtime-v1-consultant",
+  membershipId: "synthetic-runtime-v1-membership-success",
+  profileId: "synthetic-runtime-v1-profile-success",
+  profileDescription: "synthetic-runtime-v1-consultant",
+  hermesProfileRef: "synthetic-runtime-v1-profile-success",
+  promptIdentifier: "synthetic-runtime-v1-smoke",
+  runtimeId: "runtime_" + "d".repeat(32),
+});
+
+function successfulSmokeDependencies(overrides = {}) {
+  const calls = [];
+  let emitted;
+  const dependencies = {
+    validatePrerequisites: async () => calls.push("validate"),
+    startTopology: async ({ projectName }) => calls.push(`start:${projectName}`),
+    prepareProvisioningContext: () => {
+      calls.push("prepare-context");
+      return successfulContext;
+    },
+    provision: async (context) => {
+      assert.equal(context, successfulContext);
+      calls.push("provision");
+    },
+    pollRuntime: async (context) => {
+      assert.equal(context, successfulContext);
+      calls.push("poll");
+      return { observed_state: "ready", health_status: "healthy", generation: 1 };
+    },
+    createConversation: async () => {
+      calls.push("conversation");
+      return "synthetic-conversation-success";
+    },
+    createRun: async () => {
+      calls.push("run");
+      return "synthetic-run-success";
+    },
+    readEvents: async (_context, _conversationId, runId) => {
+      assert.equal(runId, "synthetic-run-success");
+      calls.push("events");
+      return ["run.queued", "run.completed"];
+    },
+    queryRun: async () => {
+      calls.push("query-run");
+      return { status: "succeeded" };
+    },
+    countAssistantMessages: async () => {
+      calls.push("count-messages");
+      return 1;
+    },
+    inspectRuntime: async () => calls.push("inspect"),
+    scanDatabase: async () => calls.push("scan-database"),
+    deleteRuntime: async (context) => {
+      assert.equal(context, successfulContext);
+      calls.push("delete");
+    },
+    waitForContainerRemoval: async (context) => {
+      assert.equal(context, successfulContext);
+      calls.push("wait-delete");
+    },
+    stopTopology: async ({ projectName, removeVolumes }) => calls.push(`stop:${projectName}:${removeVolumes}`),
+    releaseSecrets: async () => calls.push("release"),
+    emit: (value) => {
+      calls.push("emit");
+      emitted = value;
+    },
+    stage: () => undefined,
+    ...overrides,
+  };
+  return { calls, dependencies, emitted: () => emitted };
+}
+
+test("REAL_HERMES full workflow emits exact output after ordered default cleanup", async () => {
+  const fixture = successfulSmokeDependencies();
+  const output = await runControlPlaneSmoke({ environment: smokeEnvironment, argv: [], dependencies: fixture.dependencies });
+  assert.deepEqual(output, {
+    assistant_message_count: 1,
+    conversation_id: "synthetic-conversation-success",
+    event_types: ["run.queued", "run.completed"],
+    profile_id: successfulContext.profileId,
+    run_id: "synthetic-run-success",
+    run_status: "succeeded",
+    runtime_id: successfulContext.runtimeId,
+    runtime_state: "ready",
+    tenant_id: successfulContext.tenantId,
+  });
+  assert.deepEqual(fixture.emitted(), output);
+  assert.deepEqual(fixture.calls, [
+    "validate", "start:core-agent-runtime-v1-smoke", "prepare-context", "provision", "poll",
+    "conversation", "run", "events", "query-run", "count-messages", "inspect", "scan-database",
+    "delete", "wait-delete", "stop:core-agent-runtime-v1-smoke:false", "release", "emit",
+  ]);
+});
+
+test("REAL_HERMES --keep-runtime skips runtime and Compose cleanup but releases secrets", async () => {
+  const fixture = successfulSmokeDependencies();
+  await runControlPlaneSmoke({
+    environment: smokeEnvironment,
+    argv: ["--keep-runtime"],
+    dependencies: fixture.dependencies,
+  });
+  assert(!fixture.calls.includes("delete"));
+  assert(!fixture.calls.includes("wait-delete"));
+  assert(!fixture.calls.some((call) => call.startsWith("stop:")));
+  assert.deepEqual(fixture.calls.slice(-2), ["release", "emit"]);
+});
+
+test("REAL_HERMES cleanup preserves its first error while continuing exact later cleanup", async () => {
+  const deleteFailure = new Error("synthetic delete failure");
+  const fixture = successfulSmokeDependencies({
+    deleteRuntime: async () => {
+      fixture.calls.push("delete");
+      throw deleteFailure;
+    },
+    waitForContainerRemoval: async () => {
+      fixture.calls.push("wait-delete");
+      throw new Error("synthetic wait failure");
+    },
+    stopTopology: async ({ projectName, removeVolumes }) => {
+      fixture.calls.push(`stop:${projectName}:${removeVolumes}`);
+      throw new Error("synthetic stop failure");
+    },
+  });
+  await assert.rejects(
+    runControlPlaneSmoke({ environment: smokeEnvironment, argv: [], dependencies: fixture.dependencies }),
+    (error) => error?.code === "SMOKE_STAGE_FAILED" && error.cause === deleteFailure,
+  );
+  assert.deepEqual(fixture.calls.slice(-4), [
+    "delete", "wait-delete", "stop:core-agent-runtime-v1-smoke:false", "release",
+  ]);
+  assert.equal(fixture.emitted(), undefined);
+});
+
+test("REAL_HERMES recovers a response-loss orphan through its precomputed cleanup identity", async () => {
+  const responseLoss = new Error("synthetic response lost after commit");
+  const fixture = successfulSmokeDependencies({
+    provision: async (context) => {
+      assert.equal(context, successfulContext);
+      fixture.calls.push("provision-response-lost");
+      throw responseLoss;
+    },
+  });
+  await assert.rejects(
+    runControlPlaneSmoke({ environment: smokeEnvironment, argv: [], dependencies: fixture.dependencies }),
+    (error) => error?.code === "SMOKE_STAGE_FAILED" && error.cause === responseLoss,
+  );
+  assert.deepEqual(fixture.calls, [
+    "validate", "start:core-agent-runtime-v1-smoke", "prepare-context", "provision-response-lost",
+    "delete", "wait-delete", "stop:core-agent-runtime-v1-smoke:false", "release",
+  ]);
+});
+
+function productEvent(eventType, sequence, runId = "synthetic-run-success", payload = undefined) {
+  return {
+    schema_version: 1,
+    event_id: `synthetic-event-${sequence}`,
+    occurred_at: "2026-08-05T12:00:00.000Z",
+    sequence,
+    tenant_id: successfulContext.tenantId,
+    request_id: "synthetic-request-success",
+    trace_id: "synthetic-trace-success",
+    correlation_id: "synthetic-correlation-success",
+    causation_id: "synthetic-causation-success",
+    conversation_id: "synthetic-conversation-success",
+    run_id: runId,
+    event_type: eventType,
+    payload: payload ?? (eventType === "run.completed"
+      ? { run_id: runId, status: "succeeded" }
+      : { run_id: runId, status: "queued" }),
+  };
+}
+
+function eventStreamResponse(events, contentType = "text/event-stream; charset=utf-8") {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")));
+      controller.close();
+    },
+  });
+  return new Response(stream, { status: 200, headers: { "content-type": contentType } });
+}
+
+test("REAL_HERMES SSE requires a ProductEvent terminal envelope for the created run", async () => {
+  assert.equal(typeof readSmokeEvents, "function", "readSmokeEvents must be exported as an injectable seam");
+  const result = await readSmokeEvents({
+    conversationId: "synthetic-conversation-success",
+    tenantId: successfulContext.tenantId,
+    runId: "synthetic-run-success",
+    bootstrapKey: Buffer.from("synthetic-key"),
+    fetchImpl: async () => eventStreamResponse([
+      productEvent("run.queued", 1),
+      productEvent("run.completed", 2),
+    ]),
+  });
+  assert.deepEqual(result, ["run.queued", "run.completed"]);
+  for (const response of [
+    eventStreamResponse([productEvent("run.completed", 1)], "application/json"),
+    eventStreamResponse([productEvent("run.completed", 1, "synthetic-run-other")]),
+    eventStreamResponse([{ event_type: "run.completed" }]),
+  ]) {
+    await assert.rejects(
+      readSmokeEvents({
+        conversationId: "synthetic-conversation-success",
+        tenantId: successfulContext.tenantId,
+        runId: "synthetic-run-success",
+        bootstrapKey: Buffer.from("synthetic-key"),
+        fetchImpl: async () => response,
+      }),
+      /SMOKE_SSE_FAILED/,
+    );
+  }
+});
+
+test("REAL_HERMES SSE bounds total events and aggregate retained bytes", async () => {
+  assert.equal(typeof readSmokeEvents, "function", "readSmokeEvents must be exported as an injectable seam");
+  await assert.rejects(
+    readSmokeEvents({
+      conversationId: "synthetic-conversation-success",
+      tenantId: successfulContext.tenantId,
+      runId: "synthetic-run-success",
+      bootstrapKey: Buffer.from("synthetic-key"),
+      fetchImpl: async () => eventStreamResponse([
+        productEvent("run.queued", 1), productEvent("run.queued", 2), productEvent("run.queued", 3),
+      ]),
+      limits: { maximumEvents: 2, maximumRetainedBytes: 1_000_000 },
+    }),
+    /SMOKE_SSE_FAILED/,
+  );
+  await assert.rejects(
+    readSmokeEvents({
+      conversationId: "synthetic-conversation-success",
+      tenantId: successfulContext.tenantId,
+      runId: "synthetic-run-success",
+      bootstrapKey: Buffer.from("synthetic-key"),
+      fetchImpl: async () => eventStreamResponse([
+        productEvent("message.delta", 1, "synthetic-run-success", { message_id: "synthetic-message", delta: "x".repeat(300) }),
+        productEvent("message.delta", 2, "synthetic-run-success", { message_id: "synthetic-message", delta: "y".repeat(300) }),
+      ]),
+      limits: { maximumEvents: 10, maximumRetainedBytes: 512 },
+    }),
+    /SMOKE_SSE_FAILED/,
+  );
+});
+
+test("REAL_HERMES stages a stable read-only product-lock snapshot in the Supervisor state root", async (t) => {
+  assert.equal(typeof stageProductImageLockSnapshot, "function", "snapshot staging must be exported as an injectable seam");
+  assert.equal(typeof createSmokeChildEnvironment, "function", "child environment construction must be injectable");
+  const stateRoot = await mkdtemp(join(tmpdir(), "core-agent-smoke-state-test-"));
+  await chmod(stateRoot, 0o700);
+  const source = join(stateRoot, "reviewed-source.json");
+  const productLock = {
+    schemaVersion: 1,
+    repository: "core-agent/hermes-runtime",
+    tag: "v2026.8.5",
+    platforms: {
+      "linux/amd64": { reference: "core-agent/hermes-runtime:v2026.8.5@sha256:" + "a".repeat(64) },
+      "linux/arm64": { reference: "core-agent/hermes-runtime:v2026.8.5@sha256:" + "b".repeat(64) },
+    },
+  };
+  await writeFile(source, `${JSON.stringify(productLock)}\n`, { mode: 0o600 });
+  let snapshot;
+  t.after(async () => {
+    await snapshot?.cleanup().catch(() => undefined);
+    await unlink(source).catch(() => undefined);
+    await rmdir(stateRoot).catch(() => undefined);
+  });
+  snapshot = await stageProductImageLockSnapshot(source, "linux/arm64", stateRoot);
+  assert.notEqual(snapshot.path, source);
+  assert.equal(snapshot.path.startsWith(`${stateRoot}/`), true);
+  assert.equal((await stat(snapshot.path)).mode & 0o777, 0o444);
+  assert.deepEqual(JSON.parse(await readFile(snapshot.path, "utf8")), productLock);
+  assert.equal(snapshot.imageRef, productLock.platforms["linux/arm64"].reference);
+  const childEnvironment = createSmokeChildEnvironment(smokeEnvironment, snapshot.path);
+  assert.equal(childEnvironment.CORE_AGENT_HERMES_IMAGE_LOCK_FILE, snapshot.path);
+  assert.equal(smokeEnvironment.CORE_AGENT_HERMES_IMAGE_LOCK_FILE, "/safe/config/reviewed-product-images.lock.json");
+  await assert.rejects(
+    stageProductImageLockSnapshot(source, "linux/arm64", stateRoot, {
+      afterSourceRead: async () => writeFile(source, `${JSON.stringify({ ...productLock, tag: "mutated" })}\n`),
+    }),
+    /SMOKE_PRODUCT_IMAGE_LOCK_INVALID/,
+  );
+  await snapshot.cleanup();
+  await assert.rejects(stat(snapshot.path), /ENOENT/);
+  snapshot = undefined;
 });
 
 test("canonical smoke payload hashing is key-order deterministic", () => {
