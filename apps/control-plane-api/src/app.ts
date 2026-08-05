@@ -26,6 +26,8 @@ import {
 } from "./routes/health.js";
 import { registerProvisioningRoutes } from "./routes/provisioning.js";
 import { registerRuntimeRoutes } from "./routes/runtime.js";
+import { registerConversationRoutes } from "./routes/conversations.js";
+import { registerRunRoutes } from "./routes/runs.js";
 
 export const MAX_API_BODY_BYTES = 64 * 1024;
 export const MAX_API_HEADER_BYTES = 16 * 1024;
@@ -136,6 +138,8 @@ export async function buildControlPlaneApp(dependencies: ControlPlaneAppDependen
     await registerHealthRoutes(app, dependencies);
     await registerProvisioningRoutes(app, dependencies);
     await registerRuntimeRoutes(app, dependencies);
+    await registerConversationRoutes(app, dependencies);
+    await registerRunRoutes(app, dependencies);
     return app;
   } catch (error) {
     await cleanupFailedAppStartup(app, bootstrapDigest);

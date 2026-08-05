@@ -2030,6 +2030,14 @@ Run: `npm test -w @core-agent/control-plane-api -- --test-name-pattern="conversa
 
 Expected: FAIL with route not found.
 
+Implementation RED evidence (2026-08-05): the service suites failed because
+`create-conversation` and `create-agent-run` did not exist. The HTTP suites
+failed before the not-found handler with `400 INVALID_REQUEST`, not `404`: an
+unregistered protected path has no `tenantScoped` route config, so the existing
+authentication hook correctly rejected its tenant header first. This still
+proved the intended missing-route condition; registering the three explicit
+tenant-scoped routes is the GREEN transition.
+
 - [ ] **Step 3: Implement Conversation creation**
 
 The request contains `schema_version`, idempotency fields, `tenant_id`, `profile_id`, optional `student_ref` and `case_ref`. Require tenant authority header to match body. Validate Case/Student scope with `validateCaseScope`. Load Profile, Tenant, and Runtime within the same tenant; require all active/ready/healthy.
@@ -2056,6 +2064,15 @@ One transaction:
 8. completes idempotency with the AgentRun response.
 
 Return `202`. Duplicate identical input returns the original Run. Same key/different payload returns `409`. A cross-tenant Profile, Conversation, Session, or parent Run returns the same generic `404 RESOURCE_NOT_FOUND`.
+
+Implementation lock closure (2026-08-05): authority and readiness rows use
+shared row locks so their state cannot change before commit while independent
+Conversations in one tenant remain concurrent. Run admission exclusively locks
+only its Conversation to preserve Session binding and stream ordering. A real
+cross-Conversation race reaches PostgreSQL's tenant-global client-request
+constraint twice and converges on one success plus one
+`IDEMPOTENCY_CONFLICT`; only that constraint and `messages_pkey` are mapped
+from `23505`, while unrelated unique violations remain internal failures.
 
 - [ ] **Step 5: Implement Run query**
 

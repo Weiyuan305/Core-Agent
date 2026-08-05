@@ -29,6 +29,32 @@ Expose narrow provisioning, runtime-command, Conversation, Run, resource-query,
 and event-stream endpoints. Do not expose generic CRUD for every identity
 resource in this milestone.
 
+Runtime v1 Conversation and Run admission closes the following HTTP and
+authority interpretations:
+
+- `POST /internal/v1/conversations`,
+  `POST /internal/v1/conversations/:conversation_id/runs`, and
+  `GET /internal/v1/runs/:run_id` are tenant-scoped bootstrap routes. The
+  validated `X-Core-Agent-Tenant-Id` is authority; a Conversation body's
+  `tenant_id` must match it exactly.
+- Contracts v1 does not publish a create-Conversation request. The API keeps a
+  strict route-local schema containing only schema/idempotency fields,
+  tenant/Profile binding, and optional contract Student/Case references. It
+  accepts no client actor, Membership, Session, Hermes, or Runtime authority.
+- The bootstrap Actor must still be an active service Actor with its active
+  admin Membership. Completed idempotent replays retain this current authority
+  check, but do not re-run mutable new-admission checks such as Profile status,
+  Session expiry, or Runtime readiness. A replay is still bound to its
+  deterministically derived result ID and validated stored response.
+- Absent and cross-tenant Profile, Conversation, Session, parent Run, and Run
+  lookups converge on the same generic `404 RESOURCE_NOT_FOUND`. Run query
+  returns only the contract AgentRun resource and never job, provider, secret,
+  Hermes, or internal-error fields.
+- A client Message ID is input identity, not a database primary key. The server
+  derives its Message ID from tenant, Conversation, and that identity. Client
+  request or Message identity collisions are returned as the same bounded
+  `409 IDEMPOTENCY_CONFLICT`, including concurrent PostgreSQL unique races.
+
 ### Streaming
 
 Agent execution is asynchronous:

@@ -140,3 +140,15 @@ export {
   type CommandRuntimeResponse,
   type RuntimeCommandRequest,
 } from "./services/command-runtime.js";
+export {
+  createConversation,
+  type CreateConversationContext,
+  type CreateConversationDependencies,
+  type CreateConversationRequest,
+} from "./services/create-conversation.js";
+export {
+  createAgentRun,
+  getAgentRun,
+  type CreateAgentRunContext,
+  type CreateAgentRunDependencies,
+} from "./services/create-agent-run.js";

@@ -124,6 +124,42 @@ and job terminalization contract.
 Internal infrastructure jobs are distinct from the contract Task resource,
 which belongs to an Agent Run.
 
+Conversation admission creates one immutable active Conversation and one
+active Session in the same serializable tenant transaction. Conversation,
+Session, `conversation.created`, AuditEvent, Outbox, and completed idempotency
+response therefore commit or roll back together. Conversation, Session, and
+Hermes Session references are deterministic from tenant and idempotency
+identity; the client cannot supply a Hermes Session reference. The Session is
+owned by the trusted service Actor, expires after 30 days, and must retain the
+Conversation's immutable Profile and creator binding.
+
+Agent Run admission likewise commits a queued Run, completed user Message,
+`execute_agent_run` job, ordered events, AuditEvent, Outbox, and idempotency
+response atomically. PostgreSQL foreign-key order requires inserting the Run
+before its Message even though logical event order remains exactly
+`message.created` then `run.queued` on the Conversation stream. The job payload
+references only the Run, keeps runtime command/version null and effect phase
+`pre_effect`, and derives total attempts as the selected managed ProviderCatalog
+entry's `max_safe_retries + 1`. It does not accept a client retry ceiling.
+
+Admission does not take a tenant-wide exclusive row lock. Tenant, Profile,
+service Actor, Membership, Session, parent Run, and Runtime authority/readiness
+facts use PostgreSQL shared row locks: concurrent admissions may read them,
+while a status or readiness update cannot invalidate a decision before commit.
+Run admission takes an exclusive row lock only on its Conversation, preserving
+one ordered stream and Session binding without serializing other Conversations
+in the same B2B tenant. Tenant-global `client_request_id` and
+Conversation-scoped derived Message identities converge at their database
+unique constraints. Only PostgreSQL `23505` from
+`agent_runs_tenant_id_client_request_id_key` or `messages_pkey` is translated
+to bounded `IDEMPOTENCY_CONFLICT`; every other constraint failure remains an
+internal error instead of being mislabeled.
+
+Task 13 only admits durable `execute_agent_run` work. The production Worker
+claim allowlist continues to exclude that kind, and no Hermes streaming or Run
+execution is introduced until Task 14 supplies the matching lease-fenced Run,
+Message, event, and job transactions.
+
 ## Alternatives considered
 
 ### SQLite
