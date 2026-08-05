@@ -33,6 +33,7 @@ import {
 } from "@core-agent/runtime-core";
 
 import { validateSupervisorPolicy } from "./policy.js";
+import type { OperationJournalContext, OperationJournalStage } from "./operation-journal.js";
 import {
   BoundedDockerError,
   dockerFailure,
@@ -63,7 +64,6 @@ interface DockerContainerLike {
   inspect(options?: { readonly abortSignal?: AbortSignal }): Promise<unknown>;
   start(options?: Dockerode.ContainerStartOptions): Promise<unknown>;
   stop(options?: Dockerode.ContainerStopOptions): Promise<unknown>;
-  restart(options?: Dockerode.ContainerStopOptions): Promise<unknown>;
   wait(options?: Dockerode.ContainerWaitOptions): Promise<unknown>;
   logs(options?: Dockerode.ContainerLogsOptions): Promise<Buffer | NodeJS.ReadableStream>;
   remove(options?: Dockerode.ContainerRemoveOptions & { readonly abortSignal?: AbortSignal }): Promise<unknown>;
@@ -286,12 +286,35 @@ function isDaemonUncertainTransportError(error: unknown): boolean {
       code === undefined || !("value" in code) || typeof code.value !== "string"
       || !daemonUncertainTransportCodes.has(code.value)
     ) return false;
-    return ["statusCode", "status", "response"].every((key) => (
-      Object.getOwnPropertyDescriptor(error, key) === undefined
-    ));
+    let cursor: object | null = error;
+    while (cursor !== null) {
+      if (["statusCode", "status", "response"].some((key) => (
+        Object.getOwnPropertyDescriptor(cursor, key) !== undefined
+      ))) return false;
+      cursor = Object.getPrototypeOf(cursor) as object | null;
+    }
+    return true;
   } catch {
     return false;
   }
+}
+
+function stageMatchesRequest(request: SupervisorRequestV1, stage: OperationJournalStage): boolean {
+  if (stage === "reserved") return true;
+  if (request.kind === "start") return stage === "start_pending";
+  if (request.kind === "stop") return stage === "stop_pending";
+  if (request.kind === "delete") return stage === "delete_pending";
+  if (request.kind === "restart") return stage === "stop_pending" || stage === "start_pending";
+  return false;
+}
+
+function inMemoryJournalContext(): OperationJournalContext {
+  let stage: OperationJournalStage = "reserved";
+  return Object.freeze({
+    get stage() { return stage; },
+    recovered: false,
+    async advance(next: OperationJournalStage): Promise<void> { stage = next; },
+  });
 }
 
 async function settleDockerMutation<T>(
@@ -1073,7 +1096,9 @@ function validateGatewayInspection(
   const address = stringProperty(network, "IPAddress");
   if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(address)) throw rejected();
   return {
-    ...identity,
+    tenant_id: identity.tenant_id,
+    runtime_id: identity.runtime_id,
+    generation: identity.generation,
     exists: true,
     lifecycle: running ? "running" : "stopped",
     health,
@@ -1218,7 +1243,11 @@ export class DockerRuntimeAdapter {
     this.#options = options;
   }
 
-  public async execute(value: unknown, signal?: AbortSignal): Promise<SupervisorResponseV1> {
+  public async execute(
+    value: unknown,
+    signal?: AbortSignal,
+    journalContext?: OperationJournalContext,
+  ): Promise<SupervisorResponseV1> {
     const mutationState: DockerMutationState = { completed: false };
     let request: SupervisorRequestV1;
     try {
@@ -1235,10 +1264,12 @@ export class DockerRuntimeAdapter {
     }
     try {
       assertNotAborted(signal);
+      const context = journalContext ?? inMemoryJournalContext();
+      if (!stageMatchesRequest(request, context.stage)) throw rejected();
       const observation = await this.#withRuntimeLock(request, async () => (
         request.kind === "provision"
           ? this.#provisionValidated(request, mutationState, signal)
-          : this.#lifecycleValidated(request, mutationState, signal)
+          : this.#lifecycleValidated(request, mutationState, context, signal)
       ));
       return { protocol_version: 1, operation_id: request.operation_id, outcome: "accepted", observation };
     } catch (error) {
@@ -1656,6 +1687,7 @@ export class DockerRuntimeAdapter {
   async #lifecycleValidated(
     request: LifecycleRuntimeCommandV1,
     mutationState: DockerMutationState,
+    journalContext: OperationJournalContext,
     signal?: AbortSignal,
   ): Promise<RuntimeObservation> {
     assertNotAborted(signal);
@@ -1711,13 +1743,42 @@ export class DockerRuntimeAdapter {
     );
     if (request.kind === "inspect") return before;
     assertNotAborted(signal);
+    const inspectGateway = async (): Promise<RuntimeObservation> => validateGatewayInspection(
+      await container.handle.inspect(abortOptions(signal)),
+      undefined,
+      request,
+      names,
+      dockerIngressPath,
+      user,
+      imageConfiguration,
+    );
     if (request.kind === "start") {
+      if (journalContext.stage === "reserved") await journalContext.advance("start_pending");
+      if (journalContext.stage !== "start_pending") throw rejected();
+      if (before.lifecycle === "running") return before;
       await settleDockerMutation(container.handle.start(abortOptions(signal)), mutationState, signal);
     } else if (request.kind === "stop") {
+      if (journalContext.stage === "reserved") await journalContext.advance("stop_pending");
+      if (journalContext.stage !== "stop_pending") throw rejected();
+      if (before.lifecycle === "stopped") return before;
       await settleDockerMutation(container.handle.stop({ t: 30, ...abortOptions(signal) }), mutationState, signal);
     } else if (request.kind === "restart") {
-      await settleDockerMutation(container.handle.restart({ t: 30, ...abortOptions(signal) }), mutationState, signal);
+      if (journalContext.stage === "reserved") await journalContext.advance("stop_pending");
+      let current = before;
+      if (journalContext.stage === "stop_pending") {
+        if (current.lifecycle !== "stopped") {
+          await settleDockerMutation(container.handle.stop({ t: 30, ...abortOptions(signal) }), mutationState, signal);
+          current = await inspectGateway();
+          if (current.lifecycle !== "stopped") throw rejected();
+        }
+        await journalContext.advance("start_pending");
+      }
+      if (journalContext.stage !== "start_pending") throw rejected();
+      if (current.lifecycle === "running") return current;
+      await settleDockerMutation(container.handle.start(abortOptions(signal)), mutationState, signal);
     } else {
+      if (journalContext.stage === "reserved") await journalContext.advance("delete_pending");
+      if (journalContext.stage !== "delete_pending") throw rejected();
       await settleDockerMutation(
         container.handle.remove({ force: true, v: false, ...abortOptions(signal) }),
         mutationState,
@@ -1727,15 +1788,7 @@ export class DockerRuntimeAdapter {
       const { private_origin: _privateOrigin, ...withoutOrigin } = before;
       return { ...withoutOrigin, exists: false, lifecycle: "removed", health: "unknown", image_ref: REMOVED_RUNTIME_IMAGE_REF };
     }
-    return validateGatewayInspection(
-      await container.handle.inspect(abortOptions(signal)),
-      undefined,
-      request,
-      names,
-      dockerIngressPath,
-      user,
-      imageConfiguration,
-    );
+    return inspectGateway();
   }
 
   async #validateIngressGeneration(runtimeDigest: string, generation: number): Promise<void> {

@@ -129,7 +129,7 @@ export async function startRuntimeSupervisor(
     socketPath: configuration.socketPath,
     journal: new OperationJournal({ directory: configuration.journalRoot }),
     validateRequest: (value) => validateSupervisorPolicy(value, { imageLock, providerCatalog }),
-    execute: (request, signal) => adapter.execute(request, signal),
+    execute: (request, signal, context) => adapter.execute(request, signal, context),
   });
   await server.start();
   return server;

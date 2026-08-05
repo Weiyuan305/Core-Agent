@@ -171,6 +171,25 @@ An HTTP/status-bearing error, accessor-backed or malformed error, policy or
 validation failure, not-found response, or any other transport code is not in
 this class and must follow its normal bounded terminal path.
 
+For a stale lifecycle reservation, the replacement Supervisor must recover its
+durable stage rather than replay the Docker call blindly. The only permitted
+stages are `reserved`, `start_pending`, `stop_pending`, and `delete_pending`.
+Start, stop, and delete write their matching pending stage before mutation;
+restart writes `stop_pending`, proves the exact gateway stopped, advances to
+`start_pending`, and then starts it. Generic Docker restart is forbidden.
+Strict inspection turns an already-running start, already-stopped stop,
+already-running restart start-half, or already-absent delete into the accepted
+terminal observation without a duplicate mutation. Any incompatible or
+out-of-order stage fails closed. Never edit a stage or lock by hand: journal
+updates are canonical, atomic, directory-synced `0600` records containing only
+protocol version, request hash, random ownership token, and the closed stage.
+
+Provision reservations remain `reserved` by design. Recovery relies on stable
+derived names and strict validation/adoption of each volume, network, helper,
+and gateway boundary. Do not infer completion from a lifecycle stage or relax
+adoption checks. A future provision progress machine requires its own reviewed
+closed schema and migration procedure.
+
 Helper and failed-gateway cleanup uses an independent bounded signal even when
 the parent operation is already aborted. Treat a terminal helper failure as
 safe only when a follow-up inspect proved the exact derived name absent. If

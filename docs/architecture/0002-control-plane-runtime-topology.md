@@ -207,6 +207,31 @@ validation errors, not-found responses, and every unlisted code. Strict
 inspection may settle a provable final state; otherwise the stable reservation
 remains unresolved for restart and exact-name adoption.
 
+Lifecycle recovery also persists a closed, request-specific stage inside the
+reservation before issuing the corresponding mutation. `start` may advance
+only from `reserved` to `start_pending`, `stop` only to `stop_pending`, and
+`delete` only to `delete_pending`. `restart` is deliberately two-stage:
+`reserved -> stop_pending -> start_pending`; it never delegates to Docker's
+combined restart operation. A replacement Supervisor that owns an aged
+reservation receives both the recovered flag and the last durable stage. It
+strict-inspects the exact derived gateway, short-circuits a start already
+running or a stop already stopped, and treats an already-absent delete as
+accepted. Restart resumes the pending half: it proves stopped before advancing
+to `start_pending`, then starts only when strict inspection is not already
+running. The allowlist and transition graph are enforced by both the journal
+and adapter, and every stage replacement is canonical JSON, atomically renamed,
+directory-synced, and mode `0600`. The reservation contains only protocol
+version, request hash, random owner token, and stage; operation IDs, tenant or
+runtime identifiers, provider data, and secrets are excluded.
+
+Provision intentionally remains at `reserved`. Provisioning is a multi-resource
+reconciliation rather than one reversible lifecycle mutation: deterministic
+names plus strict immutable validation/adoption independently reconcile the
+volume, network, helpers, and gateway after a crash. Reusing a single lifecycle
+stage for those create/start boundaries would falsely imply which resource was
+completed. If provision recovery later needs finer progress, it must introduce
+a separately reviewed closed state machine for each reconciliation boundary.
+
 Initializer, manifest-verifier, and failed gateway cleanup do not reuse an
 already-aborted operation signal. Each force-remove and follow-up inspection
 uses an independent bounded reconciliation signal. A terminal response is

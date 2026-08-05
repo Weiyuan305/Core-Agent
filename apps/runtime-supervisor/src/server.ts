@@ -16,6 +16,7 @@ import {
 
 import {
   transientOperationJournalResponse,
+  type OperationJournalContext,
   type OperationJournal,
 } from "./operation-journal.js";
 
@@ -46,7 +47,11 @@ export interface RuntimeSupervisorServerOptions {
   readonly socketPath: string;
   readonly journal: OperationJournal;
   readonly validateRequest: (value: unknown) => SupervisorRequestV1;
-  readonly execute: (request: SupervisorRequestV1, signal: AbortSignal) => Promise<SupervisorResponseV1>;
+  readonly execute: (
+    request: SupervisorRequestV1,
+    signal: AbortSignal,
+    context: OperationJournalContext,
+  ) => Promise<SupervisorResponseV1>;
   readonly maximumConcurrent?: number;
   readonly admissionTimeoutMs?: number;
   readonly effectTimeoutMs?: number;
@@ -497,8 +502,8 @@ export class RuntimeSupervisorServer {
       return;
     }
     try {
-      const journalResponse = this.#options.journal.run(request, async (reserved) => (
-        this.#executeAfterAdmission(reserved, admissionDeadlineMs)
+      const journalResponse = this.#options.journal.run(request, async (reserved, context) => (
+        this.#executeAfterAdmission(reserved, admissionDeadlineMs, context)
       ), {
         admissionDeadlineMs,
         admissionExpiredResponse: unavailableResponse(request.operation_id),
@@ -514,6 +519,7 @@ export class RuntimeSupervisorServer {
   async #executeAfterAdmission(
     request: SupervisorRequestV1,
     admissionDeadlineMs: number,
+    context: OperationJournalContext,
   ) {
     const release = await this.#acquireSlot(admissionDeadlineMs);
     if (release === undefined || this.#closing || Date.now() >= admissionDeadlineMs) {
@@ -521,7 +527,7 @@ export class RuntimeSupervisorServer {
       return transientOperationJournalResponse(unavailableResponse(request.operation_id));
     }
     try {
-      return await this.#executeWithDeadline(request);
+      return await this.#executeWithDeadline(request, context);
     } finally {
       release();
     }
@@ -611,7 +617,10 @@ export class RuntimeSupervisorServer {
     }
   }
 
-  async #executeWithDeadline(request: SupervisorRequestV1): Promise<SupervisorResponseV1> {
+  async #executeWithDeadline(
+    request: SupervisorRequestV1,
+    context: OperationJournalContext,
+  ): Promise<SupervisorResponseV1> {
     const controller = new AbortController();
     const timeoutMs = this.#options.effectTimeoutMs ?? defaultEffectTimeoutMs;
     let deadlineExpired = false;
@@ -622,7 +631,10 @@ export class RuntimeSupervisorServer {
     }, timeoutMs);
     timer.unref?.();
     try {
-      const response = redactResponse(await this.#options.execute(request, controller.signal), request.operation_id);
+      const response = redactResponse(
+        await this.#options.execute(request, controller.signal, context),
+        request.operation_id,
+      );
       return deadlineExpired && response.outcome !== "accepted"
         ? timeoutResponse(request.operation_id)
         : response;
