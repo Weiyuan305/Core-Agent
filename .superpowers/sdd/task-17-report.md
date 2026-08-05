@@ -234,3 +234,48 @@ before `pg.Client` construction.
   access was performed during the Round 2 correction.
 
 No blocking Task 17 concern remains after the Round 2 correction.
+
+## Independent review Round 3 correction
+
+Round 3 of `.superpowers/sdd/task-17-review.md` confirmed the Round 2 path,
+journal, and scanner findings closed, then rejected the correction for one
+remaining Critical purpose-separation gap: canonical path checks cannot detect
+hard links to the same secret inode. The focused RED is committed as
+`833e3896be2eeb7d9d5725bc86c0b503f15cd88c`
+`test(runtime): reproduce hardlink purpose bypass`:
+
+- bootstrap preflight failed 1/1 because a `0600` bootstrap hard-linked into
+  ingress was accepted;
+- the API bootstrap loader failed 1/1 because the same hard-linked key was
+  digested;
+- `FileSecretStore` failed 2/2 because it accepted hard-linked aliases across
+  provider/ingress roots and within one root.
+
+Every regular secret-file boundary now requires an exact link count of one.
+Preflight compares device, inode, and link count across the named-before,
+opened-handle, and named-after metadata snapshots. The API bootstrap loader
+validates `nlink === 1` before reading, validates both opened and named metadata
+again after the bounded read, and includes link count in its complete file
+snapshot comparison. `FileSecretStore` applies the same single-link contract to
+the initial opened metadata, post-read handle metadata, and both pathname
+stability checks; link count is also part of its size/time/inode snapshot. The
+shared store protects both Supervisor provider/ingress reads and Worker ingress
+reads, so no additional reader-specific implementation was added. All failures
+remain fixed and do not reflect secret bytes.
+
+### Round 3 verification
+
+- Focused hard-link regressions: preflight 1/1, API 1/1, runtime-core 2/2 pass.
+- `node --test tests/runtime/control-plane-compose.test.mjs`: 16/16 pass.
+- Complete runtime-core suite: 53/53 pass.
+- Complete API suite: 14/14 pass.
+- Complete Supervisor suite: 41/41 pass.
+- `npm run check`: exit 0; contracts 143/143, runtime-core 53/53, API 14/14,
+  Worker 60/60, Supervisor 41/41, and all builds/schema/fixture/compat gates
+  pass.
+- `npm test`: exit 0; runtime 46/46, contracts 143/143, runtime-core 53/53
+  (242 tests total).
+- No Compose startup, Docker network creation, image pull/build, external
+  access, push, or merge was performed during the Round 3 correction.
+
+No blocking Task 17 concern remains after the Round 3 correction.

@@ -90,6 +90,7 @@ function validateFileMetadata(metadata: BigIntStats): void {
   if (
     uid === undefined
     || !metadata.isFile()
+    || metadata.nlink !== 1n
     || metadata.uid !== BigInt(uid)
     || (metadata.mode & 0o7777n) !== 0o600n
     || metadata.size < BigInt(MINIMUM_KEY_BYTES + 1)
@@ -100,6 +101,7 @@ function validateFileMetadata(metadata: BigIntStats): void {
 function sameFile(left: BigIntStats, right: BigIntStats): boolean {
   return left.dev === right.dev
     && left.ino === right.ino
+    && left.nlink === right.nlink
     && left.size === right.size
     && left.mtimeNs === right.mtimeNs
     && left.ctimeNs === right.ctimeNs;
@@ -132,6 +134,8 @@ export async function loadBootstrapKeyDigest(configuredPath: string): Promise<Bu
     if (offset > MAXIMUM_FILE_BYTES || offset !== Number(before.size)) throw invalidKeyFile();
     const after = await handle.stat({ bigint: true });
     const pathMetadata = await lstat(path, { bigint: true });
+    validateFileMetadata(after);
+    validateFileMetadata(pathMetadata);
     if (!sameFile(before, after) || !sameFile(after, pathMetadata)) throw invalidKeyFile();
     await validateProtectedAncestors(path);
 

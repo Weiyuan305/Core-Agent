@@ -23,8 +23,8 @@ function absolutePath(environment, name) {
   return value;
 }
 
-function sameIdentity(left, right) {
-  return left.dev === right.dev && left.ino === right.ino;
+function sameIdentityAndLinkCount(left, right) {
+  return left.dev === right.dev && left.ino === right.ino && left.nlink === right.nlink;
 }
 
 function pathsOverlap(left, right) {
@@ -70,11 +70,12 @@ async function inspectProjection({ path, kind, uid, gid, mode }) {
     const expectedKind = kind === "directory" ? held.isDirectory() : held.isFile();
     if (
       !expectedKind
+      || (kind === "file" && held.nlink !== 1)
       || held.uid !== uid
       || held.gid !== gid
       || (held.mode & 0o7777) !== mode
-      || !sameIdentity(namedBefore, held)
-      || !sameIdentity(held, namedAfter)
+      || !sameIdentityAndLinkCount(namedBefore, held)
+      || !sameIdentityAndLinkCount(held, namedAfter)
     ) throw preparationError();
     return canonical;
   } finally {

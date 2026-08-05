@@ -125,7 +125,7 @@ test("file secret stores reject one hard-linked inode across provider and ingres
 
   for (const [store, reference] of [
     [new FileSecretStore(secretRoot), { reference_id: "provider_a", version: 1, purpose: "model_provider" }],
-    [new FileSecretStore(ingressRoot), { reference_id: "ingress_a", version: 1, purpose: "integration" }],
+    [new FileSecretStore(ingressRoot), { reference_id: "ingress_a", version: 1, purpose: "hermes_ingress" }],
   ] as const) {
     await assert.rejects(store.get(reference), (error: unknown) => {
       assert(error instanceof Error);

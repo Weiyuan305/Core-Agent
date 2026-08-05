@@ -108,8 +108,13 @@ chmod/chown. With a host override the same numeric value drives both the
 container user and preflight policy. Worker mounts only ingress and the socket
 root, with the socket mount read-only; migration receives no runtime root. The
 bootstrap source is separately rejected unless it is a regular file owned by
-the exact effective API UID/GID with mode `0600`. Preflight opens metadata only
-and never reads secret bytes.
+the exact effective API UID/GID with mode `0600` and exactly one hard link.
+Preflight verifies link-count stability across its named/opened/named snapshots,
+opens metadata only, and never reads secret bytes. The API bootstrap loader and
+the shared provider/ingress `FileSecretStore` repeat the single-link requirement
+before and after bounded reads and during final pathname revalidation. This
+closes hard-link aliases introduced before preflight or while secret material is
+being loaded.
 
 This UID convergence is strictly a local-development compatibility mechanism.
 Production must keep dedicated API `12000`, Worker `12001`, and Supervisor

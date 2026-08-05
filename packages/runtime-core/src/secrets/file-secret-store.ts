@@ -123,6 +123,7 @@ function sameIdentity(left: BigIntStats, right: BigIntStats): boolean {
 
 function sameFileSnapshot(left: BigIntStats, right: BigIntStats): boolean {
   return sameIdentity(left, right)
+    && left.nlink === right.nlink
     && left.size === right.size
     && left.mtimeNs === right.mtimeNs
     && left.ctimeNs === right.ctimeNs;
@@ -210,6 +211,7 @@ export class FileSecretStore implements SecretStore {
         const privateBuffer = await boundedRead(fileHandle);
         try {
           const after = await fileHandle.stat({ bigint: true });
+          this.#validateFileMetadata(after);
           if (!sameFileSnapshot(before, after)) {
             throw fixedFileError("Secret file changed while being read");
           }
@@ -285,6 +287,7 @@ export class FileSecretStore implements SecretStore {
 
   #validateFileMetadata(metadata: BigIntStats): void {
     if (!metadata.isFile()) throw fixedFileError("Secret reference must resolve to a regular file");
+    if (metadata.nlink !== 1n) throw fixedFileError("Secret file must have exactly one hard link");
     const currentUid = process.getuid?.();
     if (currentUid === undefined || metadata.uid !== BigInt(currentUid)) {
       throw fixedFileError("Secret file must be owned by the current uid");
@@ -300,7 +303,8 @@ export class FileSecretStore implements SecretStore {
 
   async #assertOpenedPathStable(path: string, openedMetadata: BigIntStats): Promise<void> {
     const pathMetadata = await lstat(path, { bigint: true });
-    if (!pathMetadata.isFile() || !sameIdentity(openedMetadata, pathMetadata)) {
+    this.#validateFileMetadata(pathMetadata);
+    if (!sameFileSnapshot(openedMetadata, pathMetadata)) {
       throw fixedFileError("Secret file changed while being opened");
     }
   }
