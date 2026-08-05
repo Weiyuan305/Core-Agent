@@ -9,27 +9,27 @@ on:
 permissions:
   contents: read
 
+env:
+  CONTROL_PLANE_TEST_DATABASE_URL: postgresql://core_agent_ci@127.0.0.1:5432/core_agent_control
+
 jobs:
   contract:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
 
       - name: Install pinned dependencies
         run: npm ci
-
-      - name: Run runtime and contracts tests
-        run: npm test
 
       - name: Build and verify contracts
         run: npm run contracts:check
@@ -39,7 +39,129 @@ jobs:
           COMPAT_HISTORY_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: npm run compat:history -w @core-agent/contracts -- --base "$COMPAT_HISTORY_BASE"
 
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install pinned dependencies
+        run: npm ci
+
+      - name: Run unit builds and tests
+        run: npm run check
+
+      - name: Scan tracked evidence for the CI sentinel
+        run: node scripts/verify-no-secret.mjs synthetic-ci-sentinel-runtime-v1
+
+  postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-bookworm@sha256:6e5a6518f9d2ff9e9f4cba2a5a87d8f41b0f067f6f92ac847c344351a6c8d923
+        env:
+          POSTGRES_DB: core_agent_control
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_USER: core_agent_ci
+        options: >-
+          --health-cmd "pg_isready -U core_agent_ci -d core_agent_control"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install pinned dependencies
+        run: npm ci
+
+      - name: Run real PostgreSQL suites
+        run: npm run test:postgres
+
+      - name: Scan every public database text surface for the CI sentinel
+        run: node scripts/scan-runtime-database.mjs synthetic-ci-sentinel-runtime-v1
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-bookworm@sha256:6e5a6518f9d2ff9e9f4cba2a5a87d8f41b0f067f6f92ac847c344351a6c8d923
+        env:
+          POSTGRES_DB: core_agent_control
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_USER: core_agent_ci
+        options: >-
+          --health-cmd "pg_isready -U core_agent_ci -d core_agent_control"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install pinned dependencies
+        run: npm ci
+
+      - name: Run fake Supervisor and Hermes full slice
+        run: npm run test:integration
+
+      - name: Scan integration evidence for the CI sentinel
+        run: node scripts/verify-no-secret.mjs synthetic-ci-sentinel-runtime-v1
+
+  compose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install pinned dependencies
+        run: npm ci
+
+      - name: Resolve approved image tags and reject lock drift
+        run: |
+          node scripts/resolve-runtime-images.mjs
+          git diff --exit-code -- infra/runtime/base-images.lock.json
+
+      - name: Export the locked runner platform references
+        run: |
+          node --input-type=module -e 'import {readFileSync} from "node:fs"; const lock=JSON.parse(readFileSync("infra/runtime/base-images.lock.json","utf8")); process.stdout.write(`CORE_AGENT_NODE_IMAGE=${lock.images.node.platforms["linux/amd64"]}\nCORE_AGENT_POSTGRES_IMAGE=${lock.images.postgres.platforms["linux/amd64"]}\n`)' >> "$GITHUB_ENV"
+
       - name: Validate Compose configuration
         env:
-          CORE_AGENT_HERMES_INGRESS_SECRET_FILE: /dev/null
-        run: docker compose -f infra/hermes/compose.dev.yaml config --quiet
+          CORE_AGENT_BOOTSTRAP_KEY_FILE: /tmp/core-agent-bootstrap-path-only
+          CORE_AGENT_DOCKER_GID: "999"
+          CORE_AGENT_INGRESS_SECRET_ROOT: /tmp/core-agent-ingress-path-only
+          CORE_AGENT_PLATFORM: linux/amd64
+          CORE_AGENT_PROVIDER_SECRET_ROOT: /tmp/core-agent-provider-path-only
+        run: docker compose -f infra/runtime/compose.dev.yaml config --quiet
+
+      - name: Run static topology assertions
+        run: npm run test:runtime

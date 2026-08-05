@@ -7,6 +7,9 @@ import Dockerode from "dockerode";
 import {
   FileSecretStore,
   loadProviderCatalog,
+  type SecretMaterial,
+  type SecretReference,
+  type SecretStore,
 } from "@core-agent/runtime-core";
 
 import { DockerRuntimeAdapter } from "./docker-adapter.js";
@@ -19,7 +22,8 @@ const configurationKeys = {
   journalRoot: "CORE_AGENT_SUPERVISOR_JOURNAL_ROOT",
   stagingRoot: "CORE_AGENT_SUPERVISOR_STAGING_ROOT",
   ingressRoot: "CORE_AGENT_SUPERVISOR_INGRESS_ROOT",
-  secretRoot: "CORE_AGENT_SECRET_ROOT",
+  providerSecretRoot: "CORE_AGENT_PROVIDER_SECRET_ROOT",
+  ingressSecretRoot: "CORE_AGENT_INGRESS_SECRET_ROOT",
   dockerSocketPath: "CORE_AGENT_DOCKER_SOCKET_PATH",
   imageLockPath: "CORE_AGENT_IMAGE_LOCK_PATH",
   providerCatalogPath: "CORE_AGENT_PROVIDER_CATALOG_PATH",
@@ -30,7 +34,8 @@ export interface SupervisorConfiguration {
   readonly journalRoot: string;
   readonly stagingRoot: string;
   readonly ingressRoot: string;
-  readonly secretRoot: string;
+  readonly providerSecretRoot: string;
+  readonly ingressSecretRoot: string;
   readonly dockerSocketPath: string;
   readonly imageLockPath: string;
   readonly providerCatalogPath: string;
@@ -59,6 +64,19 @@ export function readSupervisorConfiguration(
   ) as unknown as SupervisorConfiguration;
 }
 
+export class PurposeScopedSecretStore implements SecretStore {
+  public constructor(
+    private readonly provider: SecretStore,
+    private readonly ingress: SecretStore,
+  ) {}
+
+  public async get(reference: SecretReference): Promise<SecretMaterial> {
+    if (reference.purpose === "model_provider") return this.provider.get(reference);
+    if (reference.purpose === "hermes_ingress") return this.ingress.get(reference);
+    throw new Error("SUPERVISOR_REJECTED: Secret purpose is invalid");
+  }
+}
+
 async function readJson(path: string): Promise<unknown> {
   try {
     return JSON.parse(await readFile(path, { encoding: "utf8" })) as unknown;
@@ -73,9 +91,13 @@ export async function startRuntimeSupervisor(
   const configuration = readSupervisorConfiguration(environment);
   const imageLock = await readJson(configuration.imageLockPath);
   const providerCatalog = loadProviderCatalog(await readJson(configuration.providerCatalogPath));
+  const secretStore = new PurposeScopedSecretStore(
+    new FileSecretStore(configuration.providerSecretRoot),
+    new FileSecretStore(configuration.ingressSecretRoot),
+  );
   const adapter = new DockerRuntimeAdapter({
     docker: new Dockerode({ socketPath: configuration.dockerSocketPath }),
-    secretStore: new FileSecretStore(configuration.secretRoot),
+    secretStore,
     imageLock,
     providerCatalog,
     stagingRoot: configuration.stagingRoot,

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "images": {
+    "node": {
+      "source": "node:22-bookworm-slim",
+      "platforms": {
+        "linux/amd64": "node:22-bookworm-slim@sha256:a17d50af28002a160548bd4225b3cfcb12c5efcb171f79e68758f2885fb1b066",
+        "linux/arm64": "node:22-bookworm-slim@sha256:253da19867dd03e2f817f433d7782adefd2a2bac8729fcd4ebc6770665167a24"
+      }
+    },
+    "postgres": {
+      "source": "postgres:17-bookworm",
+      "platforms": {
+        "linux/amd64": "postgres:17-bookworm@sha256:6e5a6518f9d2ff9e9f4cba2a5a87d8f41b0f067f6f92ac847c344351a6c8d923",
+        "linux/arm64": "postgres:17-bookworm@sha256:3aac91d19d5b7aff4c650dddfacc1a26c436459aafd4eb51ab0bf1748e990dbb"
+      }
+    }
+  }
+}

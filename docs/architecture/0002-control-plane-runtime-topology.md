@@ -49,6 +49,45 @@ Runtime v1 must finish a real vertical slice: provision a company and Profiles,
 reach a healthy Hermes container, execute one Profile conversation, and expose
 durable events. Container-only CRUD is insufficient evidence.
 
+### Development network ownership
+
+The development Compose project treats `core-agent-backplane` as an external,
+pre-existing internal bridge. `npm run runtime:network` creates it idempotently
+with the exact labels enforced by the Runtime Supervisor, or refuses an
+existing network whose driver, internal flag, attachability, name, or labels
+drift from that contract. This prerequisite prevents Compose teardown from
+claiming a network that contains Supervisor-managed Hermes containers.
+
+The Worker joins the backplane so it can call the private Hermes gateway. The
+Supervisor container itself uses `network_mode: none`: Docker socket authority,
+not membership in an application network, lets it create each Hermes container
+with `NetworkMode=core-agent-backplane`. Dynamically created Hermes containers
+join only that backplane and publish no host port. The API, PostgreSQL, and the
+one-shot migration process join only the separate internal control network.
+
+The API normally accepts only a loopback listen address. Its container image
+may bind `0.0.0.0` only when the deployment sets the exact
+`CONTROL_PLANE_API_CONTAINER_BIND=1` opt-in; the development Compose boundary
+then publishes that container port only as `127.0.0.1:8787`. This is container
+wiring, not permission to expose the API on a public host interface.
+
+Provider and Hermes-ingress bytes are separate read-only projections. The
+Worker receives only the ingress projection. The Supervisor routes
+`model_provider` references to the provider projection and `hermes_ingress`
+references to the ingress projection, rejecting every other secret purpose;
+it never receives the bootstrap key. The provider catalog and image lock are
+non-secret managed configuration, not substitutes for either projection.
+
+The image targets retain dedicated non-root identities: API `12000`, Worker
+`12001`, and Supervisor `12002`. Development Compose permits an explicit
+numeric `CORE_AGENT_RUNTIME_UID` override for macOS/Colima bind-mounted `0600`
+files, plus `CORE_AGENT_RUNTIME_GID` for API projections and
+`CORE_AGENT_SUPERVISOR_SOCKET_GID` as the Worker's and Supervisor's common UDS
+group. Their unset defaults preserve the dedicated image identities. This is
+strictly a local-development compatibility mechanism: production must keep
+dedicated service UIDs and use the real orchestrator's ownership-aware secret
+projection instead of converging services onto a host user.
+
 ## Alternatives considered
 
 ### Remote Docker host from v1

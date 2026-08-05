@@ -69,6 +69,24 @@ test("environment refuses public API binding and invalid ports", () => {
   );
 });
 
+test("environment permits an explicit container-only wildcard bind", () => {
+  assert.equal(loadRuntimeEnvironment({
+    ...runtimeEnvironment,
+    CONTROL_PLANE_API_HOST: "0.0.0.0",
+    CONTROL_PLANE_API_CONTAINER_BIND: "1",
+  }).apiHost, "0.0.0.0");
+  for (const flag of [undefined, "0", "true", " 1 "]) {
+    assert.throws(
+      () => loadRuntimeEnvironment({
+        ...runtimeEnvironment,
+        CONTROL_PLANE_API_HOST: "0.0.0.0",
+        ...(flag === undefined ? {} : { CONTROL_PLANE_API_CONTAINER_BIND: flag }),
+      }),
+      /loopback or private/u,
+    );
+  }
+});
+
 test("environment requires every server-managed value", () => {
   const requiredNames = [
     "CONTROL_PLANE_DATABASE_URL",

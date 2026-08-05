@@ -1,0 +1,218 @@
+name: core-agent-runtime-v1
+
+x-service-build: &service-build
+  context: ../..
+  dockerfile: infra/runtime/Dockerfile
+  args:
+    NODE_IMAGE: ${CORE_AGENT_NODE_IMAGE:?set CORE_AGENT_NODE_IMAGE}
+
+x-application-security: &application-security
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: 256
+  mem_limit: 1g
+  cpus: 1.0
+  stop_grace_period: 30s
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: ${CORE_AGENT_POSTGRES_IMAGE:?set CORE_AGENT_POSTGRES_IMAGE}
+    platform: ${CORE_AGENT_PLATFORM:?set CORE_AGENT_PLATFORM}
+    environment:
+      POSTGRES_DB: core_agent_runtime
+      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_USER: core_agent_runtime
+    volumes:
+      - type: volume
+        source: postgres-data
+        target: /var/lib/postgresql/data
+      - type: bind
+        source: ./postgres/init
+        target: /docker-entrypoint-initdb.d
+        read_only: true
+    networks:
+      - core-agent-control
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U core_agent_runtime -d core_agent_runtime"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  migrate:
+    image: core-agent/control-plane-api:dev
+    platform: ${CORE_AGENT_PLATFORM:?set CORE_AGENT_PLATFORM}
+    build:
+      <<: *service-build
+      target: api
+    user: "${CORE_AGENT_RUNTIME_UID:-12000}:${CORE_AGENT_RUNTIME_GID:-12000}"
+    entrypoint: ["node", "scripts/migrate-runtime.mjs"]
+    environment:
+      CONTROL_PLANE_DATABASE_URL: postgresql://core_agent_runtime@postgres:5432/core_agent_runtime
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 0.5
+    restart: "no"
+    stop_grace_period: 15s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - core-agent-control
+
+  api:
+    <<: *application-security
+    image: core-agent/control-plane-api:dev
+    platform: ${CORE_AGENT_PLATFORM:?set CORE_AGENT_PLATFORM}
+    build:
+      <<: *service-build
+      target: api
+    user: "${CORE_AGENT_RUNTIME_UID:-12000}:${CORE_AGENT_RUNTIME_GID:-12000}"
+    environment:
+      CONTROL_PLANE_API_CONTAINER_BIND: "1"
+      CONTROL_PLANE_API_HOST: 0.0.0.0
+      CONTROL_PLANE_API_PORT: "8787"
+      CONTROL_PLANE_BOOTSTRAP_KEY_FILE: /run/secrets/bootstrap_key
+      CONTROL_PLANE_DATABASE_URL: postgresql://core_agent_runtime@postgres:5432/core_agent_runtime
+      CONTROL_PLANE_IMAGE_LOCK_FILE: /app/infra/hermes/base-images.lock.json
+      CONTROL_PLANE_PROVIDER_CATALOG_FILE: /app/infra/runtime/providers.json
+      CONTROL_PLANE_SECRET_ROOT: /run/unavailable/api-secrets
+      CONTROL_PLANE_SUPERVISOR_SOCKET: /run/unavailable/supervisor.sock
+      CONTROL_PLANE_WORKER_ID: api-unused
+    secrets:
+      - source: bootstrap-key
+        target: bootstrap_key
+        uid: "${CORE_AGENT_RUNTIME_UID:-12000}"
+        gid: "${CORE_AGENT_RUNTIME_GID:-12000}"
+        mode: 0o400
+    volumes:
+      - type: bind
+        source: ./providers.dev.json
+        target: /app/infra/runtime/providers.json
+        read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    ports:
+      - "127.0.0.1:8787:8787"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    networks:
+      - core-agent-control
+
+  worker:
+    <<: *application-security
+    image: core-agent/control-plane-worker:dev
+    platform: ${CORE_AGENT_PLATFORM:?set CORE_AGENT_PLATFORM}
+    build:
+      <<: *service-build
+      target: worker
+    user: "${CORE_AGENT_RUNTIME_UID:-12001}:${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}"
+    group_add:
+      - "${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}"
+    environment:
+      CONTROL_PLANE_BOOTSTRAP_KEY_FILE: /run/unavailable/bootstrap-key
+      CONTROL_PLANE_DATABASE_URL: postgresql://core_agent_runtime@postgres:5432/core_agent_runtime
+      CONTROL_PLANE_PROVIDER_CATALOG_FILE: /app/infra/runtime/providers.json
+      CONTROL_PLANE_SECRET_ROOT: /run/core-agent/ingress
+      CONTROL_PLANE_SUPERVISOR_SOCKET: /run/core-agent/supervisor/runtime.sock
+      CONTROL_PLANE_WORKER_ID: runtime-worker-1
+    volumes:
+      - type: bind
+        source: ./providers.dev.json
+        target: /app/infra/runtime/providers.json
+        read_only: true
+      - type: bind
+        source: ${CORE_AGENT_INGRESS_SECRET_ROOT:?set CORE_AGENT_INGRESS_SECRET_ROOT}
+        target: /run/core-agent/ingress
+        read_only: true
+      - type: volume
+        source: supervisor-socket
+        target: /run/core-agent/supervisor
+        read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      supervisor:
+        condition: service_started
+    networks:
+      - core-agent-control
+      - core-agent-backplane
+
+  supervisor:
+    <<: *application-security
+    image: core-agent/runtime-supervisor:dev
+    platform: ${CORE_AGENT_PLATFORM:?set CORE_AGENT_PLATFORM}
+    build:
+      <<: *service-build
+      target: supervisor
+    user: "${CORE_AGENT_RUNTIME_UID:-12002}:${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}"
+    group_add:
+      - "${CORE_AGENT_DOCKER_GID:?set CORE_AGENT_DOCKER_GID}"
+    privileged: false
+    network_mode: none
+    environment:
+      CORE_AGENT_DOCKER_SOCKET_PATH: /var/run/docker.sock
+      CORE_AGENT_IMAGE_LOCK_PATH: /app/infra/hermes/base-images.lock.json
+      CORE_AGENT_INGRESS_SECRET_ROOT: /run/core-agent/secrets/ingress
+      CORE_AGENT_PROVIDER_CATALOG_PATH: /app/infra/runtime/providers.json
+      CORE_AGENT_PROVIDER_SECRET_ROOT: /run/core-agent/secrets/provider
+      CORE_AGENT_SUPERVISOR_INGRESS_ROOT: /var/lib/core-agent/supervisor/ingress
+      CORE_AGENT_SUPERVISOR_JOURNAL_ROOT: /var/lib/core-agent/supervisor/journal
+      CORE_AGENT_SUPERVISOR_SOCKET_PATH: /run/core-agent/supervisor/runtime.sock
+      CORE_AGENT_SUPERVISOR_STAGING_ROOT: /run/core-agent/staging
+    volumes:
+      - type: bind
+        source: ${CORE_AGENT_PROVIDER_SECRET_ROOT:?set CORE_AGENT_PROVIDER_SECRET_ROOT}
+        target: /run/core-agent/secrets/provider
+        read_only: true
+      - type: bind
+        source: ${CORE_AGENT_INGRESS_SECRET_ROOT:?set CORE_AGENT_INGRESS_SECRET_ROOT}
+        target: /run/core-agent/secrets/ingress
+        read_only: true
+      - type: volume
+        source: supervisor-socket
+        target: /run/core-agent/supervisor
+      - type: volume
+        source: supervisor-state
+        target: /var/lib/core-agent/supervisor
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+      - /run/core-agent/staging:rw,noexec,nosuid,nodev,size=128m,mode=0700,uid=${CORE_AGENT_RUNTIME_UID:-12002},gid=${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}
+
+volumes:
+  postgres-data:
+  supervisor-socket:
+  supervisor-state:
+
+secrets:
+  bootstrap-key:
+    file: ${CORE_AGENT_BOOTSTRAP_KEY_FILE:?set CORE_AGENT_BOOTSTRAP_KEY_FILE}
+
+networks:
+  core-agent-control:
+    driver: bridge
+    internal: true
+  core-agent-backplane:
+    external: true
+    name: core-agent-backplane

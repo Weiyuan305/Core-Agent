@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { readSupervisorConfiguration } from "../src/main.js";
+import { PurposeScopedSecretStore, readSupervisorConfiguration } from "../src/main.js";
 
 const valid = {
   CORE_AGENT_SUPERVISOR_SOCKET_PATH: "/run/core-agent/supervisor.sock",
   CORE_AGENT_SUPERVISOR_JOURNAL_ROOT: "/var/lib/core-agent/journal",
   CORE_AGENT_SUPERVISOR_STAGING_ROOT: "/var/lib/core-agent/staging",
   CORE_AGENT_SUPERVISOR_INGRESS_ROOT: "/var/lib/core-agent/ingress",
-  CORE_AGENT_SECRET_ROOT: "/run/secrets/core-agent",
+  CORE_AGENT_PROVIDER_SECRET_ROOT: "/run/secrets/provider",
+  CORE_AGENT_INGRESS_SECRET_ROOT: "/run/secrets/ingress",
   CORE_AGENT_DOCKER_SOCKET_PATH: "/var/run/docker.sock",
   CORE_AGENT_IMAGE_LOCK_PATH: "/etc/core-agent/base-images.lock.json",
   CORE_AGENT_PROVIDER_CATALOG_PATH: "/etc/core-agent/providers.json",
@@ -20,7 +21,8 @@ test("Supervisor main accepts only explicit absolute managed paths", () => {
     journalRoot: valid.CORE_AGENT_SUPERVISOR_JOURNAL_ROOT,
     stagingRoot: valid.CORE_AGENT_SUPERVISOR_STAGING_ROOT,
     ingressRoot: valid.CORE_AGENT_SUPERVISOR_INGRESS_ROOT,
-    secretRoot: valid.CORE_AGENT_SECRET_ROOT,
+    providerSecretRoot: valid.CORE_AGENT_PROVIDER_SECRET_ROOT,
+    ingressSecretRoot: valid.CORE_AGENT_INGRESS_SECRET_ROOT,
     dockerSocketPath: valid.CORE_AGENT_DOCKER_SOCKET_PATH,
     imageLockPath: valid.CORE_AGENT_IMAGE_LOCK_PATH,
     providerCatalogPath: valid.CORE_AGENT_PROVIDER_CATALOG_PATH,
@@ -28,8 +30,29 @@ test("Supervisor main accepts only explicit absolute managed paths", () => {
   for (const [key, value] of [
     ["CORE_AGENT_SUPERVISOR_SOCKET_PATH", "relative.sock"],
     ["CORE_AGENT_DOCKER_SOCKET_PATH", "\n/private/docker.sock"],
-    ["CORE_AGENT_SECRET_ROOT", ""],
+    ["CORE_AGENT_PROVIDER_SECRET_ROOT", ""],
+    ["CORE_AGENT_INGRESS_SECRET_ROOT", ""],
   ] as const) {
     assert.throws(() => readSupervisorConfiguration({ ...valid, [key]: value }), /SUPERVISOR_REJECTED/);
   }
+});
+
+test("Supervisor routes only provider and ingress references to purpose-scoped projections", async () => {
+  const calls: string[] = [];
+  const material = {
+    reference: { reference_id: "material", version: 1, purpose: "model_provider" as const },
+    text: () => "x",
+    release: () => undefined,
+  };
+  const store = new PurposeScopedSecretStore(
+    { get: async (reference) => { calls.push(`provider:${reference.reference_id}`); return material; } },
+    { get: async (reference) => { calls.push(`ingress:${reference.reference_id}`); return material; } },
+  );
+  assert.equal(await store.get({ reference_id: "provider_main", version: 1, purpose: "model_provider" }), material);
+  assert.equal(await store.get({ reference_id: "ingress_main", version: 1, purpose: "hermes_ingress" }), material);
+  assert.deepEqual(calls, ["provider:provider_main", "ingress:ingress_main"]);
+  await assert.rejects(
+    store.get({ reference_id: "invalid", version: 1, purpose: "bootstrap_api" } as never),
+    /SUPERVISOR_REJECTED/u,
+  );
 });

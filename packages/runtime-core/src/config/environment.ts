@@ -19,7 +19,12 @@ export function loadRuntimeEnvironment(env: NodeJS.ProcessEnv): RuntimeEnvironme
   };
 
   const apiHost = env.CONTROL_PLANE_API_HOST?.trim() || "127.0.0.1";
-  if (apiHost !== "127.0.0.1" && apiHost !== "::1") {
+  const containerBind = env.CONTROL_PLANE_API_CONTAINER_BIND === "1";
+  if (
+    apiHost !== "127.0.0.1"
+    && apiHost !== "::1"
+    && !(apiHost === "0.0.0.0" && containerBind)
+  ) {
     throw new Error("CONTROL_PLANE_API_HOST must be loopback or private deployment wiring");
   }
 

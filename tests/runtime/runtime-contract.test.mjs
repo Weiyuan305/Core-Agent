@@ -193,43 +193,24 @@ test("CI validates runtime contracts without building or publishing images", asy
     "utf8"
   );
 
-  assert.match(workflow, /^permissions:\n  contents: read\n\njobs:/m);
+  assert.match(workflow, /^permissions:\n  contents: read$/m);
   assert.match(workflow, /^\s+node-version: 22$/m);
   assert.match(workflow, /^\s+fetch-depth: 0$/m);
-  assert.match(workflow, /^\s+run: npm test$/m);
+  assert.match(workflow, /^\s+run: npm run contracts:check$/m);
+  assert.match(workflow, /^\s+run: npm run check$/m);
+  assert.match(workflow, /^\s+run: npm run test:postgres$/m);
+  assert.match(workflow, /^\s+run: npm run test:integration$/m);
+  assert.match(workflow, /^\s+run: npm run test:runtime$/m);
   assert.match(workflow, /github\.event\.pull_request\.base\.sha \|\| github\.event\.before/);
   assert.match(
     workflow,
-    /^\s+CORE_AGENT_HERMES_INGRESS_SECRET_FILE: \/dev\/null$/m
+    /^\s+run: docker compose -f infra\/runtime\/compose\.dev\.yaml config --quiet$/m
   );
-  assert.match(
-    workflow,
-    /^\s+run: docker compose -f infra\/hermes\/compose\.dev\.yaml config --quiet$/m
-  );
-
-  const dockerCommands = workflow
-    .split("\n")
-    .filter((line) => /^\s+run:\s+docker(?:\s|$)/.test(line));
-  assert.deepEqual(dockerCommands, [
-    "        run: docker compose -f infra/hermes/compose.dev.yaml config --quiet"
-  ]);
-  const runCommands = workflow
-    .split("\n")
-    .filter((line) => /^\s+run:/.test(line));
-  assert.deepEqual(runCommands, [
-    "        run: npm ci",
-    "        run: npm test",
-    "        run: npm run contracts:check",
-    "        run: npm run compat:history -w @core-agent/contracts -- --base \"$COMPAT_HISTORY_BASE\"",
-    "        run: docker compose -f infra/hermes/compose.dev.yaml config --quiet"
-  ]);
   const actions = workflow
     .split("\n")
     .filter((line) => /^\s+uses:/.test(line));
-  assert.deepEqual(actions, [
-    "        uses: actions/checkout@v4",
-    "        uses: actions/setup-node@v4"
-  ]);
+  assert(actions.length > 0);
+  assert(actions.every((line) => /@[a-f0-9]{40}(?:\s+#\s+v\d+(?:\.\d+){2})?$/.test(line)));
   assert.doesNotMatch(workflow, /docker\s+build|docker\s+compose\s+up/i);
   assert.doesNotMatch(workflow, /\$\{\{\s*secrets\./i);
   assert.doesNotMatch(workflow, /CORE_AGENT_API_SERVER_KEY/);
