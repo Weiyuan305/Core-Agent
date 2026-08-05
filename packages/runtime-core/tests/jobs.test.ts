@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { sql } from "kysely";
 import { Pool } from "pg";
 
 import { applyMigrations, claimJobs, claimPlatformWorkerJobs, completeJob, createRedactor, createRuntimeDatabase, failJob, heartbeatJob, retryDecision, withRuntimeAdvisoryLock } from "../src/index.js";
@@ -14,6 +16,17 @@ if (databaseUrl === undefined || !new URL(databaseUrl).pathname.slice(1).startsW
 const pool = new Pool({ connectionString: databaseUrl });
 const db = createRuntimeDatabase(pool);
 const migrationsDirectory = join(fileURLToPath(new URL("../migrations/", import.meta.url)));
+
+interface ExplainPlanNode {
+  readonly "Actual Loops"?: number;
+  readonly "Actual Rows"?: number;
+  readonly Plans?: readonly ExplainPlanNode[];
+}
+
+function maximumActualWork(node: ExplainPlanNode): number {
+  const nodeWork = (node["Actual Rows"] ?? 0) * (node["Actual Loops"] ?? 1);
+  return Math.max(nodeWork, ...(node.Plans ?? []).map(maximumActualWork));
+}
 
 async function reset(): Promise<void> {
   await pool.query("drop schema public cascade; create schema public;");
@@ -59,6 +72,8 @@ async function insertExecuteBacklog(
     description: "Jobs profile", status: "active", provider_config_id: "provider_jobs", model_id: "model_jobs",
     created_at: new Date(0), updated_at: new Date(0),
   }).execute();
+  const runs = [];
+  const jobs = [];
   for (const conversation of conversations) {
     await db.insertInto("conversations").values({
       tenant_id: "tenant_jobs", conversation_id: conversation.conversationId, profile_id: "profile_jobs",
@@ -68,22 +83,24 @@ async function insertExecuteBacklog(
     for (let index = 0; index < conversation.count; index += 1) {
       const runId = `run_${conversation.conversationId}_${index}`;
       const createdAt = new Date(conversation.createdOffset + index);
-      await db.insertInto("agent_runs").values({
+      runs.push({
         tenant_id: "tenant_jobs", run_id: runId, conversation_id: conversation.conversationId,
         request_id: `request_${runId}`, trace_id: `trace_${runId}`, client_request_id: `client_${runId}`,
         idempotency_key: `idem_${runId}`, parent_run_id: null, schema_version: 1, resource_version: 1,
         status: "queued", started_at: null, finished_at: null, failure_summary: null,
         created_at: createdAt, updated_at: createdAt,
-      }).execute();
-      await db.insertInto("worker_jobs").values({
+      });
+      jobs.push({
         tenant_id: "tenant_jobs", job_id: `job_${conversation.conversationId}_${index}`, job_kind: "execute_agent_run",
         status: "queued", attempt_count: 0, max_attempts: 3, lease_owner: null, lease_expires_at: null,
         next_attempt_at: new Date(0), payload_ref: runId, effect_state: "pre_effect", runtime_command: null,
         target_command_version: null, last_error_summary: null, run_id: runId, container_id: null,
         created_at: createdAt, updated_at: createdAt,
-      }).execute();
+      });
     }
   }
+  if (runs.length > 0) await db.insertInto("agent_runs").values(runs).execute();
+  if (jobs.length > 0) await db.insertInto("worker_jobs").values(jobs).execute();
 }
 
 async function insertRecoveryJob(input: {
@@ -209,6 +226,64 @@ test("platform claim reaches an unrelated Conversation beyond a large same-Conve
   assert.deepEqual(claimed.map((job) => job.jobId).sort(), [
     "job_conversation_hot_0", "job_conversation_unrelated_0",
   ]);
+});
+
+test("platform Conversation discovery stays non-expanding with 500 queued Runs", { timeout: 20_000 }, async () => {
+  await insertExecuteBacklog([
+    { conversationId: "conversation_scale", count: 500, createdOffset: 1 },
+    { conversationId: "conversation_scale_unrelated", count: 1, createdOffset: 10_000 },
+  ]);
+
+  const explained = await sql<{ "QUERY PLAN": readonly [{ readonly Plan: ExplainPlanNode }] }>`
+    explain (analyze, format json)
+    with active_execute_conversations as materialized (
+      select distinct active_jobs.tenant_id, active_runs.conversation_id
+      from worker_jobs as active_jobs
+      inner join agent_runs as active_runs
+        on active_runs.tenant_id = active_jobs.tenant_id and active_runs.run_id = active_jobs.run_id
+      where active_jobs.job_kind = 'execute_agent_run'
+        and active_jobs.status = 'running'
+        and active_jobs.lease_expires_at > now()
+    )
+    select jobs.tenant_id, runs.conversation_id, min(jobs.created_at) as oldest_created_at
+    from worker_jobs as jobs
+    inner join agent_runs as runs
+      on runs.tenant_id = jobs.tenant_id and runs.run_id = jobs.run_id
+    left join active_execute_conversations as active_conversations
+      on active_conversations.tenant_id = jobs.tenant_id
+      and active_conversations.conversation_id = runs.conversation_id
+    where jobs.job_kind = 'execute_agent_run'
+      and (
+        (jobs.status in ('queued', 'retrying') and jobs.attempt_count < jobs.max_attempts and jobs.next_attempt_at <= now())
+        or (jobs.status = 'running' and jobs.lease_expires_at < now())
+      )
+      and active_conversations.tenant_id is null
+    group by jobs.tenant_id, runs.conversation_id
+    order by oldest_created_at, jobs.tenant_id, runs.conversation_id
+    limit 32
+  `.execute(db);
+  const plan = explained.rows[0]?.["QUERY PLAN"][0]?.Plan;
+  assert.notEqual(plan, undefined);
+  const maximumPlanWork = maximumActualWork(plan!);
+  assert.equal(
+    maximumPlanWork < 5_000,
+    true,
+    `discovery plan must not perform a quadratic jobs-by-runs expansion; observed maximum node work ${maximumPlanWork}`,
+  );
+
+  const claimed = await claimPlatformWorkerJobs(db, {
+    workerId: "platform_scale", limit: 8, leaseMs: 30_000, jobKinds: ["execute_agent_run"],
+  });
+  assert.deepEqual(claimed.map((job) => job.jobId).sort(), [
+    "job_conversation_scale_0", "job_conversation_scale_unrelated_0",
+  ]);
+
+  const source = await readFile(new URL("../src/repositories/jobs.ts", import.meta.url), "utf8");
+  const discovery = source.slice(source.indexOf("const executeCandidates"), source.indexOf("const candidates", source.indexOf("const executeCandidates")));
+  assert.match(discovery, /cte\("active_execute_conversations"\)\.materialized\(\)/);
+  assert.match(discovery, /leftJoin\("active_execute_conversations as active_conversations"/);
+  assert.match(discovery, /where\("active_conversations\.tenant_id", "is", null\)/);
+  assert.doesNotMatch(discovery, /not\(exists\(/);
 });
 
 test("two platform claimers cannot concurrently claim two Runs from one Conversation", { timeout: 5_000 }, async () => {

@@ -2269,6 +2269,18 @@ Worker maintains rolling max-eight in-flight dispatches, claims only free slots,
 continues Outbox ticks at least every 250 ms during full long-running load, and
 awaits started dispatches during shutdown.
 
+Scale closure (2026-08-05): a MATERIALIZED CTE computes the distinct
+tenant-and-Conversation keys with an active execute job once, then the outer
+eligible jobs-and-Runs query uses a composite tenant-and-Conversation left
+anti-join rather than a Conversation self-product. Schema version 7 adds
+composite Agent Run tenant/Conversation/Run, Worker job tenant/Run,
+eligible-claim, and recovery-claim indexes, with genuine v6 upgrade and plan
+tests. The 500 queued Runs in one Conversation regression improved from the
+reviewed 11.1-second self-join result to 274 milliseconds under cold
+statistics. `EXPLAIN ANALYZE` asserts that maximum per-node work, calculated as
+actual rows multiplied by actual loops, remains below 5,000, in addition to the
+structural MATERIALIZED-CTE and composite-left-anti-join guard.
+
 ### Task 15: Serve durable Conversation events through resumable SSE
 
 **Files:**

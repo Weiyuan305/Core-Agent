@@ -159,19 +159,26 @@ export async function claimPlatformWorkerJobs(
     const executeDiscoveryLimit = Math.min(100, input.limit * 4);
     const executeCandidates = !allowedJobKinds.includes("execute_agent_run") ? [] : await (
       // @platform-worker-cross-tenant-claim reviewed scheduler authority
-      trx.selectFrom("worker_jobs as jobs")
+      trx.with((cte) => cte("active_execute_conversations").materialized(), (database) =>
+        // @platform-worker-cross-tenant-claim reviewed scheduler authority
+        database.selectFrom("worker_jobs as active_jobs")
+          .innerJoin("agent_runs as active_runs", (join) => join
+            .onRef("active_runs.tenant_id", "=", "active_jobs.tenant_id")
+            .onRef("active_runs.run_id", "=", "active_jobs.run_id"))
+          .select(["active_jobs.tenant_id", "active_runs.conversation_id"])
+          .where("active_jobs.job_kind", "=", "execute_agent_run")
+          .where("active_jobs.status", "=", "running")
+          .where("active_jobs.lease_expires_at", ">", databaseNow)
+          .distinct()
+      )
+        // @platform-worker-cross-tenant-claim reviewed scheduler authority
+        .selectFrom("worker_jobs as jobs")
         .innerJoin("agent_runs as runs", (join) => join
           .onRef("runs.tenant_id", "=", "jobs.tenant_id")
           .onRef("runs.run_id", "=", "jobs.run_id"))
-        .leftJoin("agent_runs as active_runs", (join) => join
-          .onRef("active_runs.tenant_id", "=", "runs.tenant_id")
-          .onRef("active_runs.conversation_id", "=", "runs.conversation_id"))
-        .leftJoin("worker_jobs as active_jobs", (join) => join
-          .onRef("active_jobs.tenant_id", "=", "active_runs.tenant_id")
-          .onRef("active_jobs.run_id", "=", "active_runs.run_id")
-          .on("active_jobs.job_kind", "=", "execute_agent_run")
-          .on("active_jobs.status", "=", "running")
-          .on("active_jobs.lease_expires_at", ">", databaseNow))
+        .leftJoin("active_execute_conversations as active_conversations", (join) => join
+          .onRef("active_conversations.tenant_id", "=", "jobs.tenant_id")
+          .onRef("active_conversations.conversation_id", "=", "runs.conversation_id"))
         .select([
           "jobs.tenant_id", "runs.conversation_id",
           sql<Date>`min(${sql.ref("jobs.created_at")})`.as("oldest_created_at"),
@@ -185,8 +192,8 @@ export async function claimPlatformWorkerJobs(
           ]),
           expression.and([expression("jobs.status", "=", "running"), expression("jobs.lease_expires_at", "<", databaseNow)]),
         ]))
+        .where("active_conversations.tenant_id", "is", null)
         .groupBy(["jobs.tenant_id", "runs.conversation_id"])
-        .having(sql<number>`count(${sql.ref("active_jobs.job_id")})`, "=", 0)
         .orderBy("oldest_created_at")
         .orderBy("jobs.tenant_id")
         .orderBy("runs.conversation_id")

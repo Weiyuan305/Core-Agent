@@ -210,16 +210,28 @@ possibly duplicate hidden replay.
 
 Production claim is Conversation-aware before work reaches the process. A
 bounded grouped discovery query returns only the earliest eligible
-`execute_agent_run` Conversation groups, ordered by their oldest job, and uses
-a tenant-composite self-join with `GROUP BY/HAVING` to exclude Conversations
-that already own an unexpired running execute job. It is not truncated by the
-first eight rows of one Conversation backlog. For each discovered Conversation
-the scheduler takes a transaction advisory try-lock in the same
+`execute_agent_run` Conversation groups, ordered by their oldest job. A
+MATERIALIZED CTE first computes the distinct tenant-and-Conversation keys that
+own an unexpired running execute job; the outer eligible jobs-and-Runs query
+then excludes those keys through a composite tenant-and-Conversation left
+anti-join. This avoids materializing a queued-Runs-by-active-Runs product inside
+one Conversation and is not truncated by the first eight rows of one
+Conversation backlog. For each discovered
+Conversation the scheduler takes a transaction advisory try-lock in the same
 `agent-session:v1` tenant-and-Conversation namespace, determines the earliest
 job ID, locks only that exact row with `FOR UPDATE SKIP LOCKED`, and rechecks
 eligibility and active ownership before update. A single claim also deduplicates
 Conversation keys. This serializes competing platform claimers without a new
 schema invariant while preserving parallel claims for unrelated Conversations.
+
+Schema version 7 supports this claim shape with composite indexes on Agent Run
+tenant/Conversation/Run identity, Worker job tenant/Run identity, eligible
+queued/retrying claims, and expired-running recovery claims. Migration tests
+prove a genuine v6-to-v7 upgrade, exact index existence, and index-backed plan
+support. A 500-Run same-Conversation regression reduced focused discovery and
+claim time from the reviewed 11.1 seconds to 274 milliseconds under cold
+statistics. Its analyzed plan also asserts that the maximum per-node work,
+calculated as actual rows multiplied by actual loops, stays below 5,000.
 
 The Worker process maintains a rolling set of at most eight dispatches. It
 claims only free slots rather than waiting for a batch barrier. While full, it

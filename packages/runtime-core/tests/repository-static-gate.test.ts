@@ -30,7 +30,7 @@ function findRepositoryQuerySafetyViolations(file: string, source: string): stri
       if (values === undefined || !hasTopLevelTenantId(values)) {
         violations.push(`${file}: ${table} insert is missing an explicit tenant_id value`);
       }
-    } else if (operation !== "insertInto" && tenantOwnedTables.has(table) && !authorityMarker && !/\.where\s*\(\s*["'](?:[a-z_][a-z0-9_]*\.)?tenant_id["']/i.test(chain)) {
+    } else if (operation !== "insertInto" && tenantOwnedTables.has(table) && !authorityMarker && !/\.where(?:Ref)?\s*\(\s*["'](?:[a-z_][a-z0-9_]*\.)?tenant_id["']/i.test(chain)) {
       violations.push(`${file}: ${table} query is missing a tenant_id predicate`);
     }
 
@@ -47,7 +47,7 @@ function findRepositoryQuerySafetyViolations(file: string, source: string): stri
       }
     }
   }
-  return violations;
+  return [...new Set(violations)];
 }
 
 function hasTopLevelTenantId(valuesCall: string): boolean {
@@ -87,6 +87,7 @@ function readQueryChain(source: string, start: number): string | undefined {
   let quote: "\"" | "'" | "`" | undefined;
   let lineComment = false;
   let blockComment = false;
+  let nestedEnd: number | undefined;
   for (let index = start; index < source.length; index += 1) {
     const character = source[index];
     const next = source[index + 1];
@@ -129,11 +130,13 @@ function readQueryChain(source: string, start: number): string | undefined {
     else if (character === "]") square -= 1;
     else if (character === "{") curly += 1;
     else if (character === "}") curly -= 1;
-    if (round === 0 && square === 0 && curly === 0 && source.slice(index).match(/^\.execute[A-Za-z]*\s*\(\s*\)/) !== null) {
+    if (nestedEnd === undefined && (round < 0 || square < 0 || curly < 0)) nestedEnd = index;
+    if ((nestedEnd !== undefined || (round === 0 && square === 0 && curly === 0)) && source.slice(index).match(/^\.execute[A-Za-z]*\s*\(\s*\)/) !== null) {
       const terminator = source.slice(index).match(/^\.execute[A-Za-z]*\s*\(\s*\)/)?.[0];
-      return terminator === undefined ? undefined : source.slice(start, index + terminator.length);
+      if (terminator === undefined) return undefined;
+      return source.slice(start, nestedEnd ?? index + terminator.length);
     }
-    if (round === 0 && square === 0 && curly === 0 && character === ";") return undefined;
+    if (round <= 0 && square <= 0 && curly <= 0 && character === ";") return undefined;
   }
   return undefined;
 }
@@ -217,6 +220,57 @@ test("static gate requires a top-level insert tenant and checks tenant joins fro
   assert.deepEqual(findRepositoryQuerySafetyViolations("nested.ts", unsafe), [
     "nested.ts: messages insert is missing an explicit tenant_id value",
     "nested.ts: messages join is missing a composite tenant_id condition",
+  ]);
+});
+
+test("static gate validates a tenant-scoped correlated subquery inside an executed outer chain", () => {
+  const safe = `
+    await db.selectFrom("worker_jobs as jobs")
+      .where(({ not, exists, selectFrom }) => not(exists(
+        selectFrom("worker_jobs as active_jobs")
+          .innerJoin("agent_runs as active_runs", (join) => join
+            .onRef("active_runs.tenant_id", "=", "active_jobs.tenant_id")
+            .onRef("active_runs.run_id", "=", "active_jobs.run_id"))
+          .whereRef("active_jobs.tenant_id", "=", "jobs.tenant_id")
+      )))
+      .where("jobs.tenant_id", "=", tenantId)
+      .execute();
+  `;
+  assert.deepEqual(findRepositoryQuerySafetyViolations("safe-subquery.ts", safe), []);
+});
+
+test("static gate rejects an unsafe nested subquery and a standalone forgotten query", () => {
+  const unsafe = `
+    await db.selectFrom("worker_jobs as jobs")
+      .where(({ not, exists, selectFrom }) => not(exists(
+        selectFrom("worker_jobs as active_jobs")
+          .innerJoin("agent_runs as active_runs", "active_runs.run_id", "active_jobs.run_id")
+      )))
+      .where("jobs.tenant_id", "=", tenantId)
+      .execute();
+    const forgotten = db.selectFrom("messages").where("tenant_id", "=", tenantId);
+  `;
+  assert.deepEqual(findRepositoryQuerySafetyViolations("unsafe-subquery.ts", unsafe), [
+    "unsafe-subquery.ts: agent_runs join is missing a composite tenant_id condition",
+    "unsafe-subquery.ts: worker_jobs query is missing a tenant_id predicate",
+    "unsafe-subquery.ts: messages selectFrom has no bounded execute terminator",
+  ]);
+});
+
+test("static gate rejects an unexecuted outer builder even when its nested subquery is safe", () => {
+  const forgotten = `
+    const query = db.selectFrom("worker_jobs as jobs")
+      .where(({ not, exists, selectFrom }) => not(exists(
+        selectFrom("worker_jobs as active_jobs")
+          .innerJoin("agent_runs as active_runs", (join) => join
+            .onRef("active_runs.tenant_id", "=", "active_jobs.tenant_id")
+            .onRef("active_runs.run_id", "=", "active_jobs.run_id"))
+          .whereRef("active_jobs.tenant_id", "=", "jobs.tenant_id")
+      )))
+      .where("jobs.tenant_id", "=", tenantId);
+  `;
+  assert.deepEqual(findRepositoryQuerySafetyViolations("forgotten-outer.ts", forgotten), [
+    "forgotten-outer.ts: worker_jobs selectFrom has no bounded execute terminator",
   ]);
 });
 
