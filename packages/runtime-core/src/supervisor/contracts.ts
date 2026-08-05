@@ -4,7 +4,12 @@ import type { SecretReference } from "../secrets/secret-store.js";
 
 export const MAX_SUPERVISOR_FRAME_BYTES = 262_144;
 export const SUPERVISOR_DEADLINE_BUDGET = Object.freeze({
+  initializerTimeoutMs: 35_000,
+  verifierTimeoutMs: 35_000,
+  reconciliationTimeoutMs: 10_000,
+  effectOverheadMs: 10_000,
   effectTimeoutMs: 120_000,
+  admissionTimeoutMs: 1_000,
   operationTimeoutMs: 150_000,
   cancellationSettlementTimeoutMs: 20_000,
   clientTimeoutMs: 180_000,

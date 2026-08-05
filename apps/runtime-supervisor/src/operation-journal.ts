@@ -57,6 +57,30 @@ interface HeldReservation {
   readonly heartbeat: NodeJS.Timeout;
 }
 
+const transientResponseBrand = Symbol("transient-operation-journal-response");
+
+export interface TransientOperationJournalResponse {
+  readonly [transientResponseBrand]: true;
+  readonly response: SupervisorResponseV1;
+}
+
+export interface OperationJournalRunOptions {
+  readonly admissionDeadlineMs?: number;
+  readonly admissionExpiredResponse?: SupervisorResponseV1;
+}
+
+export function transientOperationJournalResponse(
+  response: SupervisorResponseV1,
+): TransientOperationJournalResponse {
+  return Object.freeze({ [transientResponseBrand]: true as const, response });
+}
+
+function isTransientOperationJournalResponse(
+  value: SupervisorResponseV1 | TransientOperationJournalResponse,
+): value is TransientOperationJournalResponse {
+  return typeof value === "object" && value !== null && transientResponseBrand in value;
+}
+
 export interface OperationJournalOptions {
   readonly directory: string;
   readonly reservationStaleMs?: number;
@@ -238,7 +262,10 @@ export class OperationJournal {
 
   public run(
     value: unknown,
-    operation: (request: SupervisorRequestV1) => Promise<SupervisorResponseV1>,
+    operation: (
+      request: SupervisorRequestV1,
+    ) => Promise<SupervisorResponseV1 | TransientOperationJournalResponse>,
+    options: OperationJournalRunOptions = {},
   ): Promise<SupervisorResponseV1> {
     const request = validateSupervisorRequest(value);
     const complete = this.#complete.get(request.operation_id);
@@ -249,7 +276,12 @@ export class OperationJournal {
     if (prior !== undefined) {
       return prior.requestHash === request.request_hash ? prior.response : Promise.resolve(conflict(request.operation_id));
     }
-    const response = this.#runReserved(request, operation);
+    if (
+      (options.admissionDeadlineMs === undefined) !== (options.admissionExpiredResponse === undefined)
+      || (options.admissionDeadlineMs !== undefined
+        && (!Number.isSafeInteger(options.admissionDeadlineMs) || options.admissionDeadlineMs < 1))
+    ) throw journalError();
+    const response = this.#runReserved(request, operation, options);
     const reservation = { requestHash: request.request_hash, response };
     this.#inFlight.set(request.operation_id, reservation);
     void response.finally(() => {
@@ -260,7 +292,10 @@ export class OperationJournal {
 
   async #runReserved(
     request: SupervisorRequestV1,
-    operation: (request: SupervisorRequestV1) => Promise<SupervisorResponseV1>,
+    operation: (
+      request: SupervisorRequestV1,
+    ) => Promise<SupervisorResponseV1 | TransientOperationJournalResponse>,
+    options: OperationJournalRunOptions,
   ): Promise<SupervisorResponseV1> {
     const directory = await this.#openDirectory();
     try {
@@ -269,12 +304,24 @@ export class OperationJournal {
         const stored = await this.#read(directory, request.operation_id);
         if (stored !== undefined) return this.#replay(request, stored);
 
+        if (
+          options.admissionDeadlineMs !== undefined
+          && options.admissionExpiredResponse !== undefined
+          && Date.now() >= options.admissionDeadlineMs
+        ) return validateSupervisorResponse(options.admissionExpiredResponse);
+
         const acquired = await this.#tryAcquire(directory, request);
         if (acquired !== undefined) {
           try {
             const raced = await this.#read(directory, request.operation_id);
             if (raced !== undefined) return this.#replay(request, raced);
-            const response = validateSupervisorResponse(await operation(request));
+            const result = await operation(request);
+            if (isTransientOperationJournalResponse(result)) {
+              const transient = validateSupervisorResponse(result.response);
+              if (transient.operation_id !== request.operation_id) throw journalError();
+              return transient;
+            }
+            const response = validateSupervisorResponse(result);
             if (response.operation_id !== request.operation_id) throw journalError();
             const record: JournalRecordV1 = {
               protocol_version: 1,

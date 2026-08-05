@@ -274,7 +274,12 @@ test("Supervisor production deadline budget orders effect, operation, and client
   assert(budget.cancellationSettlementTimeoutMs > 0);
   assert(budget.admissionTimeoutMs > 0);
   assert(budget.admissionTimeoutMs < budget.effectTimeoutMs);
-  assert(budget.operationTimeoutMs + budget.cancellationSettlementTimeoutMs < budget.clientTimeoutMs);
+  assert(
+    budget.admissionTimeoutMs
+      + budget.operationTimeoutMs
+      + budget.cancellationSettlementTimeoutMs
+      < budget.clientTimeoutMs,
+  );
   assert.equal(runtimeCore.MAX_SUPERVISOR_TIMEOUT_MS, budget.clientTimeoutMs);
 });
 

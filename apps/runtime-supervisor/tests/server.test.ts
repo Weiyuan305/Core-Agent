@@ -271,7 +271,7 @@ test("busy admission is bounded and non-durable so a later retry can dispatch", 
       await released;
     }
     return accepted(value.operation_id);
-  }, { maximumConcurrent: 1, admissionTimeoutMs: 20 });
+  }, { maximumConcurrent: 1, admissionTimeoutMs: 100 });
   await server.start();
   try {
     const client = new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 });
@@ -354,7 +354,7 @@ test("Unix service caps execution at four and waits for abort settlement before 
     await timedReleased;
     mutations += 1;
     return accepted(value.operation_id);
-  }, { operationTimeoutMs: 25, shutdownTimeoutMs: 100 });
+  }, { admissionTimeoutMs: 50, operationTimeoutMs: 100, shutdownTimeoutMs: 100 });
   await timed.start();
   try {
     const journalRecordsBefore = (await readdir(join(temporaryRoot, "journal")))
@@ -410,8 +410,9 @@ test("an unsettled cancellation returns a bounded transient timeout without rele
     mutations += 1;
     return accepted(value.operation_id);
   }, {
-    operationTimeoutMs: 10,
-    cancellationSettlementTimeoutMs: 15,
+    admissionTimeoutMs: 50,
+    operationTimeoutMs: 100,
+    cancellationSettlementTimeoutMs: 30,
     shutdownTimeoutMs: 50,
   });
   await server.start();
