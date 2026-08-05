@@ -65,7 +65,13 @@ test.afterEach(async () => {
 
 function buildServer(
   execute: (request: SupervisorRequestV1, signal: AbortSignal) => Promise<SupervisorResponseV1>,
-  options: { operationTimeoutMs?: number; cancellationSettlementTimeoutMs?: number; shutdownTimeoutMs?: number } = {},
+  options: {
+    maximumConcurrent?: number;
+    admissionTimeoutMs?: number;
+    operationTimeoutMs?: number;
+    cancellationSettlementTimeoutMs?: number;
+    shutdownTimeoutMs?: number;
+  } = {},
 ) {
   return new RuntimeSupervisorServer({
     socketPath,
@@ -193,6 +199,112 @@ test("Unix service rejects deadline configuration outside the shared production 
     () => buildServer(execute, { cancellationSettlementTimeoutMs: 0 }),
     /SUPERVISOR_REJECTED/,
   );
+  assert.throws(
+    () => buildServer(execute, { admissionTimeoutMs: SUPERVISOR_DEADLINE_BUDGET.admissionTimeoutMs + 1 }),
+    /SUPERVISOR_REJECTED/,
+  );
+  assert.throws(
+    () => buildServer(execute, { admissionTimeoutMs: 0 }),
+    /SUPERVISOR_REJECTED/,
+  );
+});
+
+test("journal attachment precedes capacity so retries consume no execution slots", async () => {
+  let dispatches = 0;
+  let markBlocked!: () => void;
+  const blocked = new Promise<void>((resolve) => { markBlocked = resolve; });
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  const server = buildServer(async (value) => {
+    dispatches += 1;
+    if (value.operation_id === "operation_slot_owner") {
+      markBlocked();
+      await released;
+    }
+    return accepted(value.operation_id);
+  }, { maximumConcurrent: 2 });
+  await server.start();
+  try {
+    const client = new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 });
+    const owner = client.execute(request("operation_slot_owner"));
+    await blocked;
+    const retries = Array.from({ length: 3 }, () => (
+      client.execute(request("operation_slot_owner")).then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      )
+    ));
+    const unrelatedResult = await client.execute(request("operation_slot_unrelated")).then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    assert("value" in unrelatedResult, String("error" in unrelatedResult ? unrelatedResult.error : "missing response"));
+    const unrelated = unrelatedResult.value;
+    assert.equal(unrelated.outcome, "accepted");
+    assert.equal(dispatches, 2);
+    release();
+    const ownerResponse = await owner;
+    const replayed = await Promise.all(retries);
+    assert.equal(replayed.every((result) => "value" in result), true);
+    assert.deepEqual(replayed.map((result) => "value" in result ? result.value : undefined), [
+      ownerResponse,
+      ownerResponse,
+      ownerResponse,
+    ]);
+    assert.equal(dispatches, 2);
+  } finally {
+    release();
+    await server.close();
+  }
+});
+
+test("busy admission is bounded and non-durable so a later retry can dispatch", async () => {
+  let dispatches = 0;
+  let markBlocked!: () => void;
+  const blocked = new Promise<void>((resolve) => { markBlocked = resolve; });
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  const server = buildServer(async (value) => {
+    dispatches += 1;
+    if (value.operation_id === "operation_busy_owner") {
+      markBlocked();
+      await released;
+    }
+    return accepted(value.operation_id);
+  }, { maximumConcurrent: 1, admissionTimeoutMs: 20 });
+  await server.start();
+  try {
+    const client = new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 });
+    const owner = client.execute(request("operation_busy_owner")).then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    await blocked;
+    const busyResult = await client.execute(request("operation_busy_retry")).then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    assert("value" in busyResult, String("error" in busyResult ? busyResult.error : "missing response"));
+    const busy = busyResult.value;
+    assert.equal(busy.outcome, "failed");
+    if (busy.outcome === "failed") {
+      assert.equal(busy.code, "DEPENDENCY_UNAVAILABLE");
+      assert.equal(busy.retryable, true);
+    }
+    assert.equal(dispatches, 1);
+    const journalNames = await readdir(join(temporaryRoot, "journal"));
+    assert.equal(journalNames.some((name) => name.endsWith(".json") && name.includes("operation_busy_retry")), false);
+    assert.equal(journalNames.filter((name) => name.endsWith(".lock")).length, 1);
+
+    release();
+    assert("value" in await owner);
+    const retried = await client.execute(request("operation_busy_retry"));
+    assert.equal(retried.outcome, "accepted");
+    assert.equal(dispatches, 2);
+  } finally {
+    release();
+    await server.close();
+  }
 });
 
 test("Unix service caps execution at four and waits for abort settlement before journaling", async () => {

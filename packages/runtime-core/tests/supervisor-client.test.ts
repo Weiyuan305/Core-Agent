@@ -246,17 +246,34 @@ test("Supervisor client applies a bounded timeout and redacts transport details"
 test("Supervisor production deadline budget orders effect, operation, and client wait", () => {
   const exported = runtimeCore as unknown as Record<string, unknown>;
   const budget = exported.SUPERVISOR_DEADLINE_BUDGET as undefined | {
+    readonly initializerTimeoutMs: number;
+    readonly verifierTimeoutMs: number;
+    readonly reconciliationTimeoutMs: number;
+    readonly effectOverheadMs: number;
     readonly effectTimeoutMs: number;
     readonly operationTimeoutMs: number;
     readonly cancellationSettlementTimeoutMs: number;
+    readonly admissionTimeoutMs: number;
     readonly clientTimeoutMs: number;
   };
 
   assert(budget !== undefined);
   assert.equal(Object.isFrozen(budget), true);
-  assert(budget.effectTimeoutMs >= 120_000);
+  assert(budget.initializerTimeoutMs > 0);
+  assert(budget.verifierTimeoutMs > 0);
+  assert(budget.reconciliationTimeoutMs > 0);
+  assert(budget.effectOverheadMs > 0);
+  assert(
+    budget.initializerTimeoutMs
+      + budget.verifierTimeoutMs
+      + (budget.reconciliationTimeoutMs * 3)
+      + budget.effectOverheadMs
+      < budget.effectTimeoutMs,
+  );
   assert(budget.effectTimeoutMs < budget.operationTimeoutMs);
   assert(budget.cancellationSettlementTimeoutMs > 0);
+  assert(budget.admissionTimeoutMs > 0);
+  assert(budget.admissionTimeoutMs < budget.effectTimeoutMs);
   assert(budget.operationTimeoutMs + budget.cancellationSettlementTimeoutMs < budget.clientTimeoutMs);
   assert.equal(runtimeCore.MAX_SUPERVISOR_TIMEOUT_MS, budget.clientTimeoutMs);
 });
