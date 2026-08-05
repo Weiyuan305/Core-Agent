@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -176,7 +176,7 @@ test("Unix service refuses unsafe parents and never unlinks a non-socket", async
   assert.equal(await readFile(socketPath, "utf8"), "preserve-me");
 });
 
-test("Unix service caps execution at four and applies an aborting operation deadline", async () => {
+test("Unix service caps execution at four and waits for abort settlement before journaling", async () => {
   let active = 0;
   let maximum = 0;
   let release!: () => void;
@@ -208,29 +208,51 @@ test("Unix service caps execution at four and applies an aborting operation dead
 
   socketPath = join(temporaryRoot, "deadline.sock");
   let aborted = false;
+  let dispatches = 0;
+  let mutations = 0;
+  let releaseTimed!: () => void;
+  const timedReleased = new Promise<void>((resolve) => { releaseTimed = resolve; });
+  let observeAbort!: () => void;
+  const abortObserved = new Promise<void>((resolve) => { observeAbort = resolve; });
   const timed = buildServer(async (value, signal) => {
-    await new Promise<void>((resolve) => {
-      signal.addEventListener("abort", () => {
-        aborted = true;
-        resolve();
-      }, { once: true });
-    });
+    dispatches += 1;
+    signal.addEventListener("abort", () => {
+      aborted = true;
+      observeAbort();
+    }, { once: true });
+    await timedReleased;
+    mutations += 1;
     return accepted(value.operation_id);
   }, { operationTimeoutMs: 25, shutdownTimeoutMs: 100 });
   await timed.start();
   try {
-    const response = await new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 })
-      .execute(request("operation_deadline"));
-    assert.deepEqual(response, {
-      protocol_version: 1,
-      operation_id: "operation_deadline",
-      outcome: "failed",
-      code: "DEPENDENCY_TIMEOUT",
-      retryable: true,
-      summary: "Runtime Supervisor operation timed out",
-    });
+    const client = new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 });
+    let firstSettled = false;
+    const first = client.execute(request("operation_deadline")).finally(() => { firstSettled = true; });
+    await abortObserved;
+    await new Promise((resolve) => setImmediate(resolve));
     assert.equal(aborted, true);
+    assert.equal(firstSettled, false);
+    assert.equal(dispatches, 1);
+    assert.equal(mutations, 0);
+    assert.equal((await readdir(join(temporaryRoot, "journal"))).some((name) => name.endsWith(".json")), false);
+
+    let replaySettled = false;
+    const replay = client.execute(request("operation_deadline")).finally(() => { replaySettled = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(replaySettled, false);
+    assert.equal(dispatches, 1);
+
+    releaseTimed();
+    const [response, replayed] = await Promise.all([first, replay]);
+    assert.equal(response.outcome, "accepted");
+    assert.deepEqual(replayed, response);
+    assert.equal(mutations, 1);
+    assert.equal((await readdir(join(temporaryRoot, "journal"))).some((name) => name.endsWith(".json")), true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(mutations, 1);
   } finally {
+    releaseTimed();
     await timed.close();
   }
 });

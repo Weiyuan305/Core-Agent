@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import * as runtimeCore from "../src/index.js";
 import {
   FakeRuntimeSupervisorServer,
   RuntimeSupervisorClient,
@@ -233,11 +234,61 @@ test("Supervisor client applies a bounded timeout and redacts transport details"
       },
     );
     assert.throws(
-      () => new RuntimeSupervisorClient({ socketPath, timeoutMs: 10_001 }),
+      () => new RuntimeSupervisorClient({ socketPath, timeoutMs: runtimeCore.MAX_SUPERVISOR_TIMEOUT_MS + 1 }),
       /DEPENDENCY_TIMEOUT/,
     );
   } finally {
     for (const socket of acceptedSockets) socket.destroy();
     await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("Supervisor production deadline budget orders effect, operation, and client wait", () => {
+  const exported = runtimeCore as unknown as Record<string, unknown>;
+  const budget = exported.SUPERVISOR_DEADLINE_BUDGET as undefined | {
+    readonly effectTimeoutMs: number;
+    readonly operationTimeoutMs: number;
+    readonly clientTimeoutMs: number;
+  };
+
+  assert(budget !== undefined);
+  assert.equal(Object.isFrozen(budget), true);
+  assert(budget.effectTimeoutMs >= 120_000);
+  assert(budget.effectTimeoutMs < budget.operationTimeoutMs);
+  assert(budget.operationTimeoutMs < budget.clientTimeoutMs);
+  assert.equal(runtimeCore.MAX_SUPERVISOR_TIMEOUT_MS, budget.clientTimeoutMs);
+});
+
+test("Supervisor default client accepts an operation beyond the former ten-second ceiling", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const server = new FakeRuntimeSupervisorServer({
+    socketPath,
+    dispatch: async (request) => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10_001));
+      return {
+        protocol_version: 1,
+        operation_id: request.operation_id,
+        outcome: "accepted",
+        observation: {
+          tenant_id: request.kind === "provision" ? request.runtime.tenant_id : request.tenant_id,
+          runtime_id: request.kind === "provision" ? request.runtime.runtime_id : request.runtime_id,
+          generation: request.kind === "provision" ? request.runtime.generation : request.generation,
+          exists: true,
+          lifecycle: "running",
+          health: "healthy",
+          image_ref: request.kind === "provision" ? request.runtime.image_ref : imageRef,
+        },
+      };
+    },
+  });
+  await server.start();
+  try {
+    const pending = new RuntimeSupervisorClient({ socketPath }).execute(signed());
+    while (server.requests.length === 0) await new Promise((resolve) => setImmediate(resolve));
+    context.mock.timers.tick(10_001);
+    const response = await pending;
+    assert.equal(response.outcome, "accepted");
+  } finally {
+    await server.close();
   }
 });

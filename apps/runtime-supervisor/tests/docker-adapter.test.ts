@@ -179,7 +179,8 @@ class FakeContainer {
     public options?: Dockerode.ContainerCreateOptions,
   ) {}
 
-  public async inspect(): Promise<unknown> {
+  public async inspect(options?: { readonly abortSignal?: AbortSignal }): Promise<unknown> {
+    this.docker.cancellationSignals.push({ operation: `inspect:${this.name}`, signal: options?.abortSignal });
     if (this.options === undefined && this.name.startsWith("core-agent-runtime-")) {
       this.docker.gatewayInspections += 1;
       this.docker.markGatewayInspection?.();
@@ -238,7 +239,8 @@ class FakeContainer {
     };
   }
 
-  public async start(): Promise<void> {
+  public async start(options?: { readonly abortSignal?: AbortSignal }): Promise<void> {
+    this.docker.cancellationSignals.push({ operation: `start:${this.name}`, signal: options?.abortSignal });
     this.actions.push("start");
     this.docker.mutations.push(`start:${this.name}`);
     if (this.options?.Labels?.["core-agent.resource"] === "runtime" && this.docker.failGatewayStart) {
@@ -247,19 +249,22 @@ class FakeContainer {
     this.running = true;
   }
 
-  public async stop(): Promise<void> {
+  public async stop(options?: { readonly abortSignal?: AbortSignal }): Promise<void> {
+    this.docker.cancellationSignals.push({ operation: `stop:${this.name}`, signal: options?.abortSignal });
     this.actions.push("stop");
     this.docker.mutations.push(`stop:${this.name}`);
     this.running = false;
   }
 
-  public async restart(): Promise<void> {
+  public async restart(options?: { readonly abortSignal?: AbortSignal }): Promise<void> {
+    this.docker.cancellationSignals.push({ operation: `restart:${this.name}`, signal: options?.abortSignal });
     this.actions.push("restart");
     this.docker.mutations.push(`restart:${this.name}`);
     this.running = true;
   }
 
-  public async wait(): Promise<{ StatusCode: number }> {
+  public async wait(options?: { readonly abortSignal?: AbortSignal }): Promise<{ StatusCode: number }> {
+    this.docker.cancellationSignals.push({ operation: `wait:${this.name}`, signal: options?.abortSignal });
     this.actions.push("wait");
     if (this.options?.Labels?.["core-agent.resource"] === "runtime-manifest-verifier") {
       const outputBind = this.options.HostConfig?.Binds?.find((bind) => bind.endsWith(":/run/core-agent/output"));
@@ -275,11 +280,13 @@ class FakeContainer {
     return { StatusCode: this.docker.initializerExitCode };
   }
 
-  public async logs(): Promise<Buffer> {
+  public async logs(options?: { readonly abortSignal?: AbortSignal }): Promise<Buffer> {
+    this.docker.cancellationSignals.push({ operation: `logs:${this.name}`, signal: options?.abortSignal });
     return Buffer.from(this.docker.initializerLogs);
   }
 
-  public async remove(options?: Dockerode.ContainerRemoveOptions): Promise<void> {
+  public async remove(options?: Dockerode.ContainerRemoveOptions & { readonly abortSignal?: AbortSignal }): Promise<void> {
+    this.docker.cancellationSignals.push({ operation: `remove:${this.name}`, signal: options?.abortSignal });
     this.actions.push(`remove:${JSON.stringify(options ?? {})}`);
     this.docker.mutations.push(`remove:${this.name}`);
     this.removed = true;
@@ -290,7 +297,8 @@ class FakeContainer {
 class FakeVolume {
   public constructor(readonly docker: FakeDocker, readonly name: string) {}
 
-  public async inspect(): Promise<unknown> {
+  public async inspect(options?: { readonly abortSignal?: AbortSignal }): Promise<unknown> {
+    this.docker.cancellationSignals.push({ operation: `inspect-volume:${this.name}`, signal: options?.abortSignal });
     const value = this.docker.volumes.get(this.name);
     if (value === undefined) throw missing();
     return value;
@@ -300,7 +308,8 @@ class FakeVolume {
 class FakeNetwork {
   public constructor(readonly docker: FakeDocker, readonly name: string) {}
 
-  public async inspect(): Promise<unknown> {
+  public async inspect(options?: { readonly abortSignal?: AbortSignal }): Promise<unknown> {
+    this.docker.cancellationSignals.push({ operation: `inspect-network:${this.name}`, signal: options?.abortSignal });
     const value = this.docker.networks.get(this.name);
     if (value === undefined) throw missing();
     return value;
@@ -310,7 +319,8 @@ class FakeNetwork {
 class FakeImage {
   public constructor(readonly docker: FakeDocker, readonly name: string) {}
 
-  public async inspect(): Promise<unknown> {
+  public async inspect(options?: { readonly abortSignal?: AbortSignal }): Promise<unknown> {
+    this.docker.cancellationSignals.push({ operation: `inspect-image:${this.name}`, signal: options?.abortSignal });
     if (this.name !== imageRef) throw missing();
     return {
       Config: {
@@ -339,6 +349,7 @@ class FakeDocker {
   public gatewayInspectionBarrier: Promise<void> | undefined;
   public markGatewayInspection: (() => void) | undefined;
   public readonly hostMappings: Array<{ readonly host: string; readonly local: string }> = [];
+  public readonly cancellationSignals: Array<{ readonly operation: string; readonly signal?: AbortSignal }> = [];
 
   public localPath(path: string): string {
     const mapping = this.hostMappings.find(({ host }) => path === host || path.startsWith(`${host}/`));
@@ -354,6 +365,7 @@ class FakeDocker {
   }
 
   public async createContainer(options: Dockerode.ContainerCreateOptions): Promise<FakeContainer> {
+    this.cancellationSignals.push({ operation: `create-container:${options.name ?? "missing"}`, signal: options.abortSignal });
     const name = options.name;
     if (typeof name !== "string") throw new Error("missing container name");
     if (this.containers.has(name)) throw new Error("already exists");
@@ -379,7 +391,8 @@ class FakeDocker {
     return new FakeVolume(this, name);
   }
 
-  public async createVolume(options: { Name?: string; Labels?: Record<string, string> }): Promise<unknown> {
+  public async createVolume(options: { Name?: string; Labels?: Record<string, string>; abortSignal?: AbortSignal }): Promise<unknown> {
+    this.cancellationSignals.push({ operation: `create-volume:${options.Name ?? "missing"}`, signal: options.abortSignal });
     const name = options.Name;
     if (typeof name !== "string") throw new Error("missing volume name");
     this.volumes.set(name, { Name: name, Labels: structuredClone(options.Labels ?? {}) });
@@ -392,6 +405,7 @@ class FakeDocker {
   }
 
   public async createNetwork(options: Dockerode.NetworkCreateOptions): Promise<unknown> {
+    this.cancellationSignals.push({ operation: `create-network:${options.Name}`, signal: options.abortSignal });
     const ipam = structuredClone(options.IPAM ?? {
       Driver: "default",
       Config: [],
@@ -542,6 +556,26 @@ test("initializer and gateway use daemon-visible binds, one numeric identity, an
       Config: [{ Subnet: "172.31.240.0/24", Gateway: "172.31.240.1" }],
     },
   });
+});
+
+test("adapter propagates one operation AbortSignal through Docker inspection and mutation calls", async () => {
+  const { adapter, docker } = buildAdapter();
+  const controller = new AbortController();
+  const provisioned = await adapter.execute(signed(), controller.signal);
+  assert.equal(provisioned.outcome, "accepted");
+  const stopped = await adapter.execute(lifecycle("stop", "operation_signal_stop"), controller.signal);
+  assert.equal(stopped.outcome, "accepted");
+  const restarted = await adapter.execute(lifecycle("restart", "operation_signal_restart"), controller.signal);
+  assert.equal(restarted.outcome, "accepted");
+  const deleted = await adapter.execute(lifecycle("delete", "operation_signal_delete"), controller.signal);
+  assert.equal(deleted.outcome, "accepted");
+
+  assert(docker.cancellationSignals.length > 20);
+  assert.equal(
+    docker.cancellationSignals.every(({ signal }) => signal === controller.signal),
+    true,
+    JSON.stringify(docker.cancellationSignals.map(({ operation, signal }) => ({ operation, propagated: signal === controller.signal }))),
+  );
 });
 
 test("gateway adoption accepts only the exact Docker merge of locked-image and runtime configuration", async () => {
