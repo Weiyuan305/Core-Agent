@@ -334,7 +334,7 @@ class FakeDocker {
   public manifestRawOverride: string | Uint8Array | undefined;
   public attachExternalNetwork = false;
   public failGatewayStart = false;
-  public mergeImageConfiguration = false;
+  public mergeImageConfiguration = true;
   public gatewayInspections = 0;
   public gatewayInspectionBarrier: Promise<void> | undefined;
   public markGatewayInspection: (() => void) | undefined;
@@ -391,7 +391,11 @@ class FakeDocker {
     return new FakeNetwork(this, name);
   }
 
-  public async createNetwork(options: { Name: string; Driver?: string; Internal?: boolean; Attachable?: boolean; Labels?: Record<string, string> }): Promise<unknown> {
+  public async createNetwork(options: Dockerode.NetworkCreateOptions): Promise<unknown> {
+    const ipam = structuredClone(options.IPAM ?? {
+      Driver: "default",
+      Config: [],
+    }) as { Driver?: string; Options?: Record<string, string> | null; Config?: unknown[] };
     this.networks.set(options.Name, {
       Name: options.Name,
       Driver: options.Driver,
@@ -402,11 +406,7 @@ class FakeDocker {
       Ingress: false,
       EnableIPv6: false,
       Options: structuredClone((options as { Options?: Record<string, string> }).Options ?? {}),
-      IPAM: structuredClone((options as { IPAM?: unknown }).IPAM ?? {
-        Driver: "default",
-        Options: null,
-        Config: [],
-      }),
+      IPAM: { ...ipam, Options: ipam.Options ?? null },
     });
     this.mutations.push(`network:${options.Name}`);
     return this.networks.get(options.Name);
@@ -470,7 +470,6 @@ test("initializer and gateway use daemon-visible binds, one numeric identity, an
   assert.equal(initializer.HostConfig?.NetworkMode, "none");
   assert.deepEqual(initializer.HostConfig?.CapDrop, ["ALL"]);
   assert.equal(initializer.HostConfig?.ReadonlyRootfs, true);
-  assert.deepEqual(initializer.Env, []);
   assert.equal(initializer.HostConfig?.Binds?.some((bind) => bind.includes("docker.sock")), false);
   assert.equal(initializer.HostConfig?.AutoRemove, false);
   assert.equal(initializer.Entrypoint?.[0], "/opt/hermes/.venv/bin/python");

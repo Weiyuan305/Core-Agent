@@ -104,7 +104,10 @@ Load the non-secret environment, then execute the Task17 prerequisites in this
 order. `runtime:images` performs registry access and writes the Node/PostgreSQL
 lock only when the resolved indexes are valid. `runtime:network` creates or
 validates the labeled internal backplane and dedicated non-internal egress
-bridge. `runtime:paths` enforces all five canonical path, owner, mode,
+bridge. The egress bridge is fixed to `172.31.240.0/24` with gateway
+`172.31.240.1`, default IPAM, IPv4 masquerading enabled, and IPv6 disabled;
+the command fails closed on a host CIDR collision or configuration drift.
+`runtime:paths` enforces all five canonical path, owner, mode,
 link-count, and non-overlap rules and creates private state-root `staging` and
 `ingress` children. On macOS/Colima, keep state below a canonical Docker-shared
 host path such as `/Users/...`; Supervisor passes those host child paths to the

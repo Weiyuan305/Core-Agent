@@ -56,7 +56,11 @@ The development Compose project treats `core-agent-backplane` and
 creates both idempotently with the exact labels enforced by Runtime Supervisor,
 or refuses a network whose driver, internal flag, attachability, name, or
 labels drift. Backplane is internal; egress is deliberately non-internal so
-Hermes can reach the selected HTTPS model provider. Neither is attachable.
+Hermes can reach the selected HTTPS model provider. The egress bridge has the
+closed single-host contract `172.31.240.0/24`, gateway `172.31.240.1`, local
+scope, IPv6 and swarm ingress disabled, default IPAM, and IP masquerading
+enabled. Preparation fails closed if that CIDR is unavailable or any of those
+settings drift. Neither network is attachable.
 Compose teardown therefore cannot claim a network containing
 Supervisor-managed Hermes containers.
 

@@ -7,11 +7,24 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const networkContracts = Object.freeze([
   Object.freeze({ name: "core-agent-backplane", resource: "backplane", internal: true }),
-  Object.freeze({ name: "core-agent-egress", resource: "egress", internal: false }),
+  Object.freeze({
+    name: "core-agent-egress",
+    resource: "egress",
+    internal: false,
+    subnet: "172.31.240.0/24",
+    gateway: "172.31.240.1",
+    options: Object.freeze({ "com.docker.network.bridge.enable_ip_masquerade": "true" }),
+  }),
 ]);
 
 function invalidNetwork() {
   return new Error("runtime network is invalid");
+}
+
+function exactRecord(value, expected) {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    && Object.keys(value).length === Object.keys(expected).length
+    && Object.entries(expected).every(([key, item]) => value[key] === item);
 }
 
 async function docker(args) {
@@ -43,6 +56,18 @@ function validateInspection(raw, contract) {
     || value.Labels["core-agent.resource"] !== contract.resource
     || value.Labels["core-agent.network"] !== contract.name
   ) throw invalidNetwork();
+  if (contract.resource === "egress" && (
+    value.Scope !== "local"
+    || value.Ingress !== false
+    || value.EnableIPv6 !== false
+    || !exactRecord(value.Options, contract.options)
+    || typeof value.IPAM !== "object" || value.IPAM === null || Array.isArray(value.IPAM)
+    || Object.keys(value.IPAM).length !== 3
+    || value.IPAM.Driver !== "default"
+    || value.IPAM.Options !== null
+    || !Array.isArray(value.IPAM.Config) || value.IPAM.Config.length !== 1
+    || !exactRecord(value.IPAM.Config[0], { Subnet: contract.subnet, Gateway: contract.gateway })
+  )) throw invalidNetwork();
 }
 
 export async function prepareRuntimeNetwork({ runDocker = docker } = {}) {
@@ -55,6 +80,11 @@ export async function prepareRuntimeNetwork({ runDocker = docker } = {}) {
       await runDocker([
         "network", "create", "--driver", "bridge",
         ...(contract.internal ? ["--internal"] : []),
+        ...(contract.resource === "egress" ? [
+          "--subnet", contract.subnet,
+          "--gateway", contract.gateway,
+          "--opt", "com.docker.network.bridge.enable_ip_masquerade=true",
+        ] : []),
         "--label", "core-agent.managed=runtime-v1",
         "--label", `core-agent.resource=${contract.resource}`,
         "--label", `core-agent.network=${contract.name}`,

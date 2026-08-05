@@ -19,9 +19,12 @@ accepted and implemented.
   group. Do not reuse the development shared UID arrangement in production.
 - Keep Hermes containers on exactly the labeled internal backplane and the
   dedicated non-internal egress bridge, with no host port bindings. Worker
-  reaches only the backplane address. Treat egress as a trusted single-host
-  boundary, restrict host forwarding/firewall policy, and attach no unrelated
-  container. Supervisor adoption must validate the complete prior label set,
+  reaches only the backplane address. Provision egress as the exact local
+  `172.31.240.0/24` bridge with gateway `172.31.240.1`, default IPAM, IPv4
+  masquerading enabled, and IPv6 and swarm ingress disabled; a collision or
+  drift is a deployment failure. Treat egress as a trusted single-host boundary,
+  restrict host forwarding/firewall policy, and attach no unrelated container.
+  Supervisor adoption must validate the complete prior label set,
   request hash, tenant/runtime identity, generation, volume, network, and image
   digest before it acts.
 

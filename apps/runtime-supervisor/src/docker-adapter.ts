@@ -20,6 +20,7 @@ import type Dockerode from "dockerode";
 
 import {
   deriveManagedRuntimeNames,
+  loadRuntimeImageLock,
   REMOVED_RUNTIME_IMAGE_REF,
   validateSupervisorRequest,
   type ProviderCatalog,
@@ -40,6 +41,19 @@ import {
 const requestHashPattern = /^sha256:[a-f0-9]{64}$/;
 const maximumInitializerWaitMs = 120_000;
 const managedEgressNetwork = "core-agent-egress";
+const managedHomeEnvironment = "HOME=/opt/data";
+const gatewayEnvironment = Object.freeze([
+  managedHomeEnvironment,
+  "API_SERVER_ENABLED=true",
+  "API_SERVER_HOST=0.0.0.0",
+  "API_SERVER_PORT=8642",
+  "GATEWAY_MULTIPLEX_PROFILES=true",
+]);
+const egressNetworkConfiguration = Object.freeze({
+  subnet: "172.31.240.0/24",
+  gateway: "172.31.240.1",
+  options: Object.freeze({ "com.docker.network.bridge.enable_ip_masquerade": "true" }),
+});
 
 interface DockerContainerLike {
   inspect(): Promise<unknown>;
@@ -55,8 +69,14 @@ interface DockerResourceLike {
   inspect(): Promise<unknown>;
 }
 
+interface LockedImageConfiguration {
+  readonly environment: readonly string[];
+  readonly labels: Readonly<Record<string, string>>;
+}
+
 export interface DockerClientLike {
   getContainer(name: string): DockerContainerLike;
+  getImage(name: string): DockerResourceLike;
   createContainer(options: Dockerode.ContainerCreateOptions): Promise<DockerContainerLike>;
   getVolume(name: string): DockerResourceLike;
   createVolume(options: Dockerode.VolumeCreateOptions): Promise<unknown>;
@@ -141,6 +161,35 @@ function exactStringRecord(value: unknown, expected: Readonly<Record<string, str
   }
 }
 
+function exactDataKeys(value: unknown, expectedKeys: readonly string[]): void {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw rejected();
+  const keys = Reflect.ownKeys(value);
+  if (
+    keys.length !== expectedKeys.length
+    || keys.some((key) => typeof key !== "string" || !expectedKeys.includes(key))
+  ) throw rejected();
+  for (const key of expectedKeys) dataProperty(value, key);
+}
+
+function safeStringRecord(value: unknown): Readonly<Record<string, string>> {
+  if (typeof value !== "object" || value === null || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) {
+    throw rejected();
+  }
+  const keys = Reflect.ownKeys(value);
+  if (keys.length > 256) throw rejected();
+  const result = Object.create(null) as Record<string, string>;
+  for (const key of keys) {
+    if (typeof key !== "string" || key.length < 1 || key.length > 256) throw rejected();
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (
+      descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable
+      || typeof descriptor.value !== "string" || descriptor.value.length > 4_096
+    ) throw rejected();
+    result[key] = descriptor.value;
+  }
+  return Object.freeze(result);
+}
+
 function safeStringArray(value: unknown): readonly string[] {
   if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) throw rejected();
   const result: string[] = [];
@@ -157,6 +206,31 @@ function safeStringArray(value: unknown): readonly string[] {
 function equalStringArrays(value: unknown, expected: readonly string[]): void {
   const actual = safeStringArray(value);
   if (actual.length !== expected.length || actual.some((item, index) => item !== expected[index])) throw rejected();
+}
+
+function environmentRecord(value: unknown): Readonly<Record<string, string>> {
+  const values = safeStringArray(value);
+  if (values.length > 256) throw rejected();
+  const result = Object.create(null) as Record<string, string>;
+  for (const item of values) {
+    const separator = item.indexOf("=");
+    const name = separator < 0 ? item : item.slice(0, separator);
+    if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/u.test(name) || Object.hasOwn(result, name)) throw rejected();
+    result[name] = item;
+  }
+  return Object.freeze(result);
+}
+
+function validateMergedEnvironment(
+  value: unknown,
+  imageEnvironment: readonly string[],
+  runtimeEnvironment: readonly string[],
+): void {
+  const expected = {
+    ...environmentRecord(imageEnvironment),
+    ...environmentRecord(runtimeEnvironment),
+  };
+  exactStringRecord(environmentRecord(value), expected);
 }
 
 function exactEmptyRecord(value: unknown): void {
@@ -356,7 +430,7 @@ function exactInitializerOptions(
       "--data-root", "/opt/data",
       "--manifest", "/opt/data/.core-agent/manifest.json",
     ],
-    Env: [],
+    Env: [managedHomeEnvironment],
     Labels: { ...runtimeLabels(request, names), "core-agent.resource": "runtime-initializer" },
     HostConfig: {
       AutoRemove: false,
@@ -392,12 +466,7 @@ function exactGatewayOptions(
     User: user,
     Entrypoint: ["/opt/core-agent/gateway-entrypoint.sh"],
     Cmd: [],
-    Env: [
-      "API_SERVER_ENABLED=true",
-      "API_SERVER_HOST=0.0.0.0",
-      "API_SERVER_PORT=8642",
-      "GATEWAY_MULTIPLEX_PROFILES=true",
-    ],
+    Env: [...gatewayEnvironment],
     Labels: { ...runtimeLabels(request, names) },
     ExposedPorts: { "8642/tcp": {} },
     HostConfig: {
@@ -455,7 +524,7 @@ function exactManifestVerifierOptions(
       "-c",
       "import os; from pathlib import Path; data=Path('/opt/data/.core-agent/manifest.json').read_bytes(); fd=os.open('/run/core-agent/output/manifest.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600); os.write(fd,data); os.fsync(fd); os.close(fd)",
     ],
-    Env: [],
+    Env: [managedHomeEnvironment],
     Labels: { ...runtimeLabels(request, names), "core-agent.resource": "runtime-manifest-verifier" },
     HostConfig: {
       AutoRemove: false,
@@ -582,6 +651,33 @@ function validateNetworkInspection(
     || booleanProperty(value, "Attachable") !== false
   ) throw rejected();
   exactStringRecord(dataProperty(value, "Labels"), networkLabels(name, resource));
+  if (resource === "egress") {
+    if (
+      stringProperty(value, "Scope") !== "local"
+      || booleanProperty(value, "Ingress") !== false
+      || booleanProperty(value, "EnableIPv6") !== false
+    ) throw rejected();
+    exactStringRecord(dataProperty(value, "Options"), egressNetworkConfiguration.options);
+    const ipam = dataProperty(value, "IPAM");
+    exactDataKeys(ipam, ["Driver", "Options", "Config"]);
+    if (stringProperty(ipam, "Driver") !== "default" || dataProperty(ipam, "Options") !== null) throw rejected();
+    const configurations = dataProperty(ipam, "Config");
+    if (!Array.isArray(configurations) || Object.getPrototypeOf(configurations) !== Array.prototype || configurations.length !== 1) {
+      throw rejected();
+    }
+    const configuration = dataProperty(configurations, "0");
+    exactStringRecord(configuration, {
+      Subnet: egressNetworkConfiguration.subnet,
+      Gateway: egressNetworkConfiguration.gateway,
+    });
+  }
+}
+
+function gatewayImageReference(value: unknown): string {
+  const config = dataProperty(value, "Config");
+  const imageRef = stringProperty(config, "Image");
+  if (stringProperty(dataProperty(config, "Labels"), "core-agent.image-ref") !== imageRef) throw rejected();
+  return imageRef;
 }
 
 function validateGatewayInspection(
@@ -591,6 +687,7 @@ function validateGatewayInspection(
   names: RuntimeNames,
   ingressPath: string,
   user: string,
+  imageConfiguration: LockedImageConfiguration,
 ): RuntimeObservation {
   if (stringProperty(value, "Name") !== `/${names.container}`) throw rejected();
   const config = dataProperty(value, "Config");
@@ -602,28 +699,26 @@ function validateGatewayInspection(
   const imageRef = request === undefined
     ? stringProperty(labels, "core-agent.image-ref")
     : request.runtime.image_ref;
-  const expectedLabels = runtimeLabels({
-    protocol_version: 1,
-    operation_id: request?.operation_id ?? "lifecycle_adoption",
-    kind: "provision",
-    request_hash: requestHash,
-    runtime: {
-      ...identity,
-      image_ref: imageRef,
-      platform: "linux/amd64",
-      volume_ref: names.volume,
-      ingress_secret_ref: { reference_id: "placeholder", version: 1, purpose: "hermes_ingress" },
-      profiles: [],
-    },
-  }, names);
+  const expectedLabels = {
+    ...imageConfiguration.labels,
+    ...runtimeLabels({
+      protocol_version: 1,
+      operation_id: request?.operation_id ?? "lifecycle_adoption",
+      kind: "provision",
+      request_hash: requestHash,
+      runtime: {
+        ...identity,
+        image_ref: imageRef,
+        platform: "linux/amd64",
+        volume_ref: names.volume,
+        ingress_secret_ref: { reference_id: "placeholder", version: 1, purpose: "hermes_ingress" },
+        profiles: [],
+      },
+    }, names),
+  };
   exactStringRecord(labels, expectedLabels);
   if (stringProperty(config, "Image") !== imageRef || stringProperty(config, "User") !== user) throw rejected();
-  equalStringArrays(dataProperty(config, "Env"), [
-    "API_SERVER_ENABLED=true",
-    "API_SERVER_HOST=0.0.0.0",
-    "API_SERVER_PORT=8642",
-    "GATEWAY_MULTIPLEX_PROFILES=true",
-  ]);
+  validateMergedEnvironment(dataProperty(config, "Env"), imageConfiguration.environment, gatewayEnvironment);
   equalStringArrays(dataProperty(config, "Entrypoint"), ["/opt/core-agent/gateway-entrypoint.sh"]);
   equalStringArrays(dataProperty(config, "Cmd"), []);
   const exposedPorts = dataProperty(config, "ExposedPorts");
@@ -856,8 +951,33 @@ export class DockerRuntimeAdapter {
     }
   }
 
+  async #inspectLockedImageConfiguration(imageRef: string): Promise<LockedImageConfiguration> {
+    let lockedReferences: readonly string[];
+    try {
+      const lock = loadRuntimeImageLock(this.#options.imageLock);
+      lockedReferences = Object.values(lock.platforms).map(({ reference }) => reference);
+    } catch {
+      throw rejected();
+    }
+    if (!lockedReferences.includes(imageRef)) throw rejected();
+    let inspection: unknown;
+    try {
+      inspection = await this.#options.docker.getImage(imageRef).inspect();
+    } catch (error) {
+      throw redactDockerError(error);
+    }
+    const config = dataProperty(inspection, "Config");
+    const environment = safeStringArray(dataProperty(config, "Env"));
+    environmentRecord(environment);
+    return Object.freeze({
+      environment,
+      labels: safeStringRecord(dataProperty(config, "Labels")),
+    });
+  }
+
   async #provisionValidated(request: ProvisionRuntimeCommandV1, signal?: AbortSignal): Promise<RuntimeObservation> {
     assertNotAborted(signal);
+    const imageConfiguration = await this.#inspectLockedImageConfiguration(request.runtime.image_ref);
     const names = deriveManagedRuntimeNames(request.runtime);
     const runtimeDigest = resourceDigest(request.runtime.tenant_id, request.runtime.runtime_id);
     const ingressParent = join(resolve(this.#options.ingressRoot), runtimeDigest);
@@ -888,7 +1008,15 @@ export class DockerRuntimeAdapter {
     if (gateway.inspection !== undefined) {
       if (volume.inspection === undefined || network.inspection === undefined || egressNetwork.inspection === undefined) throw rejected();
       await validatePersistentIngress(ingressPath);
-      const observation = validateGatewayInspection(gateway.inspection, request, request.runtime, names, dockerIngressPath, user);
+      const observation = validateGatewayInspection(
+        gateway.inspection,
+        request,
+        request.runtime,
+        names,
+        dockerIngressPath,
+        user,
+        imageConfiguration,
+      );
       await ensurePrivateDirectory(this.#options.stagingRoot);
       const adoptionStage = await mkdtemp(join(resolve(this.#options.stagingRoot), "operation-"));
       await chmod(adoptionStage, 0o700);
@@ -907,6 +1035,7 @@ export class DockerRuntimeAdapter {
         names,
         dockerIngressPath,
         user,
+        imageConfiguration,
       );
       if (resumed.lifecycle !== "running") throw rejected();
       return resumed;
@@ -933,6 +1062,15 @@ export class DockerRuntimeAdapter {
         Driver: "bridge",
         Internal: false,
         Attachable: false,
+        EnableIPv6: false,
+        Options: { ...egressNetworkConfiguration.options },
+        IPAM: {
+          Driver: "default",
+          Config: [{
+            Subnet: egressNetworkConfiguration.subnet,
+            Gateway: egressNetworkConfiguration.gateway,
+          }],
+        },
         Labels: { ...networkLabels(managedEgressNetwork, "egress") },
       });
     }
@@ -1023,6 +1161,7 @@ export class DockerRuntimeAdapter {
           names,
           dockerIngressPath,
           user,
+          imageConfiguration,
         );
         if (observation.lifecycle !== "running") throw rejected();
         return observation;
@@ -1121,11 +1260,20 @@ export class DockerRuntimeAdapter {
       throw rejected();
     }
     if (volume.inspection === undefined || network.inspection === undefined || egressNetwork.inspection === undefined) throw rejected();
+    const imageConfiguration = await this.#inspectLockedImageConfiguration(gatewayImageReference(container.inspection));
     validateVolumeInspection(volume.inspection, request, names);
     validateNetworkInspection(network.inspection, names.network, "backplane", true);
     validateNetworkInspection(egressNetwork.inspection, managedEgressNetwork, "egress", false);
     await validatePersistentIngress(ingressPath);
-    const before = validateGatewayInspection(container.inspection, undefined, request, names, dockerIngressPath, user);
+    const before = validateGatewayInspection(
+      container.inspection,
+      undefined,
+      request,
+      names,
+      dockerIngressPath,
+      user,
+      imageConfiguration,
+    );
     if (request.kind === "inspect") return before;
     assertNotAborted(signal);
     if (request.kind === "start") await container.handle.start();
@@ -1137,7 +1285,15 @@ export class DockerRuntimeAdapter {
       const { private_origin: _privateOrigin, ...withoutOrigin } = before;
       return { ...withoutOrigin, exists: false, lifecycle: "removed", health: "unknown", image_ref: REMOVED_RUNTIME_IMAGE_REF };
     }
-    return validateGatewayInspection(await container.handle.inspect(), undefined, request, names, dockerIngressPath, user);
+    return validateGatewayInspection(
+      await container.handle.inspect(),
+      undefined,
+      request,
+      names,
+      dockerIngressPath,
+      user,
+      imageConfiguration,
+    );
   }
 
   async #validateIngressGeneration(runtimeDigest: string, generation: number): Promise<void> {
