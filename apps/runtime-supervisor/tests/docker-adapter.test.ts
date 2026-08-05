@@ -243,6 +243,22 @@ class FakeContainer {
     this.docker.cancellationSignals.push({ operation: `start:${this.name}`, signal: options?.abortSignal });
     this.actions.push("start");
     this.docker.mutations.push(`start:${this.name}`);
+    if (this.options?.Labels?.["core-agent.resource"] === "runtime" && this.docker.abortRejectingGatewayStart !== undefined) {
+      const uncertain = this.docker.abortRejectingGatewayStart;
+      uncertain.markEntered();
+      await new Promise<void>((_resolve, reject) => {
+        const onAbort = (): void => {
+          void uncertain.releaseLateMutation.then(() => {
+            this.running = true;
+            this.docker.mutations.push(`late-start:${this.name}`);
+            uncertain.markLateMutation();
+          });
+          reject(new Error("synthetic local Docker request abort"));
+        };
+        if (options?.abortSignal?.aborted === true) onAbort();
+        else options?.abortSignal?.addEventListener("abort", onAbort, { once: true });
+      });
+    }
     if (this.options?.Labels?.["core-agent.resource"] === "runtime" && this.docker.failGatewayStart) {
       throw new Error("gateway start failed with untrusted details");
     }
@@ -350,6 +366,11 @@ class FakeDocker {
   public markGatewayInspection: (() => void) | undefined;
   public readonly hostMappings: Array<{ readonly host: string; readonly local: string }> = [];
   public readonly cancellationSignals: Array<{ readonly operation: string; readonly signal: AbortSignal | undefined }> = [];
+  public abortRejectingGatewayStart: {
+    readonly markEntered: () => void;
+    readonly releaseLateMutation: Promise<void>;
+    readonly markLateMutation: () => void;
+  } | undefined;
 
   public localPath(path: string): string {
     const mapping = this.hostMappings.find(({ host }) => path === host || path.startsWith(`${host}/`));
@@ -576,6 +597,49 @@ test("adapter propagates one operation AbortSignal through Docker inspection and
     true,
     JSON.stringify(docker.cancellationSignals.map(({ operation, signal }) => ({ operation, propagated: signal === controller.signal }))),
   );
+});
+
+test("an aborted mutating Docker request remains unsettled when the daemon can still mutate later", async () => {
+  const docker = new FakeDocker();
+  let markEntered!: () => void;
+  const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+  let releaseLateMutation!: () => void;
+  const lateMutationReleased = new Promise<void>((resolve) => { releaseLateMutation = resolve; });
+  let markLateMutation!: () => void;
+  const lateMutationObserved = new Promise<void>((resolve) => { markLateMutation = resolve; });
+  docker.abortRejectingGatewayStart = {
+    markEntered,
+    releaseLateMutation: lateMutationReleased,
+    markLateMutation,
+  };
+  const { adapter } = buildAdapter(docker);
+  const controller = new AbortController();
+  let settled = false;
+  const pending = adapter.execute(signed(), controller.signal);
+  void pending.then(
+    () => { settled = true; },
+    () => { settled = true; },
+  );
+
+  await entered;
+  controller.abort();
+  const stillPending = Symbol("still pending");
+  const beforeLateMutation = await Promise.race([
+    pending,
+    new Promise<typeof stillPending>((resolve) => setTimeout(() => resolve(stillPending), 50)),
+  ]);
+  assert.equal(beforeLateMutation, stillPending);
+  assert.equal(settled, false);
+
+  releaseLateMutation();
+  await lateMutationObserved;
+  const afterLateMutation = await Promise.race([
+    pending,
+    new Promise<typeof stillPending>((resolve) => setTimeout(() => resolve(stillPending), 20)),
+  ]);
+  assert.equal(docker.mutations.some((mutation) => mutation.startsWith("late-start:")), true);
+  assert.equal(afterLateMutation, stillPending);
+  assert.equal(settled, false);
 });
 
 test("gateway adoption accepts only the exact Docker merge of locked-image and runtime configuration", async () => {
