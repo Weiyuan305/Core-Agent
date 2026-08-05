@@ -606,7 +606,7 @@ function buildRecoveryServer(
     operationTimeoutMs: 400,
     cancellationSettlementTimeoutMs: 100,
     shutdownTimeoutMs: 10,
-    maximumConcurrent: options.maximumConcurrent,
+    ...(options.maximumConcurrent === undefined ? {} : { maximumConcurrent: options.maximumConcurrent }),
   });
 }
 

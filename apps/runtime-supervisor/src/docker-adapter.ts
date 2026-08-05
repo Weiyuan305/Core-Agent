@@ -1753,32 +1753,50 @@ export class DockerRuntimeAdapter {
       imageConfiguration,
     );
     if (request.kind === "start") {
-      if (journalContext.stage === "reserved") await journalContext.advance("start_pending");
+      if (journalContext.stage === "reserved") {
+        await journalContext.advance("start_pending");
+        assertNotAborted(signal);
+      }
       if (journalContext.stage !== "start_pending") throw rejected();
       if (before.lifecycle === "running") return before;
+      assertNotAborted(signal);
       await settleDockerMutation(container.handle.start(abortOptions(signal)), mutationState, signal);
     } else if (request.kind === "stop") {
-      if (journalContext.stage === "reserved") await journalContext.advance("stop_pending");
+      if (journalContext.stage === "reserved") {
+        await journalContext.advance("stop_pending");
+        assertNotAborted(signal);
+      }
       if (journalContext.stage !== "stop_pending") throw rejected();
       if (before.lifecycle === "stopped") return before;
+      assertNotAborted(signal);
       await settleDockerMutation(container.handle.stop({ t: 30, ...abortOptions(signal) }), mutationState, signal);
     } else if (request.kind === "restart") {
-      if (journalContext.stage === "reserved") await journalContext.advance("stop_pending");
+      if (journalContext.stage === "reserved") {
+        await journalContext.advance("stop_pending");
+        assertNotAborted(signal);
+      }
       let current = before;
       if (journalContext.stage === "stop_pending") {
         if (current.lifecycle !== "stopped") {
+          assertNotAborted(signal);
           await settleDockerMutation(container.handle.stop({ t: 30, ...abortOptions(signal) }), mutationState, signal);
           current = await inspectGateway();
           if (current.lifecycle !== "stopped") throw rejected();
         }
         await journalContext.advance("start_pending");
+        assertNotAborted(signal);
       }
       if (journalContext.stage !== "start_pending") throw rejected();
       if (current.lifecycle === "running") return current;
+      assertNotAborted(signal);
       await settleDockerMutation(container.handle.start(abortOptions(signal)), mutationState, signal);
     } else {
-      if (journalContext.stage === "reserved") await journalContext.advance("delete_pending");
+      if (journalContext.stage === "reserved") {
+        await journalContext.advance("delete_pending");
+        assertNotAborted(signal);
+      }
       if (journalContext.stage !== "delete_pending") throw rejected();
+      assertNotAborted(signal);
       await settleDockerMutation(
         container.handle.remove({ force: true, v: false, ...abortOptions(signal) }),
         mutationState,

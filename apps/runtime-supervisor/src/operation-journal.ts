@@ -356,6 +356,7 @@ export class OperationJournal {
 
         const acquired = await this.#tryAcquire(directory, request, recoveredStage);
         if (acquired !== undefined) {
+          let retainStagedReservation = false;
           try {
             const raced = await this.#read(directory, request.operation_id);
             if (raced !== undefined) return this.#replay(request, raced);
@@ -363,6 +364,7 @@ export class OperationJournal {
             if (isTransientOperationJournalResponse(result)) {
               const transient = validateSupervisorResponse(result.response);
               if (transient.operation_id !== request.operation_id) throw journalError();
+              retainStagedReservation = acquired.record.stage !== "reserved";
               return transient;
             }
             const response = validateSupervisorResponse(result);
@@ -378,7 +380,7 @@ export class OperationJournal {
             this.#complete.set(request.operation_id, { requestHash: request.request_hash, response });
             return response;
           } finally {
-            await this.#release(directory, acquired);
+            await this.#release(directory, acquired, retainStagedReservation);
           }
         }
 
@@ -655,6 +657,12 @@ export class OperationJournal {
       const payload = await boundedRead(handle, maximumReservationBytes);
       try {
         const record = parseReservation(safeJsonParse(payload));
+        const expected = Buffer.from(`${canonicalJson(record)}\n`, "utf8");
+        try {
+          if (!payload.equals(expected)) throw journalError();
+        } finally {
+          expected.fill(0);
+        }
         const after = await handle.stat({ bigint: true });
         if (!sameSnapshot(before, after)) throw journalError();
         let named: BigIntStats;
@@ -688,13 +696,28 @@ export class OperationJournal {
     return true;
   }
 
-  async #release(directory: FileHandle, reservation: HeldReservation): Promise<void> {
+  async #release(
+    directory: FileHandle,
+    reservation: HeldReservation,
+    retainStagedReservation = false,
+  ): Promise<void> {
     clearInterval(reservation.heartbeat);
     try {
       const held = await reservation.handle.stat({ bigint: true });
       const named = await lstat(this.#childPath(directory, reservation.filename), { bigint: true }).catch(() => undefined);
       if (named !== undefined && sameIdentity(held, reservation.identity) && sameIdentity(held, named)) {
-        await unlink(this.#childPath(directory, reservation.filename)).catch(() => undefined);
+        if (retainStagedReservation) {
+          const relinquished = new Date(0);
+          await reservation.handle.utimes(relinquished, relinquished);
+          await reservation.handle.sync();
+          const retained = await lstat(this.#childPath(directory, reservation.filename), { bigint: true })
+            .catch(() => undefined);
+          if (retained === undefined || !sameIdentity(retained, reservation.identity)) throw journalError();
+          await this.#assertDirectory(directory);
+          await directory.sync();
+        } else {
+          await unlink(this.#childPath(directory, reservation.filename)).catch(() => undefined);
+        }
       }
     } finally {
       await reservation.handle.close().catch(() => undefined);
