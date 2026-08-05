@@ -271,6 +271,28 @@ function abortOptions(signal?: AbortSignal): { readonly abortSignal?: AbortSigna
 }
 
 const unresolvedDockerMutation = new Promise<never>(() => undefined);
+const daemonUncertainTransportCodes = new Set([
+  "ECONNABORTED",
+  "ECONNRESET",
+  "EPIPE",
+  "ERR_STREAM_PREMATURE_CLOSE",
+]);
+
+function isDaemonUncertainTransportError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  try {
+    const code = Object.getOwnPropertyDescriptor(error, "code");
+    if (
+      code === undefined || !("value" in code) || typeof code.value !== "string"
+      || !daemonUncertainTransportCodes.has(code.value)
+    ) return false;
+    return ["statusCode", "status", "response"].every((key) => (
+      Object.getOwnPropertyDescriptor(error, key) === undefined
+    ));
+  } catch {
+    return false;
+  }
+}
 
 async function settleDockerMutation<T>(
   promise: Promise<T>,
@@ -285,7 +307,9 @@ async function settleDockerMutation<T>(
     // Aborting the HTTP request does not prove that the Docker daemon cancelled
     // a mutation it already accepted. Keep the stable journal reservation live
     // until process restart can reconcile the derived resource through adoption.
-    if (signal?.aborted === true) return unresolvedDockerMutation;
+    if (signal?.aborted === true || isDaemonUncertainTransportError(error)) {
+      return unresolvedDockerMutation;
+    }
     throw error;
   }
 }

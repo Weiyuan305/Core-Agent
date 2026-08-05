@@ -163,8 +163,13 @@ slot. If the effect remains unsettled, preserve the managed resources and
 journal directory, collect only redacted service evidence, and restart the
 Supervisor through the approved service procedure so stale-reservation
 recovery and strict resource adoption can reconcile the derived names.
-This includes a Dockerode mutation that rejects on local request abort: its
-daemon-side outcome is unknown until restart/adoption reconciliation.
+This includes a Dockerode mutation that rejects on local request abort and the
+narrow response-less codes `ECONNRESET`, `EPIPE`, `ECONNABORTED`, and
+`ERR_STREAM_PREMATURE_CLOSE` while its signal is still active: their daemon-side
+outcome is unknown until strict inspection or restart/adoption reconciliation.
+An HTTP/status-bearing error, accessor-backed or malformed error, policy or
+validation failure, not-found response, or any other transport code is not in
+this class and must follow its normal bounded terminal path.
 
 Helper and failed-gateway cleanup uses an independent bounded signal even when
 the parent operation is already aborted. Treat a terminal helper failure as

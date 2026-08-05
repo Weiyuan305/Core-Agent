@@ -198,7 +198,14 @@ the stable derived resource names before any new effect. The Supervisor never
 starts a second in-process effect merely because the transport wait expired.
 In particular, a mutating Dockerode request that rejects locally after abort is
 still remote-uncertain: the adapter keeps it unsettled because local HTTP
-rejection does not prove that Docker daemon work was cancelled.
+rejection does not prove that Docker daemon work was cancelled. The same rule
+applies while the signal remains active when a real `Error` carries one of the
+narrow response-less transport codes `ECONNRESET`, `EPIPE`, `ECONNABORTED`, or
+`ERR_STREAM_PREMATURE_CLOSE`. The classifier reads only own data descriptors
+and rejects HTTP/status-bearing errors, accessors, malformed values, policy or
+validation errors, not-found responses, and every unlisted code. Strict
+inspection may settle a provable final state; otherwise the stable reservation
+remains unresolved for restart and exact-name adoption.
 
 Initializer, manifest-verifier, and failed gateway cleanup do not reuse an
 already-aborted operation signal. Each force-remove and follow-up inspection
