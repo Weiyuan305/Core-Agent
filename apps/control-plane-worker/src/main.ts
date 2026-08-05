@@ -99,6 +99,7 @@ async function dispatchRuntimeJob(dependencies: WorkerDependencies, job: Claimed
     () => handleExecuteAgentRun({
     begin: (runJob) => dependencies.repositories.agentRuns.begin(runJob),
     inspectRuntime: (facts, operationSignal) => inspectAgentRunRuntime(dependencies.supervisorClient, facts, job.attemptCount, operationSignal),
+    markDispatched: (runJob) => dependencies.repositories.agentRuns.markDispatched(runJob),
     stream: (facts, origin, operationSignal) => ({ async *[Symbol.asyncIterator]() {
       const material = await dependencies.ingressSecretStore.get(facts.ingressSecretRef);
       yield* dependencies.executionHermesClient.streamChat({

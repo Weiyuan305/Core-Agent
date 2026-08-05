@@ -90,6 +90,7 @@ test("Agent Run execution atomically begins, persists ordered unsafe deltas, and
   assert.equal(begun.facts.timeoutMs, 10_000);
   assert.equal(begun.facts.ingressSecretRef.purpose, "hermes_ingress");
 
+  assert.deepEqual(await setup.repository.markDispatched(ref), { kind: "updated" });
   assert.deepEqual(await setup.repository.persistDelta(ref, begun.facts.assistantMessageId, "Hello"), { kind: "updated" });
   assert.deepEqual(await setup.repository.persistDelta(ref, begun.facts.assistantMessageId, " there"), { kind: "updated" });
   assert.equal(await db.selectFrom("messages").selectAll().where("tenant_id", "=", setup.tenantId).execute().then((rows) => rows.length), 1, "no partial assistant Message");
@@ -134,12 +135,89 @@ test("safe pre-effect retry of an already-running Run does not duplicate run.sta
   );
 });
 
+test("dispatch mark rejects a queued Run before begin", { timeout: 5_000 }, async () => {
+  const setup = await setupExecution("tenant_execute_dispatch_before_begin");
+  const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", runId: setup.run.run_id };
+
+  await assert.rejects(setup.repository.markDispatched(ref), /Run is not running/);
+  assert.deepEqual(
+    await db.selectFrom("worker_jobs").select("effect_state").where("tenant_id", "=", setup.tenantId).executeTakeFirstOrThrow(),
+    { effect_state: "pre_effect" },
+  );
+});
+
+test("dispatch is durably marked unsafe before any delta and pre-dispatch deltas are rejected", { timeout: 5_000 }, async () => {
+  const setup = await setupExecution("tenant_execute_dispatch_boundary");
+  const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", runId: setup.run.run_id };
+  const begun = await setup.repository.begin(ref);
+  assert.equal(begun.kind, "admitted");
+  if (begun.kind !== "admitted") return;
+
+  await assert.rejects(
+    setup.repository.persistDelta(ref, begun.facts.assistantMessageId, "too early"),
+    /requires durable dispatch/,
+  );
+  assert.deepEqual(
+    await db.selectFrom("worker_jobs").select("effect_state").where("tenant_id", "=", setup.tenantId).executeTakeFirstOrThrow(),
+    { effect_state: "pre_effect" },
+  );
+
+  assert.deepEqual(await setup.repository.markDispatched(ref), { kind: "updated" });
+  assert.deepEqual(
+    await db.selectFrom("worker_jobs").select("effect_state").where("tenant_id", "=", setup.tenantId).executeTakeFirstOrThrow(),
+    { effect_state: "unsafe_to_replay" },
+  );
+  assert.deepEqual(await setup.repository.persistDelta(ref, begun.facts.assistantMessageId, "after mark"), { kind: "updated" });
+});
+
+test("dispatch mark loses authority when a worker-job row wait crosses the database lease", { timeout: 5_000 }, async () => {
+  const setup = await setupExecution("tenant_execute_mark_wait");
+  const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", runId: setup.run.run_id };
+  assert.equal((await setup.repository.begin(ref)).kind, "admitted");
+  await pool.query(
+    "update worker_jobs set lease_expires_at = clock_timestamp() + interval '150 milliseconds' where tenant_id = $1 and job_id = $2",
+    [setup.tenantId, setup.job.jobId],
+  );
+
+  const blocker = await pool.connect();
+  try {
+    await blocker.query("begin");
+    await blocker.query("select job_id from worker_jobs where tenant_id = $1 and job_id = $2 for update", [setup.tenantId, setup.job.jobId]);
+    const pending = setup.repository.markDispatched(ref);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await blocker.query("commit");
+    assert.deepEqual(await pending, { kind: "lease_lost" });
+  } finally {
+    try { await blocker.query("rollback"); } catch { /* transaction already closed */ }
+    blocker.release();
+  }
+  assert.deepEqual(
+    await db.selectFrom("worker_jobs").select(["status", "effect_state"]).where("tenant_id", "=", setup.tenantId).executeTakeFirstOrThrow(),
+    { status: "running", effect_state: "pre_effect" },
+  );
+});
+
+test("a crash after dispatch mark is reclaimed as unsafe and cannot become a safe retry", { timeout: 5_000 }, async () => {
+  const setup = await setupExecution("tenant_execute_mark_crash");
+  const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", runId: setup.run.run_id };
+  assert.equal((await setup.repository.begin(ref)).kind, "admitted");
+  assert.deepEqual(await setup.repository.markDispatched(ref), { kind: "updated" });
+  await db.updateTable("worker_jobs").set({ lease_expires_at: new Date(0) })
+    .where("tenant_id", "=", setup.tenantId).where("job_id", "=", setup.job.jobId).execute();
+
+  const [reclaimed] = await claimJobs(db, { tenantId: setup.tenantId, workerId: "worker_recovery", limit: 1, leaseMs: 300_000 });
+  assert.equal(reclaimed?.effectState, "unsafe_to_replay");
+  assert.equal(reclaimed?.recoveryOnly, false);
+  assert.deepEqual(await setup.repository.fail({ ...ref, workerId: "worker_recovery" }, "Unsafe dispatched request cannot replay"), { kind: "updated" });
+});
+
 test("unsafe recovery failure atomically terminalizes Run and job without an assistant Message", async () => {
   const setup = await setupExecution("tenant_execute_unsafe_failure");
   const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", runId: setup.run.run_id };
   const begun = await setup.repository.begin(ref);
   assert.equal(begun.kind, "admitted");
   if (begun.kind !== "admitted") return;
+  assert.deepEqual(await setup.repository.markDispatched(ref), { kind: "updated" });
   assert.deepEqual(await setup.repository.persistDelta(ref, begun.facts.assistantMessageId, "partial"), { kind: "updated" });
   assert.deepEqual(await setup.repository.fail(ref, "Bearer private-secret socket provider-body"), { kind: "updated" });
 
@@ -161,6 +239,7 @@ test("database-clock lease loss before begin, delta, completion, and failure wri
     const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", runId: setup.run.run_id };
     const begun = phase === "begin" ? undefined : await setup.repository.begin(ref);
     if (begun !== undefined) assert.equal(begun.kind, "admitted");
+    if (phase === "delta" || phase === "complete") assert.deepEqual(await setup.repository.markDispatched(ref), { kind: "updated" });
     await db.updateTable("worker_jobs").set({ lease_expires_at: new Date("2000-01-01T00:00:00.000Z") }).where("tenant_id", "=", setup.tenantId).execute();
     const result = phase === "begin"
       ? await setup.repository.begin(ref)
@@ -183,6 +262,7 @@ test("lease expiry while waiting on the Run row rolls back delta, completion, an
     const begun = await setup.repository.begin(ref);
     assert.equal(begun.kind, "admitted");
     if (begun.kind !== "admitted") continue;
+    if (phase === "delta" || phase === "complete") assert.deepEqual(await setup.repository.markDispatched(ref), { kind: "updated" });
     if (phase === "complete") await setup.repository.persistDelta(ref, begun.facts.assistantMessageId, "durable");
 
     await pool.query("update worker_jobs set lease_expires_at = clock_timestamp() + interval '150 milliseconds' where tenant_id = $1 and job_id = $2", [setup.tenantId, setup.job.jobId]);
@@ -216,6 +296,7 @@ test("lease expiry while message.delta waits on the stream sequence rolls back e
   const begun = await setup.repository.begin(ref);
   assert.equal(begun.kind, "admitted");
   if (begun.kind !== "admitted") return;
+  assert.deepEqual(await setup.repository.markDispatched(ref), { kind: "updated" });
   const beforeOutbox = await db.selectFrom("outbox").selectAll().where("tenant_id", "=", setup.tenantId).execute().then((rows) => rows.length);
   await pool.query("update worker_jobs set lease_expires_at = clock_timestamp() + interval '150 milliseconds' where tenant_id = $1 and job_id = $2", [setup.tenantId, setup.job.jobId]);
 
@@ -232,7 +313,7 @@ test("lease expiry while message.delta waits on the stream sequence rolls back e
     blocker.release();
   }
   const job = await db.selectFrom("worker_jobs").select(["status", "effect_state"]).where("tenant_id", "=", setup.tenantId).where("job_id", "=", setup.job.jobId).executeTakeFirstOrThrow();
-  assert.deepEqual(job, { status: "running", effect_state: "pre_effect" });
+  assert.deepEqual(job, { status: "running", effect_state: "unsafe_to_replay" });
   assert.equal(await db.selectFrom("product_events").selectAll().where("tenant_id", "=", setup.tenantId).where("event_type", "=", "message.delta").execute().then((rows) => rows.length), 0);
   assert.equal(await db.selectFrom("outbox").selectAll().where("tenant_id", "=", setup.tenantId).execute().then((rows) => rows.length), beforeOutbox);
 });
@@ -243,6 +324,7 @@ test("two sequential Runs in one Conversation bind durable delta accounting only
   const first = await setup.repository.begin(firstRef);
   assert.equal(first.kind, "admitted");
   if (first.kind !== "admitted") return;
+  await setup.repository.markDispatched(firstRef);
   await setup.repository.persistDelta(firstRef, first.facts.assistantMessageId, "first answer");
   await setup.repository.complete(firstRef, first.facts, "first answer");
 
@@ -256,6 +338,7 @@ test("two sequential Runs in one Conversation bind durable delta accounting only
   const second = await setup.repository.begin(secondRef);
   assert.equal(second.kind, "admitted");
   if (second.kind !== "admitted") return;
+  await setup.repository.markDispatched(secondRef);
   assert.deepEqual(await setup.repository.persistDelta(secondRef, second.facts.assistantMessageId, "second answer"), { kind: "updated" });
   assert.deepEqual(await setup.repository.complete(secondRef, second.facts, "second answer"), { kind: "updated" });
   const assistants = await db.selectFrom("messages").select(["run_id", "content"]).where("tenant_id", "=", setup.tenantId).where("role", "=", "assistant").orderBy("created_at").execute();
@@ -301,6 +384,7 @@ test("tampered in-memory completion facts roll back without an assistant Message
   const begun = await setup.repository.begin(ref);
   assert.equal(begun.kind, "admitted");
   if (begun.kind !== "admitted") return;
+  await setup.repository.markDispatched(ref);
   await setup.repository.persistDelta(ref, begun.facts.assistantMessageId, "answer");
   await assert.rejects(setup.repository.complete(ref, { ...begun.facts, assistantMessageId: "message_attacker" }, "answer"));
   assert.equal(await db.selectFrom("messages").selectAll().where("tenant_id", "=", setup.tenantId).where("role", "=", "assistant").execute().then((rows) => rows.length), 0);

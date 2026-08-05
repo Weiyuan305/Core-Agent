@@ -258,6 +258,9 @@ export class WorkerAgentRunRepository {
     if (delta.length < 1 || delta.length > 4_000) throw new Error("Agent Run delta is invalid");
     return fenced(this.db, async (trx) => {
       const claimed = await lockedOwnedJob(trx, job);
+      if (claimed.effect_state !== "unsafe_to_replay") {
+        throw new Error("Agent Run delta requires durable dispatch");
+      }
       const run = await trx.selectFrom("agent_runs").select(["tenant_id", "run_id", "conversation_id", "request_id", "trace_id", "status"])
         .where("tenant_id", "=", job.tenantId).where("run_id", "=", job.runId).forUpdate().executeTakeFirst();
       if (run === undefined || run.status !== "running" || messageId !== assistantMessageId(job.tenantId, job.runId)) throw new Error("Stored Agent Run delta identity is inconsistent");
@@ -275,9 +278,6 @@ export class WorkerAgentRunRepository {
         total += value.length;
       }
       if (total > 4_000) throw new Error("Agent Run assistant content exceeds its bound");
-      if (claimed.effect_state === "pre_effect") {
-        await updateOwnedJob(trx, job, { effect_state: "unsafe_to_replay", updated_at: this.now() });
-      }
       const now = this.now();
       await appendProductEvents({ tenantId: job.tenantId, trx }, {
         streamId: `conversation_${run.conversation_id}`,
@@ -289,6 +289,23 @@ export class WorkerAgentRunRepository {
           payload: { message_id: messageId, delta },
         }],
       });
+      await requireStillOwned(trx, job);
+      return { kind: "updated" as const };
+    }) as Promise<JobLeaseResult>;
+  }
+
+  public async markDispatched(job: AgentRunWorkerJobRef): Promise<JobLeaseResult> {
+    return fenced(this.db, async (trx) => {
+      const claimed = await lockedOwnedJob(trx, job);
+      if (claimed.effect_state !== "pre_effect") {
+        throw new Error("Agent Run dispatch is already unsafe to replay");
+      }
+      const run = await trx.selectFrom("agent_runs").select("status")
+        .where("tenant_id", "=", job.tenantId).where("run_id", "=", job.runId)
+        .forUpdate().executeTakeFirst();
+      if (run?.status !== "running") throw new Error("Agent Run is not running for dispatch");
+      await requireStillOwned(trx, job);
+      await updateOwnedJob(trx, job, { effect_state: "unsafe_to_replay", updated_at: this.now() });
       await requireStillOwned(trx, job);
       return { kind: "updated" as const };
     }) as Promise<JobLeaseResult>;

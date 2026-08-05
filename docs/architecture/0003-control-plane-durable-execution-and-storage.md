@@ -95,8 +95,8 @@ generic retry flag:
   dispatched but its healthy terminal observation is still pending, so every
   later claim is inspect-only;
 - for `execute_agent_run`, `unsafe_to_replay` retains its separate meaning that
-  an outbound model-call boundary was crossed and automatic execution replay is
-  prohibited;
+  the owned job was durably marked immediately before the outbound Hermes
+  request could be dispatched, and automatic execution replay is prohibited;
 - provisioning and Outbox jobs do not claim an unsafe phase in Runtime v1.
 
 After an accepted reconcile effect returns a running but non-healthy
@@ -170,16 +170,25 @@ boundary as follows:
   purpose as `integration` and returns the typed `hermes_ingress` reference;
 - `queued -> running` appends one `run.started`; a reclaimed, below-ceiling
   `pre_effect` job may resume the already-running Run without duplicating it;
-- the first non-empty assistant delta atomically changes the job to
-  `unsafe_to_replay` and appends `message.delta` before the streaming iterator
-  may be pulled again. Delta accounting and completion evidence are filtered by
-  both Conversation stream and Run ID, so sequential Runs cannot share output;
+- after successful Supervisor inspection, a separate transaction locks the
+  owned job and target Run, requires the Run to be `running`, repeats the
+  database-clock lease fence, and changes `pre_effect -> unsafe_to_replay`.
+  Only after that commit may the Worker resolve SecretMaterial or enter the
+  Hermes streaming client. Every delta transaction requires the already-unsafe
+  phase and appends `message.delta` before the streaming iterator may be pulled
+  again. Delta accounting and completion evidence are filtered by both
+  Conversation stream and Run ID, so sequential Runs cannot share output;
 - durable deltas remain ProductEvents only. No partial assistant Message exists.
   Exact concatenated output creates one completed assistant Message only in the
   same transaction that appends `message.completed`, transitions the Run to
   succeeded, appends `run.completed`, advances Session activity, writes audit
   and Outbox rows, and completes the job;
-- any failure after the unsafe boundary terminalizes Run and job atomically.
+- safe automatic retry is limited to retryable inspection/dependency failure
+  before the dispatch mark. Any failure after the unsafe boundary terminalizes
+  Run and job atomically. With no reliable Hermes idempotency key, connection
+  refusal, timeout, malformed response, caller abort, or process crash after
+  the mark cannot prove that Hermes did not accept work and therefore cannot be
+  replayed automatically;
   Reclaimed unsafe work and both final-attempt recovery phases terminalize
   without Supervisor inspect, SecretStore access, or Hermes. Worker/process
   cancellation or lease loss makes no business cancellation or stale terminal
@@ -191,8 +200,32 @@ boundary as follows:
 Every delta transaction performs one final database-clock lease check after
 ProductEvent sequence allocation and Outbox insertion. This closes the row-wait
 window: if the Conversation stream-sequence row was locked until the lease
-expired, the final fence aborts and rolls back `unsafe_to_replay`, the delta,
-the sequence allocation, and Outbox together.
+expired, the final fence rolls back the delta, sequence allocation, and Outbox
+together while the earlier committed dispatch mark correctly remains unsafe.
+
+This boundary deliberately chooses at-most-once dispatch safety over automatic
+availability. A post-mark failure can terminalize a Run even when the request
+never reached Hermes. Recovery requires an explicit child Run rather than a
+possibly duplicate hidden replay.
+
+Production claim is Conversation-aware before work reaches the process. A
+bounded grouped discovery query returns only the earliest eligible
+`execute_agent_run` Conversation groups, ordered by their oldest job, and uses
+a tenant-composite self-join with `GROUP BY/HAVING` to exclude Conversations
+that already own an unexpired running execute job. It is not truncated by the
+first eight rows of one Conversation backlog. For each discovered Conversation
+the scheduler takes a transaction advisory try-lock in the same
+`agent-session:v1` tenant-and-Conversation namespace, determines the earliest
+job ID, locks only that exact row with `FOR UPDATE SKIP LOCKED`, and rechecks
+eligibility and active ownership before update. A single claim also deduplicates
+Conversation keys. This serializes competing platform claimers without a new
+schema invariant while preserving parallel claims for unrelated Conversations.
+
+The Worker process maintains a rolling set of at most eight dispatches. It
+claims only free slots rather than waiting for a batch barrier. While full, it
+wakes on either dispatch completion or the 250-ms poll boundary, so Outbox
+notification work continues during long model Runs. Shutdown starts no new
+claim after abort and awaits every already-started dispatch to settle.
 
 Only one Agent Run may use one Conversation's Hermes Session at a time. The
 Worker resolves the immutable Run-to-Conversation binding inside the authority

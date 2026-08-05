@@ -52,18 +52,23 @@ function scriptedStream(script: readonly (string | Error)[]): AsyncIterable<stri
   };
 }
 
-function port(overrides: Partial<ExecuteAgentRunPort> = {}) {
+type ReviewedExecuteAgentRunPort = ExecuteAgentRunPort & {
+  markDispatched(job: Parameters<ExecuteAgentRunPort["begin"]>[0]): Promise<{ kind: "updated" } | { kind: "lease_lost" }>;
+};
+
+function port(overrides: Partial<ReviewedExecuteAgentRunPort> = {}) {
   const calls: string[] = [];
-  const value: ExecuteAgentRunPort = {
+  const value = {
     begin: async () => { calls.push("begin"); return { kind: "admitted", facts }; },
     inspectRuntime: async () => { calls.push("inspect"); return "http://core-agent-runtime-example:8642"; },
+    markDispatched: async () => { calls.push("mark-dispatched"); return { kind: "updated" as const }; },
     stream: () => { calls.push("hermes"); return scriptedStream(["Hello", " there"]); },
     persistDelta: async (_job, _messageId, delta) => { calls.push(`delta:${delta}`); return { kind: "updated" }; },
     complete: async (_job, _facts, content) => { calls.push(`complete:${content}`); return { kind: "updated" }; },
     retry: async () => { calls.push("retry"); return { kind: "updated" }; },
     fail: async (_job, summary) => { calls.push(`fail:${summary}`); return { kind: "updated" }; },
     ...overrides,
-  };
+  } satisfies ReviewedExecuteAgentRunPort;
   return { value, calls };
 }
 
@@ -87,7 +92,7 @@ test("execute Agent Run durably persists each delta before pulling the next one 
   const result = await handleExecuteAgentRun(setup.value, job, new AbortController().signal);
 
   assert.deepEqual(result, { kind: "succeeded" });
-  assert.deepEqual(setup.calls, ["begin", "inspect", "delta:Hello", "delta: there", "complete:Hello there"]);
+  assert.deepEqual(setup.calls, ["begin", "inspect", "mark-dispatched", "delta:Hello", "delta: there", "complete:Hello there"]);
 });
 
 test("disconnect after first durable delta terminalizes without automatic replay", async () => {
@@ -100,18 +105,38 @@ test("disconnect after first durable delta terminalizes without automatic replay
 
   assert.equal(result.kind, "failed");
   assert.equal(hermesCalls, 1);
-  assert.deepEqual(setup.calls.slice(0, 4), ["begin", "inspect", "delta:partial", "fail:Agent execution failed after durable output"]);
+  assert.deepEqual(setup.calls, [
+    "begin", "inspect", "mark-dispatched", "delta:partial", "fail:Agent execution failed after dispatch",
+  ]);
   assert.equal(setup.calls.includes("retry"), false);
 });
 
-test("dependency refusal before the first delta safely reschedules only while attempts remain", async () => {
-  for (const [attemptCount, expected] of [[1, "retry"], [3, "failed"]] as const) {
-    const setup = port({ stream: () => scriptedStream([new HermesStreamError("DEPENDENCY_UNAVAILABLE", true)]) });
-    const result = await handleExecuteAgentRun(setup.value, { ...job, attemptCount }, new AbortController().signal);
-    assert.equal(result.kind, expected);
-    assert.equal(setup.calls.some((call) => call.startsWith("delta:")), false);
-    assert.equal(setup.calls.includes("retry"), expected === "retry");
-  }
+test("Hermes acceptance before the first delta is already unsafe and never retries", async () => {
+  const setup = port({
+    stream: () => {
+      setup.calls.push("hermes-accepted");
+      return scriptedStream([new HermesStreamError("DEPENDENCY_UNAVAILABLE", true)]);
+    },
+  });
+
+  const result = await handleExecuteAgentRun(setup.value, job, new AbortController().signal);
+
+  assert.deepEqual(result, { kind: "failed", summary: "Agent execution failed after dispatch" });
+  assert.deepEqual(setup.calls, [
+    "begin", "inspect", "mark-dispatched", "hermes-accepted", "fail:Agent execution failed after dispatch",
+  ]);
+  assert.equal(setup.calls.includes("retry"), false);
+});
+
+test("lease loss while marking dispatch performs zero SecretStore or Hermes work", async () => {
+  const setup = port({
+    markDispatched: async () => { setup.calls.push("mark-dispatched"); return { kind: "lease_lost" }; },
+  });
+
+  const result = await handleExecuteAgentRun(setup.value, job, new AbortController().signal);
+
+  assert.deepEqual(result, { kind: "failed", summary: "Worker job lease lost" });
+  assert.deepEqual(setup.calls, ["begin", "inspect", "mark-dispatched"]);
 });
 
 test("unsafe reclaim and final-attempt recovery terminalize with zero inspect, secret, or Hermes work", async () => {

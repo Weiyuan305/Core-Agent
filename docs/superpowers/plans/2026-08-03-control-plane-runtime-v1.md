@@ -2171,7 +2171,13 @@ The caller supplies the key through a releasable SecretMaterial and releases it 
 
 - [x] **Step 4: Implement Run start and durable deltas**
 
-Before external work, one transaction transitions `queued -> running`, sets `started_at`, appends `run.started`, and marks a worker execution record `pre_effect`. For every non-empty delta, one transaction appends `message.delta` and flips the execution record to `unsafe_to_replay` before acknowledging the chunk in process memory.
+Before external work, one transaction transitions `queued -> running`, sets
+`started_at`, appends `run.started`, and leaves the Worker execution record at
+`pre_effect`. After Supervisor inspection succeeds, a second lease- and
+database-clock-fenced transaction requires the Run to be `running` and commits
+`unsafe_to_replay`. Only then may SecretStore or Hermes be entered. Every
+non-empty delta transaction requires that unsafe phase and appends
+`message.delta` before acknowledging the chunk in process memory.
 
 Do not create the assistant Message until completion. On `[DONE]`, one transaction:
 
@@ -2185,12 +2191,14 @@ Do not create the assistant Message until completion. On `[DONE]`, one transacti
 
 - [x] **Step 5: Implement failure classification around the unsafe boundary**
 
-Before any delta/effect, connection refusal and timeout may reschedule
-according to ProviderCatalog retry ceiling. At or after the Worker job's
-`effect_state = unsafe_to_replay`, any interruption produces a bounded redacted
-`run.failed`, terminal Run/job failure, and no automatic Hermes retry. An
-explicit retry must enter through Task 13 and create a child Run with
-`parent_run_id`.
+Before the dispatch mark, retryable Supervisor inspection failure may
+reschedule according to ProviderCatalog retry ceiling. At or after the Worker
+job's `effect_state = unsafe_to_replay`, any interruption produces a bounded
+redacted `run.failed`, terminal Run/job failure, and no automatic Hermes retry.
+This includes connection refusal, timeout, malformed response, abort, or crash
+before the first delta: Hermes has no reliable idempotency key, so acceptance
+cannot be disproved. An explicit retry must enter through Task 13 and create a
+child Run with `parent_run_id`.
 
 Cancellation of the Worker process leaves the lease to expire. It does not write `run.cancelled`. A reclaimed job checks the execution record: `pre_effect` may retry safely; `unsafe_to_replay` converts to terminal failed without calling Hermes.
 
@@ -2227,14 +2235,19 @@ generation, image, existence, running lifecycle, health, and managed private
 origin. Execution does not hold the runtime advisory lock across model work,
 so long conversations cannot block stop/delete admission.
 
-Each non-empty delta changes `effect_state` to `unsafe_to_replay` and appends
-the Run-scoped durable event before the iterator advances. No partial assistant
+After inspect and before SecretStore/Hermes, a dedicated transaction requires
+the Run to be running and durably changes `effect_state` to
+`unsafe_to_replay`. Each non-empty delta requires that phase and appends the
+Run-scoped durable event before the iterator advances. No partial assistant
 Message is stored. Completion atomically writes the exact concatenated Message,
 ordered completion events, Run success, Session activity, audit/outbox, and job
 success. Unsafe reclaim and both final-attempt recovery phases terminalize with
 zero external calls; cancellation/lease loss never writes `run.cancelled` or a
-stale terminal state. Production claims `execute_agent_run` only after those
-paths passed. HTTP resumable SSE remains exclusively Task 15.
+stale terminal state. The availability tradeoff is explicit: a post-mark
+failure may fail a Run even if Hermes never received it, because automatic
+replay could duplicate an accepted request. Production claims
+`execute_agent_run` only after those paths passed. HTTP resumable SSE remains
+exclusively Task 15.
 
 Concurrency closure (2026-08-05): delta persistence repeats the database-clock
 lease fence after stream-sequence allocation and Outbox insertion, so expiry
@@ -2245,6 +2258,16 @@ Run-to-Conversation binding before and after lock acquisition, then `begin`
 revalidates its lease. Runs sharing a Conversation/Hermes Session serialize;
 different Conversations and tenants remain concurrent. Try-lock polling is
 cancellation-aware and does not reuse the Runtime lifecycle lock namespace.
+
+Scheduler closure (2026-08-05): platform claim performs bounded grouped
+Conversation discovery, excludes groups with an unexpired running execute job,
+and orders by the oldest eligible job without allowing one eight-row backlog to
+hide unrelated work. Competing claimers use a transaction advisory try-lock in
+the `agent-session:v1` tenant-and-Conversation namespace, lock only the exact
+earliest job with `FOR UPDATE SKIP LOCKED`, and revalidate before claim. The
+Worker maintains rolling max-eight in-flight dispatches, claims only free slots,
+continues Outbox ticks at least every 250 ms during full long-running load, and
+awaits started dispatches during shutdown.
 
 ### Task 15: Serve durable Conversation events through resumable SSE
 
@@ -2447,8 +2470,10 @@ Add explicit tests for:
 - missed fake notification still delivers events from PostgreSQL;
 - Outbox dispatcher restart delivers a wake hint without duplicating the
   committed ProductEvent;
-- pre-delta Hermes disconnect retries within the configured ceiling;
-- post-delta disconnect performs no second Hermes call and ends Run failed;
+- retryable Supervisor inspection failure before the dispatch mark retries
+  within the configured ceiling;
+- Hermes refusal or disconnect after the dispatch mark, including before the
+  first delta, performs no second Hermes call and ends Run failed;
 - a child retry creates a new Run and preserves the failed parent.
 
 - [ ] **Step 6: Cover security failures**

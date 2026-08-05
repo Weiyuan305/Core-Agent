@@ -62,3 +62,98 @@ test("already-aborted parent starts no heartbeat or handler effect", async () =>
   }, { tenantId: "tenant_a", jobId: "job_a", jobKind: "provision_runtime", runtimeCommand: null, targetCommandVersion: null, payloadRef: "runtime_a", attemptCount: 1, maxAttempts: 5, effectState: "pre_effect", recoveryOnly: false, leaseExpiresAt: new Date() }, controller.signal);
   assert.equal(scheduled, 0); assert.equal(handled, 0);
 });
+
+test("a free slot claims and starts new work while an earlier dispatch remains in flight", async () => {
+  const controller = new AbortController();
+  let claimCount = 0;
+  let startedNew = false;
+  const loop = runWorkerLoop({
+    tick: async () => undefined,
+    claim: async () => {
+      claimCount += 1;
+      if (claimCount === 1) return [{ jobId: "job_long" }];
+      if (claimCount === 2) return [{ jobId: "job_new" }];
+      return [];
+    },
+    dispatch: async (job, signal) => {
+      if (job.jobId === "job_new") { startedNew = true; controller.abort(); return; }
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+    },
+    wait: async () => undefined,
+  }, controller.signal);
+  await Promise.race([
+    loop,
+    new Promise<void>((resolve) => setTimeout(() => { controller.abort(); resolve(); }, 100)),
+  ]);
+  await loop;
+
+  assert.equal(startedNew, true);
+  assert.equal(claimCount >= 2, true);
+});
+
+test("Outbox tick continues while all eight Worker slots contain long-running jobs", async () => {
+  const controller = new AbortController();
+  let ticks = 0;
+  let claimed = false;
+  const loop = runWorkerLoop({
+    tick: async () => { ticks += 1; if (ticks === 2) controller.abort(); },
+    claim: async () => {
+      if (claimed) return [];
+      claimed = true;
+      return Array.from({ length: 8 }, (_, index) => ({ jobId: `job_long_${index}` }));
+    },
+    dispatch: async (_job, signal) => {
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+    },
+    wait: async () => undefined,
+  }, controller.signal);
+  await Promise.race([
+    loop,
+    new Promise<void>((resolve) => setTimeout(() => { controller.abort(); resolve(); }, 100)),
+  ]);
+  await loop;
+
+  assert.equal(ticks >= 2, true);
+});
+
+test("shutdown waits for every started dispatch to observe abort and finish cleanup", async () => {
+  const controller = new AbortController();
+  let cleaned = false;
+  const loop = runWorkerLoop({
+    tick: async () => undefined,
+    claim: async () => [{ jobId: "job_cleanup" }],
+    dispatch: async (_job, signal) => {
+      controller.abort();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.equal(signal.aborted, true);
+      cleaned = true;
+    },
+    wait: async () => undefined,
+  }, controller.signal);
+
+  await loop;
+  assert.equal(cleaned, true);
+});
+
+test("a rejected dispatch is observed and does not block later available work", async () => {
+  const controller = new AbortController();
+  let claims = 0;
+  let completed = false;
+  await runWorkerLoop({
+    tick: async () => undefined,
+    claim: async () => {
+      claims += 1;
+      if (claims === 1) return [{ jobId: "job_reject" }];
+      if (claims === 2) return [{ jobId: "job_after_reject" }];
+      controller.abort();
+      return [];
+    },
+    dispatch: async (job) => {
+      if (job.jobId === "job_reject") throw new Error("synthetic dispatch failure");
+      completed = true;
+    },
+    wait: async () => undefined,
+  }, controller.signal);
+
+  assert.equal(completed, true);
+});

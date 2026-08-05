@@ -2,6 +2,7 @@ import { sql, type Kysely } from "kysely";
 
 import type { RuntimeDatabase } from "../db/database.js";
 import { redactSummary, type Redactor } from "../domain/redaction.js";
+import { agentRunConversationLockKey } from "./agent-run-conversation-lock.js";
 
 interface ClaimedJobBase {
   tenantId: string;
@@ -141,22 +142,145 @@ export async function claimPlatformWorkerJobs(
   const databaseNow = sql<Date>`now()`;
   const leaseExpiresAt = sql<Date>`now() + ${input.leaseMs} * interval '1 millisecond'`;
   return db.transaction().execute(async (trx) => {
-    // @platform-worker-cross-tenant-claim reviewed scheduler authority
-    const candidates = await trx.selectFrom("worker_jobs").select(["tenant_id", "job_id", "status", "attempt_count", "max_attempts"])
-      .where("job_kind", "in", allowedJobKinds)
-      .where((expression) => expression.or([
-        expression.and([
-          expression("status", "in", ["queued", "retrying"]),
-          expression("attempt_count", "<", expression.ref("max_attempts")),
-          expression("next_attempt_at", "<=", databaseNow),
-        ]),
-        expression.and([expression("status", "=", "running"), expression("lease_expires_at", "<", databaseNow)]),
-      ])).orderBy("created_at").limit(input.limit).forUpdate().skipLocked().execute();
+    const nonExecuteKinds = allowedJobKinds.filter((kind) => kind !== "execute_agent_run");
+    const nonExecuteCandidates = nonExecuteKinds.length === 0 ? [] : await (
+      // @platform-worker-cross-tenant-claim reviewed scheduler authority
+      trx.selectFrom("worker_jobs").select(["tenant_id", "job_id", "status", "attempt_count", "max_attempts", "created_at"])
+        .where("job_kind", "in", nonExecuteKinds)
+        .where((expression) => expression.or([
+          expression.and([
+            expression("status", "in", ["queued", "retrying"]),
+            expression("attempt_count", "<", expression.ref("max_attempts")),
+            expression("next_attempt_at", "<=", databaseNow),
+          ]),
+          expression.and([expression("status", "=", "running"), expression("lease_expires_at", "<", databaseNow)]),
+        ])).orderBy("created_at").limit(input.limit).forUpdate().skipLocked().execute()
+    );
+    const executeDiscoveryLimit = Math.min(100, input.limit * 4);
+    const executeCandidates = !allowedJobKinds.includes("execute_agent_run") ? [] : await (
+      // @platform-worker-cross-tenant-claim reviewed scheduler authority
+      trx.selectFrom("worker_jobs as jobs")
+        .innerJoin("agent_runs as runs", (join) => join
+          .onRef("runs.tenant_id", "=", "jobs.tenant_id")
+          .onRef("runs.run_id", "=", "jobs.run_id"))
+        .leftJoin("agent_runs as active_runs", (join) => join
+          .onRef("active_runs.tenant_id", "=", "runs.tenant_id")
+          .onRef("active_runs.conversation_id", "=", "runs.conversation_id"))
+        .leftJoin("worker_jobs as active_jobs", (join) => join
+          .onRef("active_jobs.tenant_id", "=", "active_runs.tenant_id")
+          .onRef("active_jobs.run_id", "=", "active_runs.run_id")
+          .on("active_jobs.job_kind", "=", "execute_agent_run")
+          .on("active_jobs.status", "=", "running")
+          .on("active_jobs.lease_expires_at", ">", databaseNow))
+        .select([
+          "jobs.tenant_id", "runs.conversation_id",
+          sql<Date>`min(${sql.ref("jobs.created_at")})`.as("oldest_created_at"),
+        ])
+        .where("jobs.job_kind", "=", "execute_agent_run")
+        .where((expression) => expression.or([
+          expression.and([
+            expression("jobs.status", "in", ["queued", "retrying"]),
+            expression("jobs.attempt_count", "<", expression.ref("jobs.max_attempts")),
+            expression("jobs.next_attempt_at", "<=", databaseNow),
+          ]),
+          expression.and([expression("jobs.status", "=", "running"), expression("jobs.lease_expires_at", "<", databaseNow)]),
+        ]))
+        .groupBy(["jobs.tenant_id", "runs.conversation_id"])
+        .having(sql<number>`count(${sql.ref("active_jobs.job_id")})`, "=", 0)
+        .orderBy("oldest_created_at")
+        .orderBy("jobs.tenant_id")
+        .orderBy("runs.conversation_id")
+        .limit(executeDiscoveryLimit)
+        .execute()
+    );
+    const candidates = [
+      ...nonExecuteCandidates.map((candidate) => ({ ...candidate, conversation_id: null })),
+      ...executeCandidates.map((candidate) => ({
+        tenant_id: candidate.tenant_id,
+        conversation_id: candidate.conversation_id,
+        created_at: candidate.oldest_created_at,
+        job_id: candidate.conversation_id,
+        status: "conversation_candidate",
+        attempt_count: 0,
+        max_attempts: 0,
+      })),
+    ].sort((left, right) => left.created_at.getTime() - right.created_at.getTime() || left.job_id.localeCompare(right.job_id));
     const claimed: ClaimedJob[] = [];
+    const seenConversations = new Set<string>();
     for (const candidate of candidates) {
-      const recoveryOnly = isRecoveryOnly(candidate);
+      if (claimed.length >= input.limit) break;
+      let selected: {
+        tenant_id: string; job_id: string; status: string; attempt_count: number; max_attempts: number;
+      } | undefined = candidate.conversation_id === null ? candidate : undefined;
+      if (candidate.conversation_id !== null) {
+        const conversationKey = agentRunConversationLockKey(candidate.tenant_id, candidate.conversation_id);
+        if (seenConversations.has(conversationKey)) continue;
+        seenConversations.add(conversationKey);
+        const lock = await sql<{ acquired: boolean }>`select pg_try_advisory_xact_lock(hashtextextended(${conversationKey}, 0)) as acquired`.execute(trx);
+        if (lock.rows[0]?.acquired !== true) continue;
+        const earliest = await trx.selectFrom("worker_jobs as jobs")
+          .innerJoin("agent_runs as runs", (join) => join
+            .onRef("runs.tenant_id", "=", "jobs.tenant_id")
+            .onRef("runs.run_id", "=", "jobs.run_id"))
+          .select("jobs.job_id")
+          .where("jobs.tenant_id", "=", candidate.tenant_id)
+          .where("runs.conversation_id", "=", candidate.conversation_id)
+          .where("jobs.job_kind", "=", "execute_agent_run")
+          .where((expression) => expression.or([
+            expression.and([
+              expression("jobs.status", "in", ["queued", "retrying"]),
+              expression("jobs.attempt_count", "<", expression.ref("jobs.max_attempts")),
+              expression("jobs.next_attempt_at", "<=", databaseNow),
+            ]),
+            expression.and([expression("jobs.status", "=", "running"), expression("jobs.lease_expires_at", "<", databaseNow)]),
+          ]))
+          .orderBy("jobs.created_at")
+          .orderBy("jobs.job_id")
+          .limit(1)
+          .executeTakeFirst();
+        if (earliest === undefined) continue;
+        const locked = await trx.selectFrom("worker_jobs")
+          .select(["tenant_id", "job_id", "status", "attempt_count", "max_attempts"])
+          .where("tenant_id", "=", candidate.tenant_id)
+          .where("job_id", "=", earliest.job_id)
+          .forUpdate()
+          .skipLocked()
+          .executeTakeFirst();
+        if (locked === undefined) continue;
+        const eligible = await trx.selectFrom("worker_jobs")
+          .select("job_id")
+          .where("tenant_id", "=", candidate.tenant_id)
+          .where("job_id", "=", locked.job_id)
+          .where("job_kind", "=", "execute_agent_run")
+          .where((expression) => expression.or([
+            expression.and([
+              expression("status", "in", ["queued", "retrying"]),
+              expression("attempt_count", "<", expression.ref("max_attempts")),
+              expression("next_attempt_at", "<=", databaseNow),
+            ]),
+            expression.and([expression("status", "=", "running"), expression("lease_expires_at", "<", databaseNow)]),
+          ]))
+          .executeTakeFirst();
+        if (eligible === undefined) continue;
+        const active = await trx.selectFrom("worker_jobs as active_jobs")
+          .innerJoin("agent_runs as active_runs", (join) => join
+            .onRef("active_runs.tenant_id", "=", "active_jobs.tenant_id")
+            .onRef("active_runs.run_id", "=", "active_jobs.run_id"))
+          .select("active_jobs.job_id")
+          .where("active_jobs.tenant_id", "=", candidate.tenant_id)
+          .where("active_runs.conversation_id", "=", candidate.conversation_id)
+          .where("active_jobs.job_kind", "=", "execute_agent_run")
+          .where("active_jobs.status", "=", "running")
+          .where("active_jobs.lease_expires_at", ">", databaseNow)
+          .limit(1)
+          .executeTakeFirst();
+        if (active !== undefined) continue;
+        selected = locked;
+      }
+      if (selected === undefined) continue;
+      const recoveryOnly = isRecoveryOnly(selected);
       const row = await trx.updateTable("worker_jobs").set({ status: "running", attempt_count: sql<number>`case when attempt_count < max_attempts then attempt_count + 1 else attempt_count end`, lease_owner: input.workerId, lease_expires_at: leaseExpiresAt, updated_at: databaseNow })
-        .where("tenant_id", "=", candidate.tenant_id).where("job_id", "=", candidate.job_id)
+        .where("tenant_id", "=", selected.tenant_id).where("job_id", "=", selected.job_id)
         .returning(["tenant_id", "job_id", "job_kind", "attempt_count", "max_attempts", "payload_ref", "runtime_command", "target_command_version", "effect_state", "lease_expires_at"]).executeTakeFirstOrThrow();
       const base: ClaimedJobBase = { tenantId: row.tenant_id, jobId: row.job_id, attemptCount: row.attempt_count, maxAttempts: row.max_attempts, payloadRef: row.payload_ref, recoveryOnly, leaseExpiresAt: row.lease_expires_at! };
       const effectState = workerEffectState(row.effect_state);

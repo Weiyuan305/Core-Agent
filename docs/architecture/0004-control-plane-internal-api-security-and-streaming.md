@@ -79,6 +79,15 @@ ports, controls, percent tricks, and redirects. Requests contain only the
 Bearer ingress material, server Session header, selected managed model, one
 user message, and `stream: true`.
 
+Immediately before the Worker may obtain that Bearer material or dispatch the
+HTTP request, it commits the leased job's `unsafe_to_replay` phase while
+requiring the target Run to be running. Hermes exposes no reliable idempotency
+key for this call. Consequently every refusal, timeout, malformed/truncated
+response, abort, or crash after that commit is terminal or left for unsafe
+recovery; none is an automatic retry. This may fail a Run whose request never
+reached Hermes, which is the explicit availability cost of avoiding a hidden
+duplicate model execution.
+
 Responses must be `text/event-stream`. Parsing is fatal UTF-8 and strict JSON,
 bounds each physical line to 64 KiB and total assistant content to 4,000
 characters, yields only non-empty `choices[0].delta.content`, and succeeds only

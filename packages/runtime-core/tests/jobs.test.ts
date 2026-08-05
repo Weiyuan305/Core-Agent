@@ -46,6 +46,46 @@ async function insertRuntime(): Promise<void> {
   }).execute();
 }
 
+async function insertExecuteBacklog(
+  conversations: readonly { conversationId: string; count: number; createdOffset: number }[],
+): Promise<void> {
+  await db.insertInto("actors").values({
+    tenant_id: "tenant_jobs", actor_id: "actor_jobs", schema_version: 1, resource_version: 1,
+    actor_kind: "human", display_name: "Jobs actor", status: "active", created_at: new Date(0), updated_at: new Date(0),
+  }).execute();
+  await db.insertInto("profiles").values({
+    tenant_id: "tenant_jobs", profile_id: "profile_jobs", schema_version: 1, resource_version: 1,
+    owner_actor_id: "actor_jobs", profile_kind: "default", hermes_profile_ref: "jobs",
+    description: "Jobs profile", status: "active", provider_config_id: "provider_jobs", model_id: "model_jobs",
+    created_at: new Date(0), updated_at: new Date(0),
+  }).execute();
+  for (const conversation of conversations) {
+    await db.insertInto("conversations").values({
+      tenant_id: "tenant_jobs", conversation_id: conversation.conversationId, profile_id: "profile_jobs",
+      created_by_actor_id: "actor_jobs", status: "active", schema_version: 1, resource_version: 1,
+      student_ref: null, case_ref: null, created_at: new Date(conversation.createdOffset), updated_at: new Date(conversation.createdOffset),
+    }).execute();
+    for (let index = 0; index < conversation.count; index += 1) {
+      const runId = `run_${conversation.conversationId}_${index}`;
+      const createdAt = new Date(conversation.createdOffset + index);
+      await db.insertInto("agent_runs").values({
+        tenant_id: "tenant_jobs", run_id: runId, conversation_id: conversation.conversationId,
+        request_id: `request_${runId}`, trace_id: `trace_${runId}`, client_request_id: `client_${runId}`,
+        idempotency_key: `idem_${runId}`, parent_run_id: null, schema_version: 1, resource_version: 1,
+        status: "queued", started_at: null, finished_at: null, failure_summary: null,
+        created_at: createdAt, updated_at: createdAt,
+      }).execute();
+      await db.insertInto("worker_jobs").values({
+        tenant_id: "tenant_jobs", job_id: `job_${conversation.conversationId}_${index}`, job_kind: "execute_agent_run",
+        status: "queued", attempt_count: 0, max_attempts: 3, lease_owner: null, lease_expires_at: null,
+        next_attempt_at: new Date(0), payload_ref: runId, effect_state: "pre_effect", runtime_command: null,
+        target_command_version: null, last_error_summary: null, run_id: runId, container_id: null,
+        created_at: createdAt, updated_at: createdAt,
+      }).execute();
+    }
+  }
+}
+
 async function insertRecoveryJob(input: {
   jobId: string; jobKind: "reconcile_runtime" | "execute_agent_run" | "dispatch_outbox";
   status: "queued" | "retrying" | "running"; attemptCount: number; maxAttempts: number;
@@ -100,16 +140,26 @@ test("expired final reconcile work is reclaimed once without incrementing beyond
 });
 
 test("expired final execute jobs reclaim pre and unsafe phases without incrementing", async () => {
-  await insertRecoveryJob({ jobId: "job_execute_pre", jobKind: "execute_agent_run", status: "running", attemptCount: 2, maxAttempts: 2, effectState: "pre_effect" });
-  await insertRecoveryJob({ jobId: "job_execute_unsafe", jobKind: "execute_agent_run", status: "running", attemptCount: 2, maxAttempts: 2, effectState: "unsafe_to_replay" });
+  await insertExecuteBacklog([
+    { conversationId: "execute_pre", count: 1, createdOffset: 1 },
+    { conversationId: "execute_unsafe", count: 1, createdOffset: 2 },
+  ]);
+  await db.updateTable("worker_jobs").set({
+    status: "running", attempt_count: 2, max_attempts: 2, lease_owner: "worker_crashed",
+    lease_expires_at: new Date(0), effect_state: "pre_effect",
+  }).where("tenant_id", "=", "tenant_jobs").where("job_id", "=", "job_execute_pre_0").execute();
+  await db.updateTable("worker_jobs").set({
+    status: "running", attempt_count: 2, max_attempts: 2, lease_owner: "worker_crashed",
+    lease_expires_at: new Date(0), effect_state: "unsafe_to_replay",
+  }).where("tenant_id", "=", "tenant_jobs").where("job_id", "=", "job_execute_unsafe_0").execute();
   const [left, right] = await Promise.all([
     claimPlatformWorkerJobs(db, { workerId: "platform_recover_a", limit: 8, leaseMs: 30_000, jobKinds: ["execute_agent_run"] }),
     claimPlatformWorkerJobs(db, { workerId: "platform_recover_b", limit: 8, leaseMs: 30_000, jobKinds: ["execute_agent_run"] }),
   ]);
   const recovered = [...left, ...right].sort((a, b) => a.jobId.localeCompare(b.jobId));
   assert.deepEqual(recovered.map((job) => ({ jobId: job.jobId, attemptCount: job.attemptCount, recoveryOnly: job.recoveryOnly, effectState: job.effectState })), [
-    { jobId: "job_execute_pre", attemptCount: 2, recoveryOnly: true, effectState: "pre_effect" },
-    { jobId: "job_execute_unsafe", attemptCount: 2, recoveryOnly: true, effectState: "unsafe_to_replay" },
+    { jobId: "job_execute_pre_0", attemptCount: 2, recoveryOnly: true, effectState: "pre_effect" },
+    { jobId: "job_execute_unsafe_0", attemptCount: 2, recoveryOnly: true, effectState: "unsafe_to_replay" },
   ]);
   assert.deepEqual(await claimPlatformWorkerJobs(db, { workerId: "platform_recover_c", limit: 8, leaseMs: 30_000, jobKinds: ["execute_agent_run"] }), []);
 });
@@ -144,6 +194,66 @@ test("platform Worker claims eligible jobs across tenants without duplicate owne
   ]);
   assert.deepEqual(new Set([...left, ...right].map((job) => job.tenantId)), new Set(["tenant_jobs", "tenant_jobs_b"]));
   assert.equal(left.length + right.length, 2);
+});
+
+test("platform claim reaches an unrelated Conversation beyond a large same-Conversation backlog", { timeout: 5_000 }, async () => {
+  await insertExecuteBacklog([
+    { conversationId: "conversation_hot", count: 8, createdOffset: 1 },
+    { conversationId: "conversation_unrelated", count: 1, createdOffset: 100 },
+  ]);
+
+  const claimed = await claimPlatformWorkerJobs(db, {
+    workerId: "platform_fair", limit: 8, leaseMs: 30_000, jobKinds: ["execute_agent_run"],
+  });
+
+  assert.deepEqual(claimed.map((job) => job.jobId).sort(), [
+    "job_conversation_hot_0", "job_conversation_unrelated_0",
+  ]);
+});
+
+test("two platform claimers cannot concurrently claim two Runs from one Conversation", { timeout: 5_000 }, async () => {
+  await insertExecuteBacklog([{ conversationId: "conversation_shared", count: 2, createdOffset: 1 }]);
+
+  const [left, right] = await Promise.all([
+    claimPlatformWorkerJobs(db, { workerId: "platform_shared_a", limit: 1, leaseMs: 30_000, jobKinds: ["execute_agent_run"] }),
+    claimPlatformWorkerJobs(db, { workerId: "platform_shared_b", limit: 1, leaseMs: 30_000, jobKinds: ["execute_agent_run"] }),
+  ]);
+
+  assert.equal(left.length + right.length, 1);
+  assert.equal([...left, ...right][0]?.jobId, "job_conversation_shared_0");
+});
+
+test("an unexpired running Agent Run blocks later jobs only in its own Conversation", { timeout: 5_000 }, async () => {
+  await insertExecuteBacklog([
+    { conversationId: "conversation_busy", count: 2, createdOffset: 1 },
+    { conversationId: "conversation_free", count: 1, createdOffset: 10 },
+  ]);
+  await db.updateTable("worker_jobs").set({
+    status: "running", attempt_count: 1, lease_owner: "platform_existing",
+    lease_expires_at: new Date("2100-01-01T00:00:00.000Z"),
+  }).where("tenant_id", "=", "tenant_jobs").where("job_id", "=", "job_conversation_busy_0").execute();
+
+  const claimed = await claimPlatformWorkerJobs(db, {
+    workerId: "platform_parallel", limit: 8, leaseMs: 30_000, jobKinds: ["execute_agent_run"],
+  });
+
+  assert.deepEqual(claimed.map((job) => job.jobId), ["job_conversation_free_0"]);
+});
+
+test("different Conversations remain claimable in parallel", { timeout: 5_000 }, async () => {
+  await insertExecuteBacklog([
+    { conversationId: "conversation_parallel_a", count: 1, createdOffset: 1 },
+    { conversationId: "conversation_parallel_b", count: 1, createdOffset: 2 },
+  ]);
+
+  const [left, right] = await Promise.all([
+    claimPlatformWorkerJobs(db, { workerId: "platform_parallel_a", limit: 1, leaseMs: 30_000, jobKinds: ["execute_agent_run"] }),
+    claimPlatformWorkerJobs(db, { workerId: "platform_parallel_b", limit: 1, leaseMs: 30_000, jobKinds: ["execute_agent_run"] }),
+  ]);
+
+  assert.deepEqual(new Set([...left, ...right].map((job) => job.jobId)), new Set([
+    "job_conversation_parallel_a_0", "job_conversation_parallel_b_0",
+  ]));
 });
 
 test("runtime advisory lock serializes external work for one tenant runtime", async () => {
