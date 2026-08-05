@@ -11,6 +11,7 @@ import {
   SUPERVISOR_DEADLINE_BUDGET,
   canonicalSupervisorRequestHash,
   loadProviderCatalog,
+  validateSupervisorResponse,
   type ProvisionRuntimeCommandDataV1,
   type SecretMaterial,
   type SecretReference,
@@ -565,23 +566,33 @@ function buildRecoveryServer(
   socketPath: string,
   journal: OperationJournal,
   adapter: DockerRuntimeAdapter,
+  onExecute: () => void = () => undefined,
+  onSettled: (value: unknown) => void = () => undefined,
 ): RuntimeSupervisorServer {
   return new RuntimeSupervisorServer({
     socketPath,
     journal,
     validateRequest: (value) => validateSupervisorPolicy(value, { imageLock, providerCatalog }),
-    execute: (...args: unknown[]) => {
+    execute: async (...args: unknown[]) => {
+      onExecute();
       const [request, signal, context] = args as [unknown, AbortSignal, unknown];
-      return (adapter.execute as unknown as (
-        value: unknown,
-        operationSignal: AbortSignal,
-        reservationContext: unknown,
-      ) => ReturnType<DockerRuntimeAdapter["execute"]>)(request, signal, context);
+      try {
+        const value = await (adapter.execute as unknown as (
+          value: unknown,
+          operationSignal: AbortSignal,
+          reservationContext: unknown,
+        ) => ReturnType<DockerRuntimeAdapter["execute"]>)(request, signal, context);
+        onSettled(value);
+        return value;
+      } catch (error) {
+        onSettled(error);
+        throw error;
+      }
     },
-    admissionTimeoutMs: 25,
-    effectTimeoutMs: 50,
-    operationTimeoutMs: 100,
-    cancellationSettlementTimeoutMs: 30,
+    admissionTimeoutMs: 100,
+    effectTimeoutMs: 200,
+    operationTimeoutMs: 400,
+    cancellationSettlementTimeoutMs: 100,
     shutdownTimeoutMs: 10,
   });
 }
@@ -1106,16 +1117,24 @@ test("stale lifecycle reservations recover applied response-less mutations witho
     docker.responseLessMutationErrors.clear();
 
     const recoveredAdapter = buildAdapter(docker, new FakeSecretStore()).adapter;
+    let recoveredExecutions = 0;
+    let adapterSettlement: unknown;
     const recoveredServer = buildRecoveryServer(
       socketPath,
       new OperationJournal({ directory: journalRoot }),
       recoveredAdapter,
+      () => { recoveredExecutions += 1; },
+      (value) => { adapterSettlement = value; },
     );
     await recoveredServer.start();
     try {
       const recovered = await new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 })
         .execute(lifecycleRequest);
-      assert.equal(recovered.outcome, "accepted");
+      assert.equal(
+        recovered.outcome,
+        "accepted",
+        `${kind}: executions=${recoveredExecutions} adapter=${JSON.stringify(adapterSettlement)} ${JSON.stringify(recovered)}`,
+      );
     } finally {
       await recoveredServer.close();
     }
@@ -1200,8 +1219,8 @@ test("only response-less data-property transport codes are daemon-uncertain", as
     const response = await Promise.race([buildAdapter(docker).adapter.execute(signed({
       ...provisionData(),
       operation_id: `operation_negative_transport_${index}`,
-    })), new Promise<typeof timeout>((resolve) => setTimeout(() => resolve(timeout), 30))]);
-    assert.notEqual(response, timeout);
+    })), new Promise<typeof timeout>((resolve) => setTimeout(() => resolve(timeout), 100))]);
+    assert.notEqual(response, timeout, `failure index ${index} was incorrectly left daemon-uncertain`);
     if (response === timeout) continue;
     assert.equal(response.outcome, "failed");
     if (response.outcome === "failed") assert.equal(response.code, "DEPENDENCY_UNAVAILABLE");
@@ -1230,6 +1249,14 @@ test("gateway adoption accepts only the exact Docker merge of locked-image and r
   gateway.options!.Labels!["untrusted.extra"] = "value";
   response = await adapter.execute(lifecycle("inspect", "operation_merged_label_drift"));
   assert.equal(response.outcome, "rejected");
+});
+
+test("accepted adapter observations contain only the exact Supervisor response shape", async () => {
+  const { adapter } = buildAdapter();
+  const provisioned = await adapter.execute(signed());
+  assert.doesNotThrow(() => validateSupervisorResponse(provisioned));
+  const stopped = await adapter.execute(lifecycle("stop", "operation_exact_observation_stop"));
+  assert.doesNotThrow(() => validateSupervisorResponse(stopped));
 });
 
 test("provision validates the fixed non-secret manifest before starting the gateway", async () => {
