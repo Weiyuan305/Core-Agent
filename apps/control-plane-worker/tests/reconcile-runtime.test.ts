@@ -40,6 +40,60 @@ for (const command of ["start", "stop", "restart", "delete"] as const) {
   });
 }
 
+test("external Runtime effects are durably marked before dispatch and complete with an effect proof", async () => {
+  const order: string[] = [];
+  const result = await handleReconcileRuntime({
+    loadFacts: async () => ({ tenantId: "tenant_a", runtimeId: "runtime_a", generation: 1, imageRef, commandVersion: 1, observedState: "stopped", desiredState: "running" }),
+    supervisor: async (request) => {
+      order.push(`supervisor:${request.kind}`);
+      if (request.kind === "inspect") return { protocol_version: 1, operation_id: request.operation_id, outcome: "accepted", observation: { tenant_id: "tenant_a", runtime_id: "runtime_a", generation: 1, exists: true, lifecycle: "stopped", health: "unknown", image_ref: imageRef } };
+      assert.deepEqual(order, ["supervisor:inspect", "mark", "supervisor:start"]);
+      return { protocol_version: 1, operation_id: request.operation_id, outcome: "accepted", observation: { tenant_id: "tenant_a", runtime_id: "runtime_a", generation: 1, exists: true, lifecycle: "running", health: "healthy", image_ref: imageRef, private_origin: "http://172.30.0.4:8642" } };
+    },
+    reprovision: async () => { throw new Error("not expected"); },
+    isCurrent: async () => true,
+    markEffectDispatched: async () => { order.push("mark"); return true; },
+    succeed: async (_job, success) => {
+      assert.deepEqual(success, { kind: "effect_dispatched", command: "start", observation: { tenant_id: "tenant_a", runtime_id: "runtime_a", generation: 1, exists: true, lifecycle: "running", health: "healthy", image_ref: imageRef, private_origin: "http://172.30.0.4:8642" } });
+      order.push("complete:effect_dispatched");
+      return true;
+    },
+    retry: async () => true,
+    fail: async () => true,
+  }, { tenantId: "tenant_a", jobId: "job_effect_proof", attemptCount: 1, maxAttempts: 5, targetCommandVersion: 1, command: "start", effectState: "pre_effect", recoveryOnly: false }, new AbortController().signal);
+  assert.deepEqual(result, { kind: "succeeded" });
+  assert.deepEqual(order, ["supervisor:inspect", "mark", "supervisor:start", "complete:effect_dispatched"]);
+});
+
+test("pre-effect inspection success carries an explicit inspect proof", async () => {
+  let marks = 0;
+  const observation = { tenant_id: "tenant_a", runtime_id: "runtime_a", generation: 1, exists: true as const, lifecycle: "running" as const, health: "healthy" as const, image_ref: imageRef, private_origin: "http://172.30.0.4:8642" };
+  const result = await handleReconcileRuntime({
+    loadFacts: async () => ({ tenantId: "tenant_a", runtimeId: "runtime_a", generation: 1, imageRef, commandVersion: 1, observedState: "ready", desiredState: "running" }),
+    supervisor: async (request) => ({ protocol_version: 1, operation_id: request.operation_id, outcome: "accepted", observation }),
+    reprovision: async () => { throw new Error("not expected"); }, isCurrent: async () => true,
+    markEffectDispatched: async () => { marks += 1; return true; },
+    succeed: async (_job, success) => {
+      assert.deepEqual(success, { kind: "inspect_proved", command: "start", observation });
+      return true;
+    },
+    retry: async () => true, fail: async () => true,
+  }, { tenantId: "tenant_a", jobId: "job_inspect_proof", attemptCount: 1, maxAttempts: 5, targetCommandVersion: 1, command: "start", effectState: "pre_effect", recoveryOnly: false }, new AbortController().signal);
+  assert.deepEqual(result, { kind: "succeeded" });
+  assert.equal(marks, 0);
+});
+
+test("superseded reconciliation carries an explicit closed disposition", async () => {
+  const result = await handleReconcileRuntime({
+    loadFacts: async () => ({ tenantId: "tenant_a", runtimeId: "runtime_a", generation: 1, imageRef, commandVersion: 2, observedState: "ready", desiredState: "running" }),
+    supervisor: async () => { throw new Error("not expected"); }, reprovision: async () => { throw new Error("not expected"); },
+    isCurrent: async () => true, markEffectDispatched: async () => true,
+    succeed: async (_job, success) => { assert.deepEqual(success, { kind: "superseded" }); return true; },
+    retry: async () => true, fail: async () => true,
+  }, { tenantId: "tenant_a", jobId: "job_superseded_proof", attemptCount: 1, maxAttempts: 5, targetCommandVersion: 1, command: "start", effectState: "pre_effect", recoveryOnly: false }, new AbortController().signal);
+  assert.deepEqual(result, { kind: "succeeded" });
+});
+
 test("retryable inspect failure reschedules without issuing an effect", async () => {
   let effects = 0; let retries = 0;
   const result = await handleReconcileRuntime({
@@ -210,14 +264,14 @@ for (const [command, observation] of [
 }
 
 test("lease loss while marking a dispatched effect cannot reschedule or fail the job", async () => {
-  let retried = 0; let failed = 0;
+  let retried = 0; let failed = 0; const kinds: string[] = [];
   const result = await handleReconcileRuntime({
     loadFacts: async () => ({ tenantId: "tenant_a", runtimeId: "runtime_a", generation: 1, imageRef, commandVersion: 1, observedState: "ready", desiredState: "running" }),
-    supervisor: async (request) => ({ protocol_version: 1, operation_id: request.operation_id, outcome: "accepted", observation: { tenant_id: "tenant_a", runtime_id: "runtime_a", generation: 1, exists: true, lifecycle: "running", health: request.kind === "restart" ? "unknown" : "healthy", image_ref: imageRef, private_origin: "http://172.30.0.4:8642" } }),
+    supervisor: async (request) => { kinds.push(request.kind); return { protocol_version: 1, operation_id: request.operation_id, outcome: "accepted", observation: { tenant_id: "tenant_a", runtime_id: "runtime_a", generation: 1, exists: true, lifecycle: "running", health: "healthy", image_ref: imageRef, private_origin: "http://172.30.0.4:8642" } as const }; },
     reprovision: async () => { throw new Error("not expected"); }, isCurrent: async () => true, markEffectDispatched: async () => false,
     succeed: async () => true, retry: async () => { retried += 1; return true; }, fail: async () => { failed += 1; return true; },
   }, { tenantId: "tenant_a", jobId: "job_mark_lease_loss", attemptCount: 1, maxAttempts: 5, targetCommandVersion: 1, command: "restart", effectState: "pre_effect", recoveryOnly: false }, new AbortController().signal);
-  assert.deepEqual(result, { kind: "failed", summary: "Worker job lease lost" }); assert.equal(retried, 0); assert.equal(failed, 0);
+  assert.deepEqual(result, { kind: "failed", summary: "Worker job lease lost" }); assert.deepEqual(kinds, ["inspect"]); assert.equal(retried, 0); assert.equal(failed, 0);
 });
 
 test("missing restart reprovision marks unknown health once then becomes inspect-only", async () => {
