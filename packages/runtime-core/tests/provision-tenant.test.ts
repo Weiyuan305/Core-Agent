@@ -538,8 +538,8 @@ test("superseded reconcile retry and failure terminalize only their owned jobs",
   const repository = new WorkerRuntimeRepository(db, createRedactor([]), () => new Date("2026-08-06T00:00:00.000Z"));
   const ref = (job: typeof failedOld) => ({ tenantId, runtimeId: accepted.runtime.container_id, jobId: job.job_id, workerId: "worker_a", attemptCount: job.attempt_count });
 
-  assert.deepEqual(await repository.failReconcileJob(ref(failedOld), 1, "stale rejected effect"), { kind: "superseded" });
-  assert.deepEqual(await repository.retryReconcileJob(ref(retriedOld), 2, "stale timeout", new Date("2026-08-06T00:01:00.000Z")), { kind: "superseded" });
+  assert.deepEqual(await repository.failReconcile(ref(failedOld), 1, "stale rejected effect"), { kind: "superseded" });
+  assert.deepEqual(await repository.retryReconcile(ref(retriedOld), 2, "stale timeout", new Date("2026-08-06T00:01:00.000Z")), { kind: "superseded" });
   assert.deepEqual(await db.selectFrom("runtime_containers").select(["desired_state", "observed_state", "health_status", "failure_summary", "resource_version", "command_version"]).where("tenant_id", "=", tenantId).executeTakeFirstOrThrow(), beforeRuntime);
   assert.deepEqual(await db.selectFrom("product_events").select(({ fn }) => fn.countAll<number>().as("count")).where("tenant_id", "=", tenantId).executeTakeFirstOrThrow(), beforeEvents);
   assert.deepEqual(await db.selectFrom("audit_events").select(({ fn }) => fn.countAll<number>().as("count")).where("tenant_id", "=", tenantId).executeTakeFirstOrThrow(), beforeAudits);
@@ -547,8 +547,13 @@ test("superseded reconcile retry and failure terminalize only their owned jobs",
     { target_command_version: "1", status: "succeeded", last_error_summary: "Superseded by a newer runtime command" },
     { target_command_version: "2", status: "succeeded", last_error_summary: "Superseded by a newer runtime command" },
   ]);
-  assert.deepEqual(await repository.failReconcileJob({ ...ref(current), attemptCount: current.attempt_count + 1 }, 3, "wrong attempt"), { kind: "lease_lost" });
-  assert.deepEqual(await repository.failReconcileJob(ref(current), 3, "current final failure"), { kind: "failed" });
+  const beforeRejectedByKind = await db.selectFrom("runtime_containers").selectAll().where("tenant_id", "=", tenantId).executeTakeFirstOrThrow();
+  assert.equal(await repository.retryProvisionJob(ref(current), "wrong job kind", new Date(1)), false);
+  assert.deepEqual(await repository.failProvisionJob(ref(current), "wrong job kind"), { kind: "lease_lost" });
+  assert.deepEqual(await repository.failReconcile(ref(current), 2, "caller target differs from stored target"), { kind: "lease_lost" });
+  assert.deepEqual(await db.selectFrom("runtime_containers").selectAll().where("tenant_id", "=", tenantId).executeTakeFirstOrThrow(), beforeRejectedByKind);
+  assert.deepEqual(await repository.failReconcile({ ...ref(current), attemptCount: current.attempt_count + 1 }, 3, "wrong attempt"), { kind: "lease_lost" });
+  assert.deepEqual(await repository.failReconcile(ref(current), 3, "current final failure"), { kind: "failed" });
 });
 
 test("Worker terminal transaction makes no transition after lease loss", async () => {
@@ -910,14 +915,14 @@ test("same-owner runtime reclaim fences effect and every terminal ownership muta
       assert.equal(await repository.markReconcileEffectDispatched(stale, "start", targetCommandVersion), false);
       assert.equal(await repository.markReconcileEffectDispatched(current, "start", targetCommandVersion), true);
     } else if (operation === "retry") {
-      assert.equal(await repository.retryJob(stale, "stale", new Date(1)), false);
-      assert.equal(await repository.retryJob(current, "current", new Date(1)), true);
+      assert.deepEqual(await repository.retryReconcile(stale, targetCommandVersion, "stale", new Date(1)), { kind: "lease_lost" });
+      assert.deepEqual(await repository.retryReconcile(current, targetCommandVersion, "current", new Date(1)), { kind: "retried" });
     } else if (operation === "supersede") {
       assert.equal(await repository.completeSuperseded(stale), false);
       assert.equal(await repository.completeSuperseded(current), true);
     } else if (operation === "failure") {
-      assert.equal(await repository.failRuntimeJob(stale, "stale"), false);
-      assert.equal(await repository.failRuntimeJob(current, "current"), true);
+      assert.deepEqual(await repository.failReconcile(stale, targetCommandVersion, "stale"), { kind: "lease_lost" });
+      assert.deepEqual(await repository.failReconcile(current, targetCommandVersion, "current"), { kind: "failed" });
     } else {
       assert.equal(await repository.finishReconcile(stale, "start", targetCommandVersion, observation), false);
       assert.equal(await repository.finishReconcile(current, "start", targetCommandVersion, observation), true);
