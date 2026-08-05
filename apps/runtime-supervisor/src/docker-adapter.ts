@@ -40,7 +40,9 @@ import {
 } from "./redact-docker-error.js";
 
 const requestHashPattern = /^sha256:[a-f0-9]{64}$/;
-const maximumInitializerWaitMs = SUPERVISOR_DEADLINE_BUDGET.effectTimeoutMs;
+const maximumInitializerWaitMs = SUPERVISOR_DEADLINE_BUDGET.initializerTimeoutMs;
+const maximumVerifierWaitMs = SUPERVISOR_DEADLINE_BUDGET.verifierTimeoutMs;
+const maximumReconciliationWaitMs = SUPERVISOR_DEADLINE_BUDGET.reconciliationTimeoutMs;
 const managedEgressNetwork = "core-agent-egress";
 const managedHomeEnvironment = "HOME=/opt/data";
 const gatewayEnvironment = Object.freeze([
@@ -97,6 +99,8 @@ export interface DockerRuntimeAdapterOptions {
   readonly managedRuntimeUid: number;
   readonly managedRuntimeGid: number;
   readonly initializerTimeoutMs?: number;
+  readonly verifierTimeoutMs?: number;
+  readonly reconciliationTimeoutMs?: number;
 }
 
 type RuntimeNames = ReturnType<typeof deriveManagedRuntimeNames>;
@@ -467,8 +471,11 @@ function exactInitializerOptions(
     HostConfig: {
       AutoRemove: false,
       NetworkMode: "none",
+      Privileged: false,
       ReadonlyRootfs: true,
+      CapAdd: [],
       CapDrop: ["ALL"],
+      Devices: [],
       SecurityOpt: ["no-new-privileges:true"],
       Binds: [
         `${names.volume}:/opt/data`,
@@ -561,8 +568,11 @@ function exactManifestVerifierOptions(
     HostConfig: {
       AutoRemove: false,
       NetworkMode: "none",
+      Privileged: false,
       ReadonlyRootfs: true,
+      CapAdd: [],
       CapDrop: ["ALL"],
+      Devices: [],
       SecurityOpt: ["no-new-privileges:true"],
       Binds: [
         `${names.volume}:/opt/data:ro`,
@@ -574,6 +584,98 @@ function exactManifestVerifierOptions(
       PidsLimit: 32,
     },
   };
+}
+
+function bindSource(value: string, destination: string): string {
+  const suffix = `:${destination}`;
+  if (!value.endsWith(suffix)) throw rejected();
+  const source = value.slice(0, -suffix.length);
+  if (source.length < 1 || source.includes(":")) throw rejected();
+  return source;
+}
+
+function assertDockerStagingChild(root: string, path: string, suffix: string): string {
+  const canonicalRoot = resolve(root);
+  if (canonicalRoot !== root || resolve(path) !== path) throw rejected();
+  const child = relative(canonicalRoot, path);
+  if (
+    child.startsWith("..") || isAbsolute(child)
+    || !/^operation-[^/]+\//u.test(child)
+    || !child.endsWith(suffix)
+  ) throw rejected();
+  return path.slice(0, -suffix.length);
+}
+
+function validateHelperInspection(
+  value: unknown,
+  request: ProvisionRuntimeCommandV1,
+  names: RuntimeNames,
+  helperName: string,
+  resource: "runtime-initializer" | "runtime-manifest-verifier",
+  user: string,
+  dockerHostStagingRoot: string,
+  imageConfiguration: LockedImageConfiguration,
+): void {
+  if (stringProperty(value, "Name") !== `/${helperName}`) throw rejected();
+  const config = dataProperty(value, "Config");
+  if (stringProperty(config, "Image") !== request.runtime.image_ref || stringProperty(config, "User") !== user) throw rejected();
+  exactStringRecord(dataProperty(config, "Labels"), {
+    ...imageConfiguration.labels,
+    ...runtimeLabels(request, names),
+    "core-agent.resource": resource,
+  });
+  validateMergedEnvironment(dataProperty(config, "Env"), imageConfiguration.environment, [managedHomeEnvironment]);
+  const hostConfig = dataProperty(value, "HostConfig");
+  if (
+    booleanProperty(hostConfig, "AutoRemove") !== false
+    || stringProperty(hostConfig, "NetworkMode") !== "none"
+    || booleanProperty(hostConfig, "Privileged") !== false
+    || booleanProperty(hostConfig, "ReadonlyRootfs") !== true
+  ) throw rejected();
+  equalStringArrays(dataProperty(hostConfig, "CapAdd"), []);
+  equalStringArrays(dataProperty(hostConfig, "CapDrop"), ["ALL"]);
+  equalStringArrays(dataProperty(hostConfig, "Devices"), []);
+  equalStringArrays(dataProperty(hostConfig, "SecurityOpt"), ["no-new-privileges:true"]);
+  const binds = safeStringArray(dataProperty(hostConfig, "Binds"));
+  const networks = dataProperty(dataProperty(value, "NetworkSettings"), "Networks");
+  if (typeof networks !== "object" || networks === null || Reflect.ownKeys(networks).length !== 0) throw rejected();
+
+  if (resource === "runtime-initializer") {
+    equalStringArrays(dataProperty(config, "Entrypoint"), ["/opt/hermes/.venv/bin/python", "/opt/core-agent/initialize.py"]);
+    equalStringArrays(dataProperty(config, "Cmd"), [
+      "--bundle", "/run/core-agent/bootstrap/bundle.json",
+      "--data-root", "/opt/data",
+      "--manifest", "/opt/data/.core-agent/manifest.json",
+    ]);
+    exactStringRecord(dataProperty(hostConfig, "Tmpfs"), {
+      "/tmp": "rw,noexec,nosuid,nodev,size=64m,mode=1777",
+      "/run/core-agent/output": "rw,noexec,nosuid,nodev,size=16m,mode=0700",
+    });
+    exactNumberProperty(hostConfig, "Memory", 1_073_741_824);
+    exactNumberProperty(hostConfig, "NanoCpus", 1_000_000_000);
+    exactNumberProperty(hostConfig, "PidsLimit", 256);
+    if (binds.length !== 3 || binds[0] !== `${names.volume}:/opt/data`) throw rejected();
+    const bundle = bindSource(binds[1]!, "/run/core-agent/bootstrap/bundle.json:ro");
+    const secrets = bindSource(binds[2]!, "/run/core-agent/secrets:ro");
+    const operationRoot = assertDockerStagingChild(dockerHostStagingRoot, bundle, "/bundle.json");
+    if (assertDockerStagingChild(dockerHostStagingRoot, secrets, "/secrets") !== operationRoot) throw rejected();
+    return;
+  }
+
+  equalStringArrays(dataProperty(config, "Entrypoint"), ["/opt/hermes/.venv/bin/python"]);
+  equalStringArrays(dataProperty(config, "Cmd"), [
+    "-c",
+    "import os; from pathlib import Path; data=Path('/opt/data/.core-agent/manifest.json').read_bytes(); fd=os.open('/run/core-agent/output/manifest.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600); os.write(fd,data); os.fsync(fd); os.close(fd)",
+  ]);
+  exactStringRecord(dataProperty(hostConfig, "Tmpfs"), {
+    "/tmp": "rw,noexec,nosuid,nodev,size=16m,mode=1777",
+  });
+  exactNumberProperty(hostConfig, "Memory", 134_217_728);
+  exactNumberProperty(hostConfig, "NanoCpus", 500_000_000);
+  exactNumberProperty(hostConfig, "PidsLimit", 32);
+  if (binds.length !== 2 || binds[0] !== `${names.volume}:/opt/data:ro`) throw rejected();
+  const output = bindSource(binds[1]!, "/run/core-agent/output");
+  assertDockerStagingChild(dockerHostStagingRoot, output, "/output");
 }
 
 function canonicalJson(value: unknown): string {
@@ -877,6 +979,37 @@ function boundedWait<T>(promise: Promise<T>, timeoutMs: number, signal?: AbortSi
   });
 }
 
+type BoundedDockerAttempt<T> =
+  | { readonly outcome: "fulfilled"; readonly value: T }
+  | { readonly outcome: "rejected"; readonly error: unknown }
+  | { readonly outcome: "timed-out" };
+
+async function boundedDockerAttempt<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+): Promise<BoundedDockerAttempt<T>> {
+  const controller = new AbortController();
+  let timer: NodeJS.Timeout | undefined;
+  const result: Promise<BoundedDockerAttempt<T>> = Promise.resolve()
+    .then(() => operation(controller.signal))
+    .then(
+      (value): BoundedDockerAttempt<T> => ({ outcome: "fulfilled", value }),
+      (error: unknown): BoundedDockerAttempt<T> => ({ outcome: "rejected", error }),
+    );
+  const timeout = new Promise<BoundedDockerAttempt<T>>((resolvePromise) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolvePromise({ outcome: "timed-out" });
+    }, timeoutMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([result, timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 function parseWaitStatus(value: unknown): number {
   const status = dataProperty(value, "StatusCode");
   if (typeof status !== "number" || !Number.isSafeInteger(status)) {
@@ -896,6 +1029,18 @@ export class DockerRuntimeAdapter {
         || options.initializerTimeoutMs < 1
         || options.initializerTimeoutMs > maximumInitializerWaitMs)
     ) throw dockerFailure("DEPENDENCY_TIMEOUT", "Initializer timeout configuration is invalid");
+    if (
+      options.verifierTimeoutMs !== undefined
+      && (!Number.isSafeInteger(options.verifierTimeoutMs)
+        || options.verifierTimeoutMs < 1
+        || options.verifierTimeoutMs > maximumVerifierWaitMs)
+    ) throw dockerFailure("DEPENDENCY_TIMEOUT", "Verifier timeout configuration is invalid");
+    if (
+      options.reconciliationTimeoutMs !== undefined
+      && (!Number.isSafeInteger(options.reconciliationTimeoutMs)
+        || options.reconciliationTimeoutMs < 1
+        || options.reconciliationTimeoutMs > maximumReconciliationWaitMs)
+    ) throw dockerFailure("DEPENDENCY_TIMEOUT", "Reconciliation timeout configuration is invalid");
     const uid = process.getuid?.();
     const gid = process.getgid?.();
     if (
@@ -1020,6 +1165,34 @@ export class DockerRuntimeAdapter {
     });
   }
 
+  async #removeAndProveContainerAbsent(
+    container: DockerContainerLike,
+    name: string,
+    mutationState: DockerMutationState,
+  ): Promise<void> {
+    const timeoutMs = this.#options.reconciliationTimeoutMs ?? maximumReconciliationWaitMs;
+    const reconciliationDeadlineMs = Date.now() + timeoutMs;
+    await boundedDockerAttempt(
+      (cleanupSignal) => container.remove({ force: true, v: false, ...abortOptions(cleanupSignal) }),
+      timeoutMs,
+    );
+    const remainingMs = reconciliationDeadlineMs - Date.now();
+    if (remainingMs <= 0) return unresolvedDockerMutation;
+    const absence = await boundedDockerAttempt(
+      (reconciliationSignal) => this.#options.docker.getContainer(name).inspect(abortOptions(reconciliationSignal)),
+      remainingMs,
+    );
+    if (absence.outcome === "rejected" && isNotFound(absence.error)) {
+      mutationState.completed = false;
+      return;
+    }
+    // A fulfilled inspection, timeout, or unclassified inspection failure
+    // cannot prove the exact daemon object absent. The journal reservation must
+    // remain live because either the helper can still run or force-remove can
+    // still take effect after the local request returned.
+    return unresolvedDockerMutation;
+  }
+
   async #provisionValidated(
     request: ProvisionRuntimeCommandV1,
     mutationState: DockerMutationState,
@@ -1053,7 +1226,32 @@ export class DockerRuntimeAdapter {
     if (volume.inspection !== undefined) validateVolumeInspection(volume.inspection, request, names);
     if (network.inspection !== undefined) validateNetworkInspection(network.inspection, names.network, "backplane", true);
     if (egressNetwork.inspection !== undefined) validateNetworkInspection(egressNetwork.inspection, managedEgressNetwork, "egress", false);
-    if (initializer.inspection !== undefined || verifier.inspection !== undefined) throw rejected();
+    if (initializer.inspection !== undefined) {
+      validateHelperInspection(
+        initializer.inspection,
+        request,
+        names,
+        initializerName,
+        "runtime-initializer",
+        user,
+        this.#options.dockerHostStagingRoot,
+        imageConfiguration,
+      );
+      await this.#removeAndProveContainerAbsent(initializer.handle, initializerName, mutationState);
+    }
+    if (verifier.inspection !== undefined) {
+      validateHelperInspection(
+        verifier.inspection,
+        request,
+        names,
+        verifierName,
+        "runtime-manifest-verifier",
+        user,
+        this.#options.dockerHostStagingRoot,
+        imageConfiguration,
+      );
+      await this.#removeAndProveContainerAbsent(verifier.handle, verifierName, mutationState);
+    }
     if (gateway.inspection !== undefined) {
       if (volume.inspection === undefined || network.inspection === undefined || egressNetwork.inspection === undefined) throw rejected();
       await validatePersistentIngress(ingressPath);
@@ -1187,11 +1385,7 @@ export class DockerRuntimeAdapter {
           throw dockerFailure("DEPENDENCY_UNAVAILABLE", "Docker initializer failed");
         }
       } finally {
-        await settleDockerMutation(
-          initializerContainer.remove({ force: true, v: false, ...abortOptions(signal) }),
-          mutationState,
-          signal,
-        ).catch(() => undefined);
+        await this.#removeAndProveContainerAbsent(initializerContainer, initializerName, mutationState);
       }
 
       await this.#verifyManifest(request, names, verifierName, stageDirectory, mutationState, signal);
@@ -1227,11 +1421,7 @@ export class DockerRuntimeAdapter {
         return observation;
       } catch (error) {
         if (gatewayContainer !== undefined) {
-          await settleDockerMutation(
-            gatewayContainer.remove({ force: true, v: false, ...abortOptions(signal) }),
-            mutationState,
-            signal,
-          ).catch(() => undefined);
+          await this.#removeAndProveContainerAbsent(gatewayContainer, names.container, mutationState);
         }
         await this.#removeIngressCredential(runtimeDigest, request.runtime.generation);
         throw error;
@@ -1269,18 +1459,14 @@ export class DockerRuntimeAdapter {
       await settleDockerMutation(verifierContainer.start(abortOptions(signal)), mutationState, signal);
       const waited = await boundedWait(
         verifierContainer.wait(abortOptions(signal)),
-        this.#options.initializerTimeoutMs ?? maximumInitializerWaitMs,
+        this.#options.verifierTimeoutMs ?? maximumVerifierWaitMs,
         signal,
       );
       if (parseWaitStatus(waited) !== 0) {
         throw dockerFailure("DEPENDENCY_UNAVAILABLE", "Docker manifest verifier failed");
       }
     } finally {
-      await settleDockerMutation(
-        verifierContainer.remove({ force: true, v: false, ...abortOptions(signal) }),
-        mutationState,
-        signal,
-      ).catch(() => undefined);
+      await this.#removeAndProveContainerAbsent(verifierContainer, verifierName, mutationState);
     }
     assertNotAborted(signal);
     const manifest = await readPrivateManifest(join(outputDirectory, "manifest.json"));

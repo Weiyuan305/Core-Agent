@@ -7,6 +7,7 @@ import test from "node:test";
 
 import {
   REMOVED_RUNTIME_IMAGE_REF,
+  SUPERVISOR_DEADLINE_BUDGET,
   canonicalSupervisorRequestHash,
   loadProviderCatalog,
   type ProvisionRuntimeCommandDataV1,
@@ -182,6 +183,7 @@ class FakeContainer {
 
   public async inspect(options?: { readonly abortSignal?: AbortSignal }): Promise<unknown> {
     this.docker.cancellationSignals.push({ operation: `inspect:${this.name}`, signal: options?.abortSignal });
+    if (this.docker.failedInspectionNames.has(this.name)) throw new Error("synthetic uncertain container inspection");
     if (this.options === undefined && this.name.startsWith("core-agent-runtime-")) {
       this.docker.gatewayInspections += 1;
       this.docker.markGatewayInspection?.();
@@ -325,6 +327,9 @@ class FakeContainer {
     }
     this.removed = true;
     this.docker.containers.delete(this.name);
+    if (resource !== undefined && this.docker.failAbsenceInspectionAfterRemoval.has(resource)) {
+      this.docker.failedInspectionNames.add(this.name);
+    }
   }
 }
 
@@ -395,6 +400,8 @@ class FakeDocker {
   public helperLateMutations = 0;
   public rejectAbortedHelperRemove = false;
   public readonly failedRemovals = new Set<string>();
+  public readonly failAbsenceInspectionAfterRemoval = new Set<string>();
+  public readonly failedInspectionNames = new Set<string>();
 
   public localPath(path: string): string {
     const mapping = this.hostMappings.find(({ host }) => path === host || path.startsWith(`${host}/`));
@@ -485,7 +492,11 @@ test.afterEach(async () => {
 function buildAdapter(
   docker = new FakeDocker(),
   secretStore = new FakeSecretStore(),
-  timeouts: { readonly initializerTimeoutMs?: number; readonly reconciliationTimeoutMs?: number } = {},
+  timeouts: {
+    readonly initializerTimeoutMs?: number;
+    readonly verifierTimeoutMs?: number;
+    readonly reconciliationTimeoutMs?: number;
+  } = {},
 ) {
   const stagingRoot = join(temporaryRoot, "supervisor", "staging");
   const ingressRoot = join(temporaryRoot, "supervisor", "ingress");
@@ -514,10 +525,41 @@ function buildAdapter(
       managedRuntimeUid,
       managedRuntimeGid,
       initializerTimeoutMs: timeouts.initializerTimeoutMs ?? 1_000,
+      verifierTimeoutMs: timeouts.verifierTimeoutMs ?? 1_000,
       reconciliationTimeoutMs: timeouts.reconciliationTimeoutMs ?? 25,
     } as never),
   };
 }
+
+test("adapter rejects helper deadlines outside the aggregate production budget", () => {
+  assert.doesNotThrow(() => buildAdapter(new FakeDocker(), new FakeSecretStore(), {
+    initializerTimeoutMs: SUPERVISOR_DEADLINE_BUDGET.initializerTimeoutMs,
+    verifierTimeoutMs: SUPERVISOR_DEADLINE_BUDGET.verifierTimeoutMs,
+    reconciliationTimeoutMs: SUPERVISOR_DEADLINE_BUDGET.reconciliationTimeoutMs,
+  }));
+  assert.throws(
+    () => buildAdapter(new FakeDocker(), new FakeSecretStore(), {
+      initializerTimeoutMs: SUPERVISOR_DEADLINE_BUDGET.initializerTimeoutMs + 1,
+    }),
+    /DEPENDENCY_TIMEOUT/,
+  );
+  assert.throws(
+    () => buildAdapter(new FakeDocker(), new FakeSecretStore(), {
+      verifierTimeoutMs: SUPERVISOR_DEADLINE_BUDGET.verifierTimeoutMs + 1,
+    }),
+    /DEPENDENCY_TIMEOUT/,
+  );
+  assert.throws(
+    () => buildAdapter(new FakeDocker(), new FakeSecretStore(), {
+      reconciliationTimeoutMs: SUPERVISOR_DEADLINE_BUDGET.reconciliationTimeoutMs + 1,
+    }),
+    /DEPENDENCY_TIMEOUT/,
+  );
+  assert.throws(
+    () => buildAdapter(new FakeDocker(), new FakeSecretStore(), { verifierTimeoutMs: 0 }),
+    /DEPENDENCY_TIMEOUT/,
+  );
+});
 
 test("initializer and gateway use daemon-visible binds, one numeric identity, and exact split networks", async () => {
   const { adapter, docker, secretStore, roots, managedUser } = buildAdapter();
@@ -621,12 +663,13 @@ test("adapter propagates one operation AbortSignal through Docker inspection and
   assert.equal(deleted.outcome, "accepted");
 
   assert(docker.cancellationSignals.length > 20);
-  const helperCleanup = docker.cancellationSignals.filter(({ operation }) => (
-    operation.startsWith("remove:core-agent-runtime-")
+  const helperCleanup = docker.cancellationSignals.filter(({ signal }) => signal !== controller.signal);
+  assert(helperCleanup.length >= 4);
+  assert.equal(helperCleanup.every(({ operation, signal }) => (
+    signal !== undefined
+    && (operation.startsWith("remove:core-agent-runtime-") || operation.startsWith("inspect:core-agent-runtime-"))
     && (operation.includes("-initializer-") || operation.endsWith("-manifest"))
-  ));
-  assert(helperCleanup.length >= 2);
-  assert.equal(helperCleanup.every(({ signal }) => signal !== undefined && signal !== controller.signal), true);
+  )), true);
   assert.equal(
     docker.cancellationSignals
       .filter((entry) => !helperCleanup.includes(entry))
@@ -696,6 +739,41 @@ test("an uncertain timed-out helper cleanup never becomes a durable terminal jou
     releaseWait();
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(docker.helperLateMutations, 1);
+    assert.equal(settled, false);
+  }
+});
+
+test("an uncertain helper absence inspection cannot produce a durable terminal response", async () => {
+  for (const resource of ["runtime-initializer", "runtime-manifest-verifier"] as const) {
+    const docker = new FakeDocker();
+    docker.blockedHelperResource = resource;
+    docker.failAbsenceInspectionAfterRemoval.add(resource);
+    let markEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+    docker.markHelperWaitEntered = markEntered;
+    let releaseWait!: () => void;
+    docker.helperWaitBarrier = new Promise<void>((resolve) => { releaseWait = resolve; });
+    const { adapter } = buildAdapter(docker, new FakeSecretStore(), {
+      initializerTimeoutMs: 5,
+      verifierTimeoutMs: 5,
+      reconciliationTimeoutMs: 10,
+    });
+    const journalDirectory = join(temporaryRoot, `journal-${resource}-inspect`);
+    const journal = new OperationJournal({ directory: journalDirectory });
+    const request = signed({ ...provisionData(), operation_id: `operation_${resource}_inspect_uncertain` });
+    let settled = false;
+    const pending = journal.run(request, (reserved) => adapter.execute(reserved)).finally(() => { settled = true; });
+    await entered;
+    const boundary = await Promise.race([
+      pending,
+      new Promise<"still-pending">((resolve) => setTimeout(() => resolve("still-pending"), 50)),
+    ]);
+    assert.equal(boundary, "still-pending");
+    assert.equal(settled, false);
+    assert.equal((await readdir(journalDirectory)).some((name) => name.endsWith(".json")), false);
+    releaseWait();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(docker.helperLateMutations, 0);
     assert.equal(settled, false);
   }
 });

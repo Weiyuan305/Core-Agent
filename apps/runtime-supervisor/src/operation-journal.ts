@@ -308,7 +308,11 @@ export class OperationJournal {
           options.admissionDeadlineMs !== undefined
           && options.admissionExpiredResponse !== undefined
           && Date.now() >= options.admissionDeadlineMs
-        ) return validateSupervisorResponse(options.admissionExpiredResponse);
+        ) {
+          const expired = validateSupervisorResponse(options.admissionExpiredResponse);
+          if (expired.operation_id !== request.operation_id) throw journalError();
+          return expired;
+        }
 
         const acquired = await this.#tryAcquire(directory, request);
         if (acquired !== undefined) {

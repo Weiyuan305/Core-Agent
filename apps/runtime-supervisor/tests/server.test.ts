@@ -207,6 +207,10 @@ test("Unix service rejects deadline configuration outside the shared production 
     () => buildServer(execute, { admissionTimeoutMs: 0 }),
     /SUPERVISOR_REJECTED/,
   );
+  assert.throws(
+    () => buildServer(execute, { admissionTimeoutMs: 100, operationTimeoutMs: 100 }),
+    /SUPERVISOR_REJECTED/,
+  );
 });
 
 test("journal attachment precedes capacity so retries consume no execution slots", async () => {
@@ -293,7 +297,7 @@ test("busy admission is bounded and non-durable so a later retry can dispatch", 
     }
     assert.equal(dispatches, 1);
     const journalNames = await readdir(join(temporaryRoot, "journal"));
-    assert.equal(journalNames.some((name) => name.endsWith(".json") && name.includes("operation_busy_retry")), false);
+    assert.equal(journalNames.some((name) => name.endsWith(".json")), false);
     assert.equal(journalNames.filter((name) => name.endsWith(".lock")).length, 1);
 
     release();

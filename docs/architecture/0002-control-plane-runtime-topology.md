@@ -153,13 +153,27 @@ state, and UDS projections instead of converging services onto a host user.
 
 ### Supervisor deadline and journal ownership
 
-Runtime v1 has one exported production deadline budget. A Docker/initializer
-effect is bounded at 120 seconds, the Supervisor operation deadline is 150
-seconds, cancellation settlement is allowed 20 further seconds, and the
-Runtime Supervisor client waits 180 seconds. Configuration must preserve
-`effect < operation < operation + settlement < client`; test-only values may
-scale the same ordering down, but production components import the shared
-budget rather than restating numbers.
+Runtime v1 has one exported production deadline budget. Initializer and
+manifest-verifier execution receive 35 seconds each. Three independent
+reconciliation windows of 10 seconds cover initializer, verifier, and gateway
+absence proof, and 10 seconds remains for the other bounded Docker calls. That
+110-second worst-case sequential composition is strictly below the 120-second
+effect budget. A request may wait at most 1 second for admission after journal
+deduplication, the Supervisor operation deadline is 150 seconds, cancellation
+settlement is allowed 20 further seconds, and the Runtime Supervisor client
+waits 180 seconds. Configuration must preserve both
+`initializer + verifier + 3 * reconciliation + overhead < effect < operation`
+and `admission + operation + settlement < client`. Test-only values may scale
+the same ordering down, but production components import the shared budget
+rather than restating numbers.
+
+Journal lookup and in-flight attachment happen before execution-capacity
+acquisition. Only the first dispatch for an operation can own one of the four
+execution slots; any number of identical in-process retries attach without
+consuming more capacity. If a new operation cannot acquire a slot before its
+receipt-relative admission deadline, it receives a retryable, non-durable busy
+response. Its journal reservation is released, no effect may start after that
+deadline, and a later retry may reserve and dispatch normally.
 
 The operation deadline aborts every supported Dockerode inspect, create, wait,
 log, start, stop, restart, and remove request. Reaching that deadline does not
@@ -181,6 +195,17 @@ starts a second in-process effect merely because the transport wait expired.
 In particular, a mutating Dockerode request that rejects locally after abort is
 still remote-uncertain: the adapter keeps it unsettled because local HTTP
 rejection does not prove that Docker daemon work was cancelled.
+
+Initializer, manifest-verifier, and failed gateway cleanup do not reuse an
+already-aborted operation signal. Each force-remove and follow-up inspection
+uses an independent bounded reconciliation signal. A terminal response is
+possible only after inspection proves the exact derived container name absent.
+A present object, timed-out inspection, or unclassified Docker failure leaves
+the operation unsettled and therefore non-durable. On restart, an exact helper
+residue is validated against its immutable image, identity, labels, command,
+security controls, volume, and protected staging binds before it is removed and
+absence-proven. Any drift is rejected without mutation and must be quarantined
+for operator investigation.
 
 Development PostgreSQL trust authentication is permitted only on the isolated
 internal control bridge. The official-image bootstrap superuser is not given

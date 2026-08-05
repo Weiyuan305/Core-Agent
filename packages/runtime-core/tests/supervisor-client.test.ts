@@ -263,6 +263,13 @@ test("Supervisor production deadline budget orders effect, operation, and client
   assert(budget.verifierTimeoutMs > 0);
   assert(budget.reconciliationTimeoutMs > 0);
   assert(budget.effectOverheadMs > 0);
+  assert.equal(
+    budget.initializerTimeoutMs
+      + budget.verifierTimeoutMs
+      + (budget.reconciliationTimeoutMs * 3)
+      + budget.effectOverheadMs,
+    110_000,
+  );
   assert(
     budget.initializerTimeoutMs
       + budget.verifierTimeoutMs
@@ -274,6 +281,12 @@ test("Supervisor production deadline budget orders effect, operation, and client
   assert(budget.cancellationSettlementTimeoutMs > 0);
   assert(budget.admissionTimeoutMs > 0);
   assert(budget.admissionTimeoutMs < budget.effectTimeoutMs);
+  assert.equal(
+    budget.admissionTimeoutMs
+      + budget.operationTimeoutMs
+      + budget.cancellationSettlementTimeoutMs,
+    171_000,
+  );
   assert(
     budget.admissionTimeoutMs
       + budget.operationTimeoutMs

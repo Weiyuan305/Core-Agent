@@ -72,11 +72,21 @@ files group/world-readable.
 ## Supervisor deadline operations
 
 Deploy Worker, Runtime Supervisor, and Runtime Core from one revision so all
-three use the shared 120-second effect, 150-second operation, 20-second
-cancellation-settlement, and 180-second client-wait budget. Do not lower the
-Worker client wait below the Supervisor operation plus settlement window. A
-Supervisor startup that receives an out-of-range operation or settlement
-limit must fail closed.
+three use the shared deadline budget: 35 seconds each for initializer and
+verifier, three 10-second cleanup/absence-proof windows, 10 seconds of other
+effect overhead, a 120-second total effect, 1-second admission, 150-second
+operation, 20-second cancellation settlement, and 180-second client wait. The
+enforced production equations are `35 + 35 + 3*10 + 10 = 110 < 120 < 150`
+and `1 + 150 + 20 = 171 < 180` seconds. Do not lower the Worker client wait
+below the aggregate admission, operation, and settlement window. Supervisor or
+adapter startup with an out-of-range or misordered limit must fail closed.
+
+Journal deduplication precedes capacity admission. Identical retries attach to
+the first dispatch and consume no additional execution slots. A distinct
+operation that remains busy through the one-second admission window receives a
+retryable non-durable unavailable response; the Supervisor releases that
+operation's reservation and never starts its effect after the deadline. Retry
+that operation later with the same ID and hash.
 
 A timeout response before cancellation settlement is transient and is not
 proof of a durable timeout journal entry. Retry only with the exact same stable
@@ -89,6 +99,17 @@ Supervisor through the approved service procedure so stale-reservation
 recovery and strict resource adoption can reconcile the derived names.
 This includes a Dockerode mutation that rejects on local request abort: its
 daemon-side outcome is unknown until restart/adoption reconciliation.
+
+Helper and failed-gateway cleanup uses an independent bounded signal even when
+the parent operation is already aborted. Treat a terminal helper failure as
+safe only when a follow-up inspect proved the exact derived name absent. If
+force-remove or absence inspection is uncertain, the response remains
+non-durable and the helper may still be running. Do not manually delete its
+journal reservation or start a replacement helper. Perform an approved
+Supervisor restart: exact initializer/verifier residue is strict-validated,
+force-removed, absence-proven, and then provisioning resumes. Drifted residue
+is never auto-removed; quarantine it, preserve redacted inspect evidence, and
+require explicit operator investigation rather than broad Docker cleanup.
 
 ## Product-image rollout
 
