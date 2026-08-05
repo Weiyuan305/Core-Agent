@@ -1,7 +1,7 @@
 import { type AuditEvent, type ProductEvent } from "@core-agent/contracts";
 import { sql } from "kysely";
 
-import type { TenantTransaction } from "../db/transaction.js";
+import type { TenantDatabaseContext, TenantTransaction } from "../db/transaction.js";
 import { DomainError } from "../domain/idempotency.js";
 import { validateAuditEvent, validateProductEvent } from "../domain/events.js";
 import { safeContractInteger } from "./resources.js";
@@ -17,6 +17,56 @@ export type ProductEventWithoutSequence = ProductEvent extends infer Event
     ? Omit<Event, "sequence">
     : never
   : never;
+
+export type PersistedProductEvent = ProductEvent & { readonly stream_id: string };
+
+export async function readEventsAfter(
+  context: TenantDatabaseContext,
+  streamId: string,
+  afterSequence: number,
+  limit = 100,
+  signal?: AbortSignal,
+): Promise<readonly PersistedProductEvent[]> {
+  if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
+    throw new DomainError("INVALID_REQUEST", "ProductEvent cursor is unsafe");
+  }
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+    throw new DomainError("INVALID_REQUEST", "ProductEvent read limit is unsafe");
+  }
+  const rows = await context.db.selectFrom("product_events")
+    .selectAll()
+    .where("tenant_id", "=", context.tenantId)
+    .where("stream_id", "=", streamId)
+    .where("sequence", ">", String(afterSequence))
+    .orderBy("sequence", "asc")
+    .limit(limit)
+    .execute({ signal, inflightQueryAbortStrategy: "cancel query" });
+  return rows.map((row) => {
+    const event = {
+      schema_version: row.schema_version,
+      event_id: row.event_id,
+      occurred_at: row.occurred_at.toISOString(),
+      sequence: safeContractInteger(row.sequence),
+      tenant_id: row.tenant_id,
+      request_id: row.request_id,
+      trace_id: row.trace_id,
+      correlation_id: row.correlation_id,
+      causation_id: row.causation_id,
+      ...(row.profile_id === null ? {} : { profile_id: row.profile_id }),
+      ...(row.conversation_id === null ? {} : { conversation_id: row.conversation_id }),
+      ...(row.run_id === null ? {} : { run_id: row.run_id }),
+      ...(row.task_id === null ? {} : { task_id: row.task_id }),
+      ...(row.approval_id === null ? {} : { approval_id: row.approval_id }),
+      ...(row.student_ref === null ? {} : { student_ref: row.student_ref }),
+      ...(row.case_ref === null ? {} : { case_ref: row.case_ref }),
+      ...(row.capability_id === null ? {} : { capability_id: row.capability_id }),
+      event_type: row.event_type,
+      payload: row.payload,
+    };
+    validateProductEvent(event, context.tenantId);
+    return { stream_id: row.stream_id, ...event };
+  });
+}
 
 export async function enqueueOutbox(
   context: TenantTransaction,

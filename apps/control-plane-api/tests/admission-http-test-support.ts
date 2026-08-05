@@ -15,6 +15,7 @@ import type { Kysely } from "kysely";
 import type { Pool } from "pg";
 
 import { buildControlPlaneApp } from "../src/app.js";
+import type { EventNotifier } from "../src/sse.js";
 
 export const bootstrapKey = "synthetic-bootstrap-key-00000001";
 export const admissionHttpNow = new Date("2026-08-05T02:00:00.000Z");
@@ -63,7 +64,11 @@ export async function seedHttpReadyTenant(db: Kysely<RuntimeDatabase>, tenantId:
   return profileId;
 }
 
-export async function buildHttpAdmissionApp(databaseUrl: string, db: Kysely<RuntimeDatabase>): Promise<{ app: FastifyInstance; directory: string }> {
+export async function buildHttpAdmissionApp(
+  databaseUrl: string,
+  db: Kysely<RuntimeDatabase>,
+  options: { readonly eventNotifier?: EventNotifier } = {},
+): Promise<{ app: FastifyInstance; directory: string }> {
   await mkdir(testRoot, { recursive: true, mode: 0o700 });
   await chmod(testRoot, 0o700);
   const directory = await mkdtemp(join(testRoot, "admission-"));
@@ -86,6 +91,7 @@ export async function buildHttpAdmissionApp(databaseUrl: string, db: Kysely<Runt
     imageLock,
     logger,
     redactor: createRedactor([bootstrapKey]),
+    ...(options.eventNotifier === undefined ? {} : { eventNotifier: options.eventNotifier }),
   });
   return { app, directory };
 }

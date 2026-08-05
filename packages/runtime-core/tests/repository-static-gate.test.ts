@@ -131,10 +131,12 @@ function readQueryChain(source: string, start: number): string | undefined {
     else if (character === "{") curly += 1;
     else if (character === "}") curly -= 1;
     if (nestedEnd === undefined && (round < 0 || square < 0 || curly < 0)) nestedEnd = index;
-    if ((nestedEnd !== undefined || (round === 0 && square === 0 && curly === 0)) && source.slice(index).match(/^\.execute[A-Za-z]*\s*\(\s*\)/) !== null) {
-      const terminator = source.slice(index).match(/^\.execute[A-Za-z]*\s*\(\s*\)/)?.[0];
-      if (terminator === undefined) return undefined;
-      return source.slice(start, nestedEnd ?? index + terminator.length);
+    const terminator = source.slice(index).match(/^\.execute[A-Za-z]*\s*\(/)?.[0];
+    if ((nestedEnd !== undefined || (round === 0 && square === 0 && curly === 0)) && terminator !== undefined) {
+      const openParenthesis = source.indexOf("(", index);
+      const call = readCallAt(source, openParenthesis);
+      if (call === undefined) return undefined;
+      return source.slice(start, nestedEnd ?? openParenthesis + call.length);
     }
     if (round <= 0 && square <= 0 && curly <= 0 && character === ";") return undefined;
   }
@@ -208,6 +210,15 @@ test("static gate accepts explicit insert scope and composite tenant joins", () 
       .executeTakeFirstOrThrow();
   `;
   assert.deepEqual(findRepositoryQuerySafetyViolations("safe.ts", safe), []);
+});
+
+test("static gate accepts bounded execute options without weakening tenant scope", () => {
+  const safe = `
+    await db.selectFrom("product_events")
+      .where("tenant_id", "=", tenantId)
+      .execute({ signal, inflightQueryAbortStrategy: "cancel query" });
+  `;
+  assert.deepEqual(findRepositoryQuerySafetyViolations("safe-options.ts", safe), []);
 });
 
 test("static gate requires a top-level insert tenant and checks tenant joins from unowned roots", () => {

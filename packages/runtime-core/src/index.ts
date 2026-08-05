@@ -77,7 +77,9 @@ export {
   appendProductEvents,
   appendAuditEvent,
   enqueueOutbox,
+  readEventsAfter,
   type AppendProductEventsInput,
+  type PersistedProductEvent,
   type ProductEventWithoutSequence,
 } from "./repositories/events.js";
 export {

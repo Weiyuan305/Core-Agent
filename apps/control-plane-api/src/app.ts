@@ -28,6 +28,8 @@ import { registerProvisioningRoutes } from "./routes/provisioning.js";
 import { registerRuntimeRoutes } from "./routes/runtime.js";
 import { registerConversationRoutes } from "./routes/conversations.js";
 import { registerRunRoutes } from "./routes/runs.js";
+import { registerEventRoutes } from "./routes/events.js";
+import { BoundedTimerEventNotifier, type EventNotifier } from "./sse.js";
 
 export const MAX_API_BODY_BYTES = 64 * 1024;
 export const MAX_API_HEADER_BYTES = 16 * 1024;
@@ -54,6 +56,7 @@ export interface ControlPlaneAppDependencies extends HealthDependencies {
   readonly providerCatalog: ProviderCatalog;
   readonly logger: FastifyBaseLogger;
   readonly redactor: Redactor;
+  readonly eventNotifier?: EventNotifier;
 }
 
 export async function cleanupFailedAppStartup(
@@ -140,6 +143,10 @@ export async function buildControlPlaneApp(dependencies: ControlPlaneAppDependen
     await registerRuntimeRoutes(app, dependencies);
     await registerConversationRoutes(app, dependencies);
     await registerRunRoutes(app, dependencies);
+    await registerEventRoutes(app, {
+      db: dependencies.db,
+      eventNotifier: dependencies.eventNotifier ?? new BoundedTimerEventNotifier(),
+    });
     return app;
   } catch (error) {
     await cleanupFailedAppStartup(app, bootstrapDigest);
