@@ -472,6 +472,13 @@ test("REAL_HERMES SSE requires a ProductEvent terminal envelope for the created 
 
 test("REAL_HERMES SSE bounds total events and aggregate retained bytes", async () => {
   assert.equal(typeof readSmokeEvents, "function", "readSmokeEvents must be exported as an injectable seam");
+  const aggregateEvents = [
+    productEvent("message.delta", 1, "synthetic-run-success", { message_id: "synthetic-message", delta: "x".repeat(300) }),
+    productEvent("message.delta", 2, "synthetic-run-success", { message_id: "synthetic-message", delta: "y".repeat(300) }),
+  ];
+  const aggregateLimit = 1_200;
+  assert(aggregateEvents.every((event) => Buffer.byteLength(JSON.stringify(event), "utf8") < aggregateLimit));
+  assert(aggregateEvents.reduce((total, event) => total + Buffer.byteLength(JSON.stringify(event), "utf8"), 0) > aggregateLimit);
   await assert.rejects(
     readSmokeEvents({
       conversationId: "synthetic-conversation-success",
@@ -491,11 +498,8 @@ test("REAL_HERMES SSE bounds total events and aggregate retained bytes", async (
       tenantId: successfulContext.tenantId,
       runId: "synthetic-run-success",
       bootstrapKey: Buffer.from("synthetic-key"),
-      fetchImpl: async () => eventStreamResponse([
-        productEvent("message.delta", 1, "synthetic-run-success", { message_id: "synthetic-message", delta: "x".repeat(300) }),
-        productEvent("message.delta", 2, "synthetic-run-success", { message_id: "synthetic-message", delta: "y".repeat(300) }),
-      ]),
-      limits: { maximumEvents: 10, maximumRetainedBytes: 512 },
+      fetchImpl: async () => eventStreamResponse(aggregateEvents),
+      limits: { maximumEvents: 10, maximumRetainedBytes: aggregateLimit },
     }),
     /SMOKE_SSE_FAILED/,
   );

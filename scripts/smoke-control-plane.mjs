@@ -70,15 +70,15 @@ const fixedIdentifiers = Object.freeze({
 });
 
 class SmokeError extends Error {
-  constructor(code) {
-    super(code);
+  constructor(code, cause) {
+    super(code, cause === undefined ? undefined : { cause });
     this.name = "SmokeError";
     this.code = code;
   }
 }
 
-function smokeError(code) {
-  return new SmokeError(code);
+function smokeError(code, cause) {
+  return new SmokeError(code, cause);
 }
 
 function exactRecord(value, keys, code) {
@@ -182,6 +182,9 @@ function sameFileSnapshot(left, right) {
   return left.dev === right.dev
     && left.ino === right.ino
     && left.nlink === right.nlink
+    && left.mode === right.mode
+    && left.uid === right.uid
+    && left.gid === right.gid
     && left.size === right.size
     && left.mtimeNs === right.mtimeNs
     && left.ctimeNs === right.ctimeNs;
@@ -407,6 +410,137 @@ export function validateProductImageLock(value, platform) {
   return value.platforms[platform].reference;
 }
 
+function validateProductLockMetadata(metadata) {
+  if (
+    !metadata.isFile()
+    || metadata.nlink !== 1n
+    || metadata.size < 1n
+    || metadata.size > BigInt(maximumApiBodyBytes)
+  ) throw smokeError("SMOKE_PRODUCT_IMAGE_LOCK_INVALID");
+}
+
+export async function stageProductImageLockSnapshot(sourcePath, platform, stateRoot, dependencies = {}) {
+  const io = {
+    afterSourceRead: dependencies.afterSourceRead,
+    chmod: dependencies.chmod ?? chmod,
+    lstat: dependencies.lstat ?? lstat,
+    mkdtemp: dependencies.mkdtemp ?? mkdtemp,
+    open: dependencies.open ?? open,
+    rmdir: dependencies.rmdir ?? rmdir,
+    unlink: dependencies.unlink ?? unlink,
+  };
+  if (typeof sourcePath !== "string" || !isAbsolute(sourcePath) || resolve(sourcePath) !== sourcePath
+    || typeof stateRoot !== "string" || !isAbsolute(stateRoot) || resolve(stateRoot) !== stateRoot) {
+    throw smokeError("SMOKE_PRODUCT_IMAGE_LOCK_INVALID");
+  }
+  let sourceHandle;
+  let sourceBytes;
+  try {
+    const namedBefore = await io.lstat(sourcePath, { bigint: true });
+    validateProductLockMetadata(namedBefore);
+    sourceHandle = await io.open(sourcePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const openedBefore = await sourceHandle.stat({ bigint: true });
+    validateProductLockMetadata(openedBefore);
+    if (!sameFileSnapshot(namedBefore, openedBefore)) throw smokeError("SMOKE_PRODUCT_IMAGE_LOCK_INVALID");
+    sourceBytes = await sourceHandle.readFile();
+    if (!Buffer.isBuffer(sourceBytes) || sourceBytes.length !== Number(openedBefore.size)) {
+      throw smokeError("SMOKE_PRODUCT_IMAGE_LOCK_INVALID");
+    }
+    await io.afterSourceRead?.();
+    const openedAfter = await sourceHandle.stat({ bigint: true });
+    const namedAfter = await io.lstat(sourcePath, { bigint: true });
+    validateProductLockMetadata(openedAfter);
+    validateProductLockMetadata(namedAfter);
+    if (!sameFileSnapshot(openedBefore, openedAfter) || !sameFileSnapshot(openedAfter, namedAfter)) {
+      throw smokeError("SMOKE_PRODUCT_IMAGE_LOCK_INVALID");
+    }
+  } catch (error) {
+    if (error instanceof SmokeError) throw error;
+    throw smokeError("SMOKE_PRODUCT_IMAGE_LOCK_INVALID");
+  } finally {
+    await sourceHandle?.close().catch(() => undefined);
+  }
+
+  let directory;
+  let snapshotPath;
+  let snapshotHandle;
+  try {
+    const productLock = parseJson(new TextDecoder("utf-8", { fatal: true }).decode(sourceBytes), "SMOKE_PRODUCT_IMAGE_LOCK_INVALID");
+    const imageRef = validateProductImageLock(productLock, platform);
+    directory = await io.mkdtemp(join(stateRoot, ".core-agent-product-lock-"));
+    await io.chmod(directory, 0o700);
+    snapshotPath = join(directory, "reviewed-product-images.lock.json");
+    snapshotHandle = await io.open(
+      snapshotPath,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o444,
+    );
+    await snapshotHandle.writeFile(sourceBytes);
+    await snapshotHandle.sync();
+    await snapshotHandle.chmod(0o444);
+    const writtenMetadata = await snapshotHandle.stat({ bigint: true });
+    if (!writtenMetadata.isFile() || writtenMetadata.nlink !== 1n
+      || (writtenMetadata.mode & 0o7777n) !== 0o444n
+      || writtenMetadata.size !== BigInt(sourceBytes.length)) {
+      throw smokeError("SMOKE_PRODUCT_IMAGE_LOCK_INVALID");
+    }
+    await snapshotHandle.close();
+    snapshotHandle = undefined;
+    const namedSnapshot = await io.lstat(snapshotPath, { bigint: true });
+    snapshotHandle = await io.open(snapshotPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const openedSnapshot = await snapshotHandle.stat({ bigint: true });
+    if (!sameFileSnapshot(writtenMetadata, namedSnapshot) || !sameFileSnapshot(namedSnapshot, openedSnapshot)) {
+      throw smokeError("SMOKE_PRODUCT_IMAGE_LOCK_INVALID");
+    }
+    const copied = await snapshotHandle.readFile();
+    try {
+      if (!Buffer.isBuffer(copied) || copied.length !== sourceBytes.length
+        || !createHash("sha256").update(copied).digest().equals(createHash("sha256").update(sourceBytes).digest())) {
+        throw smokeError("SMOKE_PRODUCT_IMAGE_LOCK_INVALID");
+      }
+      const verifiedOpenedSnapshot = await snapshotHandle.stat({ bigint: true });
+      const verifiedNamedSnapshot = await io.lstat(snapshotPath, { bigint: true });
+      if (!sameFileSnapshot(openedSnapshot, verifiedOpenedSnapshot)
+        || !sameFileSnapshot(verifiedOpenedSnapshot, verifiedNamedSnapshot)) {
+        throw smokeError("SMOKE_PRODUCT_IMAGE_LOCK_INVALID");
+      }
+    } finally {
+      if (Buffer.isBuffer(copied)) copied.fill(0);
+    }
+    await snapshotHandle.close();
+    snapshotHandle = undefined;
+    let cleaned = false;
+    return Object.freeze({
+      imageRef,
+      path: snapshotPath,
+      async cleanup() {
+        if (cleaned) return;
+        cleaned = true;
+        let cleanupError;
+        try {
+          await io.unlink(snapshotPath);
+        } catch (error) {
+          if (error?.code !== "ENOENT") cleanupError = error;
+        }
+        try {
+          await io.rmdir(directory);
+        } catch (error) {
+          if (error?.code !== "ENOENT" && cleanupError === undefined) cleanupError = error;
+        }
+        if (cleanupError !== undefined) throw smokeError("SMOKE_PRODUCT_IMAGE_LOCK_CLEANUP_FAILED");
+      },
+    });
+  } catch (error) {
+    await snapshotHandle?.close().catch(() => undefined);
+    if (snapshotPath !== undefined) await io.unlink(snapshotPath).catch(() => undefined);
+    if (directory !== undefined) await io.rmdir(directory).catch(() => undefined);
+    if (error instanceof SmokeError) throw error;
+    throw smokeError("SMOKE_PRODUCT_IMAGE_LOCK_INVALID");
+  } finally {
+    sourceBytes?.fill(0);
+  }
+}
+
 function validateRuntimeBaseLock(lock, environment) {
   const code = "SMOKE_PLATFORM_LOCK_INVALID";
   exactRecord(lock, ["schemaVersion", "images"], code);
@@ -484,13 +618,20 @@ function composeArgs(...args) {
   return ["compose", "--project-name", composeProject, "-f", composeFile, ...args];
 }
 
-function childEnvironment(environment) {
+export function createSmokeChildEnvironment(environment, productImageLockSnapshotPath) {
   const safe = {};
   for (const name of ["PATH", "HOME", "DOCKER_HOST", "DOCKER_CONTEXT", "XDG_CONFIG_HOME"]) {
     if (typeof process.env[name] === "string") safe[name] = process.env[name];
   }
   for (const name of requiredEnvironmentNames) {
     if (name !== "CORE_AGENT_REAL_HERMES_SMOKE") safe[name] = environment[name];
+  }
+  if (productImageLockSnapshotPath !== undefined) {
+    if (typeof productImageLockSnapshotPath !== "string" || !isAbsolute(productImageLockSnapshotPath)
+      || resolve(productImageLockSnapshotPath) !== productImageLockSnapshotPath) {
+      throw smokeError("SMOKE_PRODUCT_IMAGE_LOCK_INVALID");
+    }
+    safe.CORE_AGENT_HERMES_IMAGE_LOCK_FILE = productImageLockSnapshotPath;
   }
   return safe;
 }
@@ -675,10 +816,75 @@ function assertProductImageConfiguration(inspection) {
   }
 }
 
-async function readEvents(conversationId, tenantId, bootstrapKey, signal) {
+const productEventRequiredFields = Object.freeze([
+  "schema_version", "event_id", "occurred_at", "sequence", "tenant_id", "request_id", "trace_id",
+  "correlation_id", "causation_id", "event_type", "payload",
+]);
+const productEventOptionalFields = new Set([
+  "profile_id", "conversation_id", "run_id", "task_id", "approval_id", "student_ref", "case_ref", "capability_id",
+]);
+const strictUtcTimestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u;
+
+function validateProductEventEnvelope(event, expected) {
+  const code = "SMOKE_SSE_FAILED";
+  if (typeof event !== "object" || event === null || Array.isArray(event) || Object.getPrototypeOf(event) !== Object.prototype) {
+    throw smokeError(code);
+  }
+  const ownKeys = Reflect.ownKeys(event);
+  if (ownKeys.some((key) => typeof key !== "string"
+    || (!productEventRequiredFields.includes(key) && !productEventOptionalFields.has(key)))) throw smokeError(code);
+  for (const key of productEventRequiredFields) dataProperty(event, key, code);
+  for (const key of ownKeys) dataProperty(event, key, code);
+  for (const key of ["event_id", "tenant_id", "request_id", "trace_id", "correlation_id", "causation_id", "event_type"]) {
+    if (typeof event[key] !== "string" || event[key].length < 1 || event[key].length > 255) throw smokeError(code);
+  }
+  for (const key of productEventOptionalFields) {
+    if (Object.hasOwn(event, key) && key.endsWith("_id")
+      && (typeof event[key] !== "string" || event[key].length < 1 || event[key].length > 255)) throw smokeError(code);
+  }
+  if (event.schema_version !== 1 || !Number.isSafeInteger(event.sequence) || event.sequence < 0
+    || typeof event.occurred_at !== "string" || !strictUtcTimestampPattern.test(event.occurred_at)
+    || !Number.isFinite(Date.parse(event.occurred_at))
+    || event.tenant_id !== expected.tenantId
+    || (Object.hasOwn(event, "conversation_id") && event.conversation_id !== expected.conversationId)
+    || typeof event.payload !== "object" || event.payload === null || Array.isArray(event.payload)) {
+    throw smokeError(code);
+  }
+  if (!/^[a-z][a-z0-9_.]{0,127}$/u.test(event.event_type)) throw smokeError(code);
+  if (event.event_type === "run.completed" || event.event_type === "run.failed") {
+    const expectedStatus = event.event_type === "run.completed" ? "succeeded" : "failed";
+    const payloadKeys = Object.keys(event.payload);
+    if (payloadKeys.some((key) => !["run_id", "status", "summary"].includes(key))
+      || !Object.hasOwn(event.payload, "run_id") || !Object.hasOwn(event.payload, "status")
+      || event.run_id !== expected.runId || event.payload.run_id !== expected.runId
+      || event.payload.status !== expectedStatus
+      || (Object.hasOwn(event.payload, "summary") && (typeof event.payload.summary !== "string" || event.payload.summary.length > 4_000))) {
+      throw smokeError(code);
+    }
+  }
+  return event.event_type;
+}
+
+export async function readSmokeEvents({
+  conversationId,
+  tenantId,
+  runId,
+  bootstrapKey,
+  signal,
+  fetchImpl = fetch,
+  limits = {},
+}) {
+  const maximumEvents = limits.maximumEvents ?? 1_000;
+  const maximumRetainedBytes = limits.maximumRetainedBytes ?? maximumApiBodyBytes;
+  if (typeof conversationId !== "string" || typeof tenantId !== "string" || typeof runId !== "string"
+    || !Buffer.isBuffer(bootstrapKey)
+    || !Number.isSafeInteger(maximumEvents) || maximumEvents < 1 || maximumEvents > 10_000
+    || !Number.isSafeInteger(maximumRetainedBytes) || maximumRetainedBytes < 1 || maximumRetainedBytes > 16 * maximumApiBodyBytes) {
+    throw smokeError("SMOKE_SSE_FAILED");
+  }
   let response;
   try {
-    response = await fetch(`${apiOrigin}/internal/v1/conversations/${encodeURIComponent(conversationId)}/events?after_sequence=0`, {
+    response = await fetchImpl(`${apiOrigin}/internal/v1/conversations/${encodeURIComponent(conversationId)}/events?after_sequence=0`, {
       headers: {
         authorization: `Bearer ${bootstrapKey.toString("utf8")}`,
         "x-core-agent-tenant-id": tenantId,
@@ -688,11 +894,15 @@ async function readEvents(conversationId, tenantId, bootstrapKey, signal) {
   } catch {
     throw smokeError("SMOKE_SSE_FAILED");
   }
-  if (response.status !== 200 || response.body === null) throw smokeError("SMOKE_SSE_FAILED");
+  const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+  if (response.status !== 200 || response.body === null || contentType !== "text/event-stream") {
+    throw smokeError("SMOKE_SSE_FAILED");
+  }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   const eventTypes = [];
   let pending = "";
+  let retainedBytes = 0;
   try {
     while (true) {
       const next = await reader.read();
@@ -705,9 +915,10 @@ async function readEvents(conversationId, tenantId, bootstrapKey, signal) {
         pending = pending.slice(separator + 2);
         const data = frame.split("\n").find((line) => line.startsWith("data: "))?.slice(6);
         if (data !== undefined) {
+          retainedBytes += Buffer.byteLength(data, "utf8");
+          if (eventTypes.length >= maximumEvents || retainedBytes > maximumRetainedBytes) throw smokeError("SMOKE_SSE_FAILED");
           const event = parseJson(data, "SMOKE_SSE_FAILED");
-          const eventType = dataProperty(event, "event_type", "SMOKE_SSE_FAILED");
-          if (typeof eventType !== "string" || !/^[a-z][a-z0-9_.]{0,127}$/u.test(eventType)) throw smokeError("SMOKE_SSE_FAILED");
+          const eventType = validateProductEventEnvelope(event, { conversationId, tenantId, runId });
           eventTypes.push(eventType);
           if (eventType === "run.completed" || eventType === "run.failed") {
             await reader.cancel().catch(() => undefined);
@@ -732,6 +943,10 @@ function deriveManagedNames(tenantId, runtimeId, generation) {
   });
 }
 
+function deriveProvisionedRuntimeId(tenantId) {
+  return `runtime_${createHash("sha256").update(tenantId, "utf8").digest("hex").slice(0, 32)}`;
+}
+
 async function scanDumpForSecrets(filePath, secretValues) {
   const metadata = await stat(filePath, { bigint: true });
   if (!metadata.isFile() || (metadata.mode & 0o7777n) !== 0o600n || metadata.size > 64n * 1024n * 1024n) {
@@ -748,21 +963,22 @@ async function scanDumpForSecrets(filePath, secretValues) {
 }
 
 function createDefaultDependencies(environment, signal) {
-  const childEnv = childEnvironment(environment);
-  const child = (command, args, options = {}) => runBoundedChild(command, args, {
-    ...options,
-    environment: childEnv,
-    signal: options.cleanup === true ? undefined : signal,
-  });
   const identifiers = createSyntheticIdentifiers();
   const state = {
     bootstrapKey: undefined,
     providerSecret: undefined,
     ingressSecret: undefined,
     imageRef: undefined,
+    productImageLockSnapshot: undefined,
     provider: undefined,
     runtime: undefined,
   };
+  const childEnv = () => createSmokeChildEnvironment(environment, state.productImageLockSnapshot?.path);
+  const child = (command, args, options = {}) => runBoundedChild(command, args, {
+    ...options,
+    environment: childEnv(),
+    signal: options.cleanup === true ? undefined : signal,
+  });
   const secretValues = () => [state.bootstrapKey, state.providerSecret, state.ingressSecret].filter(Buffer.isBuffer);
 
   return {
@@ -776,16 +992,21 @@ function createDefaultDependencies(environment, signal) {
     async validatePrerequisites() {
       await child("docker", ["version", "--format", "{{json .Server.Version}}"]);
       await child("docker", ["compose", "version", "--short"]);
-      const [baseLockRaw, productLockRaw, providerRaw] = await Promise.all([
+      const [baseLockRaw, providerRaw] = await Promise.all([
         readFile(runtimeBaseLockFile, "utf8"),
-        readFile(environment.CORE_AGENT_HERMES_IMAGE_LOCK_FILE, "utf8"),
         readFile(providerCatalogFile, "utf8"),
       ]).catch(() => { throw smokeError("SMOKE_CONFIGURATION_INVALID"); });
       const baseLock = parseJson(baseLockRaw, "SMOKE_PLATFORM_LOCK_INVALID");
       validateRuntimeBaseLock(baseLock, environment);
-      const productLock = parseJson(productLockRaw, "SMOKE_PRODUCT_IMAGE_LOCK_INVALID");
-      state.imageRef = validateProductImageLock(productLock, environment.CORE_AGENT_PLATFORM);
       state.provider = validateProviderCatalog(parseJson(providerRaw, "SMOKE_PROVIDER_CATALOG_INVALID"));
+      await child("node", ["scripts/prepare-runtime-network.mjs"]);
+      await child("node", ["scripts/prepare-runtime-paths.mjs"]);
+      state.productImageLockSnapshot = await stageProductImageLockSnapshot(
+        environment.CORE_AGENT_HERMES_IMAGE_LOCK_FILE,
+        environment.CORE_AGENT_PLATFORM,
+        environment.CORE_AGENT_SUPERVISOR_STATE_ROOT,
+      );
+      state.imageRef = state.productImageLockSnapshot.imageRef;
       const productInspection = await validateImageAvailable(state.imageRef, child);
       assertProductImageConfiguration(productInspection);
       await validateImageAvailable(environment.CORE_AGENT_NODE_IMAGE, child);
@@ -796,8 +1017,6 @@ function createDefaultDependencies(environment, signal) {
         `${state.provider.credential_secret_ref}.v1`,
       ));
       state.ingressSecret = await readProtectedSecret(join(environment.CORE_AGENT_INGRESS_SECRET_ROOT, "hermes_ingress.v1"));
-      await child("node", ["scripts/prepare-runtime-network.mjs"]);
-      await child("node", ["scripts/prepare-runtime-paths.mjs"]);
       await child("docker", composeArgs("config", "--quiet"));
     },
     async startTopology() {
@@ -807,7 +1026,14 @@ function createDefaultDependencies(environment, signal) {
       });
       await requestJson("/health/ready", { bootstrapKey: state.bootstrapKey, statuses: [200], signal });
     },
-    async provision() {
+    prepareProvisioningContext() {
+      return Object.freeze({ ...identifiers, runtimeId: deriveProvisionedRuntimeId(identifiers.tenantId) });
+    },
+    async provision(context) {
+      if (context?.tenantId !== identifiers.tenantId
+        || context.runtimeId !== deriveProvisionedRuntimeId(identifiers.tenantId)) {
+        throw smokeError("SMOKE_PROVISION_RESPONSE_INVALID");
+      }
       const request = provisioningRequest(identifiers, state.imageRef, environment.CORE_AGENT_PLATFORM, state.provider);
       const response = await requestJson("/internal/v1/tenant-provisioning", {
         method: "POST", body: request, bootstrapKey: state.bootstrapKey, statuses: [202], signal,
@@ -818,8 +1044,7 @@ function createDefaultDependencies(environment, signal) {
         throw smokeError("SMOKE_PROVISION_RESPONSE_INVALID");
       }
       const runtimeId = dataProperty(runtime, "container_id", "SMOKE_PROVISION_RESPONSE_INVALID");
-      if (typeof runtimeId !== "string") throw smokeError("SMOKE_PROVISION_RESPONSE_INVALID");
-      return { ...identifiers, runtimeId };
+      if (runtimeId !== context.runtimeId) throw smokeError("SMOKE_PROVISION_RESPONSE_INVALID");
     },
     async pollRuntime(context) {
       const deadline = Date.now() + maximumPollMs;
@@ -852,8 +1077,8 @@ function createDefaultDependencies(environment, signal) {
       if (typeof runId !== "string") throw smokeError("SMOKE_RUN_RESPONSE_INVALID");
       return runId;
     },
-    async readEvents(context, conversationId) {
-      return readEvents(conversationId, context.tenantId, state.bootstrapKey, signal);
+    async readEvents(context, conversationId, runId) {
+      return readSmokeEvents({ conversationId, tenantId: context.tenantId, runId, bootstrapKey: state.bootstrapKey, signal });
     },
     async queryRun(context, runId) {
       return requestJson(`/internal/v1/runs/${encodeURIComponent(runId)}`, {
@@ -909,7 +1134,7 @@ function createDefaultDependencies(environment, signal) {
         await runBoundedChildToFile("docker", composeArgs(
           "exec", "-T", "postgres", "pg_dump", "-U", "core_agent_app", "-d", "core_agent_runtime",
           "--no-owner", "--no-privileges", "--schema=public",
-        ), handle, { environment: childEnv, signal, timeoutMs: 120_000 });
+        ), handle, { environment: childEnv(), signal, timeoutMs: 120_000 });
         await handle.sync();
         await handle.close();
         await scanDumpForSecrets(dumpPath, secretValues());
@@ -966,11 +1191,14 @@ function createDefaultDependencies(environment, signal) {
         cleanup: true, timeoutMs: 120_000, maxOutputBytes: 4 * 1024 * 1024,
       });
     },
-    releaseSecrets() {
+    async releaseSecrets() {
       for (const secret of secretValues()) secret.fill(0);
       state.bootstrapKey = undefined;
       state.providerSecret = undefined;
       state.ingressSecret = undefined;
+      const snapshot = state.productImageLockSnapshot;
+      state.productImageLockSnapshot = undefined;
+      await snapshot?.cleanup();
     },
   };
 }
@@ -1008,7 +1236,9 @@ export async function runControlPlaneSmoke({
     topologyOwned = true;
     await deps.startTopology({ projectName: composeProject });
     deps.stage?.("provision");
-    context = await deps.provision();
+    context = deps.prepareProvisioningContext?.();
+    const provisionedContext = await deps.provision(context);
+    if (context === undefined) context = provisionedContext;
     const runtime = await deps.pollRuntime(context);
     deps.stage?.("run");
     const conversationId = await deps.createConversation(context);
@@ -1035,22 +1265,43 @@ export async function runControlPlaneSmoke({
     primaryError = error;
   } finally {
     let cleanupError;
+    const rememberCleanupError = (error) => {
+      if (cleanupError === undefined) cleanupError = error;
+    };
     if (!keepRuntime) {
       try {
         deps.stage?.("cleanup");
-        if (context !== undefined) {
-          await deps.deleteRuntime(context);
-          await deps.waitForContainerRemoval(context);
-        }
-        if (topologyOwned) await deps.stopTopology({ projectName: composeProject, removeVolumes: false });
       } catch (error) {
-        cleanupError = error;
+        rememberCleanupError(error);
+      }
+      if (context !== undefined) {
+        try {
+          await deps.deleteRuntime(context);
+        } catch (error) {
+          rememberCleanupError(error);
+        }
+        try {
+          await deps.waitForContainerRemoval(context);
+        } catch (error) {
+          rememberCleanupError(error);
+        }
+      }
+      if (topologyOwned) {
+        try {
+          await deps.stopTopology({ projectName: composeProject, removeVolumes: false });
+        } catch (error) {
+          rememberCleanupError(error);
+        }
       }
     }
-    deps.releaseSecrets?.();
+    try {
+      await deps.releaseSecrets?.();
+    } catch (error) {
+      rememberCleanupError(error);
+    }
     if (primaryError === undefined && cleanupError !== undefined) primaryError = cleanupError;
   }
-  if (primaryError !== undefined) throw smokeError("SMOKE_STAGE_FAILED");
+  if (primaryError !== undefined) throw smokeError("SMOKE_STAGE_FAILED", primaryError);
   deps.emit(output);
   return output;
 }

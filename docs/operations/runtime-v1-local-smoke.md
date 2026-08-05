@@ -21,11 +21,18 @@ registry RepoDigests, review them, and create a ManagedImageLock-shaped JSON
 file whose repository identifies the Core-Agent Hermes runtime product and
 whose `linux/amd64` and `linux/arm64` references both have the form
 `repository:tag@sha256:<64 lowercase hex characters>`. The same absolute lock
-file is mounted into API and Supervisor through
-`CORE_AGENT_HERMES_IMAGE_LOCK_FILE`. The smoke rejects the current
+file is supplied to the smoke through `CORE_AGENT_HERMES_IMAGE_LOCK_FILE`.
+After the Task17 path preflight, the smoke reads that source with stable
+pre/read/post metadata checks, stages an owner-private directory and `0444`
+snapshot below `CORE_AGENT_SUPERVISOR_STATE_ROOT`, verifies the copied bytes,
+and overrides the child-only Compose environment so API and Supervisor mount
+that same snapshot read-only. The caller's source path is never mounted by the
+smoke, and the snapshot path is never printed. The smoke rejects the current
 `nousresearch/hermes-agent` base lock and rejects an installed image whose
 RepoDigest or `/opt/core-agent/gateway-entrypoint.sh` configuration does not
-match the reviewed product lock.
+match the reviewed product lock. Source mutation during snapshot creation fails
+closed; the staged file is unlinked during resource release, including failure
+paths.
 
 The release flow is therefore:
 
@@ -108,7 +115,10 @@ CORE_AGENT_REAL_HERMES_SMOKE=1 npm run smoke:control-plane
 Do not manually run `compose up` first. The smoke owns its exact project and
 starts only `postgres migrate api worker supervisor`. It validates Docker and
 Compose, locked Node/PostgreSQL/product-Hermes references, runtime paths and
-network, all three secret files, and the product image before startup.
+network, all three secret files, and the product image before startup. It also
+precomputes the deterministic synthetic tenant/runtime cleanup identity before
+the provisioning POST, so a committed request whose response is lost or invalid
+can still be queried and deleted without a broad Docker label deletion.
 
 On success stdout contains exactly one JSON object with these keys and no
 others: `assistant_message_count`, `conversation_id`, `event_types`,
@@ -117,10 +127,13 @@ others: `assistant_message_count`, `conversation_id`, `event_types`,
 AC10 success unless `runtime_state` is `ready`, `run_status` is `succeeded`, the
 event list ends in `run.completed`, and `assistant_message_count` is positive.
 
-Default cleanup sends runtime `delete`, waits up to five minutes for the exact
-managed container to disappear, confirms the exact labeled tenant volume
-remains, and runs Compose `down` without `-v`. The PostgreSQL Compose volume
-also remains because the command never uses `--volumes`.
+Default cleanup attempts runtime `delete`, the exact managed-container removal
+check, and Compose `down` without `-v` independently. A failure in one step does
+not skip the later bounded steps, the first cleanup failure is retained, and
+secret buffers and the product-lock snapshot are released in all cases. The
+container-removal check confirms the exact labeled tenant volume remains. The
+PostgreSQL Compose volume also remains because the command never uses
+`--volumes`.
 
 `--keep-runtime` skips runtime deletion and Compose shutdown for inspection but
 does not add output fields:
@@ -148,6 +161,11 @@ bootstrap file in memory, send `X-Core-Agent-Tenant-Id`, and send either
 sequence}`. Retain only sequence numbers and event types; do not save `data:`
 payloads. Never put the bootstrap value in shell history, command arguments,
 an environment variable, or a pasted transcript.
+
+The automated smoke additionally requires the response content type to be
+`text/event-stream`, validates each retained item as a ProductEvent envelope,
+requires the terminal event's top-level and payload `run_id` to match the
+created Run, and fails closed on its event-count or aggregate-byte bounds.
 
 Stop only the smoke-owned Compose project, never a broader project and never
 with `-v`:
