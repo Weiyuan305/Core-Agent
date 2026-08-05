@@ -66,7 +66,7 @@ async function dispatchRuntimeJob(dependencies: WorkerDependencies, job: Claimed
       getIngressMaterial: (reference) => dependencies.ingressSecretStore.get(reference),
       probe: (input, operationSignal) => dependencies.hermesClient.probe(input, operationSignal),
       succeed: () => dependencies.repositories.runtimes.finishProvision(ref),
-      retry: async (_job, summary) => { const retry = nextAttempt(dependencies, job, summary); return dependencies.repositories.runtimes.retryJob(ref, retry.summary, retry.at); },
+      retry: async (_job, summary) => { const retry = nextAttempt(dependencies, job, summary); return dependencies.repositories.runtimes.retryProvisionJob(ref, retry.summary, retry.at); },
       fail: (_job, summary) => dependencies.repositories.runtimes.failProvisionJob(ref, summary),
     }, job, signal);
   });
@@ -91,8 +91,8 @@ async function dispatchRuntimeJob(dependencies: WorkerDependencies, job: Claimed
     succeed: async (_job, response) => response?.outcome === "accepted"
       ? dependencies.repositories.runtimes.finishReconcile(ref, job.runtimeCommand, job.targetCommandVersion, response.observation)
       : dependencies.repositories.runtimes.completeSuperseded(ref),
-    retry: async (_job, summary) => { const retry = nextAttempt(dependencies, job, summary); return dependencies.repositories.runtimes.retryReconcileJob(ref, job.targetCommandVersion, retry.summary, retry.at); },
-    fail: (_job, summary) => dependencies.repositories.runtimes.failReconcileJob(ref, job.targetCommandVersion, summary),
+    retry: async (_job, summary) => { const retry = nextAttempt(dependencies, job, summary); return dependencies.repositories.runtimes.retryReconcile(ref, job.targetCommandVersion, retry.summary, retry.at); },
+    fail: (_job, summary) => dependencies.repositories.runtimes.failReconcile(ref, job.targetCommandVersion, summary),
   }, { tenantId: job.tenantId, jobId: job.jobId, attemptCount: job.attemptCount, maxAttempts: job.maxAttempts, targetCommandVersion: job.targetCommandVersion, command: job.runtimeCommand, effectState: job.effectState, recoveryOnly: job.recoveryOnly }, signal));
   if (job.jobKind === "execute_agent_run") return withAgentRunConversationLock(
     dependencies.db,

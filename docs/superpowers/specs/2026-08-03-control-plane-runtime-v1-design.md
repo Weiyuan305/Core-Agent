@@ -542,6 +542,11 @@ superseded-success, with no Runtime mutation and no failure ProductEvent or
 AuditEvent. This applies to rejected, thrown, timed-out, contradictory, and
 final-attempt results from both pre-effect and already-dispatched work. A
 matching version retains the bounded retry and terminal failure behavior.
+Provision and reconcile terminalization are distinct repository capabilities:
+the former is SQL-scoped to `provision_runtime`, while the latter validates the
+locked job's persisted kind and target version against the claimed target before
+any Runtime mutation. The repository intentionally has no generic retry or
+Runtime-failure method shared by both job kinds.
 
 ## 10. Provisioning flow
 

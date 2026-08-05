@@ -171,6 +171,15 @@ health, or failure state and emits no failure ProductEvent or AuditEvent. The
 Worker reports that disposition as succeeded; only a matching command version
 may retry or publish current-command failure history.
 
+The repository exposes separate provision and reconcile terminalization
+methods. Provision retry/failure SQL accepts only a persisted
+`job_kind = 'provision_runtime'`. Reconcile retry/failure first locks the owned
+job row and requires `job_kind = 'reconcile_runtime'`, a non-null persisted
+`target_command_version`, and equality between that value and the Worker's
+claimed target. A missing, wrong-kind, or mismatched claim fails as lease loss
+before the Runtime is locked or mutated; there is no generic Runtime-failure
+entry point that can bypass this command-aware disposition.
+
 `CONTROL_PLANE_WORKER_ID` is a bounded operator-configured prefix, not the
 durable lease identity. Each Worker process appends one fresh cryptographic
 UUID for its lifetime. The derived identity is used only for lease ownership;

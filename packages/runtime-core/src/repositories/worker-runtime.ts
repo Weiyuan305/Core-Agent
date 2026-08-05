@@ -187,7 +187,12 @@ export class WorkerRuntimeRepository {
 
   public async failProvisionJob(job: RuntimeWorkerJobRef, summary: string): Promise<ProvisionFailureResult> {
     return provisionTransaction(this.db, async (trx) => {
-      await requireLease(trx, job, true);
+      const claimed = await trx.selectFrom("worker_jobs").select("job_kind")
+        .where("tenant_id", "=", job.tenantId).where("job_id", "=", job.jobId)
+        .where("attempt_count", "=", job.attemptCount).where("lease_owner", "=", job.workerId)
+        .where("status", "=", "running").where("lease_expires_at", ">", sql<Date>`clock_timestamp()`)
+        .forUpdate().executeTakeFirst();
+      if (claimed?.job_kind !== "provision_runtime") throw new LeaseFenceLost();
       const row = await trx.selectFrom("runtime_containers").select(["observed_state", "resource_version", "command_version"]).where("tenant_id", "=", job.tenantId).where("container_id", "=", job.runtimeId).forUpdate().executeTakeFirstOrThrow();
       await requireLease(trx, job);
       if (safeContractInteger(row.command_version) > 0) {
@@ -204,16 +209,24 @@ export class WorkerRuntimeRepository {
     });
   }
 
-  public async retryJob(job: RuntimeWorkerJobRef, summary: string, nextAttemptAt: Date): Promise<boolean> {
+  public async retryProvisionJob(job: RuntimeWorkerJobRef, summary: string, nextAttemptAt: Date): Promise<boolean> {
     const result = await this.db.updateTable("worker_jobs").set({ status: "retrying", lease_owner: null, lease_expires_at: null, next_attempt_at: nextAttemptAt,
       last_error_summary: redactSummary(summary, 1000, this.redactor), updated_at: this.now() }).where("tenant_id", "=", job.tenantId).where("job_id", "=", job.jobId)
-      .where("attempt_count", "=", job.attemptCount).where("lease_owner", "=", job.workerId).where("lease_expires_at", ">", sql<Date>`clock_timestamp()`).executeTakeFirst();
+      .where("job_kind", "=", "provision_runtime").where("attempt_count", "=", job.attemptCount)
+      .where("lease_owner", "=", job.workerId).where("status", "=", "running")
+      .where("lease_expires_at", ">", sql<Date>`clock_timestamp()`).executeTakeFirst();
     return Number(result.numUpdatedRows) === 1;
   }
 
   private async finalizeReconcileFailure(job: RuntimeWorkerJobRef, targetCommandVersion: number, summary: string, nextAttemptAt?: Date): Promise<ReconcileRetryResult | ReconcileFailureResult> {
     return provisionTransaction(this.db, async (trx) => {
-      await requireLease(trx, job, true);
+      const claimed = await trx.selectFrom("worker_jobs").select(["job_kind", "target_command_version"])
+        .where("tenant_id", "=", job.tenantId).where("job_id", "=", job.jobId)
+        .where("attempt_count", "=", job.attemptCount).where("lease_owner", "=", job.workerId)
+        .where("status", "=", "running").where("lease_expires_at", ">", sql<Date>`clock_timestamp()`)
+        .forUpdate().executeTakeFirst();
+      if (claimed === undefined || claimed.job_kind !== "reconcile_runtime" || claimed.target_command_version === null
+        || safeContractInteger(claimed.target_command_version) !== targetCommandVersion) throw new LeaseFenceLost();
       const row = await trx.selectFrom("runtime_containers").select(["observed_state", "resource_version", "command_version"])
         .where("tenant_id", "=", job.tenantId).where("container_id", "=", job.runtimeId).forUpdate().executeTakeFirstOrThrow();
       await requireLease(trx, job);
@@ -235,26 +248,12 @@ export class WorkerRuntimeRepository {
     });
   }
 
-  public async retryReconcileJob(job: RuntimeWorkerJobRef, targetCommandVersion: number, summary: string, nextAttemptAt: Date): Promise<ReconcileRetryResult> {
+  public async retryReconcile(job: RuntimeWorkerJobRef, targetCommandVersion: number, summary: string, nextAttemptAt: Date): Promise<ReconcileRetryResult> {
     return this.finalizeReconcileFailure(job, targetCommandVersion, summary, nextAttemptAt) as Promise<ReconcileRetryResult>;
   }
 
-  public async failReconcileJob(job: RuntimeWorkerJobRef, targetCommandVersion: number, summary: string): Promise<ReconcileFailureResult> {
+  public async failReconcile(job: RuntimeWorkerJobRef, targetCommandVersion: number, summary: string): Promise<ReconcileFailureResult> {
     return this.finalizeReconcileFailure(job, targetCommandVersion, summary) as Promise<ReconcileFailureResult>;
-  }
-
-  public async failRuntimeJob(job: RuntimeWorkerJobRef, summary: string, action = "runtime.reconcile"): Promise<boolean> {
-    return fencedTransaction(this.db, async (trx) => {
-      await requireLease(trx, job, true);
-      const row = await trx.selectFrom("runtime_containers").select(["observed_state", "resource_version"]).where("tenant_id", "=", job.tenantId).where("container_id", "=", job.runtimeId).forUpdate().executeTakeFirstOrThrow();
-      await requireLease(trx, job);
-      const now = this.now(); const context = { tenantId: job.tenantId, trx }; let version = safeContractInteger(row.resource_version);
-      if (row.observed_state !== "failed" && row.observed_state !== "deleted") version = await transition(trx, context, job, row.observed_state as RuntimeContainer["observed_state"], "failed", "unhealthy", now);
-      const redacted = redactSummary(summary, 1000, this.redactor);
-      await trx.updateTable("runtime_containers").set({ failure_summary: redacted }).where("tenant_id", "=", job.tenantId).where("container_id", "=", job.runtimeId).execute();
-      await appendWorkerAudit(context, job, action, "failed", redacted, version, now);
-      await finishOwnedJob(trx, job, { status: "failed", lease_owner: null, lease_expires_at: null, last_error_summary: redacted, updated_at: now });
-    });
   }
 
   public async loadReconcileFacts(tenantId: string, runtimeId: string): Promise<StoredReconcileFacts> {

@@ -48,6 +48,12 @@ failure event/audit entry. Current-command failure alerts therefore require a
 matching `target_command_version`; investigate any mismatch as a broken Worker
 transaction boundary.
 
+A provision terminalization presented with a non-provision job kind, or a
+reconcile terminalization whose locked persisted target differs from the
+Worker's claim, is reported as lease loss and must make no Runtime mutation.
+Treat repeated occurrences as a Worker contract or data-integrity alert; do not
+retry them through a generic Runtime failure path.
+
 Outbox delivery has a hard limit of 10 notification attempts. Each polling
 transaction first locks at most 100 exhausted pending rows in deterministic
 creation-and-identity order with `FOR UPDATE SKIP LOCKED`. It rechecks each
