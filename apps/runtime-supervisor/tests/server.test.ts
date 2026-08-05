@@ -64,7 +64,7 @@ test.afterEach(async () => {
 
 function buildServer(
   execute: (request: SupervisorRequestV1, signal: AbortSignal) => Promise<SupervisorResponseV1>,
-  options: { operationTimeoutMs?: number; shutdownTimeoutMs?: number } = {},
+  options: { operationTimeoutMs?: number; cancellationSettlementTimeoutMs?: number; shutdownTimeoutMs?: number } = {},
 ) {
   return new RuntimeSupervisorServer({
     socketPath,
@@ -254,5 +254,52 @@ test("Unix service caps execution at four and waits for abort settlement before 
   } finally {
     releaseTimed();
     await timed.close();
+  }
+});
+
+test("an unsettled cancellation returns a bounded transient timeout without releasing its stable journal reservation", async () => {
+  let dispatches = 0;
+  let mutations = 0;
+  let observeAbort!: () => void;
+  const abortObserved = new Promise<void>((resolve) => { observeAbort = resolve; });
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  const server = buildServer(async (value, signal) => {
+    dispatches += 1;
+    signal.addEventListener("abort", observeAbort, { once: true });
+    await released;
+    mutations += 1;
+    return accepted(value.operation_id);
+  }, {
+    operationTimeoutMs: 10,
+    cancellationSettlementTimeoutMs: 15,
+    shutdownTimeoutMs: 50,
+  });
+  await server.start();
+  try {
+    const client = new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 });
+    const first = client.execute(request("operation_unsettled_deadline"));
+    await abortObserved;
+    const response = await first;
+    assert.equal(response.outcome, "failed");
+    if (response.outcome === "failed") assert.equal(response.code, "DEPENDENCY_TIMEOUT");
+    assert.equal(dispatches, 1);
+    assert.equal(mutations, 0);
+    assert.equal((await readdir(join(temporaryRoot, "journal"))).some((name) => name.endsWith(".json")), false);
+
+    let replaySettled = false;
+    const replay = client.execute(request("operation_unsettled_deadline")).finally(() => { replaySettled = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(replaySettled, false);
+    assert.equal(dispatches, 1);
+
+    release();
+    const replayed = await replay;
+    assert.equal(replayed.outcome, "accepted");
+    assert.equal(mutations, 1);
+    assert.equal((await readdir(join(temporaryRoot, "journal"))).some((name) => name.endsWith(".json")), true);
+  } finally {
+    release();
+    await server.close();
   }
 });
