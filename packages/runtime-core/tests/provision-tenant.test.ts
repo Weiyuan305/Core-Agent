@@ -12,6 +12,7 @@ import { applyMigrations } from "../src/db/migrate.js";
 import { canonicalPayloadHash, DomainError } from "../src/domain/idempotency.js";
 import { provisionTenant } from "../src/services/provision-tenant.js";
 import { commandRuntime, getTenantRuntime } from "../src/services/command-runtime.js";
+import { createConversation } from "../src/services/create-conversation.js";
 import { createRedactor } from "../src/domain/redaction.js";
 import { WorkerRuntimeRepository } from "../src/repositories/worker-runtime.js";
 import { acquireRuntimeTransactionAdvisoryLock, withRuntimeAdvisoryLock } from "../src/repositories/runtime-lock.js";
@@ -114,6 +115,21 @@ async function runtimeTerminalSnapshot(tenantId: string) {
     audits: await db.selectFrom("audit_events").selectAll().where("tenant_id", "=", tenantId).orderBy("audit_event_id").execute(),
     outbox: await db.selectFrom("outbox").selectAll().where("tenant_id", "=", tenantId).orderBy("outbox_id").execute(),
   };
+}
+
+async function databaseDeadlocks(): Promise<number> {
+  const result = await pool.query<{ deadlocks: string }>("select deadlocks::text from pg_stat_database where datname = current_database()");
+  return Number(result.rows[0]?.deadlocks ?? "0");
+}
+
+async function waitForLockWaiters(minimum: number): Promise<void> {
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    const result = await pool.query<{ count: string }>("select count(*)::text as count from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid() and wait_event_type = 'Lock'");
+    if (Number(result.rows[0]?.count ?? "0") >= minimum) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(`expected at least ${minimum} PostgreSQL lock waiters`);
 }
 
 async function holdRuntimeRowUntilLeaseExpires(
@@ -537,6 +553,43 @@ test("finishProvision rejects wrong persisted success intent before every write"
   const repository = new WorkerRuntimeRepository(db, createRedactor([]));
   assert.deepEqual(await repository.finishProvision({ tenantId, runtimeId: accepted.runtime.container_id, jobId: reconcile.job_id, workerId: "worker_success", attemptCount: reconcile.attempt_count }), { kind: "lease_lost" });
   assert.deepEqual(await runtimeTerminalSnapshot(tenantId), before);
+});
+
+test("finishProvision and Conversation admission share one lock order without a database deadlock", { timeout: 10_000 }, async () => {
+  const tenantId = "tenant_finish_conversation_lock_order";
+  const provisioning = b2bRequest(tenantId);
+  const context = { tenantId, requestId: "request_finish_conversation_lock", traceId: "trace_finish_conversation_lock", actorId: "core_agent_provisioner" as const, membershipId: "core_agent_provisioner_admin" as const, effectiveRole: "admin" as const };
+  const accepted = await provisionTenant({ db, providerCatalog, imageLock }, context, provisioning);
+  const job = await db.selectFrom("worker_jobs").select(["job_id", "attempt_count"]).where("tenant_id", "=", tenantId).where("job_kind", "=", "provision_runtime").executeTakeFirstOrThrow();
+  await db.updateTable("tenants").set({ status: "active" }).where("tenant_id", "=", tenantId).execute();
+  await db.updateTable("profiles").set({ status: "active" }).where("tenant_id", "=", tenantId).execute();
+  await db.updateTable("runtime_containers").set({ observed_state: "provisioning" }).where("tenant_id", "=", tenantId).execute();
+  await db.updateTable("worker_jobs").set({ status: "running", lease_owner: "worker_finish", lease_expires_at: new Date("2100-01-01T00:00:00.000Z") }).where("tenant_id", "=", tenantId).where("job_id", "=", job.job_id).execute();
+  const repository = new WorkerRuntimeRepository(db, createRedactor([]));
+  const ref = { tenantId, runtimeId: accepted.runtime.container_id, jobId: job.job_id, workerId: "worker_finish", attemptCount: job.attempt_count };
+  let releaseRuntime!: () => void;
+  let runtimeLocked!: () => void;
+  const release = new Promise<void>((resolve) => { releaseRuntime = resolve; });
+  const locked = new Promise<void>((resolve) => { runtimeLocked = resolve; });
+  const blocker = db.transaction().execute(async (trx) => {
+    await trx.selectFrom("runtime_containers").select("container_id").where("tenant_id", "=", tenantId).where("container_id", "=", accepted.runtime.container_id).forUpdate().executeTakeFirstOrThrow();
+    runtimeLocked();
+    await release;
+  });
+  await locked;
+  const beforeDeadlocks = await databaseDeadlocks();
+  const finishing = repository.finishProvision(ref);
+  await waitForLockWaiters(1);
+  const creating = createConversation({ db, now: () => new Date("2026-08-06T01:00:00.000Z") }, context, withHash({ schema_version: 1 as const, idempotency_key: "idem_finish_conversation_lock", tenant_id: tenantId, profile_id: provisioning.identity_graph.profiles[0]!.profile_id }));
+  await waitForLockWaiters(2);
+  releaseRuntime();
+  await blocker;
+  const [completed, conversation] = await Promise.all([finishing, creating]);
+  assert.deepEqual(completed, { kind: "completed" });
+  assert.equal(conversation.status, "active");
+  assert.equal(await databaseDeadlocks(), beforeDeadlocks);
+  const runtime = await db.selectFrom("runtime_containers").select(["observed_state", "health_status"]).where("tenant_id", "=", tenantId).executeTakeFirstOrThrow();
+  assert.deepEqual(runtime, { observed_state: "ready", health_status: "healthy" });
 });
 
 test("reconcile success and superseded completion reject mismatched persisted intent without writes", async () => {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { HermesStreamError, type ClaimedJob, type StoredAgentRunExecutionFacts } from "@core-agent/runtime-core";
+import { DatabaseTransactionRetryExhaustedError, HermesStreamError, type ClaimedJob, type StoredAgentRunExecutionFacts } from "@core-agent/runtime-core";
 
 import {
   handleExecuteAgentRun,
@@ -126,6 +126,21 @@ test("Hermes acceptance before the first delta is already unsafe and never retri
     "begin", "inspect", "mark-dispatched", "hermes-accepted", "fail:Agent execution failed after dispatch",
   ]);
   assert.equal(setup.calls.includes("retry"), false);
+});
+
+test("database concurrency exhaustion after unsafe dispatch leaves Agent Run finalization to lease recovery", async () => {
+  const setup = port({
+    complete: async () => { setup.calls.push("complete:db-exhausted"); throw new DatabaseTransactionRetryExhaustedError(); },
+  });
+
+  await assert.rejects(
+    handleExecuteAgentRun(setup.value, job, new AbortController().signal),
+    DatabaseTransactionRetryExhaustedError,
+  );
+  assert.deepEqual(setup.calls, [
+    "begin", "inspect", "mark-dispatched", "hermes", "delta:Hello", "delta: there", "complete:db-exhausted",
+  ]);
+  assert.equal(setup.calls.some((call) => call === "retry" || call.startsWith("fail:")), false);
 });
 
 test("lease loss while marking dispatch performs zero SecretStore or Hermes work", async () => {

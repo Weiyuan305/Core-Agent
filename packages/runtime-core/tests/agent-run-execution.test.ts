@@ -7,6 +7,7 @@ import {
   claimJobs,
   createRedactor,
   createRuntimeDatabase,
+  DomainError,
   WorkerAgentRunRepository,
   type ClaimedJob,
 } from "../src/index.js";
@@ -74,6 +75,21 @@ async function setupExecution(tenantId: string) {
   };
 }
 
+async function databaseDeadlocks(): Promise<number> {
+  const result = await pool.query<{ deadlocks: string }>("select deadlocks::text from pg_stat_database where datname = current_database()");
+  return Number(result.rows[0]?.deadlocks ?? "0");
+}
+
+async function waitForLockWaiters(minimum: number): Promise<void> {
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    const result = await pool.query<{ count: string }>("select count(*)::text as count from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid() and wait_event_type = 'Lock'");
+    if (Number(result.rows[0]?.count ?? "0") >= minimum) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(`expected at least ${minimum} PostgreSQL lock waiters`);
+}
+
 test.beforeEach(async () => resetAdmissionDatabase(pool));
 test.after(async () => db.destroy());
 
@@ -118,6 +134,57 @@ test("Agent Run execution atomically begins, persists ordered unsafe deltas, and
   );
   assert.equal(await db.selectFrom("audit_events").selectAll().where("tenant_id", "=", setup.tenantId).execute().then((rows) => rows.length), 3);
   assert.equal(await db.selectFrom("outbox").selectAll().where("tenant_id", "=", setup.tenantId).execute().then((rows) => rows.length), 8);
+});
+
+test("Agent Run completion and failure share conversation-run order with parent retry admission", { timeout: 15_000 }, async () => {
+  for (const operation of ["complete", "fail"] as const) {
+    const setup = await setupExecution(`tenant_agent_run_lock_${operation}`);
+    const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", attemptCount: setup.job.attemptCount, runId: setup.run.run_id };
+    const begun = await setup.repository.begin(ref);
+    assert.equal(begun.kind, "admitted");
+    if (begun.kind !== "admitted") continue;
+    if (operation === "complete") {
+      assert.deepEqual(await setup.repository.markDispatched(ref), { kind: "updated" });
+      assert.deepEqual(await setup.repository.persistDelta(ref, begun.facts.assistantMessageId, "Final answer"), { kind: "updated" });
+    }
+    let releaseRun!: () => void;
+    let runLocked!: () => void;
+    const release = new Promise<void>((resolve) => { releaseRun = resolve; });
+    const locked = new Promise<void>((resolve) => { runLocked = resolve; });
+    const blocker = db.transaction().execute(async (trx) => {
+      await trx.selectFrom("agent_runs").select("run_id").where("tenant_id", "=", setup.tenantId).where("run_id", "=", setup.run.run_id).forUpdate().executeTakeFirstOrThrow();
+      runLocked();
+      await release;
+    });
+    await locked;
+    const beforeDeadlocks = await databaseDeadlocks();
+    const terminal = operation === "complete"
+      ? setup.repository.complete(ref, begun.facts, "Final answer")
+      : setup.repository.fail(ref, "Synthetic terminal failure");
+    await waitForLockWaiters(1);
+    const childAdmission = createAgentRun({ db, providerCatalog, now: () => admissionNow }, serviceContext(setup.tenantId), setup.conversation.conversation_id, withPayloadHash({
+      schema_version: 1 as const,
+      idempotency_key: `idem_child_lock_${operation}`,
+      client_request_id: `client_child_lock_${operation}`,
+      input_message: { client_message_id: `message_child_lock_${operation}`, content: "Retry after parent terminalization" },
+      parent_run_id: setup.run.run_id,
+    })).then((value) => ({ kind: "accepted" as const, value }), (error: unknown) => ({ kind: "rejected" as const, error }));
+    await waitForLockWaiters(2);
+    releaseRun();
+    await blocker;
+    assert.deepEqual(await terminal, { kind: "updated" }, operation);
+    const child = await childAdmission;
+    if (operation === "complete") {
+      assert.equal(child.kind, "rejected");
+      if (child.kind === "rejected") assert.equal(child.error instanceof DomainError && child.error.code === "RESOURCE_NOT_FOUND", true);
+    } else {
+      assert.equal(child.kind, "accepted");
+      if (child.kind === "accepted") assert.equal(child.value.parent_run_id, setup.run.run_id);
+    }
+    assert.equal(await databaseDeadlocks(), beforeDeadlocks, operation);
+    const parent = await db.selectFrom("agent_runs").select("status").where("tenant_id", "=", setup.tenantId).where("run_id", "=", setup.run.run_id).executeTakeFirstOrThrow();
+    assert.equal(parent.status, operation === "complete" ? "succeeded" : "failed");
+  }
 });
 
 test("safe pre-effect retry of an already-running Run does not duplicate run.started", async () => {
