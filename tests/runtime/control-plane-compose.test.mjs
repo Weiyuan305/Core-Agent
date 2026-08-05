@@ -444,6 +444,7 @@ test("CI preserves contracts and separates deterministic runtime gates", async (
       POSTGRES_HOST_AUTH_METHOD: "trust",
       POSTGRES_USER: "postgres",
     });
+    assert.deepEqual(service.ports, ["5432:5432"]);
     assert.match(service.options, /pg_isready -U postgres -d postgres/u);
     const setup = workflow.jobs[jobName].steps.find((step) => step.name === "Create least-privilege CI database role");
     assert(setup);
@@ -457,6 +458,8 @@ test("CI preserves contracts and separates deterministic runtime gates", async (
   assert.match(workflowSource, /verify-no-secret\.mjs/u);
   assert.match(workflowSource, /scan-runtime-database\.mjs synthetic-ci-sentinel-runtime-v1/u);
   assert.match(workflowSource, /postgresql:\/\/core_agent_ci@127\.0\.0\.1:5432\/core_agent_control/u);
+  assert.equal(workflow.jobs.compose.steps.find((step) => step.name === "Validate Compose configuration").env.CORE_AGENT_SUPERVISOR_SOCKET_ROOT, "/tmp/core-agent-runtime-socket-path-only");
+  assert.equal(workflow.jobs.compose.steps.find((step) => step.name === "Validate Compose configuration").env.CORE_AGENT_SUPERVISOR_STATE_ROOT, "/tmp/core-agent-runtime-state-path-only");
 });
 
 test("runtime example environment contains paths and generated references only", async () => {
@@ -497,6 +500,19 @@ test("runtime path preflight creates final-uid 0700 roots and validates bootstra
   const bootstrap = join(root, "bootstrap-key");
   const socketRoot = join(root, "socket");
   const stateRoot = join(root, "state");
+  assert.deepEqual(preflight.resolveRuntimePathPolicy({
+    CORE_AGENT_BOOTSTRAP_KEY_FILE: bootstrap,
+    CORE_AGENT_SUPERVISOR_SOCKET_ROOT: socketRoot,
+    CORE_AGENT_SUPERVISOR_STATE_ROOT: stateRoot,
+  }), {
+    bootstrapPath: bootstrap,
+    socketRoot,
+    stateRoot,
+    bootstrapUid: 12000,
+    bootstrapGid: 12000,
+    supervisorUid: 12002,
+    supervisorGid: 12002,
+  });
   await writeFile(bootstrap, "not-read-by-preflight\n", { mode: 0o600 });
   const uid = process.getuid?.() ?? 0;
   const gid = process.getgid?.() ?? 0;
