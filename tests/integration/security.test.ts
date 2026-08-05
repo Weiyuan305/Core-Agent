@@ -362,7 +362,7 @@ test("structured log scanning reaches deep late Error and nonplain data", () => 
   }
 });
 
-test("structured log scanning fails closed without invoking serializers", () => {
+test("structured log scanning and snapshotting fail closed without invoking serializers", () => {
   let invoked = 0;
   const ownSerializer = Object.create(null) as Record<string, unknown>;
   Object.defineProperty(ownSerializer, "secret", {
@@ -392,6 +392,27 @@ test("structured log scanning fails closed without invoking serializers", () => 
     testHarnessInternals.captureStructuredLog(records, "worker_log", fields, "safe");
     sentinelError(() => testHarnessInternals.assertStructuredLogsSentinelFree(records));
   }
+  let ownKeysCalls = 0;
+  const stateful = new Proxy({}, {
+    ownKeys() {
+      ownKeysCalls += 1;
+      if (ownKeysCalls === 1) return [];
+      throw new Error(`snapshot failure ${LEAK_SENTINEL}`);
+    },
+  });
+  const records: unknown[] = [];
+  testHarnessInternals.captureStructuredLog(records, "worker_log", stateful, "safe");
+  assert.equal(ownKeysCalls, 2);
+  assert.deepEqual(
+    (records[0] as { sentinelScan: unknown }).sentinelScan,
+    {
+      detected: false,
+      incomplete: true,
+      incompleteCategories: ["structured_snapshot"],
+    },
+  );
+  sentinelError(() => testHarnessInternals.assertStructuredLogsSentinelFree(records));
+  assert.equal(JSON.stringify(records).includes(LEAK_SENTINEL), false);
   assert.equal(invoked, 0);
 });
 

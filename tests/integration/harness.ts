@@ -426,59 +426,98 @@ function safeStructuredValue(
   value: unknown,
   depth = 0,
   seen: WeakSet<object> = new WeakSet(),
-): unknown {
+): { readonly snapshot: unknown; readonly incomplete: boolean } {
   if (
     value === null
     || typeof value === "string"
     || typeof value === "number"
     || typeof value === "boolean"
     || value === undefined
-  ) return value;
-  if (typeof value === "bigint") return "bigint";
-  if ((typeof value !== "object" && typeof value !== "function") || depth >= 6) {
-    return typeof value;
+  ) return { snapshot: value, incomplete: false };
+  if (typeof value === "bigint") {
+    return { snapshot: "bigint", incomplete: false };
   }
-  if (seen.has(value)) return "circular";
+  if (typeof value !== "object" && typeof value !== "function") {
+    return { snapshot: typeof value, incomplete: false };
+  }
+  if (depth >= 6) {
+    return { snapshot: typeof value, incomplete: true };
+  }
+  if (seen.has(value)) return { snapshot: "circular", incomplete: false };
   seen.add(value);
   let keys: readonly PropertyKey[];
   try { keys = Reflect.ownKeys(value); }
-  catch { return { category: "unscannable" }; }
+  catch {
+    return {
+      snapshot: { category: "unscannable" },
+      incomplete: true,
+    };
+  }
   const isArray = Array.isArray(value);
   if (!isArray) {
     try {
       const prototype = Object.getPrototypeOf(value);
       if (prototype !== Object.prototype && prototype !== null) {
-        return { category: "nonplain" };
+        return {
+          snapshot: { category: "nonplain" },
+          incomplete: false,
+        };
       }
     } catch {
-      return { category: "unscannable" };
+      return {
+        snapshot: { category: "unscannable" },
+        incomplete: true,
+      };
     }
   }
   if (isArray) {
     const result: unknown[] = [];
+    let incomplete = false;
     for (const key of keys) {
-      if (result.length >= 100) break;
       if (typeof key !== "string" || !/^(0|[1-9][0-9]*)$/.test(key)) continue;
+      if (result.length >= 100) {
+        incomplete = true;
+        break;
+      }
       let descriptor: PropertyDescriptor | undefined;
       try { descriptor = Object.getOwnPropertyDescriptor(value, key); }
-      catch { return { category: "unscannable" }; }
+      catch {
+        return {
+          snapshot: { category: "unscannable" },
+          incomplete: true,
+        };
+      }
       if (descriptor !== undefined && "value" in descriptor) {
-        result.push(safeStructuredValue(descriptor.value, depth + 1, seen));
+        const child = safeStructuredValue(descriptor.value, depth + 1, seen);
+        result.push(child.snapshot);
+        incomplete ||= child.incomplete;
+      } else if (descriptor === undefined) {
+        incomplete = true;
       }
     }
-    return result;
+    return { snapshot: result, incomplete };
   }
   const result: Record<string, unknown> = {};
+  let incomplete = keys.length > 100;
   for (const key of keys.slice(0, 100)) {
     if (typeof key !== "string") continue;
     let descriptor: PropertyDescriptor | undefined;
     try { descriptor = Object.getOwnPropertyDescriptor(value, key); }
-    catch { return { category: "unscannable" }; }
+    catch {
+      return {
+        snapshot: { category: "unscannable" },
+        incomplete: true,
+      };
+    }
     if (descriptor !== undefined && "value" in descriptor && descriptor.enumerable) {
-      result[key] = safeStructuredValue(descriptor.value, depth + 1, seen);
+      const child = safeStructuredValue(descriptor.value, depth + 1, seen);
+      result[key] = child.snapshot;
+      incomplete ||= child.incomplete;
+    } else if (descriptor === undefined) {
+      incomplete = true;
     }
   }
-  return result;
+  return { snapshot: result, incomplete };
 }
 
 function scanSentinel(...roots: readonly unknown[]): SentinelScan {
@@ -697,16 +736,18 @@ function captureStructuredLog(
   forceIncomplete = false,
 ): void {
   const scan = scanSentinel(fields, message);
+  const structured = safeStructuredValue(fields);
+  const incompleteCategories = new Set(scan.incompleteCategories);
+  if (forceIncomplete) incompleteCategories.add("capture_surface");
+  if (structured.incomplete) incompleteCategories.add("structured_snapshot");
   records.push(Object.freeze({
     category,
-    fields: safeStructuredValue(fields),
+    fields: structured.snapshot,
     message,
     sentinelScan: Object.freeze({
       ...scan,
-      incomplete: scan.incomplete || forceIncomplete,
-      incompleteCategories: forceIncomplete
-        ? [...scan.incompleteCategories, "capture_surface"].sort()
-        : scan.incompleteCategories,
+      incomplete: scan.incomplete || forceIncomplete || structured.incomplete,
+      incompleteCategories: [...incompleteCategories].sort(),
     }),
   } satisfies StructuredLogCapture));
 }
