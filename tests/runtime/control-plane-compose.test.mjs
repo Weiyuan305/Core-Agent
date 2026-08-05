@@ -721,6 +721,15 @@ test("runtime network preparation owns exact private backplane and provider-capa
     Driver: "bridge",
     Internal: false,
     Attachable: false,
+    Scope: "local",
+    Ingress: false,
+    EnableIPv6: false,
+    Options: { "com.docker.network.bridge.enable_ip_masquerade": "true" },
+    IPAM: {
+      Driver: "default",
+      Options: null,
+      Config: [{ Subnet: "172.31.240.0/24", Gateway: "172.31.240.1" }],
+    },
     Labels: {
       "core-agent.managed": "runtime-v1",
       "core-agent.resource": "egress",
@@ -755,6 +764,9 @@ test("runtime network preparation owns exact private backplane and provider-capa
   ]);
   assert.deepEqual(createCalls[4], [
     "network", "create", "--driver", "bridge",
+    "--subnet", "172.31.240.0/24",
+    "--gateway", "172.31.240.1",
+    "--opt", "com.docker.network.bridge.enable_ip_masquerade=true",
     "--label", "core-agent.managed=runtime-v1",
     "--label", "core-agent.resource=egress",
     "--label", "core-agent.network=core-agent-egress",
@@ -768,6 +780,19 @@ test("runtime network preparation owns exact private backplane and provider-capa
     } }),
     /runtime network is invalid/u,
   );
+  for (const changed of [
+    { Options: { "com.docker.network.bridge.enable_ip_masquerade": "false" } },
+    { IPAM: { Driver: "custom", Options: null, Config: [{ Subnet: "172.31.240.0/24", Gateway: "172.31.240.1" }] } },
+    { Scope: "swarm" },
+    { Ingress: true },
+    { EnableIPv6: true },
+  ]) {
+    const invalidEgress = JSON.stringify({ ...JSON.parse(egressInspection), ...changed });
+    await assert.rejects(network.prepareRuntimeNetwork({ runDocker: async (args) => {
+      if (args[1] === "ls") return `${args[3].includes("egress") ? "core-agent-egress" : "core-agent-backplane"}\n`;
+      return args.at(-1) === "core-agent-egress" ? invalidEgress : backplaneInspection;
+    } }), /runtime network is invalid/u);
+  }
 });
 
 test("database sentinel scanner inspects every public text surface without returning values", async () => {

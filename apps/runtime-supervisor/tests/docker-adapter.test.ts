@@ -25,6 +25,32 @@ const providerCatalog = loadProviderCatalog(JSON.parse(await readFile(join(repos
 const imageRef = `nousresearch/hermes-agent:v2026.7.30@sha256:${"5316c2c2534c49f5e1b1691e1a2115f1230d900033c3b35d1c8fc2e47352b26d"}`;
 const providerSecret = "synthetic-supervisor-provider-secret-0001";
 const ingressSecret = "synthetic-supervisor-ingress-secret-0002";
+const imageEnvironment = [
+  "/opt/hermes/.venv/bin:/usr/local/bin:/usr/bin".replace(/^/u, "PATH="),
+  "HOME=/home/hermes",
+  "API_SERVER_ENABLED=true",
+  "API_SERVER_HOST=0.0.0.0",
+  "API_SERVER_PORT=8642",
+  "GATEWAY_MULTIPLEX_PROFILES=true",
+];
+const imageLabels = {
+  "org.opencontainers.image.title": "Core-Agent Hermes Runtime",
+  "org.opencontainers.image.description": "Pinned Hermes runtime distribution for Core-Agent",
+  "org.opencontainers.image.vendor": "Core-Agent",
+  "org.opencontainers.image.base.name": "nousresearch/hermes-agent:v2026.7.30",
+};
+
+function mergeEnvironment(image: readonly string[], overrides: readonly string[]): string[] {
+  const result = [...image];
+  for (const override of overrides) {
+    const separator = override.indexOf("=");
+    const name = separator < 0 ? override : override.slice(0, separator);
+    const existing = result.findIndex((value) => value === name || value.startsWith(`${name}=`));
+    if (existing < 0) result.push(override);
+    else result[existing] = override;
+  }
+  return result;
+}
 
 function provisionData(): ProvisionRuntimeCommandDataV1 {
   const identity = { tenant_id: "tenant_a", runtime_id: "runtime_a", generation: 7 };
@@ -169,8 +195,13 @@ class FakeContainer {
       Config: {
         Image: this.options.Image,
         User: this.options.User,
-        Labels: this.options.Labels,
-        Env: this.options.Env ?? [],
+        Labels: {
+          ...(this.docker.mergeImageConfiguration ? imageLabels : {}),
+          ...this.options.Labels,
+        },
+        Env: this.docker.mergeImageConfiguration
+          ? mergeEnvironment(imageEnvironment, this.options.Env ?? [])
+          : this.options.Env ?? [],
         Entrypoint: this.options.Entrypoint ?? [],
         Cmd: this.options.Cmd ?? [],
         ExposedPorts: this.options.ExposedPorts ?? {},
@@ -276,6 +307,20 @@ class FakeNetwork {
   }
 }
 
+class FakeImage {
+  public constructor(readonly docker: FakeDocker, readonly name: string) {}
+
+  public async inspect(): Promise<unknown> {
+    if (this.name !== imageRef) throw missing();
+    return {
+      Config: {
+        Env: [...imageEnvironment],
+        Labels: { ...imageLabels },
+      },
+    };
+  }
+}
+
 class FakeDocker {
   public readonly containers = new Map<string, FakeContainer>();
   public readonly volumes = new Map<string, unknown>();
@@ -289,6 +334,7 @@ class FakeDocker {
   public manifestRawOverride: string | Uint8Array | undefined;
   public attachExternalNetwork = false;
   public failGatewayStart = false;
+  public mergeImageConfiguration = false;
   public gatewayInspections = 0;
   public gatewayInspectionBarrier: Promise<void> | undefined;
   public markGatewayInspection: (() => void) | undefined;
@@ -301,6 +347,10 @@ class FakeDocker {
 
   public getContainer(name: string): FakeContainer {
     return this.containers.get(name) ?? new FakeContainer(this, name);
+  }
+
+  public getImage(name: string): FakeImage {
+    return new FakeImage(this, name);
   }
 
   public async createContainer(options: Dockerode.ContainerCreateOptions): Promise<FakeContainer> {
@@ -348,6 +398,15 @@ class FakeDocker {
       Internal: options.Internal,
       Attachable: options.Attachable,
       Labels: structuredClone(options.Labels ?? {}),
+      Scope: "local",
+      Ingress: false,
+      EnableIPv6: false,
+      Options: structuredClone((options as { Options?: Record<string, string> }).Options ?? {}),
+      IPAM: structuredClone((options as { IPAM?: unknown }).IPAM ?? {
+        Driver: "default",
+        Options: null,
+        Config: [],
+      }),
     });
     this.mutations.push(`network:${options.Name}`);
     return this.networks.get(options.Name);
@@ -407,6 +466,7 @@ test("initializer and gateway use daemon-visible binds, one numeric identity, an
   const verifier = docker.created[1]!;
   const gateway = docker.created[2]!;
   assert.equal(initializer.User, managedUser);
+  assert.deepEqual(initializer.Env, ["HOME=/opt/data"]);
   assert.equal(initializer.HostConfig?.NetworkMode, "none");
   assert.deepEqual(initializer.HostConfig?.CapDrop, ["ALL"]);
   assert.equal(initializer.HostConfig?.ReadonlyRootfs, true);
@@ -416,11 +476,13 @@ test("initializer and gateway use daemon-visible binds, one numeric identity, an
   assert.equal(initializer.Entrypoint?.[0], "/opt/hermes/.venv/bin/python");
   assert.equal(verifier.HostConfig?.NetworkMode, "none");
   assert.equal(verifier.User, managedUser);
+  assert.deepEqual(verifier.Env, ["HOME=/opt/data"]);
   assert.deepEqual(verifier.HostConfig?.CapDrop, ["ALL"]);
   assert.equal(verifier.HostConfig?.ReadonlyRootfs, true);
   assert.equal(verifier.HostConfig?.Binds?.[0]?.endsWith(":/opt/data:ro"), true);
   assert.equal(verifier.HostConfig?.Binds?.[1]?.endsWith(":/run/core-agent/output"), true);
   assert.deepEqual(gateway.Env, [
+    "HOME=/opt/data",
     "API_SERVER_ENABLED=true",
     "API_SERVER_HOST=0.0.0.0",
     "API_SERVER_PORT=8642",
@@ -461,6 +523,49 @@ test("initializer and gateway use daemon-visible binds, one numeric identity, an
   assert.deepEqual([...docker.networks.keys()].sort(), ["core-agent-backplane", "core-agent-egress"]);
   assert.equal((docker.networks.get("core-agent-backplane") as { Internal: boolean }).Internal, true);
   assert.equal((docker.networks.get("core-agent-egress") as { Internal: boolean }).Internal, false);
+  assert.deepEqual(docker.networks.get("core-agent-egress"), {
+    Name: "core-agent-egress",
+    Driver: "bridge",
+    Internal: false,
+    Attachable: false,
+    Labels: {
+      "core-agent.managed": "runtime-v1",
+      "core-agent.resource": "egress",
+      "core-agent.network": "core-agent-egress",
+    },
+    Scope: "local",
+    Ingress: false,
+    EnableIPv6: false,
+    Options: { "com.docker.network.bridge.enable_ip_masquerade": "true" },
+    IPAM: {
+      Driver: "default",
+      Options: null,
+      Config: [{ Subnet: "172.31.240.0/24", Gateway: "172.31.240.1" }],
+    },
+  });
+});
+
+test("gateway adoption accepts only the exact Docker merge of locked-image and runtime configuration", async () => {
+  const docker = new FakeDocker();
+  docker.mergeImageConfiguration = true;
+  const { adapter } = buildAdapter(docker);
+  const request = signed();
+  const observation = await adapter.provision(request);
+  assert.equal(observation.lifecycle, "running");
+  const gateway = docker.containers.get(deriveRuntimeNames(request.runtime).container)!;
+  const inspected = await gateway.inspect() as { Config: { Env: string[]; Labels: Record<string, string> } };
+  assert.equal(inspected.Config.Env.includes("PATH=/opt/hermes/.venv/bin:/usr/local/bin:/usr/bin"), true);
+  assert.equal(inspected.Config.Env.includes("HOME=/opt/data"), true);
+  assert.equal(inspected.Config.Labels["org.opencontainers.image.vendor"], "Core-Agent");
+  assert.equal(inspected.Config.Labels["core-agent.runtime-id"], "runtime_a");
+
+  gateway.options!.Env!.push("UNTRUSTED_EXTRA=value");
+  let response = await adapter.execute(lifecycle("inspect", "operation_merged_env_drift"));
+  assert.equal(response.outcome, "rejected");
+  gateway.options!.Env!.pop();
+  gateway.options!.Labels!["untrusted.extra"] = "value";
+  response = await adapter.execute(lifecycle("inspect", "operation_merged_label_drift"));
+  assert.equal(response.outcome, "rejected");
 });
 
 test("provision validates the fixed non-secret manifest before starting the gateway", async () => {
@@ -692,6 +797,28 @@ test("lifecycle inspects exact volume, network, and secure container config befo
   response = await adapter.execute(lifecycle("stop", "operation_bad_network"));
   assert.equal(response.outcome, "rejected");
   assert.deepEqual(docker.mutations, before);
+});
+
+test("lifecycle rejects unsupported or provider-restrictive egress network configuration", async () => {
+  const mutations = [
+    (network: Record<string, unknown>) => { network.Options = { "com.docker.network.bridge.enable_ip_masquerade": "false" }; },
+    (network: Record<string, unknown>) => { network.Options = { "com.docker.network.bridge.enable_ip_masquerade": "true", extra: "true" }; },
+    (network: Record<string, unknown>) => { network.IPAM = { Driver: "custom", Options: null, Config: [{ Subnet: "172.31.240.0/24", Gateway: "172.31.240.1" }] }; },
+    (network: Record<string, unknown>) => { network.IPAM = { Driver: "default", Options: null, Config: [{ Subnet: "172.31.241.0/24", Gateway: "172.31.241.1" }] }; },
+    (network: Record<string, unknown>) => { network.Scope = "swarm"; },
+    (network: Record<string, unknown>) => { network.Ingress = true; },
+    (network: Record<string, unknown>) => { network.EnableIPv6 = true; },
+    (network: Record<string, unknown>) => { network.Driver = "macvlan"; },
+  ];
+  for (const mutate of mutations) {
+    const built = buildAdapter();
+    await built.adapter.provision(signed());
+    mutate(built.docker.networks.get("core-agent-egress") as Record<string, unknown>);
+    const before = [...built.docker.mutations];
+    const result = await built.adapter.execute(lifecycle("inspect", `operation_egress_drift_${before.length}`));
+    assert.equal(result.outcome, "rejected");
+    assert.deepEqual(built.docker.mutations, before);
+  }
 });
 
 test("lifecycle rejects user privilege capability device and extra-network drift before action", async () => {
