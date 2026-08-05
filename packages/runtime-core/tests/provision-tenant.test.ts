@@ -16,6 +16,7 @@ import { createRedactor } from "../src/domain/redaction.js";
 import { WorkerRuntimeRepository } from "../src/repositories/worker-runtime.js";
 import { acquireRuntimeTransactionAdvisoryLock, withRuntimeAdvisoryLock } from "../src/repositories/runtime-lock.js";
 import { sql } from "kysely";
+import { claimJobs } from "../src/repositories/jobs.js";
 
 const databaseUrl = process.env.CONTROL_PLANE_TEST_DATABASE_URL;
 if (databaseUrl === undefined || !new URL(databaseUrl).pathname.slice(1).startsWith("core_agent_")) {
@@ -769,4 +770,42 @@ test("runtime query returns the same generic not-found error for absent and cros
     (error: unknown) => error instanceof DomainError && error.code === "RESOURCE_NOT_FOUND",
   );
   assert.equal(await db.selectFrom("idempotency_records").selectAll().execute().then((rows) => rows.length), 0);
+});
+
+test("same-owner runtime reclaim fences effect and every terminal ownership mutation", async () => {
+  const operations = ["effect", "retry", "supersede", "failure", "success"] as const;
+  for (const operation of operations) {
+    const tenantId = `tenant_runtime_reclaim_${operation}`;
+    const provisioning = b2bRequest(tenantId);
+    const context = { tenantId, requestId: `request_${operation}`, traceId: `trace_${operation}`, actorId: "core_agent_provisioner" as const, membershipId: "core_agent_provisioner_admin" as const, effectiveRole: "admin" as const };
+    const accepted = await provisionTenant({ db, providerCatalog, imageLock }, context, provisioning);
+    await db.updateTable("worker_jobs").set({ status: "succeeded" }).where("tenant_id", "=", tenantId).where("job_kind", "=", "provision_runtime").execute();
+    await commandRuntime({ db }, context, withHash({ schema_version: 1 as const, idempotency_key: `idem_${operation}`, expected_resource_version: 1, command: "start" as const }));
+    const [staleJob] = await claimJobs(db, { tenantId, workerId: "worker_same", limit: 1, leaseMs: 30_000 });
+    assert.equal(staleJob?.jobKind, "reconcile_runtime");
+    await db.updateTable("worker_jobs").set({ lease_expires_at: new Date(0) }).where("tenant_id", "=", tenantId).where("job_id", "=", staleJob!.jobId).execute();
+    const [currentJob] = await claimJobs(db, { tenantId, workerId: "worker_same", limit: 1, leaseMs: 30_000 });
+    assert.equal(currentJob?.jobKind, "reconcile_runtime");
+    const stale = { tenantId, runtimeId: accepted.runtime.container_id, jobId: staleJob!.jobId, workerId: "worker_same", attemptCount: staleJob!.attemptCount };
+    const current = { ...stale, attemptCount: currentJob!.attemptCount };
+    const repository = new WorkerRuntimeRepository(db, createRedactor([]));
+    const targetCommandVersion = 1;
+    const observation = { tenant_id: tenantId, runtime_id: accepted.runtime.container_id, generation: 1, exists: true, lifecycle: "running" as const, health: "healthy" as const, image_ref: imageLock.platforms["linux/amd64"].reference, private_origin: "http://172.30.0.4:8642" };
+    if (operation === "effect") {
+      assert.equal(await repository.markReconcileEffectDispatched(stale, "start", targetCommandVersion), false);
+      assert.equal(await repository.markReconcileEffectDispatched(current, "start", targetCommandVersion), true);
+    } else if (operation === "retry") {
+      assert.equal(await repository.retryJob(stale, "stale", new Date(1)), false);
+      assert.equal(await repository.retryJob(current, "current", new Date(1)), true);
+    } else if (operation === "supersede") {
+      assert.equal(await repository.completeSuperseded(stale), false);
+      assert.equal(await repository.completeSuperseded(current), true);
+    } else if (operation === "failure") {
+      assert.equal(await repository.failRuntimeJob(stale, "stale"), false);
+      assert.equal(await repository.failRuntimeJob(current, "current"), true);
+    } else {
+      assert.equal(await repository.finishReconcile(stale, "start", targetCommandVersion, observation), false);
+      assert.equal(await repository.finishReconcile(current, "start", targetCommandVersion, observation), true);
+    }
+  }
 });
