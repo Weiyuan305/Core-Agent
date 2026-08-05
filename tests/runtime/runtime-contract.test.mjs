@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, rmdir, stat, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rmdir, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -554,6 +554,8 @@ test("REAL_HERMES stages a stable read-only product-lock snapshot in the Supervi
   await chmod(stateRoot, 0o700);
   const source = join(stateRoot, "reviewed-source.json");
   const snapshotTenantId = "synthetic-runtime-v1-0123456789abcdef";
+  const emptyCollisionTenantId = "synthetic-runtime-v1-fedcba9876543210";
+  const emptyCollisionDirectory = join(stateRoot, ".core-agent-product-lock-fedcba9876543210");
   const productLock = {
     schemaVersion: 1,
     repository: "core-agent/hermes-runtime",
@@ -567,6 +569,7 @@ test("REAL_HERMES stages a stable read-only product-lock snapshot in the Supervi
   let snapshot;
   t.after(async () => {
     await snapshot?.cleanup().catch(() => undefined);
+    await rmdir(emptyCollisionDirectory).catch(() => undefined);
     await unlink(source).catch(() => undefined);
     await rmdir(stateRoot).catch(() => undefined);
   });
@@ -586,6 +589,13 @@ test("REAL_HERMES stages a stable read-only product-lock snapshot in the Supervi
     stageProductImageLockSnapshot(source, "linux/arm64", stateRoot, snapshotTenantId),
     /SMOKE_PRODUCT_IMAGE_LOCK_INVALID/,
   );
+  await mkdir(emptyCollisionDirectory, { mode: 0o700 });
+  await assert.rejects(
+    stageProductImageLockSnapshot(source, "linux/arm64", stateRoot, emptyCollisionTenantId),
+    /SMOKE_PRODUCT_IMAGE_LOCK_INVALID/,
+  );
+  assert.equal((await stat(emptyCollisionDirectory)).isDirectory(), true);
+  await rmdir(emptyCollisionDirectory);
   await assert.rejects(
     stageProductImageLockSnapshot(source, "linux/arm64", stateRoot, snapshotTenantId, {
       afterSourceRead: async () => writeFile(source, `${JSON.stringify({ ...productLock, tag: "mutated" })}\n`),
