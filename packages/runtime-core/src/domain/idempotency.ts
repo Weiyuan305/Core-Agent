@@ -82,15 +82,17 @@ export type IdempotencyAdmission<T> =
 
 export async function beginIdempotentCommand<T>(
   context: TenantTransaction,
-  input: { key: string; payloadHash: string; operation: string; expiresAt: Date },
+  input: { key: string; payloadHash: string; operation: string; now: Date; expiresAt: Date },
 ): Promise<IdempotencyAdmission<T>> {
   if (input.key.length < 1 || input.key.length > 255) throw new DomainError("INVALID_REQUEST", "Idempotency key is invalid");
   if (!/^sha256:[a-f0-9]{64}$/.test(input.payloadHash)) throw new DomainError("INVALID_REQUEST", "Payload hash is invalid");
   if (input.operation.length < 1 || input.operation.length > 200) throw new DomainError("INVALID_REQUEST", "Operation is invalid");
-  if (!(input.expiresAt instanceof Date) || !Number.isFinite(input.expiresAt.getTime()) || input.expiresAt.getTime() <= Date.now()) {
+  if (!(input.now instanceof Date) || !Number.isFinite(input.now.getTime())) {
+    throw new DomainError("INVALID_REQUEST", "Admission timestamp is invalid");
+  }
+  if (!(input.expiresAt instanceof Date) || !Number.isFinite(input.expiresAt.getTime()) || input.expiresAt.getTime() <= input.now.getTime()) {
     throw new DomainError("INVALID_REQUEST", "Expiry is invalid");
   }
-  const now = new Date();
   const inserted = await context.trx.insertInto("idempotency_records").values({
     tenant_id: context.tenantId,
     idempotency_key: input.key,
@@ -100,31 +102,17 @@ export async function beginIdempotentCommand<T>(
     result_ref: null,
     response_json: null,
     expires_at: input.expiresAt,
-    created_at: now,
-    updated_at: now,
+    created_at: input.now,
+    updated_at: input.now,
   }).onConflict((conflict) => conflict.columns(["tenant_id", "idempotency_key"]).doNothing())
     .returning("idempotency_key").executeTakeFirst();
   if (inserted !== undefined) return { kind: "acquired", recordId: input.key };
 
   const existing = await context.trx.selectFrom("idempotency_records")
-    .select(["payload_hash", "operation", "status", "result_ref", "response_json", "expires_at"])
+    .select(["payload_hash", "operation", "status", "result_ref", "response_json"])
     .where("tenant_id", "=", context.tenantId)
     .where("idempotency_key", "=", input.key)
     .forUpdate().executeTakeFirstOrThrow();
-  if (existing.expires_at.getTime() <= Date.now()) {
-    const reset = await context.trx.updateTable("idempotency_records").set({
-      payload_hash: input.payloadHash,
-      operation: input.operation,
-      status: "in_progress",
-      result_ref: null,
-      response_json: null,
-      expires_at: input.expiresAt,
-      updated_at: new Date(),
-    }).where("tenant_id", "=", context.tenantId).where("idempotency_key", "=", input.key)
-      .where("expires_at", "<=", new Date()).returning("idempotency_key").executeTakeFirst();
-    if (reset !== undefined) return { kind: "acquired", recordId: input.key };
-    throw new DomainError("INTERNAL_ERROR", "Expired idempotency record could not be reset");
-  }
   if (existing.payload_hash !== input.payloadHash || existing.operation !== input.operation) {
     throw new DomainError("IDEMPOTENCY_CONFLICT", "Idempotency key payload mismatch");
   }
@@ -144,20 +132,21 @@ export async function completeIdempotentCommand(
     operation: string;
     resultRef: string;
     response: unknown;
-    updatedAt?: Date;
+    updatedAt: Date;
   },
 ): Promise<void> {
   if (input.key.length < 1 || input.key.length > 255) throw new DomainError("INVALID_REQUEST", "Idempotency key is invalid");
   if (!/^sha256:[a-f0-9]{64}$/.test(input.payloadHash)) throw new DomainError("INVALID_REQUEST", "Payload hash is invalid");
   if (input.operation.length < 1 || input.operation.length > 200) throw new DomainError("INVALID_REQUEST", "Operation is invalid");
   if (input.resultRef.length < 1 || input.resultRef.length > 500) throw new DomainError("INVALID_REQUEST", "Result reference is invalid");
-  const updatedAt = input.updatedAt ?? new Date();
-  if (!Number.isFinite(updatedAt.getTime())) throw new DomainError("INVALID_REQUEST", "Completion timestamp is invalid");
+  if (!(input.updatedAt instanceof Date) || !Number.isFinite(input.updatedAt.getTime())) {
+    throw new DomainError("INVALID_REQUEST", "Completion timestamp is invalid");
+  }
   const completed = await context.trx.updateTable("idempotency_records").set({
     status: "completed",
     result_ref: input.resultRef,
     response_json: input.response,
-    updated_at: updatedAt,
+    updated_at: input.updatedAt,
   }).where("tenant_id", "=", context.tenantId)
     .where("idempotency_key", "=", input.key)
     .where("payload_hash", "=", input.payloadHash)

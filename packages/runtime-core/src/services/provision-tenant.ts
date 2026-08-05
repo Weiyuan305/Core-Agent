@@ -242,6 +242,7 @@ export async function provisionTenant(
       key: request.idempotency_key,
       payloadHash: request.payload_hash,
       operation,
+      now,
       expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1_000),
     });
     if (admission.kind === "replay") {

@@ -194,6 +194,7 @@ export async function createAgentRun(
         key: request.idempotency_key,
         payloadHash: request.payload_hash,
         operation,
+        now,
         expiresAt: new Date(now.getTime() + dayMs),
       });
       if (admission.kind === "replay") {

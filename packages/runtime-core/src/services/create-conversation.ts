@@ -171,6 +171,7 @@ export async function createConversation(
       key: request.idempotency_key,
       payloadHash: request.payload_hash,
       operation,
+      now,
       expiresAt: new Date(now.getTime() + dayMs),
     });
     if (admission.kind === "replay") {

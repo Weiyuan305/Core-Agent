@@ -88,15 +88,15 @@ test("idempotency validates input, compares operation, and fails closed on null 
   await db.updateTable("idempotency_records").set({ status: "completed", response_json: null })
     .where("tenant_id", "=", "tenant_idempotency").where("idempotency_key", "=", "idem_operation").execute();
   await assert.rejects(withTenantTransaction(db, "tenant_idempotency", (context) => beginIdempotentCommand(context, {
-    key: "idem_operation", payloadHash: `sha256:${"b".repeat(64)}`,
-    operation: "second_operation", now: farFutureNow, expiresAt: farFutureExpiry,
+    key: "idem_operation", payloadHash: `sha256:${"a".repeat(64)}`,
+    operation: "first_operation", now: farFutureNow, expiresAt: farFutureExpiry,
   })), /INTERNAL_ERROR/);
 
   await db.updateTable("idempotency_records").set({ response_json: { run_id: "run_1" }, result_ref: null })
     .where("tenant_id", "=", "tenant_idempotency").where("idempotency_key", "=", "idem_operation").execute();
   await assert.rejects(withTenantTransaction(db, "tenant_idempotency", (context) => beginIdempotentCommand(context, {
-    key: "idem_operation", payloadHash: `sha256:${"b".repeat(64)}`,
-    operation: "second_operation", now: farFutureNow, expiresAt: farFutureExpiry,
+    key: "idem_operation", payloadHash: `sha256:${"a".repeat(64)}`,
+    operation: "first_operation", now: farFutureNow, expiresAt: farFutureExpiry,
   })), /INTERNAL_ERROR/);
 });
 
@@ -177,7 +177,7 @@ test("idempotency completion matches the admitted hash and operation", async () 
   ]) {
     await assert.rejects(withTenantTransaction(db, "tenant_idempotency", (context) => (
       completeIdempotentCommand(context, {
-        key: "idem_complete", ...mismatch, resultRef: "runtime_a", response: { accepted: true },
+        key: "idem_complete", ...mismatch, resultRef: "runtime_a", response: { accepted: true }, updatedAt: farFutureNow,
       })
     )), /INTERNAL_ERROR/);
   }

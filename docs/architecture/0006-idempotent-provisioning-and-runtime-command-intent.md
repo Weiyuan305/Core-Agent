@@ -49,6 +49,16 @@ A completed replay must match tenant, key, operation, payload hash, stored
 `result_ref`, and the server-derived RuntimeContainer ID before its minimal
 response is returned.
 
+An existing tenant and idempotency-key pair is a permanent logical tombstone
+while its record or deterministic resource remains. The stored operation and
+payload hash never reset: an identical completed request replays, a matching
+in-progress request remains in progress, and any different operation or payload
+conflicts even after `expires_at`. The `expires_at` field is retention and
+operational metadata only; it does not authorize key reuse or a new resource
+generation. Admission receives one explicit service `now`, uses it for expiry
+validation and record timestamps, and shares that exact value with the resource,
+event, audit, job, and completion timestamps in the transaction.
+
 Runtime commands require a safely incrementable `expected_resource_version`.
 The resource update, command intent, audit, event, Outbox, and completed replay
 response commit atomically. A stale version rolls the transaction back without

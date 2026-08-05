@@ -449,6 +449,8 @@ Conversation, Run, or Runtime in another tenant.
 - `worker_jobs`: internal job kind, opaque payload reference, status, attempt,
   lease owner, lease expiry, next attempt time, last redacted error, timestamps;
 - `idempotency_records`: contract-defined tenant/key/hash/result mapping;
+  `expires_at` is retention/operations metadata and never permits reuse of an
+  existing tenant/key tombstone;
 - `outbox`: durable event reference, delivery target, attempts, next attempt,
   and delivered timestamp.
 
