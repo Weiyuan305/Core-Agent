@@ -72,11 +72,12 @@ files group/world-readable.
 ## Supervisor deadline operations
 
 Deploy Worker, Runtime Supervisor, and Runtime Core from one revision so all
-three use the shared deadline budget: 35 seconds each for initializer and
-verifier, three 10-second cleanup/absence-proof windows, 10 seconds of other
+three use the shared deadline budget: 25 seconds each for initializer and
+verifier, five 10-second cleanup/absence-proof windows for two old helpers, two
+new helpers, and a failed gateway, plus 10 seconds of other
 effect overhead, a 120-second total effect, 1-second admission, 150-second
 operation, 20-second cancellation settlement, and 180-second client wait. The
-enforced production equations are `35 + 35 + 3*10 + 10 = 110 < 120 < 150`
+enforced production equations are `25 + 25 + 5*10 + 10 = 110 < 120 < 150`
 and `1 + 150 + 20 = 171 < 180` seconds. Do not lower the Worker client wait
 below the aggregate admission, operation, and settlement window. Supervisor or
 adapter startup with an out-of-range or misordered limit must fail closed.
@@ -110,6 +111,15 @@ Supervisor restart: exact initializer/verifier residue is strict-validated,
 force-removed, absence-proven, and then provisioning resumes. Drifted residue
 is never auto-removed; quarantine it, preserve redacted inspect evidence, and
 require explicit operator investigation rather than broad Docker cleanup.
+Before starting a replacement Supervisor, the service manager must confirm the
+old PID has terminated and its singleton ownership is gone. If graceful close
+does not exit within the configured shutdown window, stop the rollout and
+escalate through the approved operator procedure; never launch a competing
+replacement, remove the singleton record, or delete a live journal lock by
+hand. After confirmed termination, the replacement may perform stale-
+reservation recovery, exact helper adoption, absence proof, and exact old-stage
+cleanup. Preserve any sibling `operation-*` stage and escalate drift rather
+than applying a directory-wide cleanup.
 
 ## Product-image rollout
 

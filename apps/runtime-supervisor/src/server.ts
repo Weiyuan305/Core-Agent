@@ -21,6 +21,7 @@ import {
 
 const defaultMaximumConcurrent = 4;
 const defaultAdmissionTimeoutMs = SUPERVISOR_DEADLINE_BUDGET.admissionTimeoutMs;
+const defaultEffectTimeoutMs = SUPERVISOR_DEADLINE_BUDGET.effectTimeoutMs;
 const defaultOperationTimeoutMs = SUPERVISOR_DEADLINE_BUDGET.operationTimeoutMs;
 const defaultCancellationSettlementTimeoutMs = SUPERVISOR_DEADLINE_BUDGET.cancellationSettlementTimeoutMs;
 const defaultShutdownTimeoutMs = 30_000;
@@ -48,6 +49,7 @@ export interface RuntimeSupervisorServerOptions {
   readonly execute: (request: SupervisorRequestV1, signal: AbortSignal) => Promise<SupervisorResponseV1>;
   readonly maximumConcurrent?: number;
   readonly admissionTimeoutMs?: number;
+  readonly effectTimeoutMs?: number;
   readonly operationTimeoutMs?: number;
   readonly cancellationSettlementTimeoutMs?: number;
   readonly shutdownTimeoutMs?: number;
@@ -179,6 +181,7 @@ export class RuntimeSupervisorServer {
   public constructor(options: RuntimeSupervisorServerOptions) {
     const maximumConcurrent = options.maximumConcurrent ?? defaultMaximumConcurrent;
     const admissionTimeoutMs = options.admissionTimeoutMs ?? defaultAdmissionTimeoutMs;
+    const effectTimeoutMs = options.effectTimeoutMs ?? defaultEffectTimeoutMs;
     const operationTimeoutMs = options.operationTimeoutMs ?? defaultOperationTimeoutMs;
     const cancellationSettlementTimeoutMs = options.cancellationSettlementTimeoutMs
       ?? defaultCancellationSettlementTimeoutMs;
@@ -186,11 +189,13 @@ export class RuntimeSupervisorServer {
     if (
       !positiveBoundedInteger(maximumConcurrent, 4)
       || !positiveBoundedInteger(admissionTimeoutMs, defaultAdmissionTimeoutMs)
+      || !positiveBoundedInteger(effectTimeoutMs, defaultEffectTimeoutMs)
       || !positiveBoundedInteger(operationTimeoutMs, defaultOperationTimeoutMs)
       || !positiveBoundedInteger(cancellationSettlementTimeoutMs, defaultCancellationSettlementTimeoutMs)
       || admissionTimeoutMs + operationTimeoutMs + cancellationSettlementTimeoutMs
         >= SUPERVISOR_DEADLINE_BUDGET.clientTimeoutMs
-      || admissionTimeoutMs >= operationTimeoutMs
+      || admissionTimeoutMs >= effectTimeoutMs
+      || effectTimeoutMs >= operationTimeoutMs
       || !positiveBoundedInteger(shutdownTimeoutMs, defaultShutdownTimeoutMs)
     ) throw rejectedError();
     this.#options = options;
@@ -608,7 +613,7 @@ export class RuntimeSupervisorServer {
 
   async #executeWithDeadline(request: SupervisorRequestV1): Promise<SupervisorResponseV1> {
     const controller = new AbortController();
-    const timeoutMs = this.#options.operationTimeoutMs ?? defaultOperationTimeoutMs;
+    const timeoutMs = this.#options.effectTimeoutMs ?? defaultEffectTimeoutMs;
     let deadlineExpired = false;
     let timer: NodeJS.Timeout | undefined;
     timer = setTimeout(() => {

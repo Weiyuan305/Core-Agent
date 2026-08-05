@@ -40,9 +40,10 @@ import {
 } from "./redact-docker-error.js";
 
 const requestHashPattern = /^sha256:[a-f0-9]{64}$/;
-const maximumInitializerWaitMs = SUPERVISOR_DEADLINE_BUDGET.initializerTimeoutMs;
-const maximumVerifierWaitMs = SUPERVISOR_DEADLINE_BUDGET.verifierTimeoutMs;
-const maximumReconciliationWaitMs = SUPERVISOR_DEADLINE_BUDGET.reconciliationTimeoutMs;
+const defaultInitializerWaitMs = SUPERVISOR_DEADLINE_BUDGET.initializerTimeoutMs;
+const defaultVerifierWaitMs = SUPERVISOR_DEADLINE_BUDGET.verifierTimeoutMs;
+const defaultReconciliationWaitMs = SUPERVISOR_DEADLINE_BUDGET.reconciliationTimeoutMs;
+const maximumEffectWaitMs = SUPERVISOR_DEADLINE_BUDGET.effectTimeoutMs;
 const managedEgressNetwork = "core-agent-egress";
 const managedHomeEnvironment = "HOME=/opt/data";
 const gatewayEnvironment = Object.freeze([
@@ -361,6 +362,15 @@ function dockerHostPath(localRoot: string, hostRoot: string, localPath: string):
   return join(host, suffix);
 }
 
+function supervisorPathFromDockerHost(localRoot: string, hostRoot: string, hostPath: string): string {
+  const local = resolve(localRoot);
+  const host = resolve(hostRoot);
+  const child = resolve(hostPath);
+  const suffix = relative(host, child);
+  if (suffix === "" || suffix.startsWith("..") || isAbsolute(suffix)) throw rejected();
+  return join(local, suffix);
+}
+
 function pathsOverlap(left: string, right: string): boolean {
   const leftToRight = relative(left, right);
   const rightToLeft = relative(right, left);
@@ -422,6 +432,52 @@ async function assertHeldPrivateDirectory(handle: FileHandle, namedPath: string)
   return held;
 }
 
+async function removeProtectedStageTree(path: string): Promise<boolean> {
+  let handle: FileHandle;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  } catch (error) {
+    return isNotFound(error);
+  }
+  try {
+    await assertHeldPrivateDirectory(handle, path);
+    const names = await readdir(path);
+    for (const name of names) {
+      if (name.length < 1 || name === "." || name === ".." || name.includes("/")) return false;
+      const child = join(path, name);
+      let metadata: BigIntStats;
+      try {
+        metadata = await lstat(child, { bigint: true });
+      } catch {
+        return false;
+      }
+      const uid = process.getuid?.();
+      if (uid === undefined || metadata.uid !== BigInt(uid) || metadata.isSymbolicLink()) return false;
+      if (metadata.isDirectory()) {
+        if ((metadata.mode & 0o7777n) !== 0o700n || !await removeProtectedStageTree(child)) return false;
+      } else if (metadata.isFile()) {
+        if ((metadata.mode & 0o7777n) !== 0o600n) return false;
+        try {
+          await unlink(child);
+        } catch {
+          return false;
+        }
+      } else return false;
+    }
+    await assertHeldPrivateDirectory(handle, path);
+    try {
+      await rmdir(path);
+      return true;
+    } catch {
+      return false;
+    }
+  } catch {
+    return false;
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
+
 async function writeExclusive(path: string, value: string): Promise<void> {
   let handle: FileHandle | undefined;
   try {
@@ -472,6 +528,14 @@ function exactInitializerOptions(
       AutoRemove: false,
       NetworkMode: "none",
       Privileged: false,
+      PublishAllPorts: false,
+      PortBindings: {},
+      RestartPolicy: { Name: "no", MaximumRetryCount: 0 },
+      IpcMode: "private",
+      PidMode: "",
+      UTSMode: "",
+      UsernsMode: "",
+      ...({ CgroupnsMode: "private" } as { readonly CgroupnsMode: string }),
       ReadonlyRootfs: true,
       CapAdd: [],
       CapDrop: ["ALL"],
@@ -569,6 +633,14 @@ function exactManifestVerifierOptions(
       AutoRemove: false,
       NetworkMode: "none",
       Privileged: false,
+      PublishAllPorts: false,
+      PortBindings: {},
+      RestartPolicy: { Name: "no", MaximumRetryCount: 0 },
+      IpcMode: "private",
+      PidMode: "",
+      UTSMode: "",
+      UsernsMode: "",
+      ...({ CgroupnsMode: "private" } as { readonly CgroupnsMode: string }),
       ReadonlyRootfs: true,
       CapAdd: [],
       CapDrop: ["ALL"],
@@ -598,12 +670,49 @@ function assertDockerStagingChild(root: string, path: string, suffix: string): s
   const canonicalRoot = resolve(root);
   if (canonicalRoot !== root || resolve(path) !== path) throw rejected();
   const child = relative(canonicalRoot, path);
+  const segments = child.split("/");
   if (
     child.startsWith("..") || isAbsolute(child)
-    || !/^operation-[^/]+\//u.test(child)
-    || !child.endsWith(suffix)
+    || segments.length !== 2
+    || !/^operation-[^/]+$/u.test(segments[0] ?? "")
+    || `/${segments[1] ?? ""}` !== suffix
   ) throw rejected();
-  return path.slice(0, -suffix.length);
+  return dirname(path);
+}
+
+interface ExpectedHelperMount {
+  readonly type: "volume" | "bind";
+  readonly destination: string;
+  readonly readWrite: boolean;
+  readonly name?: string;
+  readonly source?: string;
+}
+
+function validateHelperMounts(value: unknown, expected: readonly ExpectedHelperMount[]): void {
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype || value.length !== expected.length) {
+    throw rejected();
+  }
+  const remaining = [...expected];
+  for (let index = 0; index < value.length; index += 1) {
+    const mount = dataProperty(value, String(index));
+    const destination = stringProperty(mount, "Destination");
+    const expectedIndex = remaining.findIndex((item) => item.destination === destination);
+    if (expectedIndex < 0) throw rejected();
+    const expectedMount = remaining.splice(expectedIndex, 1)[0]!;
+    if (
+      stringProperty(mount, "Type") !== expectedMount.type
+      || booleanProperty(mount, "RW") !== expectedMount.readWrite
+    ) throw rejected();
+    if (expectedMount.type === "volume") {
+      if (stringProperty(mount, "Name") !== expectedMount.name) throw rejected();
+    } else if (stringProperty(mount, "Source") !== expectedMount.source) throw rejected();
+  }
+  if (remaining.length !== 0) throw rejected();
+}
+
+function safePrivateNamespaceMode(value: unknown, key: string): void {
+  const mode = stringProperty(value, key);
+  if (mode !== "" && mode !== "private") throw rejected();
 }
 
 function validateHelperInspection(
@@ -615,7 +724,7 @@ function validateHelperInspection(
   user: string,
   dockerHostStagingRoot: string,
   imageConfiguration: LockedImageConfiguration,
-): void {
+): string {
   if (stringProperty(value, "Name") !== `/${helperName}`) throw rejected();
   const config = dataProperty(value, "Config");
   if (stringProperty(config, "Image") !== request.runtime.image_ref || stringProperty(config, "User") !== user) throw rejected();
@@ -630,8 +739,20 @@ function validateHelperInspection(
     booleanProperty(hostConfig, "AutoRemove") !== false
     || stringProperty(hostConfig, "NetworkMode") !== "none"
     || booleanProperty(hostConfig, "Privileged") !== false
+    || booleanProperty(hostConfig, "PublishAllPorts") !== false
     || booleanProperty(hostConfig, "ReadonlyRootfs") !== true
   ) throw rejected();
+  exactEmptyRecord(dataProperty(hostConfig, "PortBindings"));
+  const restartPolicy = dataProperty(hostConfig, "RestartPolicy");
+  exactDataKeys(restartPolicy, ["Name", "MaximumRetryCount"]);
+  if (
+    stringProperty(restartPolicy, "Name") !== "no"
+    || dataProperty(restartPolicy, "MaximumRetryCount") !== 0
+  ) throw rejected();
+  safePrivateNamespaceMode(hostConfig, "IpcMode");
+  if (stringProperty(hostConfig, "PidMode") !== "" || stringProperty(hostConfig, "UTSMode") !== "") throw rejected();
+  if (stringProperty(hostConfig, "UsernsMode") !== "") throw rejected();
+  safePrivateNamespaceMode(hostConfig, "CgroupnsMode");
   equalStringArrays(dataProperty(hostConfig, "CapAdd"), []);
   equalStringArrays(dataProperty(hostConfig, "CapDrop"), ["ALL"]);
   equalStringArrays(dataProperty(hostConfig, "Devices"), []);
@@ -659,7 +780,12 @@ function validateHelperInspection(
     const secrets = bindSource(binds[2]!, "/run/core-agent/secrets:ro");
     const operationRoot = assertDockerStagingChild(dockerHostStagingRoot, bundle, "/bundle.json");
     if (assertDockerStagingChild(dockerHostStagingRoot, secrets, "/secrets") !== operationRoot) throw rejected();
-    return;
+    validateHelperMounts(dataProperty(value, "Mounts"), [
+      { type: "volume", name: names.volume, destination: "/opt/data", readWrite: true },
+      { type: "bind", source: bundle, destination: "/run/core-agent/bootstrap/bundle.json", readWrite: false },
+      { type: "bind", source: secrets, destination: "/run/core-agent/secrets", readWrite: false },
+    ]);
+    return operationRoot;
   }
 
   equalStringArrays(dataProperty(config, "Entrypoint"), ["/opt/hermes/.venv/bin/python"]);
@@ -675,7 +801,12 @@ function validateHelperInspection(
   exactNumberProperty(hostConfig, "PidsLimit", 32);
   if (binds.length !== 2 || binds[0] !== `${names.volume}:/opt/data:ro`) throw rejected();
   const output = bindSource(binds[1]!, "/run/core-agent/output");
-  assertDockerStagingChild(dockerHostStagingRoot, output, "/output");
+  const operationRoot = assertDockerStagingChild(dockerHostStagingRoot, output, "/output");
+  validateHelperMounts(dataProperty(value, "Mounts"), [
+    { type: "volume", name: names.volume, destination: "/opt/data", readWrite: false },
+    { type: "bind", source: output, destination: "/run/core-agent/output", readWrite: true },
+  ]);
+  return operationRoot;
 }
 
 function canonicalJson(value: unknown): string {
@@ -1023,24 +1154,31 @@ export class DockerRuntimeAdapter {
   readonly #runtimeLocks = new Map<string, Promise<void>>();
 
   public constructor(options: DockerRuntimeAdapterOptions) {
+    const initializerTimeoutMs = options.initializerTimeoutMs ?? defaultInitializerWaitMs;
+    const verifierTimeoutMs = options.verifierTimeoutMs ?? defaultVerifierWaitMs;
+    const reconciliationTimeoutMs = options.reconciliationTimeoutMs ?? defaultReconciliationWaitMs;
     if (
-      options.initializerTimeoutMs !== undefined
-      && (!Number.isSafeInteger(options.initializerTimeoutMs)
-        || options.initializerTimeoutMs < 1
-        || options.initializerTimeoutMs > maximumInitializerWaitMs)
+      !Number.isSafeInteger(initializerTimeoutMs)
+      || initializerTimeoutMs < 1
+      || initializerTimeoutMs > maximumEffectWaitMs
     ) throw dockerFailure("DEPENDENCY_TIMEOUT", "Initializer timeout configuration is invalid");
     if (
-      options.verifierTimeoutMs !== undefined
-      && (!Number.isSafeInteger(options.verifierTimeoutMs)
-        || options.verifierTimeoutMs < 1
-        || options.verifierTimeoutMs > maximumVerifierWaitMs)
+      !Number.isSafeInteger(verifierTimeoutMs)
+      || verifierTimeoutMs < 1
+      || verifierTimeoutMs > maximumEffectWaitMs
     ) throw dockerFailure("DEPENDENCY_TIMEOUT", "Verifier timeout configuration is invalid");
     if (
-      options.reconciliationTimeoutMs !== undefined
-      && (!Number.isSafeInteger(options.reconciliationTimeoutMs)
-        || options.reconciliationTimeoutMs < 1
-        || options.reconciliationTimeoutMs > maximumReconciliationWaitMs)
+      !Number.isSafeInteger(reconciliationTimeoutMs)
+      || reconciliationTimeoutMs < 1
+      || reconciliationTimeoutMs > maximumEffectWaitMs
     ) throw dockerFailure("DEPENDENCY_TIMEOUT", "Reconciliation timeout configuration is invalid");
+    if (
+      initializerTimeoutMs
+        + verifierTimeoutMs
+        + (reconciliationTimeoutMs * 5)
+        + SUPERVISOR_DEADLINE_BUDGET.effectOverheadMs
+      >= SUPERVISOR_DEADLINE_BUDGET.effectTimeoutMs
+    ) throw dockerFailure("DEPENDENCY_TIMEOUT", "Aggregate effect timeout configuration is invalid");
     const uid = process.getuid?.();
     const gid = process.getgid?.();
     if (
@@ -1170,7 +1308,7 @@ export class DockerRuntimeAdapter {
     name: string,
     mutationState: DockerMutationState,
   ): Promise<void> {
-    const timeoutMs = this.#options.reconciliationTimeoutMs ?? maximumReconciliationWaitMs;
+    const timeoutMs = this.#options.reconciliationTimeoutMs ?? defaultReconciliationWaitMs;
     const reconciliationDeadlineMs = Date.now() + timeoutMs;
     await boundedDockerAttempt(
       (cleanupSignal) => container.remove({ force: true, v: false, ...abortOptions(cleanupSignal) }),
@@ -1226,8 +1364,9 @@ export class DockerRuntimeAdapter {
     if (volume.inspection !== undefined) validateVolumeInspection(volume.inspection, request, names);
     if (network.inspection !== undefined) validateNetworkInspection(network.inspection, names.network, "backplane", true);
     if (egressNetwork.inspection !== undefined) validateNetworkInspection(egressNetwork.inspection, managedEgressNetwork, "egress", false);
-    if (initializer.inspection !== undefined) {
-      validateHelperInspection(
+    const initializerStage = initializer.inspection === undefined
+      ? undefined
+      : validateHelperInspection(
         initializer.inspection,
         request,
         names,
@@ -1237,10 +1376,9 @@ export class DockerRuntimeAdapter {
         this.#options.dockerHostStagingRoot,
         imageConfiguration,
       );
-      await this.#removeAndProveContainerAbsent(initializer.handle, initializerName, mutationState);
-    }
-    if (verifier.inspection !== undefined) {
-      validateHelperInspection(
+    const verifierStage = verifier.inspection === undefined
+      ? undefined
+      : validateHelperInspection(
         verifier.inspection,
         request,
         names,
@@ -1250,7 +1388,21 @@ export class DockerRuntimeAdapter {
         this.#options.dockerHostStagingRoot,
         imageConfiguration,
       );
+    if (initializerStage !== undefined && verifierStage !== undefined && initializerStage !== verifierStage) throw rejected();
+    if (initializer.inspection !== undefined) {
+      await this.#removeAndProveContainerAbsent(initializer.handle, initializerName, mutationState);
+    }
+    if (verifier.inspection !== undefined) {
       await this.#removeAndProveContainerAbsent(verifier.handle, verifierName, mutationState);
+    }
+    const residueStage = initializerStage ?? verifierStage;
+    if (residueStage !== undefined) {
+      const localStage = supervisorPathFromDockerHost(
+        this.#options.stagingRoot,
+        this.#options.dockerHostStagingRoot,
+        residueStage,
+      );
+      if (!await removeProtectedStageTree(localStage)) return unresolvedDockerMutation;
     }
     if (gateway.inspection !== undefined) {
       if (volume.inspection === undefined || network.inspection === undefined || egressNetwork.inspection === undefined) throw rejected();
@@ -1376,7 +1528,7 @@ export class DockerRuntimeAdapter {
         await settleDockerMutation(initializerContainer.start(abortOptions(signal)), mutationState, signal);
         const waited = await boundedWait(
           initializerContainer.wait(abortOptions(signal)),
-          this.#options.initializerTimeoutMs ?? maximumInitializerWaitMs,
+          this.#options.initializerTimeoutMs ?? defaultInitializerWaitMs,
           signal,
         );
         if (parseWaitStatus(waited) !== 0) {
@@ -1459,7 +1611,7 @@ export class DockerRuntimeAdapter {
       await settleDockerMutation(verifierContainer.start(abortOptions(signal)), mutationState, signal);
       const waited = await boundedWait(
         verifierContainer.wait(abortOptions(signal)),
-        this.#options.verifierTimeoutMs ?? maximumVerifierWaitMs,
+        this.#options.verifierTimeoutMs ?? defaultVerifierWaitMs,
         signal,
       );
       if (parseWaitStatus(waited) !== 0) {

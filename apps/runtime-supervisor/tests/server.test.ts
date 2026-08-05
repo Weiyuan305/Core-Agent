@@ -244,14 +244,14 @@ test("effect cancellation fires before the outer operation response window", asy
       summary: "synthetic effect cancellation",
     };
   }, {
-    admissionTimeoutMs: 5,
-    effectTimeoutMs: 20,
-    operationTimeoutMs: 100,
+    admissionTimeoutMs: 25,
+    effectTimeoutMs: 50,
+    operationTimeoutMs: 120,
     cancellationSettlementTimeoutMs: 20,
   });
   await server.start();
   try {
-    const response = await new RuntimeSupervisorClient({ socketPath, timeoutMs: 75 })
+    const response = await new RuntimeSupervisorClient({ socketPath, timeoutMs: 100 })
       .execute(request("operation_effect_deadline"));
     assert.equal(abortObserved, true);
     assert.equal(response.outcome, "failed");

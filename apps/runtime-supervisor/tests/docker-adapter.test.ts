@@ -487,7 +487,19 @@ test.beforeEach(async () => {
 });
 
 test.afterEach(async () => {
-  await rm(temporaryRoot, { recursive: true, force: true });
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await rm(temporaryRoot, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (
+        attempt === 2
+        || typeof error !== "object" || error === null
+        || Object.getOwnPropertyDescriptor(error, "code")?.value !== "ENOTEMPTY"
+      ) throw error;
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  }
 });
 
 function buildAdapter(
@@ -540,19 +552,19 @@ test("adapter rejects helper deadlines outside the aggregate production budget",
   }));
   assert.throws(
     () => buildAdapter(new FakeDocker(), new FakeSecretStore(), {
-      initializerTimeoutMs: SUPERVISOR_DEADLINE_BUDGET.initializerTimeoutMs + 1,
+      initializerTimeoutMs: SUPERVISOR_DEADLINE_BUDGET.effectTimeoutMs + 1,
     }),
     /DEPENDENCY_TIMEOUT/,
   );
   assert.throws(
     () => buildAdapter(new FakeDocker(), new FakeSecretStore(), {
-      verifierTimeoutMs: SUPERVISOR_DEADLINE_BUDGET.verifierTimeoutMs + 1,
+      verifierTimeoutMs: SUPERVISOR_DEADLINE_BUDGET.effectTimeoutMs + 1,
     }),
     /DEPENDENCY_TIMEOUT/,
   );
   assert.throws(
     () => buildAdapter(new FakeDocker(), new FakeSecretStore(), {
-      reconciliationTimeoutMs: SUPERVISOR_DEADLINE_BUDGET.reconciliationTimeoutMs + 1,
+      reconciliationTimeoutMs: SUPERVISOR_DEADLINE_BUDGET.effectTimeoutMs + 1,
     }),
     /DEPENDENCY_TIMEOUT/,
   );
@@ -860,7 +872,9 @@ const helperSecurityDrifts: ReadonlyArray<{
   { name: "PidMode", mutate: (options) => { options.HostConfig!.PidMode = "host"; } },
   { name: "UTSMode", mutate: (options) => { options.HostConfig!.UTSMode = "host"; } },
   { name: "UsernsMode", mutate: (options) => { options.HostConfig!.UsernsMode = "host"; } },
-  { name: "CgroupnsMode", mutate: (options) => { options.HostConfig!.CgroupnsMode = "host"; } },
+  { name: "CgroupnsMode", mutate: (options) => {
+    (options.HostConfig as Dockerode.HostConfig & { CgroupnsMode: string }).CgroupnsMode = "host";
+  } },
   { name: "Mounts", mutate: (_options, container) => { container.mountsOverride = []; } },
 ];
 
