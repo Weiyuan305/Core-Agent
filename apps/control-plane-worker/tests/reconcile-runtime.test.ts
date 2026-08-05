@@ -263,16 +263,18 @@ for (const [command, observation] of [
   });
 }
 
-test("lease loss while marking a dispatched effect cannot reschedule or fail the job", async () => {
-  let retried = 0; let failed = 0; const kinds: string[] = [];
-  const result = await handleReconcileRuntime({
-    loadFacts: async () => ({ tenantId: "tenant_a", runtimeId: "runtime_a", generation: 1, imageRef, commandVersion: 1, observedState: "ready", desiredState: "running" }),
-    supervisor: async (request) => { kinds.push(request.kind); return { protocol_version: 1, operation_id: request.operation_id, outcome: "accepted", observation: { tenant_id: "tenant_a", runtime_id: "runtime_a", generation: 1, exists: true, lifecycle: "running", health: "healthy", image_ref: imageRef, private_origin: "http://172.30.0.4:8642" } as const }; },
-    reprovision: async () => { throw new Error("not expected"); }, isCurrent: async () => true, markEffectDispatched: async () => false,
-    succeed: async () => true, retry: async () => { retried += 1; return true; }, fail: async () => { failed += 1; return true; },
-  }, { tenantId: "tenant_a", jobId: "job_mark_lease_loss", attemptCount: 1, maxAttempts: 5, targetCommandVersion: 1, command: "restart", effectState: "pre_effect", recoveryOnly: false }, new AbortController().signal);
-  assert.deepEqual(result, { kind: "failed", summary: "Worker job lease lost" }); assert.deepEqual(kinds, ["inspect"]); assert.equal(retried, 0); assert.equal(failed, 0);
-});
+for (const persistedIdentityMismatch of ["payload_ref", "container_id"] as const) {
+  test(`${persistedIdentityMismatch} mismatch while marking a dispatched effect performs zero external effects`, async () => {
+    let retried = 0; let failed = 0; let externalEffects = 0; const kinds: string[] = [];
+    const result = await handleReconcileRuntime({
+      loadFacts: async () => ({ tenantId: "tenant_a", runtimeId: "runtime_a", generation: 1, imageRef, commandVersion: 1, observedState: "ready", desiredState: "running" }),
+      supervisor: async (request) => { kinds.push(request.kind); if (request.kind !== "inspect") externalEffects += 1; return { protocol_version: 1, operation_id: request.operation_id, outcome: "accepted", observation: { tenant_id: "tenant_a", runtime_id: "runtime_a", generation: 1, exists: true, lifecycle: "running", health: "healthy", image_ref: imageRef, private_origin: "http://172.30.0.4:8642" } as const }; },
+      reprovision: async () => { externalEffects += 1; throw new Error("not expected"); }, isCurrent: async () => true, markEffectDispatched: async () => false,
+      succeed: async () => true, retry: async () => { retried += 1; return true; }, fail: async () => { failed += 1; return true; },
+    }, { tenantId: "tenant_a", jobId: `job_mark_${persistedIdentityMismatch}`, attemptCount: 1, maxAttempts: 5, targetCommandVersion: 1, command: "restart", effectState: "pre_effect", recoveryOnly: false }, new AbortController().signal);
+    assert.deepEqual(result, { kind: "failed", summary: "Worker job lease lost" }); assert.deepEqual(kinds, ["inspect"]); assert.equal(externalEffects, 0); assert.equal(retried, 0); assert.equal(failed, 0);
+  });
+}
 
 test("missing restart reprovision marks unknown health once then becomes inspect-only", async () => {
   let effectState: "pre_effect" | "unsafe_to_replay" = "pre_effect";

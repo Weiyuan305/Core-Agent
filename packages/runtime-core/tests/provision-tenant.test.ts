@@ -552,6 +552,7 @@ test("reconcile success and superseded completion reject mismatched persisted in
   await db.updateTable("worker_jobs").set({ status: "running", lease_owner: "worker_success", lease_expires_at: new Date("2100-01-01T00:00:00.000Z") }).where("tenant_id", "=", tenantId).where("job_id", "in", [job.job_id, provision.job_id]).execute();
   const repository = new WorkerRuntimeRepository(db, createRedactor([]));
   const ref = { tenantId, runtimeId: accepted.runtime.container_id, jobId: job.job_id, workerId: "worker_success", attemptCount: job.attempt_count };
+  const claimedIntent = { runtimeId: accepted.runtime.container_id, targetCommandVersion: 1, command: "start" as const, effectState: "pre_effect" as const };
   const observation = { tenant_id: tenantId, runtime_id: accepted.runtime.container_id, generation: 1, exists: true as const, lifecycle: "running" as const, health: "healthy" as const, image_ref: imageLock.platforms["linux/amd64"].reference, private_origin: "http://172.30.0.4:8642" };
   const before = await runtimeTerminalSnapshot(tenantId);
 
@@ -561,20 +562,36 @@ test("reconcile success and superseded completion reject mismatched persisted in
   assert.equal(await repository.finishReconcile({ ...ref, attemptCount: ref.attemptCount + 1 }, { kind: "inspect_proved", command: "start", targetCommandVersion: 1, observation }), false);
   assert.equal(await repository.finishReconcile(ref, { kind: "effect_dispatched", command: "start", targetCommandVersion: 1, observation }), false);
   assert.equal(await repository.finishReconcile({ ...ref, jobId: provision.job_id, attemptCount: provision.attempt_count }, { kind: "inspect_proved", command: "start", targetCommandVersion: 1, observation }), false);
-  assert.equal(await repository.completeSuperseded({ ...ref, runtimeId: "runtime_other" }, 1), false);
-  assert.equal(await repository.completeSuperseded(ref, 2), false);
-  assert.equal(await repository.completeSuperseded({ ...ref, attemptCount: ref.attemptCount + 1 }, 1), false);
-  assert.equal(await repository.completeSuperseded({ ...ref, jobId: provision.job_id, attemptCount: provision.attempt_count }, 1), false);
+  assert.equal(await repository.completeSuperseded({ ...ref, runtimeId: "runtime_other" }, { ...claimedIntent, runtimeId: "runtime_other" }), false);
+  assert.equal(await repository.completeSuperseded(ref, { ...claimedIntent, targetCommandVersion: 2 }), false);
+  assert.equal(await repository.completeSuperseded(ref, { ...claimedIntent, command: "stop" }), false);
+  assert.equal(await repository.completeSuperseded(ref, { ...claimedIntent, effectState: "unsafe_to_replay" }), false);
+  assert.equal(await repository.completeSuperseded({ ...ref, attemptCount: ref.attemptCount + 1 }, claimedIntent), false);
+  assert.equal(await repository.completeSuperseded({ ...ref, jobId: provision.job_id, attemptCount: provision.attempt_count }, claimedIntent), false);
   assert.deepEqual(await runtimeTerminalSnapshot(tenantId), before);
+
+  const kindAccessorIntent = { command: "start", targetCommandVersion: 1, observation };
+  let kindGetterCalls = 0;
+  Object.defineProperty(kindAccessorIntent, "kind", { enumerable: true, get() { kindGetterCalls += 1; return "inspect_proved"; } });
+  const beforeAccessor = await runtimeTerminalSnapshot(tenantId);
+  assert.equal(await repository.finishReconcile(ref, kindAccessorIntent as never), false);
+  assert.equal(kindGetterCalls, 0, "runtime validation must not invoke caller-controlled accessors");
+  assert.deepEqual(await runtimeTerminalSnapshot(tenantId), beforeAccessor);
+
+  await db.updateTable("worker_jobs").set({ effect_state: "unsafe_to_replay" }).where("tenant_id", "=", tenantId).where("job_id", "=", job.job_id).execute();
+  const beforeUnknownKind = await runtimeTerminalSnapshot(tenantId);
+  assert.equal(await repository.finishReconcile(ref, { kind: "future_proof", command: "start", targetCommandVersion: 1, observation } as never), false);
+  assert.deepEqual(await runtimeTerminalSnapshot(tenantId), beforeUnknownKind);
+  await db.updateTable("worker_jobs").set({ effect_state: "pre_effect" }).where("tenant_id", "=", tenantId).where("job_id", "=", job.job_id).execute();
 
   await db.updateTable("worker_jobs").set({ container_id: null }).where("tenant_id", "=", tenantId).where("job_id", "=", job.job_id).execute();
   const beforeMissingContainer = await runtimeTerminalSnapshot(tenantId);
   assert.equal(await repository.finishReconcile(ref, { kind: "inspect_proved", command: "start", targetCommandVersion: 1, observation }), false);
-  assert.equal(await repository.completeSuperseded(ref, 1), false);
+  assert.equal(await repository.completeSuperseded(ref, claimedIntent), false);
   assert.deepEqual(await runtimeTerminalSnapshot(tenantId), beforeMissingContainer);
   await db.updateTable("worker_jobs").set({ container_id: accepted.runtime.container_id, status: "retrying" }).where("tenant_id", "=", tenantId).where("job_id", "=", job.job_id).execute();
   const beforeWrongStatus = await runtimeTerminalSnapshot(tenantId);
-  assert.equal(await repository.completeSuperseded(ref, 1), false);
+  assert.equal(await repository.completeSuperseded(ref, claimedIntent), false);
   assert.deepEqual(await runtimeTerminalSnapshot(tenantId), beforeWrongStatus);
 });
 
@@ -600,9 +617,30 @@ test("reconcile success accepts only the matching explicit proof and durable eff
   const effectJob = await db.selectFrom("worker_jobs").select(["job_id", "attempt_count"]).where("tenant_id", "=", effectTenant).where("job_kind", "=", "reconcile_runtime").executeTakeFirstOrThrow();
   await db.updateTable("worker_jobs").set({ status: "running", lease_owner: "worker_success", lease_expires_at: new Date("2100-01-01T00:00:00.000Z") }).where("tenant_id", "=", effectTenant).where("job_id", "=", effectJob.job_id).execute();
   const effectRef = { tenantId: effectTenant, runtimeId: effectAccepted.runtime.container_id, jobId: effectJob.job_id, workerId: "worker_success", attemptCount: effectJob.attempt_count };
-  assert.equal(await repository.markReconcileEffectDispatched(effectRef, "restart", 1), true);
   const effectObservation = { tenant_id: effectTenant, runtime_id: effectAccepted.runtime.container_id, generation: 1, exists: true as const, lifecycle: "running" as const, health: "healthy" as const, image_ref: imageLock.platforms["linux/amd64"].reference, private_origin: "http://172.30.0.4:8642" };
+  const beforeInvalidRestartProof = await runtimeTerminalSnapshot(effectTenant);
+  assert.equal(await repository.finishReconcile(effectRef, { kind: "inspect_proved", command: "restart", targetCommandVersion: 1, observation: effectObservation } as never), false);
+  assert.deepEqual(await runtimeTerminalSnapshot(effectTenant), beforeInvalidRestartProof);
+  assert.equal(await repository.markReconcileEffectDispatched(effectRef, "restart", 1), true);
   assert.equal(await repository.finishReconcile(effectRef, { kind: "effect_dispatched", command: "restart", targetCommandVersion: 1, observation: effectObservation }), true);
+});
+
+test("superseded reconcile completion accepts only the exact claimed pre-effect or dispatched phase", async () => {
+  for (const effectState of ["pre_effect", "unsafe_to_replay"] as const) {
+    const tenantId = `tenant_superseded_exact_${effectState}`;
+    const context = { tenantId, requestId: `request_${effectState}`, traceId: `trace_${effectState}`, actorId: "core_agent_provisioner" as const, membershipId: "core_agent_provisioner_admin" as const, effectiveRole: "admin" as const };
+    const accepted = await provisionTenant({ db, providerCatalog, imageLock }, context, b2bRequest(tenantId));
+    await db.updateTable("worker_jobs").set({ status: "succeeded" }).where("tenant_id", "=", tenantId).where("job_kind", "=", "provision_runtime").execute();
+    await commandRuntime({ db }, context, withHash({ schema_version: 1 as const, idempotency_key: `idem_${effectState}_v1`, expected_resource_version: 1, command: "start" as const }));
+    const job = await db.selectFrom("worker_jobs").select(["job_id", "attempt_count"]).where("tenant_id", "=", tenantId).where("job_kind", "=", "reconcile_runtime").executeTakeFirstOrThrow();
+    await db.updateTable("worker_jobs").set({ status: "running", lease_owner: "worker_success", lease_expires_at: new Date("2100-01-01T00:00:00.000Z"), effect_state: effectState }).where("tenant_id", "=", tenantId).where("job_id", "=", job.job_id).execute();
+    await commandRuntime({ db }, context, withHash({ schema_version: 1 as const, idempotency_key: `idem_${effectState}_v2`, expected_resource_version: 2, command: "stop" as const }));
+    const repository = new WorkerRuntimeRepository(db, createRedactor([]));
+    const ref = { tenantId, runtimeId: accepted.runtime.container_id, jobId: job.job_id, workerId: "worker_success", attemptCount: job.attempt_count };
+    assert.equal(await repository.completeSuperseded(ref, { runtimeId: accepted.runtime.container_id, targetCommandVersion: 1, command: "start", effectState }), true, effectState);
+    const completed = await db.selectFrom("worker_jobs").select(["status", "last_error_summary"]).where("tenant_id", "=", tenantId).where("job_id", "=", job.job_id).executeTakeFirstOrThrow();
+    assert.deepEqual(completed, { status: "succeeded", last_error_summary: "Superseded by a newer runtime command" }, effectState);
+  }
 });
 
 test("Worker command supersession uses command_version independently from observed resource updates", async () => {
@@ -731,6 +769,14 @@ test("markReconcileEffectDispatched fences tenant lease command and current comm
   assert.equal(await repository.markReconcileEffectDispatched(ref, "start", targetVersion), false);
   assert.equal(await repository.markReconcileEffectDispatched(ref, "restart", targetVersion + 1), false);
   assert.equal((await db.selectFrom("worker_jobs").select("effect_state").where("tenant_id", "=", context.tenantId).where("job_id", "=", row.job_id).executeTakeFirstOrThrow()).effect_state, "pre_effect");
+
+  for (const [scenario, update] of [["payload", { payload_ref: "runtime_other" }], ["container", { container_id: null }]] as const) {
+    await db.updateTable("worker_jobs").set(update).where("tenant_id", "=", context.tenantId).where("job_id", "=", row.job_id).execute();
+    const beforeWrongIdentity = await runtimeTerminalSnapshot(context.tenantId);
+    assert.equal(await repository.markReconcileEffectDispatched(ref, "restart", targetVersion), false, scenario);
+    assert.deepEqual(await runtimeTerminalSnapshot(context.tenantId), beforeWrongIdentity, scenario);
+    await db.updateTable("worker_jobs").set(scenario === "payload" ? { payload_ref: ref.runtimeId } : { container_id: ref.runtimeId }).where("tenant_id", "=", context.tenantId).where("job_id", "=", row.job_id).execute();
+  }
 
   assert.equal(await repository.markReconcileEffectDispatched(ref, "restart", targetVersion), true);
   assert.equal((await db.selectFrom("worker_jobs").select("effect_state").where("tenant_id", "=", context.tenantId).where("job_id", "=", row.job_id).executeTakeFirstOrThrow()).effect_state, "unsafe_to_replay");
@@ -1028,8 +1074,9 @@ test("same-owner runtime reclaim fences effect and every terminal ownership muta
       assert.deepEqual(await repository.retryReconcile(stale, targetCommandVersion, "stale", new Date(1)), { kind: "lease_lost" });
       assert.deepEqual(await repository.retryReconcile(current, targetCommandVersion, "current", new Date(1)), { kind: "retried" });
     } else if (operation === "supersede") {
-      assert.equal(await repository.completeSuperseded(stale, targetCommandVersion), false);
-      assert.equal(await repository.completeSuperseded(current, targetCommandVersion), true);
+      const claimedIntent = { runtimeId: accepted.runtime.container_id, targetCommandVersion, command: "start" as const, effectState: "pre_effect" as const };
+      assert.equal(await repository.completeSuperseded(stale, claimedIntent), false);
+      assert.equal(await repository.completeSuperseded(current, claimedIntent), true);
     } else if (operation === "failure") {
       assert.deepEqual(await repository.failReconcile(stale, targetCommandVersion, "stale"), { kind: "lease_lost" });
       assert.deepEqual(await repository.failReconcile(current, targetCommandVersion, "current"), { kind: "failed" });
