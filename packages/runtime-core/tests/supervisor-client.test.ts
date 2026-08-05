@@ -266,14 +266,14 @@ test("Supervisor production deadline budget orders effect, operation, and client
   assert.equal(
     budget.initializerTimeoutMs
       + budget.verifierTimeoutMs
-      + (budget.reconciliationTimeoutMs * 3)
+      + (budget.reconciliationTimeoutMs * 5)
       + budget.effectOverheadMs,
     110_000,
   );
   assert(
     budget.initializerTimeoutMs
       + budget.verifierTimeoutMs
-      + (budget.reconciliationTimeoutMs * 3)
+      + (budget.reconciliationTimeoutMs * 5)
       + budget.effectOverheadMs
       < budget.effectTimeoutMs,
   );

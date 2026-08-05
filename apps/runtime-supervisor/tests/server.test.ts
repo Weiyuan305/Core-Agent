@@ -68,6 +68,7 @@ function buildServer(
   options: {
     maximumConcurrent?: number;
     admissionTimeoutMs?: number;
+    effectTimeoutMs?: number;
     operationTimeoutMs?: number;
     cancellationSettlementTimeoutMs?: number;
     shutdownTimeoutMs?: number;
@@ -211,6 +212,53 @@ test("Unix service rejects deadline configuration outside the shared production 
     () => buildServer(execute, { admissionTimeoutMs: 100, operationTimeoutMs: 100 }),
     /SUPERVISOR_REJECTED/,
   );
+  assert.throws(
+    () => buildServer(execute, { effectTimeoutMs: SUPERVISOR_DEADLINE_BUDGET.effectTimeoutMs + 1 }),
+    /SUPERVISOR_REJECTED/,
+  );
+  assert.throws(
+    () => buildServer(execute, { admissionTimeoutMs: 100, effectTimeoutMs: 100, operationTimeoutMs: 200 }),
+    /SUPERVISOR_REJECTED/,
+  );
+  assert.throws(
+    () => buildServer(execute, { admissionTimeoutMs: 50, effectTimeoutMs: 100, operationTimeoutMs: 100 }),
+    /SUPERVISOR_REJECTED/,
+  );
+});
+
+test("effect cancellation fires before the outer operation response window", async () => {
+  let abortObserved = false;
+  const server = buildServer(async (value, signal) => {
+    await new Promise<void>((resolve) => {
+      signal.addEventListener("abort", () => {
+        abortObserved = true;
+        resolve();
+      }, { once: true });
+    });
+    return {
+      protocol_version: 1,
+      operation_id: value.operation_id,
+      outcome: "failed",
+      code: "DEPENDENCY_TIMEOUT",
+      retryable: true,
+      summary: "synthetic effect cancellation",
+    };
+  }, {
+    admissionTimeoutMs: 5,
+    effectTimeoutMs: 20,
+    operationTimeoutMs: 100,
+    cancellationSettlementTimeoutMs: 20,
+  });
+  await server.start();
+  try {
+    const response = await new RuntimeSupervisorClient({ socketPath, timeoutMs: 75 })
+      .execute(request("operation_effect_deadline"));
+    assert.equal(abortObserved, true);
+    assert.equal(response.outcome, "failed");
+    if (response.outcome === "failed") assert.equal(response.code, "DEPENDENCY_TIMEOUT");
+  } finally {
+    await server.close();
+  }
 });
 
 test("journal attachment precedes capacity so retries consume no execution slots", async () => {
@@ -358,7 +406,7 @@ test("Unix service caps execution at four and waits for abort settlement before 
     await timedReleased;
     mutations += 1;
     return accepted(value.operation_id);
-  }, { admissionTimeoutMs: 50, operationTimeoutMs: 100, shutdownTimeoutMs: 100 });
+  }, { admissionTimeoutMs: 25, effectTimeoutMs: 50, operationTimeoutMs: 100, shutdownTimeoutMs: 100 });
   await timed.start();
   try {
     const journalRecordsBefore = (await readdir(join(temporaryRoot, "journal")))
@@ -414,7 +462,8 @@ test("an unsettled cancellation returns a bounded transient timeout without rele
     mutations += 1;
     return accepted(value.operation_id);
   }, {
-    admissionTimeoutMs: 50,
+    admissionTimeoutMs: 25,
+    effectTimeoutMs: 50,
     operationTimeoutMs: 100,
     cancellationSettlementTimeoutMs: 30,
     shutdownTimeoutMs: 50,

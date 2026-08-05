@@ -174,6 +174,7 @@ class FakeContainer {
   public running = false;
   public removed = false;
   public readonly actions: string[] = [];
+  public mountsOverride: readonly unknown[] | undefined;
 
   public constructor(
     readonly docker: FakeDocker,
@@ -212,7 +213,7 @@ class FakeContainer {
         Healthcheck: this.options.Healthcheck,
       },
       HostConfig: this.options.HostConfig,
-      Mounts: (this.options.HostConfig?.Binds ?? []).map((bind) => {
+      Mounts: this.mountsOverride ?? (this.options.HostConfig?.Binds ?? []).map((bind) => {
         const [source, destination] = bind.split(":");
         return {
           Type: source?.startsWith("core-agent-") ? "volume" : "bind",
@@ -559,6 +560,19 @@ test("adapter rejects helper deadlines outside the aggregate production budget",
     () => buildAdapter(new FakeDocker(), new FakeSecretStore(), { verifierTimeoutMs: 0 }),
     /DEPENDENCY_TIMEOUT/,
   );
+  assert.doesNotThrow(() => buildAdapter(new FakeDocker(), new FakeSecretStore(), {
+    initializerTimeoutMs: 29_000,
+    verifierTimeoutMs: 30_000,
+    reconciliationTimeoutMs: 10_000,
+  }));
+  assert.throws(
+    () => buildAdapter(new FakeDocker(), new FakeSecretStore(), {
+      initializerTimeoutMs: 30_000,
+      verifierTimeoutMs: 30_000,
+      reconciliationTimeoutMs: 10_000,
+    }),
+    /DEPENDENCY_TIMEOUT/,
+  );
 });
 
 test("initializer and gateway use daemon-visible binds, one numeric identity, and exact split networks", async () => {
@@ -804,6 +818,17 @@ test("restart reconciles exact helper residues and rejects drift before removal"
     Labels?.["core-agent.resource"] === "runtime-initializer"
     || Labels?.["core-agent.resource"] === "runtime-manifest-verifier"
   ));
+  const initializerBinds = helperOptions[0]!.HostConfig!.Binds!;
+  const bundleHostPath = initializerBinds[1]!.slice(0, -":/run/core-agent/bootstrap/bundle.json:ro".length);
+  const operationStage = dirname(first.docker.localPath(bundleHostPath));
+  const siblingStage = join(dirname(operationStage), "operation-sibling-preserve");
+  await mkdir(join(operationStage, "secrets"), { recursive: true, mode: 0o700 });
+  await mkdir(join(operationStage, "output"), { mode: 0o700 });
+  await writeFile(join(operationStage, "bundle.json"), "staged-bundle", { mode: 0o600 });
+  await writeFile(join(operationStage, "secrets", "provider-crash"), providerSecret, { mode: 0o600 });
+  await writeFile(join(operationStage, "output", "manifest.json"), "staged-output", { mode: 0o600 });
+  await mkdir(siblingStage, { mode: 0o700 });
+  await writeFile(join(siblingStage, "sentinel"), "preserve-sibling", { mode: 0o600 });
   for (const options of helperOptions) {
     const name = options.name!;
     first.docker.containers.set(name, new FakeContainer(first.docker, name, structuredClone(options)));
@@ -812,6 +837,8 @@ test("restart reconciles exact helper residues and rejects drift before removal"
   const adopted = await second.adapter.provision(request);
   assert.equal(adopted.lifecycle, "running");
   assert.equal(helperOptions.every(({ name }) => !first.docker.containers.has(name!)), true);
+  await assert.rejects(lstat(operationStage), { code: "ENOENT" });
+  assert.equal(await readFile(join(siblingStage, "sentinel"), "utf8"), "preserve-sibling");
 
   const drifted = structuredClone(helperOptions[0]!);
   drifted.HostConfig!.NetworkMode = "bridge";
@@ -821,6 +848,39 @@ test("restart reconciles exact helper residues and rejects drift before removal"
   assert.equal(rejectedResponse.outcome, "rejected");
   assert.deepEqual(first.docker.mutations, mutationsBefore);
 });
+
+const helperSecurityDrifts: ReadonlyArray<{
+  readonly name: string;
+  readonly mutate: (options: Dockerode.ContainerCreateOptions, container: FakeContainer) => void;
+}> = [
+  { name: "PortBindings", mutate: (options) => { options.HostConfig!.PortBindings = { "8642/tcp": [{ HostPort: "8642" }] }; } },
+  { name: "PublishAllPorts", mutate: (options) => { options.HostConfig!.PublishAllPorts = true; } },
+  { name: "RestartPolicy", mutate: (options) => { options.HostConfig!.RestartPolicy = { Name: "always" }; } },
+  { name: "IpcMode", mutate: (options) => { options.HostConfig!.IpcMode = "host"; } },
+  { name: "PidMode", mutate: (options) => { options.HostConfig!.PidMode = "host"; } },
+  { name: "UTSMode", mutate: (options) => { options.HostConfig!.UTSMode = "host"; } },
+  { name: "UsernsMode", mutate: (options) => { options.HostConfig!.UsernsMode = "host"; } },
+  { name: "CgroupnsMode", mutate: (options) => { options.HostConfig!.CgroupnsMode = "host"; } },
+  { name: "Mounts", mutate: (_options, container) => { container.mountsOverride = []; } },
+];
+
+for (const drift of helperSecurityDrifts) {
+  test(`helper residue rejects ${drift.name} drift before removal`, async () => {
+    const first = buildAdapter();
+    const request = signed();
+    await first.adapter.provision(request);
+    const options = structuredClone(first.docker.created.find(({ Labels }) => (
+      Labels?.["core-agent.resource"] === "runtime-initializer"
+    ))!);
+    const container = new FakeContainer(first.docker, options.name!, options);
+    drift.mutate(options, container);
+    first.docker.containers.set(options.name!, container);
+    const before = [...first.docker.mutations];
+    const response = await buildAdapter(first.docker, new FakeSecretStore()).adapter.execute(request);
+    assert.equal(response.outcome, "rejected");
+    assert.deepEqual(first.docker.mutations, before);
+  });
+}
 
 test("an aborted mutating Docker request remains unsettled when the daemon can still mutate later", async () => {
   const docker = new FakeDocker();
