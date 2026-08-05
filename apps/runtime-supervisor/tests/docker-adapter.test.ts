@@ -266,6 +266,10 @@ class FakeContainer {
     if (this.options?.Labels?.["core-agent.resource"] === "runtime" && this.docker.failGatewayStart) {
       throw new Error("gateway start failed with untrusted details");
     }
+    if (this.options?.Labels?.["core-agent.resource"] === "runtime" && this.docker.gatewayStartError !== undefined) {
+      if (this.docker.applyGatewayStartBeforeError) this.running = true;
+      throw this.docker.gatewayStartError;
+    }
     this.running = true;
   }
 
@@ -384,6 +388,8 @@ class FakeDocker {
   public manifestRawOverride: string | Uint8Array | undefined;
   public attachExternalNetwork = false;
   public failGatewayStart = false;
+  public gatewayStartError: unknown;
+  public applyGatewayStartBeforeError = false;
   public mergeImageConfiguration = true;
   public gatewayInspections = 0;
   public gatewayInspectionBarrier: Promise<void> | undefined;
@@ -937,6 +943,105 @@ test("an aborted mutating Docker request remains unsettled when the daemon can s
   assert.equal(docker.mutations.some((mutation) => mutation.startsWith("late-start:")), true);
   assert.equal(afterLateMutation, stillPending);
   assert.equal(settled, false);
+});
+
+test("an applied gateway start followed by a response-less reset stays non-terminal and restart adopts it", async () => {
+  const docker = new FakeDocker();
+  docker.gatewayStartError = Object.assign(new Error("synthetic response-less transport reset"), {
+    code: "ECONNRESET",
+  });
+  docker.applyGatewayStartBeforeError = true;
+  const request = signed();
+  const { adapter } = buildAdapter(docker);
+  const journalDirectory = join(temporaryRoot, "journal-transport-reset");
+  const journal = new OperationJournal({ directory: journalDirectory });
+  let firstSettled = false;
+  const first = journal.run(request, (reserved) => adapter.execute(reserved)).finally(() => {
+    firstSettled = true;
+  });
+  const stillPending = Symbol("still pending");
+
+  assert.equal(await Promise.race([
+    first,
+    new Promise<typeof stillPending>((resolve) => setTimeout(() => resolve(stillPending), 50)),
+  ]), stillPending);
+  assert.equal(firstSettled, false);
+  assert.equal((await readdir(journalDirectory)).some((name) => name.endsWith(".json")), false);
+  const gatewayName = deriveRuntimeNames(request.runtime).container;
+  assert.equal(docker.containers.get(gatewayName)?.running, true);
+  assert.equal(docker.mutations.filter((mutation) => mutation === `start:${gatewayName}`).length, 1);
+
+  let retrySettled = false;
+  const retry = journal.run(request, (reserved) => adapter.execute(reserved)).finally(() => {
+    retrySettled = true;
+  });
+  assert.equal(await Promise.race([
+    retry,
+    new Promise<typeof stillPending>((resolve) => setTimeout(() => resolve(stillPending), 20)),
+  ]), stillPending);
+  assert.equal(retrySettled, false);
+  assert.equal(docker.mutations.filter((mutation) => mutation === `start:${gatewayName}`).length, 1);
+
+  docker.gatewayStartError = undefined;
+  const restarted = buildAdapter(docker, new FakeSecretStore());
+  const adopted = await restarted.adapter.provision(request);
+  assert.equal(adopted.lifecycle, "running");
+  assert.equal(docker.mutations.filter((mutation) => mutation === `start:${gatewayName}`).length, 1);
+});
+
+test("every allowlisted response-less transport code stays daemon-uncertain", async () => {
+  const docker = new FakeDocker();
+  const request = signed();
+  const initial = buildAdapter(docker);
+  await initial.adapter.provision(request);
+  const gatewayName = deriveRuntimeNames(request.runtime).container;
+  const gateway = docker.containers.get(gatewayName)!;
+  docker.applyGatewayStartBeforeError = true;
+  const stillPending = Symbol("still pending");
+
+  for (const [index, code] of ["ECONNRESET", "EPIPE", "ECONNABORTED", "ERR_STREAM_PREMATURE_CLOSE"].entries()) {
+    gateway.running = false;
+    docker.gatewayStartError = Object.assign(new Error("synthetic response-less transport failure"), { code });
+    const restarted = buildAdapter(docker, new FakeSecretStore());
+    const pending = restarted.adapter.execute(lifecycle("start", `operation_allowlisted_transport_${index}`));
+    assert.equal(await Promise.race([
+      pending,
+      new Promise<typeof stillPending>((resolve) => setTimeout(() => resolve(stillPending), 20)),
+    ]), stillPending);
+    assert.equal(gateway.running, true);
+  }
+});
+
+test("only response-less data-property transport codes are daemon-uncertain", async () => {
+  let accessorReads = 0;
+  const accessorError = new Error("synthetic accessor error");
+  Object.defineProperty(accessorError, "code", {
+    enumerable: true,
+    get() {
+      accessorReads += 1;
+      throw new Error("code accessor must not run");
+    },
+  });
+  const failures: readonly unknown[] = [
+    new Error("ordinary Docker failure"),
+    Object.assign(new Error("connection refused before daemon acceptance"), { code: "ECONNREFUSED" }),
+    Object.assign(new Error("HTTP error with a transport-shaped code"), { code: "ECONNRESET", statusCode: 500 }),
+    Object.assign(new Error("Docker not found response"), { code: 404 }),
+    accessorError,
+    { code: "ECONNRESET" },
+  ];
+
+  for (const [index, failure] of failures.entries()) {
+    const docker = new FakeDocker();
+    docker.gatewayStartError = failure;
+    const response = await buildAdapter(docker).adapter.execute(signed({
+      ...provisionData(),
+      operation_id: `operation_negative_transport_${index}`,
+    }));
+    assert.equal(response.outcome, "failed");
+    if (response.outcome === "failed") assert.equal(response.code, "DEPENDENCY_UNAVAILABLE");
+  }
+  assert.equal(accessorReads, 0);
 });
 
 test("gateway adoption accepts only the exact Docker merge of locked-image and runtime configuration", async () => {
