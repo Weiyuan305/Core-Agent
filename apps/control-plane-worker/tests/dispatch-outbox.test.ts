@@ -34,3 +34,32 @@ test("Outbox dispatcher refuses a malformed claimed row without an attempt fence
     retry: async () => true,
   }, "worker_a"), /attemptCount/);
 });
+
+test("Outbox dispatcher rejects an impossible eleventh attempt before notification", async () => {
+  let notifications = 0;
+  await assert.rejects(dispatchOutbox({
+    claim: async () => [{ tenantId: "tenant_a", outboxId: "outbox_a", streamId: "runtime_a", lastSequence: 7, attemptCount: 11 }],
+    notify: async () => { notifications += 1; },
+    delivered: async () => true,
+    retry: async () => true,
+  }, "worker_a"), /attemptCount/);
+  assert.equal(notifications, 0);
+});
+
+test("Outbox dispatcher reports false delivered and retry fences without false success", async () => {
+  let retryAfterNotification = 0;
+  const result = await dispatchOutbox({
+    claim: async () => [
+      { tenantId: "tenant_a", outboxId: "outbox_ack_lost", streamId: "runtime_a", lastSequence: 7, attemptCount: 10 },
+      { tenantId: "tenant_a", outboxId: "outbox_retry_lost", streamId: "runtime_a", lastSequence: 8, attemptCount: 9 },
+    ],
+    notify: async (payload) => {
+      if (payload.includes('"last_committed_sequence":8')) throw new Error("synthetic notification failure");
+    },
+    delivered: async () => false,
+    retry: async () => { retryAfterNotification += 1; return false; },
+  }, "worker_a");
+
+  assert.deepEqual(result, { delivered: 0, retried: 0 });
+  assert.equal(retryAfterNotification, 1, "only the failed notification may request retry");
+});
