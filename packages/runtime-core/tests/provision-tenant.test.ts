@@ -508,7 +508,7 @@ test("restart persists explicit durable reconcile intent while payload_ref remai
 });
 
 test("finishProvision rejects wrong persisted success intent before every write", async () => {
-  for (const scenario of ["payload", "effect", "attempt"] as const) {
+  for (const scenario of ["payload", "container", "effect", "attempt"] as const) {
     const tenantId = `tenant_finish_provision_intent_${scenario}`;
     const provisioning = b2bRequest(tenantId);
     const context = { tenantId, requestId: `request_${scenario}`, traceId: `trace_${scenario}`, actorId: "core_agent_provisioner" as const, membershipId: "core_agent_provisioner_admin" as const, effectiveRole: "admin" as const };
@@ -516,7 +516,8 @@ test("finishProvision rejects wrong persisted success intent before every write"
     const job = await db.selectFrom("worker_jobs").select(["job_id", "attempt_count"]).where("tenant_id", "=", tenantId).where("job_kind", "=", "provision_runtime").executeTakeFirstOrThrow();
     await db.updateTable("runtime_containers").set({ observed_state: "provisioning", resource_version: 2 }).where("tenant_id", "=", tenantId).execute();
     await db.updateTable("worker_jobs").set({ status: "running", lease_owner: "worker_success", lease_expires_at: new Date("2100-01-01T00:00:00.000Z"),
-      ...(scenario === "payload" ? { payload_ref: "runtime_other" } : {}), ...(scenario === "effect" ? { effect_state: "unsafe_to_replay" } : {}) })
+      ...(scenario === "payload" ? { payload_ref: "runtime_other" } : {}), ...(scenario === "container" ? { container_id: null } : {}),
+      ...(scenario === "effect" ? { effect_state: "unsafe_to_replay" } : {}) })
       .where("tenant_id", "=", tenantId).where("job_id", "=", job.job_id).execute();
     const before = await runtimeTerminalSnapshot(tenantId);
     const repository = new WorkerRuntimeRepository(db, createRedactor([]));
@@ -565,6 +566,12 @@ test("reconcile success and superseded completion reject mismatched persisted in
   assert.equal(await repository.completeSuperseded({ ...ref, attemptCount: ref.attemptCount + 1 }, 1), false);
   assert.equal(await repository.completeSuperseded({ ...ref, jobId: provision.job_id, attemptCount: provision.attempt_count }, 1), false);
   assert.deepEqual(await runtimeTerminalSnapshot(tenantId), before);
+
+  await db.updateTable("worker_jobs").set({ container_id: null }).where("tenant_id", "=", tenantId).where("job_id", "=", job.job_id).execute();
+  const beforeMissingContainer = await runtimeTerminalSnapshot(tenantId);
+  assert.equal(await repository.finishReconcile(ref, { kind: "inspect_proved", command: "start", targetCommandVersion: 1, observation }), false);
+  assert.equal(await repository.completeSuperseded(ref, 1), false);
+  assert.deepEqual(await runtimeTerminalSnapshot(tenantId), beforeMissingContainer);
 });
 
 test("reconcile success accepts only the matching explicit proof and durable effect phase", async () => {
