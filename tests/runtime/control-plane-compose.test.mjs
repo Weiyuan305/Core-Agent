@@ -122,6 +122,10 @@ test("service mounts and networks preserve each process boundary", async () => {
     external: true,
     name: "core-agent-backplane",
   });
+  assert.deepEqual(config.networks["core-agent-egress"], {
+    external: true,
+    name: "core-agent-egress",
+  });
 
   assert.deepEqual(volumeTargets(api), [
     "/run/core-agent/config/hermes-images.lock.json",
@@ -146,6 +150,7 @@ test("service mounts and networks preserve each process boundary", async () => {
     "/run/core-agent/secrets/ingress",
     "/run/core-agent/secrets/provider",
     "/run/core-agent/supervisor",
+    "/run/core-agent/staging",
     "/var/lib/core-agent/supervisor",
     "/var/run/docker.sock",
   ]);
@@ -171,6 +176,8 @@ test("service mounts and networks preserve each process boundary", async () => {
     "${CORE_AGENT_SUPERVISOR_STATE_ROOT:?set CORE_AGENT_SUPERVISOR_STATE_ROOT}",
   );
   assert.equal(volumeAt(supervisor, "/var/run/docker.sock").read_only, undefined);
+  assert.equal(volumeAt(supervisor, "/run/core-agent/staging").source, "${CORE_AGENT_SUPERVISOR_STATE_ROOT:?set CORE_AGENT_SUPERVISOR_STATE_ROOT}/staging");
+  assert.equal(volumeAt(supervisor, "/run/core-agent/staging").read_only, undefined);
 
   assert(!volumeTargets(api).some((target) => /secrets\/provider|ingress|docker|supervisor/u.test(target)));
   assert(!volumeTargets(worker).some((target) => /secrets\/provider|docker/u.test(target)));
@@ -208,16 +215,7 @@ test("application services use least privilege and bounded resources", async () 
   assert.deepEqual(config.services.api.group_add, undefined);
   assert.deepEqual(config.services.worker.group_add, ["${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}"]);
   assert.deepEqual(config.services.supervisor.group_add, ["${CORE_AGENT_DOCKER_GID:?set CORE_AGENT_DOCKER_GID}"]);
-  const staging = config.services.supervisor.tmpfs.find((entry) => entry.startsWith("/run/core-agent/staging:"));
-  assert(staging);
-  const stagingOptions = new Set(staging.slice(staging.indexOf(":") + 1).split(","));
-  for (const option of [
-    "rw", "noexec", "nosuid", "nodev", "size=128m", "mode=0700",
-    "uid=${CORE_AGENT_RUNTIME_UID:-12002}",
-    "gid=${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}",
-  ]) {
-    assert(stagingOptions.has(option));
-  }
+  assert.equal(config.services.supervisor.tmpfs.some((entry) => entry.startsWith("/run/core-agent/staging:")), false);
 });
 
 test("startup order gates applications on one successful migration", async () => {
@@ -273,6 +271,11 @@ test("compose environment carries paths and public configuration but no secret v
   assert.equal(supervisorEnvironment.CORE_AGENT_PROVIDER_SECRET_ROOT, "/run/core-agent/secrets/provider");
   assert.equal(supervisorEnvironment.CORE_AGENT_INGRESS_SECRET_ROOT, "/run/core-agent/secrets/ingress");
   assert.equal(supervisorEnvironment.CORE_AGENT_SUPERVISOR_INGRESS_ROOT, "/var/lib/core-agent/supervisor/ingress");
+  assert.equal(supervisorEnvironment.CORE_AGENT_SUPERVISOR_STAGING_ROOT, "/run/core-agent/staging");
+  assert.equal(supervisorEnvironment.CORE_AGENT_DOCKER_HOST_STAGING_ROOT, "${CORE_AGENT_SUPERVISOR_STATE_ROOT:?set CORE_AGENT_SUPERVISOR_STATE_ROOT}/staging");
+  assert.equal(supervisorEnvironment.CORE_AGENT_DOCKER_HOST_INGRESS_ROOT, "${CORE_AGENT_SUPERVISOR_STATE_ROOT:?set CORE_AGENT_SUPERVISOR_STATE_ROOT}/ingress");
+  assert.equal(supervisorEnvironment.CORE_AGENT_MANAGED_RUNTIME_UID, "${CORE_AGENT_RUNTIME_UID:-12002}");
+  assert.equal(supervisorEnvironment.CORE_AGENT_MANAGED_RUNTIME_GID, "${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}");
 });
 
 test("runtime image lock contains exact registry-derived platform references", async () => {
@@ -564,6 +567,12 @@ test("runtime path preflight creates final-uid 0700 roots and validates bootstra
     assert.equal(metadata.uid, uid);
     assert.equal(metadata.gid, gid);
   }
+  for (const child of ["staging", "ingress"]) {
+    const metadata = await stat(join(stateRoot, child));
+    assert.equal(metadata.mode & 0o777, 0o700);
+    assert.equal(metadata.uid, uid);
+    assert.equal(metadata.gid, gid);
+  }
   assert(!/readFile|createReadStream/u.test(await source("scripts/prepare-runtime-paths.mjs")));
 
   await chmod(bootstrap, 0o644);
@@ -685,10 +694,10 @@ test("runtime path preflight rejects a hard-linked bootstrap purpose alias", asy
   });
 });
 
-test("external backplane preparation is idempotent and validates the Supervisor network contract", async () => {
+test("runtime network preparation owns exact private backplane and provider-capable egress contracts", async () => {
   const moduleUrl = pathToFileURL(pathFromRoot("scripts/prepare-runtime-network.mjs")).href;
   const network = await import(`${moduleUrl}?red=${Date.now()}`);
-  const inspection = JSON.stringify({
+  const backplaneInspection = JSON.stringify({
     Name: "core-agent-backplane",
     Driver: "bridge",
     Internal: true,
@@ -699,21 +708,35 @@ test("external backplane preparation is idempotent and validates the Supervisor 
       "core-agent.network": "core-agent-backplane",
     },
   });
+  const egressInspection = JSON.stringify({
+    Name: "core-agent-egress",
+    Driver: "bridge",
+    Internal: false,
+    Attachable: false,
+    Labels: {
+      "core-agent.managed": "runtime-v1",
+      "core-agent.resource": "egress",
+      "core-agent.network": "core-agent-egress",
+    },
+  });
   const existingCalls = [];
   await network.prepareRuntimeNetwork({ runDocker: async (args) => {
     existingCalls.push(args);
-    return args[1] === "ls" ? "core-agent-backplane\n" : `${inspection}\n`;
+    if (args[1] === "ls") return `${args[3].includes("egress") ? "core-agent-egress" : "core-agent-backplane"}\n`;
+    return `${args.at(-1) === "core-agent-egress" ? egressInspection : backplaneInspection}\n`;
   } });
   assert.deepEqual(existingCalls, [
     ["network", "ls", "--filter", "name=^core-agent-backplane$", "--format", "{{.Name}}"],
     ["network", "inspect", "--format", "{{json .}}", "core-agent-backplane"],
+    ["network", "ls", "--filter", "name=^core-agent-egress$", "--format", "{{.Name}}"],
+    ["network", "inspect", "--format", "{{json .}}", "core-agent-egress"],
   ]);
   const createCalls = [];
   await network.prepareRuntimeNetwork({ runDocker: async (args) => {
     createCalls.push(args);
     if (args[1] === "ls") return "";
-    if (args[1] === "create") return "core-agent-backplane\n";
-    return inspection;
+    if (args[1] === "create") return `${args.at(-1)}\n`;
+    return args.at(-1) === "core-agent-egress" ? egressInspection : backplaneInspection;
   } });
   assert.deepEqual(createCalls[1], [
     "network", "create", "--driver", "bridge", "--internal",
@@ -722,10 +745,20 @@ test("external backplane preparation is idempotent and validates the Supervisor 
     "--label", "core-agent.network=core-agent-backplane",
     "core-agent-backplane",
   ]);
-  const drifted = JSON.stringify({ ...JSON.parse(inspection), Internal: false });
+  assert.deepEqual(createCalls[4], [
+    "network", "create", "--driver", "bridge",
+    "--label", "core-agent.managed=runtime-v1",
+    "--label", "core-agent.resource=egress",
+    "--label", "core-agent.network=core-agent-egress",
+    "core-agent-egress",
+  ]);
+  const drifted = JSON.stringify({ ...JSON.parse(egressInspection), Internal: true });
   await assert.rejects(
-    network.prepareRuntimeNetwork({ runDocker: async (args) => args[1] === "ls" ? "core-agent-backplane\n" : drifted }),
-    /runtime backplane is invalid/u,
+    network.prepareRuntimeNetwork({ runDocker: async (args) => {
+      if (args[1] === "ls") return `${args[3].includes("egress") ? "core-agent-egress" : "core-agent-backplane"}\n`;
+      return args.at(-1) === "core-agent-egress" ? drifted : backplaneInspection;
+    } }),
+    /runtime network is invalid/u,
   );
 });
 

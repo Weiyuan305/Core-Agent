@@ -161,6 +161,8 @@ class FakeContainer {
     }
     if (this.options === undefined || this.removed) throw missing();
     const network = this.options.HostConfig?.NetworkMode;
+    const configuredNetworks = Object.keys(this.options.NetworkingConfig?.EndpointsConfig ?? {});
+    const networkNames = configuredNetworks.length === 0 && network !== "none" ? [String(network)] : configuredNetworks;
     return {
       Id: `id-${this.name}`,
       Name: `/${this.name}`,
@@ -187,7 +189,10 @@ class FakeContainer {
       }),
       NetworkSettings: {
         Networks: network === "none" ? {} : {
-          [String(network)]: { IPAddress: "172.30.0.7" },
+          ...Object.fromEntries(networkNames.map((name) => [
+            name,
+            { IPAddress: name === "core-agent-backplane" ? "172.30.0.7" : "172.31.0.7" },
+          ])),
           ...(this.docker.attachExternalNetwork && this.options.Labels?.["core-agent.resource"] === "runtime"
             ? { external: { IPAddress: "192.0.2.7" } }
             : {}),
@@ -228,7 +233,7 @@ class FakeContainer {
     if (this.options?.Labels?.["core-agent.resource"] === "runtime-manifest-verifier") {
       const outputBind = this.options.HostConfig?.Binds?.find((bind) => bind.endsWith(":/run/core-agent/output"));
       if (outputBind === undefined) throw new Error("missing verifier output bind");
-      const outputDirectory = outputBind.slice(0, -":/run/core-agent/output".length);
+      const outputDirectory = this.docker.localPath(outputBind.slice(0, -":/run/core-agent/output".length));
       await writeFile(
         join(outputDirectory, "manifest.json"),
         this.docker.manifestRawOverride
@@ -287,6 +292,12 @@ class FakeDocker {
   public gatewayInspections = 0;
   public gatewayInspectionBarrier: Promise<void> | undefined;
   public markGatewayInspection: (() => void) | undefined;
+  public readonly hostMappings: Array<{ readonly host: string; readonly local: string }> = [];
+
+  public localPath(path: string): string {
+    const mapping = this.hostMappings.find(({ host }) => path === host || path.startsWith(`${host}/`));
+    return mapping === undefined ? path : join(mapping.local, path.slice(mapping.host.length));
+  }
 
   public getContainer(name: string): FakeContainer {
     return this.containers.get(name) ?? new FakeContainer(this, name);
@@ -299,8 +310,8 @@ class FakeDocker {
     const container = new FakeContainer(this, name, structuredClone(options));
     if (options.Labels?.["core-agent.resource"] === "runtime-initializer") {
       const binds = options.HostConfig?.Binds ?? [];
-      const bundlePath = binds[1]?.split(":")[0];
-      const secretDirectory = binds[2]?.split(":")[0];
+      const bundlePath = this.localPath(binds[1]?.split(":")[0] ?? "");
+      const secretDirectory = this.localPath(binds[2]?.split(":")[0] ?? "");
       if (bundlePath === undefined || secretDirectory === undefined) throw new Error("missing staged binds");
       this.stagedModes.push((await lstat(bundlePath)).mode & 0o777);
       this.stagedModes.push((await lstat(secretDirectory)).mode & 0o777);
@@ -354,23 +365,39 @@ test.afterEach(async () => {
 });
 
 function buildAdapter(docker = new FakeDocker(), secretStore = new FakeSecretStore()) {
+  const stagingRoot = join(temporaryRoot, "supervisor", "staging");
+  const ingressRoot = join(temporaryRoot, "supervisor", "ingress");
+  const dockerHostStagingRoot = "/srv/core-agent/runtime/staging";
+  const dockerHostIngressRoot = "/srv/core-agent/runtime/ingress";
+  docker.hostMappings.push(
+    { host: dockerHostStagingRoot, local: stagingRoot },
+    { host: dockerHostIngressRoot, local: ingressRoot },
+  );
+  const managedRuntimeUid = process.getuid?.() ?? 12002;
+  const managedRuntimeGid = process.getgid?.() ?? 12002;
   return {
     docker,
     secretStore,
+    roots: { stagingRoot, ingressRoot, dockerHostStagingRoot, dockerHostIngressRoot },
+    managedUser: `${managedRuntimeUid}:${managedRuntimeGid}`,
     adapter: new DockerRuntimeAdapter({
       docker: docker as never,
       secretStore,
       imageLock,
       providerCatalog,
-      stagingRoot: join(temporaryRoot, "staging"),
-      ingressRoot: join(temporaryRoot, "ingress"),
+      stagingRoot,
+      ingressRoot,
+      dockerHostStagingRoot,
+      dockerHostIngressRoot,
+      managedRuntimeUid,
+      managedRuntimeGid,
       initializerTimeoutMs: 1_000,
-    }),
+    } as never),
   };
 }
 
-test("initializer and gateway use exact isolated options without secret bytes", async () => {
-  const { adapter, docker, secretStore } = buildAdapter();
+test("initializer and gateway use daemon-visible binds, one numeric identity, and exact split networks", async () => {
+  const { adapter, docker, secretStore, roots, managedUser } = buildAdapter();
   const request = signed();
   const observation = await adapter.provision(request);
 
@@ -379,6 +406,7 @@ test("initializer and gateway use exact isolated options without secret bytes", 
   const initializer = docker.created[0]!;
   const verifier = docker.created[1]!;
   const gateway = docker.created[2]!;
+  assert.equal(initializer.User, managedUser);
   assert.equal(initializer.HostConfig?.NetworkMode, "none");
   assert.deepEqual(initializer.HostConfig?.CapDrop, ["ALL"]);
   assert.equal(initializer.HostConfig?.ReadonlyRootfs, true);
@@ -387,6 +415,7 @@ test("initializer and gateway use exact isolated options without secret bytes", 
   assert.equal(initializer.HostConfig?.AutoRemove, false);
   assert.equal(initializer.Entrypoint?.[0], "/opt/hermes/.venv/bin/python");
   assert.equal(verifier.HostConfig?.NetworkMode, "none");
+  assert.equal(verifier.User, managedUser);
   assert.deepEqual(verifier.HostConfig?.CapDrop, ["ALL"]);
   assert.equal(verifier.HostConfig?.ReadonlyRootfs, true);
   assert.equal(verifier.HostConfig?.Binds?.[0]?.endsWith(":/opt/data:ro"), true);
@@ -398,7 +427,10 @@ test("initializer and gateway use exact isolated options without secret bytes", 
     "GATEWAY_MULTIPLEX_PROFILES=true",
   ]);
   assert.equal(gateway.HostConfig?.NetworkMode, "core-agent-backplane");
-  assert.equal(gateway.User, "hermes");
+  assert.equal(gateway.User, managedUser);
+  assert.deepEqual(Object.keys(gateway.NetworkingConfig?.EndpointsConfig ?? {}).sort(), [
+    "core-agent-backplane", "core-agent-egress",
+  ]);
   assert.equal(gateway.HostConfig?.Privileged, false);
   assert.deepEqual(gateway.HostConfig?.CapAdd, []);
   assert.deepEqual(gateway.HostConfig?.Devices, []);
@@ -414,12 +446,21 @@ test("initializer and gateway use exact isolated options without secret bytes", 
   assert.equal(secretStore.materials.length, 2);
   assert.equal(secretStore.materials.every((material) => material.released), true);
 
-  assert.deepEqual(await readdir(join(temporaryRoot, "staging")), []);
+  assert.deepEqual(await readdir(roots.stagingRoot), []);
+  const initializerBinds = initializer.HostConfig?.Binds ?? [];
+  assert(initializerBinds.some((bind) => bind.startsWith(`${roots.dockerHostStagingRoot}/`)));
+  assert.equal(initializerBinds.some((bind) => bind.startsWith(`${roots.stagingRoot}/`)), false);
   const ingressBind = gateway.HostConfig?.Binds?.find((bind) => bind.endsWith(":/run/secrets/hermes_ingress:ro"));
   assert(ingressBind !== undefined);
   const ingressPath = ingressBind.slice(0, -":/run/secrets/hermes_ingress:ro".length);
-  assert.equal(await readFile(ingressPath, "utf8"), ingressSecret);
-  assert.equal((await stat(ingressPath)).mode & 0o777, 0o600);
+  assert.match(ingressPath, /^\/srv\/core-agent\/runtime\/ingress\//u);
+  assert.equal(ingressPath.startsWith(roots.ingressRoot), false);
+  assert.equal(await readFile(docker.localPath(ingressPath), "utf8"), ingressSecret);
+  assert.equal((await stat(docker.localPath(ingressPath))).mode & 0o777, 0o600);
+  assert.equal(observation.private_origin, "http://172.30.0.7:8642");
+  assert.deepEqual([...docker.networks.keys()].sort(), ["core-agent-backplane", "core-agent-egress"]);
+  assert.equal((docker.networks.get("core-agent-backplane") as { Internal: boolean }).Internal, true);
+  assert.equal((docker.networks.get("core-agent-egress") as { Internal: boolean }).Internal, false);
 });
 
 test("provision validates the fixed non-secret manifest before starting the gateway", async () => {
@@ -480,7 +521,7 @@ test("initializer failure is bounded, releases material, and cleans the exact st
     },
   );
   assert.equal(secretStore.materials.every((material) => material.released), true);
-  assert.deepEqual(await readdir(join(temporaryRoot, "staging")), []);
+  assert.deepEqual(await readdir(join(temporaryRoot, "supervisor", "staging")), []);
 });
 
 test("lifecycle operations validate the exact managed container and preserve its volume", async () => {
@@ -490,7 +531,7 @@ test("lifecycle operations validate the exact managed container and preserve its
   const names = deriveRuntimeNames(request.runtime);
   const gateway = docker.containers.get(names.container)!;
   const ingressBind = gateway.options!.HostConfig!.Binds!.find((bind) => bind.endsWith(":/run/secrets/hermes_ingress:ro"))!;
-  const ingressPath = ingressBind.slice(0, -":/run/secrets/hermes_ingress:ro".length);
+  const ingressPath = docker.localPath(ingressBind.slice(0, -":/run/secrets/hermes_ingress:ro".length));
 
   const stopped = await adapter.execute(lifecycle("stop", "operation_stop_a"));
   assert.equal(stopped.outcome, "accepted");
@@ -547,7 +588,7 @@ test("delete cleans only the derived ingress credential when the container is al
   const names = deriveRuntimeNames(request.runtime);
   const gateway = docker.containers.get(names.container)!;
   const ingressBind = gateway.options!.HostConfig!.Binds!.find((bind) => bind.endsWith(":/run/secrets/hermes_ingress:ro"))!;
-  const ingressPath = ingressBind.slice(0, -":/run/secrets/hermes_ingress:ro".length);
+  const ingressPath = docker.localPath(ingressBind.slice(0, -":/run/secrets/hermes_ingress:ro".length));
   docker.containers.delete(names.container);
 
   const result = await adapter.execute(lifecycle("delete", "operation_delete_partial"));
@@ -564,7 +605,7 @@ test("delete refuses a symlinked generation directory without touching its outsi
   const names = deriveRuntimeNames(request.runtime);
   const gateway = docker.containers.get(names.container)!;
   const ingressBind = gateway.options!.HostConfig!.Binds!.find((bind) => bind.endsWith(":/run/secrets/hermes_ingress:ro"))!;
-  const ingressPath = ingressBind.slice(0, -":/run/secrets/hermes_ingress:ro".length);
+  const ingressPath = docker.localPath(ingressBind.slice(0, -":/run/secrets/hermes_ingress:ro".length));
   const generationDirectory = dirname(ingressPath);
   await rm(ingressPath);
   await rmdir(generationDirectory);
@@ -593,6 +634,32 @@ test("lifecycle refuses a network or bind mismatch before a Docker mutation", as
   const response = await adapter.execute(lifecycle("start", "operation_start_rejected"));
   assert.equal(response.outcome, "rejected");
   assert.deepEqual(docker.mutations, before);
+});
+
+test("lifecycle rejects a Supervisor-local ingress bind and an unapproved third network", async () => {
+  for (const mutate of [
+    (gateway: FakeContainer, _roots: { ingressRoot: string }, docker: FakeDocker) => {
+      const binds = gateway.options!.HostConfig!.Binds!;
+      const source = binds[1]!.slice(0, -":/run/secrets/hermes_ingress:ro".length);
+      binds[1] = `${docker.localPath(source)}:/run/secrets/hermes_ingress:ro`;
+    },
+    (gateway: FakeContainer) => {
+      gateway.options!.NetworkingConfig ??= { EndpointsConfig: {
+        "core-agent-backplane": {},
+        "core-agent-egress": {},
+      } };
+      gateway.options!.NetworkingConfig.EndpointsConfig!["untrusted-third-network"] = {};
+    },
+  ]) {
+    const built = buildAdapter();
+    await built.adapter.provision(signed());
+    const gateway = built.docker.containers.get(deriveRuntimeNames(signed().runtime).container)!;
+    mutate(gateway, built.roots, built.docker);
+    const before = [...built.docker.mutations];
+    const response = await built.adapter.execute(lifecycle("start", `operation_root_network_drift_${before.length}`));
+    assert.equal(response.outcome, "rejected");
+    assert.deepEqual(built.docker.mutations, before);
+  }
 });
 
 test("lifecycle inspects exact volume, network, and secure container config before action", async () => {
@@ -685,7 +752,7 @@ test("failed gateway startup removes the new container and derived ingress crede
   await assert.rejects(adapter.provision(signed()), /DEPENDENCY_UNAVAILABLE/);
   const names = deriveRuntimeNames(signed().runtime);
   assert.equal(docker.containers.has(names.container), false);
-  const ingressFiles = await readdir(join(temporaryRoot, "ingress"), { recursive: true }).catch(() => []);
+  const ingressFiles = await readdir(join(temporaryRoot, "supervisor", "ingress"), { recursive: true }).catch(() => []);
   assert.deepEqual(ingressFiles, []);
   assert.equal(docker.volumes.has(names.volume), true);
 });

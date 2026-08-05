@@ -220,6 +220,24 @@ test("initializer creates sorted profiles, exact env projections, and an idempot
   assert.equal((await readFile(paths.callLog, "utf8")).trim().split("\n").length, 4);
 });
 
+test("initializer supports the image-owned sticky volume root while keeping tenant children private", async (t) => {
+  const paths = await harness(t);
+  await chmod(paths.dataRoot, 0o1777);
+  const secret = join(paths.secretRoot, "profile_provider");
+  await writeSecret(secret, "sentinel-secret-provider-0123456789");
+  await writeFile(paths.bundlePath, JSON.stringify(bundle([
+    profile({ provider_secret_file: secret }),
+  ])));
+
+  const result = runInitializer(paths);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal((await stat(paths.dataRoot)).mode & 0o7777, 0o1777);
+  assert.equal((await stat(join(paths.dataRoot, ".core-agent"))).mode & 0o777, 0o700);
+  assert.equal((await stat(join(paths.dataRoot, "profiles"))).mode & 0o777, 0o700);
+  assert.equal((await stat(join(paths.dataRoot, "profiles", "consultant"))).mode & 0o777, 0o700);
+  assert.equal((await stat(join(paths.dataRoot, "profiles", "consultant", ".env"))).mode & 0o777, 0o600);
+});
+
 test("initializer rejects bundle drift, unsafe secrets, and closed-shape violations", async (t) => {
   const paths = await harness(t);
   const secret = join(paths.secretRoot, "profile_provider");

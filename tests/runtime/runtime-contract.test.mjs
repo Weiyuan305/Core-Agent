@@ -703,6 +703,7 @@ test("product image has fixed initializer and gateway entrypoints", () => {
   assert.match(dockerfile, /GATEWAY_MULTIPLEX_PROFILES=true/);
   assert.match(dockerfile, /chown root:root \/opt\/core-agent\/initialize\.py \/opt\/core-agent\/gateway-entrypoint\.sh/);
   assert.match(dockerfile, /chmod 0555 \/opt\/core-agent\/initialize\.py \/opt\/core-agent\/gateway-entrypoint\.sh/);
+  assert.match(dockerfile, /install -d -m 01777 -o root -g root \/opt\/data/);
   assert.doesNotMatch(dockerfile, /API_SERVER_KEY=/);
 });
 

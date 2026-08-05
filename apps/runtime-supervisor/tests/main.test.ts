@@ -7,7 +7,11 @@ const valid = {
   CORE_AGENT_SUPERVISOR_SOCKET_PATH: "/run/core-agent/supervisor.sock",
   CORE_AGENT_SUPERVISOR_JOURNAL_ROOT: "/var/lib/core-agent/journal",
   CORE_AGENT_SUPERVISOR_STAGING_ROOT: "/var/lib/core-agent/staging",
+  CORE_AGENT_DOCKER_HOST_STAGING_ROOT: "/srv/core-agent/runtime/staging",
   CORE_AGENT_SUPERVISOR_INGRESS_ROOT: "/var/lib/core-agent/ingress",
+  CORE_AGENT_DOCKER_HOST_INGRESS_ROOT: "/srv/core-agent/runtime/ingress",
+  CORE_AGENT_MANAGED_RUNTIME_UID: String(process.getuid?.() ?? 12002),
+  CORE_AGENT_MANAGED_RUNTIME_GID: String(process.getgid?.() ?? 12002),
   CORE_AGENT_PROVIDER_SECRET_ROOT: "/run/secrets/provider",
   CORE_AGENT_INGRESS_SECRET_ROOT: "/run/secrets/ingress",
   CORE_AGENT_DOCKER_SOCKET_PATH: "/var/run/docker.sock",
@@ -20,7 +24,11 @@ test("Supervisor main accepts only explicit absolute managed paths", () => {
     socketPath: valid.CORE_AGENT_SUPERVISOR_SOCKET_PATH,
     journalRoot: valid.CORE_AGENT_SUPERVISOR_JOURNAL_ROOT,
     stagingRoot: valid.CORE_AGENT_SUPERVISOR_STAGING_ROOT,
+    dockerHostStagingRoot: valid.CORE_AGENT_DOCKER_HOST_STAGING_ROOT,
     ingressRoot: valid.CORE_AGENT_SUPERVISOR_INGRESS_ROOT,
+    dockerHostIngressRoot: valid.CORE_AGENT_DOCKER_HOST_INGRESS_ROOT,
+    managedRuntimeUid: Number(valid.CORE_AGENT_MANAGED_RUNTIME_UID),
+    managedRuntimeGid: Number(valid.CORE_AGENT_MANAGED_RUNTIME_GID),
     providerSecretRoot: valid.CORE_AGENT_PROVIDER_SECRET_ROOT,
     ingressSecretRoot: valid.CORE_AGENT_INGRESS_SECRET_ROOT,
     dockerSocketPath: valid.CORE_AGENT_DOCKER_SOCKET_PATH,
@@ -32,9 +40,17 @@ test("Supervisor main accepts only explicit absolute managed paths", () => {
     ["CORE_AGENT_DOCKER_SOCKET_PATH", "\n/private/docker.sock"],
     ["CORE_AGENT_PROVIDER_SECRET_ROOT", ""],
     ["CORE_AGENT_INGRESS_SECRET_ROOT", ""],
+    ["CORE_AGENT_DOCKER_HOST_STAGING_ROOT", "relative/staging"],
+    ["CORE_AGENT_DOCKER_HOST_INGRESS_ROOT", "/srv/core-agent/../ingress"],
+    ["CORE_AGENT_MANAGED_RUNTIME_UID", "hermes"],
+    ["CORE_AGENT_MANAGED_RUNTIME_GID", "-1"],
   ] as const) {
     assert.throws(() => readSupervisorConfiguration({ ...valid, [key]: value }), /SUPERVISOR_REJECTED/);
   }
+  assert.throws(() => readSupervisorConfiguration({
+    ...valid,
+    CORE_AGENT_MANAGED_RUNTIME_UID: String((process.getuid?.() ?? 12002) + 1),
+  }), /SUPERVISOR_REJECTED/);
 });
 
 test("Supervisor routes only provider and ingress references to purpose-scoped projections", async () => {
