@@ -414,6 +414,21 @@ test("stale workers cannot backdate or future-date database lease authority", as
   } as never), { kind: "lease_lost" });
 });
 
+test("a replacement Worker with the same configured owner fences stale claim attempts", async () => {
+  await insertJob();
+  const [first] = await claimJobs(db, { tenantId: "tenant_jobs", workerId: "worker_same", limit: 1, leaseMs: 30_000 });
+  await db.updateTable("worker_jobs").set({ lease_expires_at: new Date(0) })
+    .where("tenant_id", "=", "tenant_jobs").where("job_id", "=", "job_1").execute();
+  const [replacement] = await claimJobs(db, { tenantId: "tenant_jobs", workerId: "worker_same", limit: 1, leaseMs: 30_000 });
+  assert.equal(replacement?.attemptCount, (first?.attemptCount ?? 0) + 1);
+  assert.deepEqual(await heartbeatJob(db, {
+    tenantId: "tenant_jobs", jobId: "job_1", workerId: "worker_same", attemptCount: first!.attemptCount, leaseMs: 30_000,
+  }), { kind: "lease_lost" });
+  assert.deepEqual(await completeJob(db, {
+    tenantId: "tenant_jobs", jobId: "job_1", workerId: "worker_same", attemptCount: first!.attemptCount,
+  }), { kind: "lease_lost" });
+});
+
 test("persisted job failures use a required registered-material redactor", async () => {
   await insertJob();
   await claimJobs(db, { tenantId: "tenant_jobs", workerId: "worker_a", limit: 1, leaseMs: 30_000 });
