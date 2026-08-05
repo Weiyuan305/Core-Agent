@@ -48,23 +48,23 @@ function nextAttempt(dependencies: WorkerDependencies, job: ClaimedJob, summary:
 
 async function dispatchRuntimeJob(dependencies: WorkerDependencies, job: ClaimedJob, signal: AbortSignal): Promise<HandlerResult> {
   const ref = jobRef(dependencies, job);
-  if (job.jobKind === "provision_runtime" || job.jobKind === "dispatch_outbox") {
+  if (job.jobKind === "provision_runtime") return withRuntimeAdvisoryLock(dependencies.db, job.tenantId, job.payloadRef, async () => {
     const recovery = await handleNonReconcileRecovery({
-      failRuntime: (_job, summary) => dependencies.repositories.runtimes.failRuntimeJob(ref, summary, "runtime.provision"),
-      complete: async () => (await completeJob(dependencies.db, { tenantId: job.tenantId, jobId: job.jobId, workerId: dependencies.workerId })).kind === "updated",
+      failRuntime: (_job, summary) => dependencies.repositories.runtimes.failProvisionJob(ref, summary),
+      complete: async () => false,
     }, job);
     if (recovery !== undefined) return recovery;
-  }
-  if (job.jobKind === "provision_runtime") return withRuntimeAdvisoryLock(dependencies.db, job.tenantId, job.payloadRef, () => handleProvisionRuntime({
-    transitionToProvisioning: () => dependencies.repositories.runtimes.beginProvision(ref),
-    loadFacts: () => dependencies.repositories.runtimes.loadProvisionFacts(job.tenantId, job.payloadRef, dependencies.providerCatalog),
-    supervisor: (request, operationSignal) => dependencies.supervisorClient.execute(request, operationSignal),
-    getIngressMaterial: (reference) => dependencies.ingressSecretStore.get(reference),
-    probe: (input, operationSignal) => dependencies.hermesClient.probe(input, operationSignal),
-    succeed: () => dependencies.repositories.runtimes.finishProvision(ref),
-    retry: async (_job, summary) => { const retry = nextAttempt(dependencies, job, summary); return dependencies.repositories.runtimes.retryJob(ref, retry.summary, retry.at); },
-    fail: (_job, summary) => dependencies.repositories.runtimes.failRuntimeJob(ref, summary, "runtime.provision"),
-  }, job, signal));
+    return handleProvisionRuntime({
+      transitionToProvisioning: () => dependencies.repositories.runtimes.beginProvision(ref),
+      loadFacts: () => dependencies.repositories.runtimes.loadProvisionFacts(job.tenantId, job.payloadRef, dependencies.providerCatalog),
+      supervisor: (request, operationSignal) => dependencies.supervisorClient.execute(request, operationSignal),
+      getIngressMaterial: (reference) => dependencies.ingressSecretStore.get(reference),
+      probe: (input, operationSignal) => dependencies.hermesClient.probe(input, operationSignal),
+      succeed: () => dependencies.repositories.runtimes.finishProvision(ref),
+      retry: async (_job, summary) => { const retry = nextAttempt(dependencies, job, summary); return dependencies.repositories.runtimes.retryJob(ref, retry.summary, retry.at); },
+      fail: (_job, summary) => dependencies.repositories.runtimes.failProvisionJob(ref, summary),
+    }, job, signal);
+  });
   if (job.jobKind === "reconcile_runtime") return withRuntimeAdvisoryLock(dependencies.db, job.tenantId, job.payloadRef, () => handleReconcileRuntime({
     loadFacts: () => dependencies.repositories.runtimes.loadReconcileFacts(job.tenantId, job.payloadRef),
     supervisor: (request, operationSignal) => dependencies.supervisorClient.execute(request, operationSignal),
@@ -90,6 +90,11 @@ async function dispatchRuntimeJob(dependencies: WorkerDependencies, job: Claimed
     fail: (_job, summary) => dependencies.repositories.runtimes.failRuntimeJob(ref, summary),
   }, { tenantId: job.tenantId, jobId: job.jobId, attemptCount: job.attemptCount, maxAttempts: job.maxAttempts, targetCommandVersion: job.targetCommandVersion, command: job.runtimeCommand, effectState: job.effectState, recoveryOnly: job.recoveryOnly }, signal));
   if (job.jobKind === "dispatch_outbox") {
+    const recovery = await handleNonReconcileRecovery({
+      failRuntime: async () => ({ kind: "lease_lost" }),
+      complete: async () => (await completeJob(dependencies.db, { tenantId: job.tenantId, jobId: job.jobId, workerId: dependencies.workerId })).kind === "updated",
+    }, job);
+    if (recovery !== undefined) return recovery;
     await pollOutbox(dependencies);
     await completeJob(dependencies.db, { tenantId: job.tenantId, jobId: job.jobId, workerId: dependencies.workerId });
     return { kind: "succeeded" };

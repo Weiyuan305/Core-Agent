@@ -70,6 +70,15 @@ expected resource version and committing a newer intent. Therefore a command
 cannot be admitted in the gap between the Worker's check and external effect;
 different runtimes retain independent lock keys.
 
+The initial `provision_runtime` job owns runtime initialization only while
+`runtime_containers.command_version = 0`. Normal provisioning and final-attempt
+provision recovery both hold that same runtime advisory lock before their
+atomic repository admission. If a Runtime Command has advanced the version,
+the old provision job is lease-fenced to `succeeded` with a bounded superseded
+summary and performs no Supervisor, Hermes, or runtime-state write. Provision
+begin, success, and failure transactions repeat the command-version defense so
+a misplaced caller cannot overwrite newer reconcile truth.
+
 Worker transactions that start or terminalize leased runtime work fence the
 lease before and after any runtime-row wait. They first lock the owned
 `worker_jobs` row, lock the runtime row, then re-check owner, running status,
@@ -105,8 +114,10 @@ recovery may only inspect: a healthy observation that proves the requested
 state can complete, while non-healthy, contradictory, or unprovable state
 fails terminally. In particular, `pre_effect` restart cannot be proven by a
 running inspection. Provision recovery fails without calling Supervisor and
-Outbox recovery completes without dispatching a notification. Every terminal
-write still uses the owned, unexpired lease fence. The production Worker
+Outbox recovery completes without dispatching a notification. When provision
+has already been superseded, recovery completes only the old job and preserves
+the newer runtime observation. Every terminal write still uses the owned,
+unexpired lease fence. The production Worker
 allowlist excludes `execute_agent_run` until Task 14 supplies its atomic Run
 and job terminalization contract.
 

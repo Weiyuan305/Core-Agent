@@ -60,7 +60,7 @@ export {
   type WorkerJobKind,
 } from "./repositories/jobs.js";
 export { acquireRuntimeTransactionAdvisoryLock, runtimeAdvisoryLockKey, withRuntimeAdvisoryLock } from "./repositories/runtime-lock.js";
-export { WorkerRuntimeRepository, type RuntimeWorkerJobRef, type StoredProvisionFacts, type StoredProvisionProfile, type StoredReconcileFacts } from "./repositories/worker-runtime.js";
+export { WorkerRuntimeRepository, type ProvisionAdmissionResult, type ProvisionCompletionResult, type ProvisionFailureResult, type RuntimeWorkerJobRef, type StoredProvisionFacts, type StoredProvisionProfile, type StoredReconcileFacts } from "./repositories/worker-runtime.js";
 export { claimOutboxWakeups, failOutbox, markOutboxDelivered, rescheduleOutbox, type ClaimedOutboxWakeup, type ClaimOutboxInput } from "./repositories/outbox.js";
 export {
   appendProductEvents,

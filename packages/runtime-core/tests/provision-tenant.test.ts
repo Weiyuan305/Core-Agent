@@ -562,13 +562,102 @@ test("beginProvision rolls back its transition and audit after lease expiry duri
   const repository = new WorkerRuntimeRepository(db, createRedactor([]));
   const beginning = repository.beginProvision({ tenantId: context.tenantId, runtimeId: accepted.runtime.container_id, jobId: job.job_id, workerId: "worker_old" });
   await rowLocker;
-  assert.equal(await beginning, false);
+  assert.deepEqual(await beginning, { kind: "lease_lost" });
   assert.deepEqual(await db.selectFrom("runtime_containers").select(["resource_version", "observed_state", "health_status", "failure_summary"]).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow(), beforeRuntime);
   assert.deepEqual(await db.selectFrom("product_events").select(({ fn }) => fn.countAll<string>().as("count")).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow(), beforeEvents);
   assert.deepEqual(await db.selectFrom("audit_events").select(({ fn }) => fn.countAll<string>().as("count")).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow(), beforeAudit);
 });
 
-for (const terminalOperation of ["finishProvision", "failRuntimeJob"] as const) {
+test("initial provision admission atomically supersedes command-versioned work without changing runtime truth", async () => {
+  const provisioning = b2bRequest("tenant_provision_admission_superseded");
+  const context = { tenantId: provisioning.identity_graph.tenant.tenant_id, requestId: "request_provision_admission_superseded", traceId: "trace_provision_admission_superseded", actorId: "core_agent_provisioner" as const, membershipId: "core_agent_provisioner_admin" as const, effectiveRole: "admin" as const };
+  const accepted = await provisionTenant({ db, providerCatalog, imageLock }, context, provisioning);
+  await commandRuntime({ db }, context, withHash({ schema_version: 1 as const, idempotency_key: "idem_provision_admission_restart", expected_resource_version: 1, command: "restart" as const }));
+  const job = await db.selectFrom("worker_jobs").select("job_id").where("tenant_id", "=", context.tenantId).where("job_kind", "=", "provision_runtime").executeTakeFirstOrThrow();
+  await db.updateTable("worker_jobs").set({ status: "running", lease_owner: "worker_old", lease_expires_at: new Date("2100-01-01T00:00:00.000Z") }).where("tenant_id", "=", context.tenantId).where("job_id", "=", job.job_id).execute();
+  const before = await db.selectFrom("runtime_containers").select(["resource_version", "command_version", "desired_state", "observed_state", "health_status", "failure_summary"]).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow();
+  const repository = new WorkerRuntimeRepository(db, createRedactor([]));
+
+  assert.deepEqual(await repository.beginProvision({ tenantId: context.tenantId, runtimeId: accepted.runtime.container_id, jobId: job.job_id, workerId: "worker_old" }), { kind: "superseded" });
+  assert.deepEqual(await db.selectFrom("runtime_containers").select(["resource_version", "command_version", "desired_state", "observed_state", "health_status", "failure_summary"]).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow(), before);
+  assert.deepEqual(await db.selectFrom("worker_jobs").select(["status", "lease_owner", "lease_expires_at", "last_error_summary"]).where("tenant_id", "=", context.tenantId).where("job_id", "=", job.job_id).executeTakeFirstOrThrow(), {
+    status: "succeeded", lease_owner: null, lease_expires_at: null, last_error_summary: "Superseded by a newer runtime command",
+  });
+});
+
+test("final provision recovery waits for newer reconcile truth and only supersedes its owned job", async () => {
+  const provisioning = b2bRequest("tenant_provision_recovery_lock");
+  const context = { tenantId: provisioning.identity_graph.tenant.tenant_id, requestId: "request_provision_recovery_lock", traceId: "trace_provision_recovery_lock", actorId: "core_agent_provisioner" as const, membershipId: "core_agent_provisioner_admin" as const, effectiveRole: "admin" as const };
+  const accepted = await provisionTenant({ db, providerCatalog, imageLock }, context, provisioning);
+  await commandRuntime({ db }, context, withHash({ schema_version: 1 as const, idempotency_key: "idem_provision_recovery_restart", expected_resource_version: 1, command: "restart" as const }));
+  const job = await db.selectFrom("worker_jobs").select("job_id").where("tenant_id", "=", context.tenantId).where("job_kind", "=", "provision_runtime").executeTakeFirstOrThrow();
+  await db.updateTable("worker_jobs").set({ status: "running", attempt_count: 5, max_attempts: 5, lease_owner: "worker_recovery", lease_expires_at: new Date("2100-01-01T00:00:00.000Z") }).where("tenant_id", "=", context.tenantId).where("job_id", "=", job.job_id).execute();
+
+  let truthReady!: () => void; const truthReadyPromise = new Promise<void>((resolve) => { truthReady = resolve; });
+  let releaseTruth!: () => void; const releaseTruthPromise = new Promise<void>((resolve) => { releaseTruth = resolve; });
+  const newerReconcile = withRuntimeAdvisoryLock(db, context.tenantId, accepted.runtime.container_id, async () => {
+    await db.updateTable("runtime_containers").set({ observed_state: "ready", health_status: "healthy", failure_summary: null, resource_version: 3 }).where("tenant_id", "=", context.tenantId).where("container_id", "=", accepted.runtime.container_id).execute();
+    truthReady();
+    await releaseTruthPromise;
+  });
+  await truthReadyPromise;
+
+  const repository = new WorkerRuntimeRepository(db, createRedactor([]));
+  let recoveryEntered = false;
+  const recovering = withRuntimeAdvisoryLock(db, context.tenantId, accepted.runtime.container_id, async () => {
+    recoveryEntered = true;
+    return repository.failProvisionJob({ tenantId: context.tenantId, runtimeId: accepted.runtime.container_id, jobId: job.job_id, workerId: "worker_recovery" }, "Final-attempt recovery cannot safely replay runtime provisioning");
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(recoveryEntered, false, "old provision recovery must wait for the same-runtime lock");
+  assert.equal(await withRuntimeAdvisoryLock(db, context.tenantId, "runtime_other", async () => true), true, "another runtime must remain independent");
+
+  releaseTruth();
+  await newerReconcile;
+  assert.deepEqual(await recovering, { kind: "superseded" });
+  assert.deepEqual(await db.selectFrom("runtime_containers").select(["resource_version", "command_version", "desired_state", "observed_state", "health_status", "failure_summary"]).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow(), {
+    resource_version: "3", command_version: "1", desired_state: "running", observed_state: "ready", health_status: "healthy", failure_summary: null,
+  });
+  assert.deepEqual(await db.selectFrom("worker_jobs").select(["status", "lease_owner", "last_error_summary"]).where("tenant_id", "=", context.tenantId).where("job_id", "=", job.job_id).executeTakeFirstOrThrow(), {
+    status: "succeeded", lease_owner: null, last_error_summary: "Superseded by a newer runtime command",
+  });
+});
+
+test("superseded provision terminal defenses preserve newer runtime truth", async () => {
+  for (const operation of ["finish", "fail"] as const) {
+    const provisioning = b2bRequest(`tenant_provision_terminal_${operation}`);
+    const context = { tenantId: provisioning.identity_graph.tenant.tenant_id, requestId: `request_provision_terminal_${operation}`, traceId: `trace_provision_terminal_${operation}`, actorId: "core_agent_provisioner" as const, membershipId: "core_agent_provisioner_admin" as const, effectiveRole: "admin" as const };
+    const accepted = await provisionTenant({ db, providerCatalog, imageLock }, context, provisioning);
+    await commandRuntime({ db }, context, withHash({ schema_version: 1 as const, idempotency_key: `idem_provision_terminal_${operation}`, expected_resource_version: 1, command: "restart" as const }));
+    const job = await db.selectFrom("worker_jobs").select("job_id").where("tenant_id", "=", context.tenantId).where("job_kind", "=", "provision_runtime").executeTakeFirstOrThrow();
+    await db.updateTable("runtime_containers").set({ observed_state: "ready", health_status: "healthy", failure_summary: null, resource_version: 3 }).where("tenant_id", "=", context.tenantId).execute();
+    await db.updateTable("worker_jobs").set({ status: "running", lease_owner: "worker_old", lease_expires_at: new Date("2100-01-01T00:00:00.000Z") }).where("tenant_id", "=", context.tenantId).where("job_id", "=", job.job_id).execute();
+    const before = await db.selectFrom("runtime_containers").select(["resource_version", "command_version", "observed_state", "health_status", "failure_summary"]).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow();
+    const repository = new WorkerRuntimeRepository(db, createRedactor([]));
+    const ref = { tenantId: context.tenantId, runtimeId: accepted.runtime.container_id, jobId: job.job_id, workerId: "worker_old" };
+    const result = operation === "finish" ? await repository.finishProvision(ref) : await repository.failProvisionJob(ref, "synthetic failure");
+    assert.deepEqual(result, { kind: "superseded" }, operation);
+    assert.deepEqual(await db.selectFrom("runtime_containers").select(["resource_version", "command_version", "observed_state", "health_status", "failure_summary"]).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow(), before, operation);
+  }
+});
+
+test("superseded provision cannot terminalize after lease loss", async () => {
+  const provisioning = b2bRequest("tenant_provision_superseded_lease_loss");
+  const context = { tenantId: provisioning.identity_graph.tenant.tenant_id, requestId: "request_provision_superseded_lease_loss", traceId: "trace_provision_superseded_lease_loss", actorId: "core_agent_provisioner" as const, membershipId: "core_agent_provisioner_admin" as const, effectiveRole: "admin" as const };
+  const accepted = await provisionTenant({ db, providerCatalog, imageLock }, context, provisioning);
+  await commandRuntime({ db }, context, withHash({ schema_version: 1 as const, idempotency_key: "idem_provision_lease_loss_restart", expected_resource_version: 1, command: "restart" as const }));
+  const job = await db.selectFrom("worker_jobs").select("job_id").where("tenant_id", "=", context.tenantId).where("job_kind", "=", "provision_runtime").executeTakeFirstOrThrow();
+  await db.updateTable("worker_jobs").set({ status: "running", lease_owner: "worker_expired", lease_expires_at: new Date(0) }).where("tenant_id", "=", context.tenantId).where("job_id", "=", job.job_id).execute();
+  const beforeRuntime = await db.selectFrom("runtime_containers").select(["resource_version", "command_version", "observed_state", "health_status", "failure_summary"]).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow();
+  const beforeJob = await db.selectFrom("worker_jobs").select(["status", "lease_owner", "last_error_summary"]).where("tenant_id", "=", context.tenantId).where("job_id", "=", job.job_id).executeTakeFirstOrThrow();
+  const repository = new WorkerRuntimeRepository(db, createRedactor([]));
+  assert.deepEqual(await repository.beginProvision({ tenantId: context.tenantId, runtimeId: accepted.runtime.container_id, jobId: job.job_id, workerId: "worker_expired" }), { kind: "lease_lost" });
+  assert.deepEqual(await repository.failProvisionJob({ tenantId: context.tenantId, runtimeId: accepted.runtime.container_id, jobId: job.job_id, workerId: "worker_expired" }, "synthetic failure"), { kind: "lease_lost" });
+  assert.deepEqual(await db.selectFrom("runtime_containers").select(["resource_version", "command_version", "observed_state", "health_status", "failure_summary"]).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow(), beforeRuntime);
+  assert.deepEqual(await db.selectFrom("worker_jobs").select(["status", "lease_owner", "last_error_summary"]).where("tenant_id", "=", context.tenantId).where("job_id", "=", job.job_id).executeTakeFirstOrThrow(), beforeJob);
+});
+
+for (const terminalOperation of ["finishProvision", "failProvisionJob"] as const) {
   test(`${terminalOperation} rolls back runtime events and audit after lease expiry during row-lock wait`, async () => {
     const fixtureId = terminalOperation === "finishProvision" ? "finish_prov_expiry" : "fail_job_expiry";
     const provisioning = b2bRequest(`tenant_${fixtureId}`);
@@ -586,9 +675,9 @@ for (const terminalOperation of ["finishProvision", "failRuntimeJob"] as const) 
     const repository = new WorkerRuntimeRepository(db, createRedactor([]));
     const terminal = terminalOperation === "finishProvision"
       ? repository.finishProvision({ tenantId: context.tenantId, runtimeId: accepted.runtime.container_id, jobId: job.job_id, workerId: "worker_old" })
-      : repository.failRuntimeJob({ tenantId: context.tenantId, runtimeId: accepted.runtime.container_id, jobId: job.job_id, workerId: "worker_old" }, "synthetic permanent failure", "runtime.provision");
+      : repository.failProvisionJob({ tenantId: context.tenantId, runtimeId: accepted.runtime.container_id, jobId: job.job_id, workerId: "worker_old" }, "synthetic permanent failure");
     await rowLocker;
-    assert.equal(await terminal, false);
+    assert.deepEqual(await terminal, { kind: "lease_lost" });
     assert.deepEqual(await db.selectFrom("runtime_containers").select(["resource_version", "observed_state", "health_status", "failure_summary"]).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow(), beforeRuntime);
     assert.deepEqual(await db.selectFrom("product_events").select(({ fn }) => fn.countAll<string>().as("count")).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow(), beforeEvents);
     assert.deepEqual(await db.selectFrom("audit_events").select(({ fn }) => fn.countAll<string>().as("count")).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow(), beforeAudit);

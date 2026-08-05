@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { implementedWorkerJobKinds } from "../src/main.js";
@@ -15,7 +16,7 @@ function job(jobKind: "provision_runtime" | "dispatch_outbox", recoveryOnly = tr
 test("final provision and Outbox recovery terminalize without any external dispatch", async () => {
   const calls: string[] = [];
   const port = {
-    failRuntime: async () => { calls.push("fail-runtime"); return true; },
+    failRuntime: async () => { calls.push("fail-runtime"); return { kind: "failed" as const }; },
     complete: async () => { calls.push("complete"); return true; },
   };
   assert.equal((await handleNonReconcileRecovery(port, job("provision_runtime")))?.kind, "failed");
@@ -24,7 +25,7 @@ test("final provision and Outbox recovery terminalize without any external dispa
 });
 
 test("normal provision and Outbox jobs continue to their implemented handlers", async () => {
-  const port = { failRuntime: async () => true, complete: async () => true };
+  const port = { failRuntime: async () => ({ kind: "failed" as const }), complete: async () => true };
   assert.equal(await handleNonReconcileRecovery(port, job("provision_runtime", false)), undefined);
   assert.equal(await handleNonReconcileRecovery(port, job("dispatch_outbox", false)), undefined);
 });
@@ -35,7 +36,19 @@ test("production Worker claims only implemented jobs and excludes Agent Run exec
 });
 
 test("final non-reconcile recovery reports lease loss instead of claiming terminal ownership", async () => {
-  const port = { failRuntime: async () => false, complete: async () => false };
+  const port = { failRuntime: async () => ({ kind: "lease_lost" as const }), complete: async () => false };
   assert.deepEqual(await handleNonReconcileRecovery(port, job("provision_runtime")), { kind: "failed", summary: "Worker job lease lost" });
   assert.deepEqual(await handleNonReconcileRecovery(port, job("dispatch_outbox")), { kind: "failed", summary: "Worker job lease lost" });
+});
+
+test("dispatch places normal and recovery provision handling inside the runtime advisory lock", async () => {
+  const source = await readFile(new URL("../src/main.ts", import.meta.url), "utf8");
+  const dispatchStart = source.indexOf("async function dispatchRuntimeJob");
+  const provisionStart = source.indexOf('if (job.jobKind === "provision_runtime") return withRuntimeAdvisoryLock', dispatchStart);
+  const reconcileStart = source.indexOf('if (job.jobKind === "reconcile_runtime") return withRuntimeAdvisoryLock', provisionStart);
+  assert.notEqual(dispatchStart, -1);
+  assert.notEqual(provisionStart, -1);
+  assert.notEqual(reconcileStart, -1);
+  assert.doesNotMatch(source.slice(dispatchStart, provisionStart), /handleNonReconcileRecovery/);
+  assert.match(source.slice(provisionStart, reconcileStart), /handleNonReconcileRecovery/);
 });

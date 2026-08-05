@@ -1921,7 +1921,7 @@ Define `WorkerDependencies` as one closed interface containing only `db`,
 client, Docker socket path, provider SecretStore, or unfiltered environment
 object.
 
-Each dispatch installs a heartbeat every 10 seconds, clears it in `finally`, and checks lease ownership before every terminal transaction. Per-process concurrency is eight; provisioning/reconciliation additionally use a runtime-level PostgreSQL advisory lock so two jobs never mutate one runtime concurrently.
+Each dispatch installs a heartbeat every 10 seconds, clears it in `finally`, and checks lease ownership before every terminal transaction. Per-process concurrency is eight; every normal or recovery provisioning path and every reconciliation path uses a runtime-level PostgreSQL advisory lock so two jobs never mutate one runtime concurrently. Outbox recovery does not take a runtime lock.
 
 - [ ] **Step 4: Implement provision handling**
 
@@ -1939,6 +1939,14 @@ Within a short transaction, transition `requested -> provisioning` and append `r
 7. release ingress material immediately after probes.
 
 On complete success, one transaction transitions `provisioning -> starting -> ready` as permitted, sets health `healthy`, activates Tenant/Profiles, appends ordered events/audit/Outbox, and completes the job. Permanent failure transitions to `failed` with redacted summary. Retryable failure leaves the last truthful observed state and reschedules.
+
+The initial provision job is current only while `command_version === 0`.
+Admission locks the owned job and runtime row atomically. If any Runtime Command
+has advanced the version, normal or recovery provisioning terminalizes only
+the old job as succeeded/superseded and performs zero Supervisor/Hermes or
+runtime-state effects. Begin, finish, and failure repository transactions all
+defend this invariant; a superseded final recovery waits for the same runtime
+lock and cannot overwrite newer reconcile truth.
 
 - [ ] **Step 5: Implement desired/observed reconciliation**
 

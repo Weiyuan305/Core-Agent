@@ -4,6 +4,9 @@ import { isIP } from "node:net";
 import {
   canonicalSupervisorRequestHash,
   type ProvisionRuntimeCommandDataV1,
+  type ProvisionAdmissionResult,
+  type ProvisionCompletionResult,
+  type ProvisionFailureResult,
   type SecretReference,
   type SupervisorRequestV1,
   type SupervisorResponseV1,
@@ -37,13 +40,13 @@ interface ProvisionJob { readonly tenantId: string; readonly jobId: string; read
 
 export interface ProvisionRuntimePort {
   loadFacts(job: ProvisionJob): Promise<ProvisionRuntimeFacts>;
-  transitionToProvisioning(job: ProvisionJob): Promise<boolean>;
+  transitionToProvisioning(job: ProvisionJob): Promise<ProvisionAdmissionResult>;
   supervisor(request: SupervisorRequestV1, signal: AbortSignal): Promise<SupervisorResponseV1>;
   getIngressMaterial(reference: SecretReference): Promise<IngressMaterial>;
   probe(input: { origin: string; profileRef: string; sessionId: string; ingressKey: string; modelId: string }, signal: AbortSignal): Promise<void>;
-  succeed(job: ProvisionJob): Promise<boolean>;
+  succeed(job: ProvisionJob): Promise<ProvisionCompletionResult>;
   retry(job: ProvisionJob, summary: string): Promise<boolean>;
-  fail(job: ProvisionJob, summary: string): Promise<boolean>;
+  fail(job: ProvisionJob, summary: string): Promise<ProvisionFailureResult>;
 }
 
 export function validatePrivateHermesOrigin(value: string | undefined): string {
@@ -106,7 +109,9 @@ function isTypedRetryable(error: unknown): boolean {
 
 export async function handleProvisionRuntime(port: ProvisionRuntimePort, job: ProvisionJob, signal: AbortSignal): Promise<HandlerResult> {
   try {
-    if (!await port.transitionToProvisioning(job)) return { kind: "failed", summary: "Worker job lease lost" };
+    const admission = await port.transitionToProvisioning(job);
+    if (admission.kind === "lease_lost") return { kind: "failed", summary: "Worker job lease lost" };
+    if (admission.kind === "superseded") return { kind: "succeeded" };
     const facts = await port.loadFacts(job);
     const response = await port.supervisor(buildProvisionRuntimeRequest(facts, job.jobId), signal);
     if (response.outcome !== "accepted") {
@@ -114,7 +119,9 @@ export async function handleProvisionRuntime(port: ProvisionRuntimePort, job: Pr
         await port.retry(job, boundedSummary(response.summary));
         return { kind: "retry", summary: boundedSummary(response.summary) };
       }
-      await port.fail(job, boundedSummary(response.summary));
+      const failed = await port.fail(job, boundedSummary(response.summary));
+      if (failed.kind === "lease_lost") return { kind: "failed", summary: "Worker job lease lost" };
+      if (failed.kind === "superseded") return { kind: "succeeded" };
       return { kind: "failed", summary: boundedSummary(response.summary) };
     }
     if (!observationMatches(facts, response)) throw new Error("Supervisor observation does not match stored runtime identity");
@@ -126,7 +133,8 @@ export async function handleProvisionRuntime(port: ProvisionRuntimePort, job: Pr
         await port.probe({ origin, profileRef: profile.hermesProfileRef, sessionId: `readiness-${facts.runtimeId}-${facts.generation}`, ingressKey: material.text(), modelId: profile.modelId }, signal);
       }
     } finally { material.release(); }
-    if (!await port.succeed(job)) return { kind: "failed", summary: "Worker job lease lost" };
+    const completed = await port.succeed(job);
+    if (completed.kind === "lease_lost") return { kind: "failed", summary: "Worker job lease lost" };
     return { kind: "succeeded" };
   } catch (error) {
     const summary = boundedSummary(error);
@@ -134,6 +142,9 @@ export async function handleProvisionRuntime(port: ProvisionRuntimePort, job: Pr
     if (job.attemptCount < job.maxAttempts && isTypedRetryable(error)) {
       await port.retry(job, summary); return { kind: "retry", summary };
     }
-    await port.fail(job, summary); return { kind: "failed", summary };
+    const failed = await port.fail(job, summary);
+    if (failed.kind === "lease_lost") return { kind: "failed", summary: "Worker job lease lost" };
+    if (failed.kind === "superseded") return { kind: "succeeded" };
+    return { kind: "failed", summary };
   }
 }

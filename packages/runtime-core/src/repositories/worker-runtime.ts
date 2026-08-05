@@ -22,6 +22,9 @@ export interface RuntimeWorkerJobRef {
   readonly workerId: string;
   readonly runtimeId: string;
 }
+export type ProvisionAdmissionResult = { readonly kind: "admitted" | "superseded" | "lease_lost" };
+export type ProvisionCompletionResult = { readonly kind: "completed" | "superseded" | "lease_lost" };
+export type ProvisionFailureResult = { readonly kind: "failed" | "superseded" | "lease_lost" };
 export interface StoredProvisionProfile {
   readonly profileId: string; readonly hermesProfileRef: string; readonly description: string;
   readonly providerConfigId: string; readonly providerBaseUrl: string; readonly modelId: string;
@@ -66,6 +69,15 @@ async function fencedTransaction(db: Kysely<RuntimeDatabase>, work: (trx: Transa
     return true;
   } catch (error) {
     if (error instanceof LeaseFenceLost) return false;
+    throw error;
+  }
+}
+async function provisionTransaction<Result extends { readonly kind: string }>(
+  db: Kysely<RuntimeDatabase>, work: (trx: Transaction<RuntimeDatabase>) => Promise<Result>,
+): Promise<Result | { readonly kind: "lease_lost" }> {
+  try { return await db.transaction().execute(work); }
+  catch (error) {
+    if (error instanceof LeaseFenceLost) return { kind: "lease_lost" };
     throw error;
   }
 }
@@ -127,24 +139,33 @@ export class WorkerRuntimeRepository {
       volumeRef: runtime.volume_ref, ingressSecretRef: { reference_id: ingress.reference_id, version: safeContractInteger(ingress.version), purpose: "hermes_ingress" }, profiles: mapped };
   }
 
-  public async beginProvision(job: RuntimeWorkerJobRef): Promise<boolean> {
-    return fencedTransaction(this.db, async (trx) => {
+  public async beginProvision(job: RuntimeWorkerJobRef): Promise<ProvisionAdmissionResult> {
+    return provisionTransaction(this.db, async (trx) => {
       await requireLease(trx, job, true);
-      const row = await trx.selectFrom("runtime_containers").select(["observed_state", "resource_version"]).where("tenant_id", "=", job.tenantId).where("container_id", "=", job.runtimeId).forUpdate().executeTakeFirstOrThrow();
+      const row = await trx.selectFrom("runtime_containers").select(["observed_state", "resource_version", "command_version"]).where("tenant_id", "=", job.tenantId).where("container_id", "=", job.runtimeId).forUpdate().executeTakeFirstOrThrow();
       await requireLease(trx, job);
-      if (row.observed_state === "provisioning") return;
+      if (safeContractInteger(row.command_version) > 0) {
+        await finishOwnedJob(trx, job, { status: "succeeded", lease_owner: null, lease_expires_at: null, last_error_summary: "Superseded by a newer runtime command", updated_at: this.now() });
+        return { kind: "superseded" } as const;
+      }
+      if (row.observed_state === "provisioning") return { kind: "admitted" } as const;
       if (row.observed_state !== "requested") throw new Error("Runtime is not provisionable");
       const context = { tenantId: job.tenantId, trx };
       const version = await transition(trx, context, job, "requested", "provisioning", "unknown", this.now());
       await appendWorkerAudit(context, job, "runtime.provision", "pending", "Runtime provisioning started", version, this.now());
+      return { kind: "admitted" } as const;
     });
   }
 
-  public async finishProvision(job: RuntimeWorkerJobRef): Promise<boolean> {
-    return fencedTransaction(this.db, async (trx) => {
+  public async finishProvision(job: RuntimeWorkerJobRef): Promise<ProvisionCompletionResult> {
+    return provisionTransaction(this.db, async (trx) => {
       await requireLease(trx, job, true);
-      const current = await trx.selectFrom("runtime_containers").select("observed_state").where("tenant_id", "=", job.tenantId).where("container_id", "=", job.runtimeId).forUpdate().executeTakeFirstOrThrow();
+      const current = await trx.selectFrom("runtime_containers").select(["observed_state", "command_version"]).where("tenant_id", "=", job.tenantId).where("container_id", "=", job.runtimeId).forUpdate().executeTakeFirstOrThrow();
       await requireLease(trx, job);
+      if (safeContractInteger(current.command_version) > 0) {
+        await finishOwnedJob(trx, job, { status: "succeeded", lease_owner: null, lease_expires_at: null, last_error_summary: "Superseded by a newer runtime command", updated_at: this.now() });
+        return { kind: "superseded" } as const;
+      }
       if (current.observed_state !== "provisioning") throw new Error("Runtime provisioning state changed");
       const now = this.now(); const context = { tenantId: job.tenantId, trx };
       await transition(trx, context, job, "provisioning", "starting", "unknown", now);
@@ -154,6 +175,26 @@ export class WorkerRuntimeRepository {
       await trx.updateTable("profiles").set({ status: "active", resource_version: sql`resource_version + 1`, updated_at: now }).where("tenant_id", "=", job.tenantId).where("status", "=", "provisioning").execute();
       await appendWorkerAudit(context, job, "runtime.provision", "succeeded", "Runtime provisioning completed after Profile readiness probes", version, now);
       await finishOwnedJob(trx, job, { status: "succeeded", lease_owner: null, lease_expires_at: null, last_error_summary: null, updated_at: now });
+      return { kind: "completed" } as const;
+    });
+  }
+
+  public async failProvisionJob(job: RuntimeWorkerJobRef, summary: string): Promise<ProvisionFailureResult> {
+    return provisionTransaction(this.db, async (trx) => {
+      await requireLease(trx, job, true);
+      const row = await trx.selectFrom("runtime_containers").select(["observed_state", "resource_version", "command_version"]).where("tenant_id", "=", job.tenantId).where("container_id", "=", job.runtimeId).forUpdate().executeTakeFirstOrThrow();
+      await requireLease(trx, job);
+      if (safeContractInteger(row.command_version) > 0) {
+        await finishOwnedJob(trx, job, { status: "succeeded", lease_owner: null, lease_expires_at: null, last_error_summary: "Superseded by a newer runtime command", updated_at: this.now() });
+        return { kind: "superseded" } as const;
+      }
+      const now = this.now(); const context = { tenantId: job.tenantId, trx }; let version = safeContractInteger(row.resource_version);
+      if (row.observed_state !== "failed" && row.observed_state !== "deleted") version = await transition(trx, context, job, row.observed_state as RuntimeContainer["observed_state"], "failed", "unhealthy", now);
+      const redacted = redactSummary(summary, 1000, this.redactor);
+      await trx.updateTable("runtime_containers").set({ failure_summary: redacted }).where("tenant_id", "=", job.tenantId).where("container_id", "=", job.runtimeId).execute();
+      await appendWorkerAudit(context, job, "runtime.provision", "failed", redacted, version, now);
+      await finishOwnedJob(trx, job, { status: "failed", lease_owner: null, lease_expires_at: null, last_error_summary: redacted, updated_at: now });
+      return { kind: "failed" } as const;
     });
   }
 

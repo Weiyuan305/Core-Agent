@@ -79,6 +79,14 @@ before optimistic-version admission. A newer accepted command therefore either
 precedes the Worker's final check or waits until the older effect has finished;
 it cannot race into the interval between those two operations.
 
+Initial provisioning has the narrower command-currency rule
+`command_version = 0`. Its normal and recovery paths acquire the runtime lock
+before a typed, lease-fenced repository admission. A positive command version
+atomically terminalizes the old provision job as succeeded/superseded without
+Supervisor or Hermes work and without changing observed state, health, or
+failure summary. Provision finish and failure transactions enforce the same
+rule defensively.
+
 Supervisor absence has one shared protocol representation:
 `REMOVED_RUNTIME_IMAGE_REF`, the immutable
 `managed/removed@sha256:` reference with a 64-zero digest. An observation with
