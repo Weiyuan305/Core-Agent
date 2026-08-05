@@ -119,6 +119,10 @@ interface HeldIngressDirectories {
   readonly generationName: string;
 }
 
+interface DockerMutationState {
+  completed: boolean;
+}
+
 function rejected(): Error {
   return new Error("SUPERVISOR_REJECTED: Docker resource did not match managed runtime metadata");
 }
@@ -259,6 +263,26 @@ function errorCode(error: unknown): unknown {
 
 function abortOptions(signal?: AbortSignal): { readonly abortSignal?: AbortSignal } {
   return signal === undefined ? {} : { abortSignal: signal };
+}
+
+const unresolvedDockerMutation = new Promise<never>(() => undefined);
+
+async function settleDockerMutation<T>(
+  promise: Promise<T>,
+  state: DockerMutationState,
+  signal?: AbortSignal,
+): Promise<T> {
+  try {
+    const result = await promise;
+    state.completed = true;
+    return result;
+  } catch (error) {
+    // Aborting the HTTP request does not prove that the Docker daemon cancelled
+    // a mutation it already accepted. Keep the stable journal reservation live
+    // until process restart can reconcile the derived resource through adoption.
+    if (signal?.aborted === true) return unresolvedDockerMutation;
+    throw error;
+  }
 }
 
 async function inspectOptional<T extends DockerResourceLike>(
@@ -888,6 +912,7 @@ export class DockerRuntimeAdapter {
   }
 
   public async execute(value: unknown, signal?: AbortSignal): Promise<SupervisorResponseV1> {
+    const mutationState: DockerMutationState = { completed: false };
     let request: SupervisorRequestV1;
     try {
       request = validateSupervisorPolicy(value, this.#options);
@@ -905,12 +930,13 @@ export class DockerRuntimeAdapter {
       assertNotAborted(signal);
       const observation = await this.#withRuntimeLock(request, async () => (
         request.kind === "provision"
-          ? this.#provisionValidated(request, signal)
-          : this.#lifecycleValidated(request, signal)
+          ? this.#provisionValidated(request, mutationState, signal)
+          : this.#lifecycleValidated(request, mutationState, signal)
       ));
       return { protocol_version: 1, operation_id: request.operation_id, outcome: "accepted", observation };
     } catch (error) {
       if (signal?.aborted === true) {
+        if (mutationState.completed) return unresolvedDockerMutation;
         return {
           protocol_version: 1,
           operation_id: request.operation_id,
@@ -947,7 +973,8 @@ export class DockerRuntimeAdapter {
   public async provision(value: unknown): Promise<RuntimeObservation> {
     const request = validateSupervisorPolicy(value, this.#options);
     if (request.kind !== "provision") throw rejected();
-    return this.#withRuntimeLock(request, () => this.#provisionValidated(request));
+    const mutationState: DockerMutationState = { completed: false };
+    return this.#withRuntimeLock(request, () => this.#provisionValidated(request, mutationState));
   }
 
   async #withRuntimeLock<T>(
@@ -993,7 +1020,11 @@ export class DockerRuntimeAdapter {
     });
   }
 
-  async #provisionValidated(request: ProvisionRuntimeCommandV1, signal?: AbortSignal): Promise<RuntimeObservation> {
+  async #provisionValidated(
+    request: ProvisionRuntimeCommandV1,
+    mutationState: DockerMutationState,
+    signal?: AbortSignal,
+  ): Promise<RuntimeObservation> {
     assertNotAborted(signal);
     const imageConfiguration = await this.#inspectLockedImageConfiguration(request.runtime.image_ref, signal);
     const names = deriveManagedRuntimeNames(request.runtime);
@@ -1039,13 +1070,13 @@ export class DockerRuntimeAdapter {
       const adoptionStage = await mkdtemp(join(resolve(this.#options.stagingRoot), "operation-"));
       await chmod(adoptionStage, 0o700);
       try {
-        await this.#verifyManifest(request, names, verifierName, adoptionStage, signal);
+        await this.#verifyManifest(request, names, verifierName, adoptionStage, mutationState, signal);
       } finally {
         await rm(adoptionStage, { recursive: true, force: true });
       }
       if (observation.lifecycle === "running") return observation;
       assertNotAborted(signal);
-      await gateway.handle.start(abortOptions(signal));
+      await settleDockerMutation(gateway.handle.start(abortOptions(signal)), mutationState, signal);
       const resumed = validateGatewayInspection(
         await gateway.handle.inspect(abortOptions(signal)),
         request,
@@ -1061,26 +1092,26 @@ export class DockerRuntimeAdapter {
 
     if (volume.inspection === undefined) {
       assertNotAborted(signal);
-      await this.#options.docker.createVolume({
+      await settleDockerMutation(this.#options.docker.createVolume({
         Name: names.volume,
         Labels: { ...volumeLabels(request, names) },
         ...abortOptions(signal),
-      });
+      }), mutationState, signal);
     }
     if (network.inspection === undefined) {
       assertNotAborted(signal);
-      await this.#options.docker.createNetwork({
+      await settleDockerMutation(this.#options.docker.createNetwork({
         Name: names.network,
         Driver: "bridge",
         Internal: true,
         Attachable: false,
         Labels: { ...networkLabels(names.network, "backplane") },
         ...abortOptions(signal),
-      });
+      }), mutationState, signal);
     }
     if (egressNetwork.inspection === undefined) {
       assertNotAborted(signal);
-      await this.#options.docker.createNetwork({
+      await settleDockerMutation(this.#options.docker.createNetwork({
         Name: managedEgressNetwork,
         Driver: "bridge",
         Internal: false,
@@ -1096,7 +1127,7 @@ export class DockerRuntimeAdapter {
         },
         Labels: { ...networkLabels(managedEgressNetwork, "egress") },
         ...abortOptions(signal),
-      });
+      }), mutationState, signal);
     }
 
     await ensurePrivateDirectory(this.#options.stagingRoot);
@@ -1134,17 +1165,17 @@ export class DockerRuntimeAdapter {
       })}\n`);
 
       assertNotAborted(signal);
-      const initializerContainer = await this.#options.docker.createContainer({ ...exactInitializerOptions(
+      const initializerContainer = await settleDockerMutation(this.#options.docker.createContainer({ ...exactInitializerOptions(
         request,
         names,
         initializerName,
         dockerHostPath(this.#options.stagingRoot, this.#options.dockerHostStagingRoot, bundlePath),
         dockerHostPath(this.#options.stagingRoot, this.#options.dockerHostStagingRoot, secretDirectory),
         user,
-      ), ...abortOptions(signal) });
+      ), ...abortOptions(signal) }), mutationState, signal);
       try {
         assertNotAborted(signal);
-        await initializerContainer.start(abortOptions(signal));
+        await settleDockerMutation(initializerContainer.start(abortOptions(signal)), mutationState, signal);
         const waited = await boundedWait(
           initializerContainer.wait(abortOptions(signal)),
           this.#options.initializerTimeoutMs ?? maximumInitializerWaitMs,
@@ -1156,10 +1187,14 @@ export class DockerRuntimeAdapter {
           throw dockerFailure("DEPENDENCY_UNAVAILABLE", "Docker initializer failed");
         }
       } finally {
-        await initializerContainer.remove({ force: true, v: false, ...abortOptions(signal) }).catch(() => undefined);
+        await settleDockerMutation(
+          initializerContainer.remove({ force: true, v: false, ...abortOptions(signal) }),
+          mutationState,
+          signal,
+        ).catch(() => undefined);
       }
 
-      await this.#verifyManifest(request, names, verifierName, stageDirectory, signal);
+      await this.#verifyManifest(request, names, verifierName, stageDirectory, mutationState, signal);
       assertNotAborted(signal);
       const ingressMaterial = await this.#options.secretStore.get(request.runtime.ingress_secret_ref);
       try {
@@ -1171,14 +1206,14 @@ export class DockerRuntimeAdapter {
       assertNotAborted(signal);
       let gatewayContainer: DockerContainerLike | undefined;
       try {
-        gatewayContainer = await this.#options.docker.createContainer({ ...exactGatewayOptions(
+        gatewayContainer = await settleDockerMutation(this.#options.docker.createContainer({ ...exactGatewayOptions(
           request,
           names,
           dockerIngressPath,
           user,
-        ), ...abortOptions(signal) });
+        ), ...abortOptions(signal) }), mutationState, signal);
         assertNotAborted(signal);
-        await gatewayContainer.start(abortOptions(signal));
+        await settleDockerMutation(gatewayContainer.start(abortOptions(signal)), mutationState, signal);
         const observation = validateGatewayInspection(
           await gatewayContainer.inspect(abortOptions(signal)),
           request,
@@ -1192,7 +1227,11 @@ export class DockerRuntimeAdapter {
         return observation;
       } catch (error) {
         if (gatewayContainer !== undefined) {
-          await gatewayContainer.remove({ force: true, v: false, ...abortOptions(signal) }).catch(() => undefined);
+          await settleDockerMutation(
+            gatewayContainer.remove({ force: true, v: false, ...abortOptions(signal) }),
+            mutationState,
+            signal,
+          ).catch(() => undefined);
         }
         await this.#removeIngressCredential(runtimeDigest, request.runtime.generation);
         throw error;
@@ -1212,21 +1251,22 @@ export class DockerRuntimeAdapter {
     names: RuntimeNames,
     verifierName: string,
     stageDirectory: string,
+    mutationState: DockerMutationState,
     signal?: AbortSignal,
   ): Promise<void> {
     assertNotAborted(signal);
     const outputDirectory = join(stageDirectory, "output");
     await mkdir(outputDirectory, { mode: 0o700 });
-    const verifierContainer = await this.#options.docker.createContainer({ ...exactManifestVerifierOptions(
+    const verifierContainer = await settleDockerMutation(this.#options.docker.createContainer({ ...exactManifestVerifierOptions(
       request,
       names,
       verifierName,
       dockerHostPath(this.#options.stagingRoot, this.#options.dockerHostStagingRoot, outputDirectory),
       managedUser(this.#options),
-    ), ...abortOptions(signal) });
+    ), ...abortOptions(signal) }), mutationState, signal);
     try {
       assertNotAborted(signal);
-      await verifierContainer.start(abortOptions(signal));
+      await settleDockerMutation(verifierContainer.start(abortOptions(signal)), mutationState, signal);
       const waited = await boundedWait(
         verifierContainer.wait(abortOptions(signal)),
         this.#options.initializerTimeoutMs ?? maximumInitializerWaitMs,
@@ -1236,7 +1276,11 @@ export class DockerRuntimeAdapter {
         throw dockerFailure("DEPENDENCY_UNAVAILABLE", "Docker manifest verifier failed");
       }
     } finally {
-      await verifierContainer.remove({ force: true, v: false, ...abortOptions(signal) }).catch(() => undefined);
+      await settleDockerMutation(
+        verifierContainer.remove({ force: true, v: false, ...abortOptions(signal) }),
+        mutationState,
+        signal,
+      ).catch(() => undefined);
     }
     assertNotAborted(signal);
     const manifest = await readPrivateManifest(join(outputDirectory, "manifest.json"));
@@ -1247,7 +1291,11 @@ export class DockerRuntimeAdapter {
     }
   }
 
-  async #lifecycleValidated(request: LifecycleRuntimeCommandV1, signal?: AbortSignal): Promise<RuntimeObservation> {
+  async #lifecycleValidated(
+    request: LifecycleRuntimeCommandV1,
+    mutationState: DockerMutationState,
+    signal?: AbortSignal,
+  ): Promise<RuntimeObservation> {
     assertNotAborted(signal);
     const names = deriveManagedRuntimeNames(request);
     const runtimeDigest = resourceDigest(request.tenant_id, request.runtime_id);
@@ -1301,11 +1349,18 @@ export class DockerRuntimeAdapter {
     );
     if (request.kind === "inspect") return before;
     assertNotAborted(signal);
-    if (request.kind === "start") await container.handle.start(abortOptions(signal));
-    else if (request.kind === "stop") await container.handle.stop({ t: 30, ...abortOptions(signal) });
-    else if (request.kind === "restart") await container.handle.restart({ t: 30, ...abortOptions(signal) });
-    else {
-      await container.handle.remove({ force: true, v: false, ...abortOptions(signal) });
+    if (request.kind === "start") {
+      await settleDockerMutation(container.handle.start(abortOptions(signal)), mutationState, signal);
+    } else if (request.kind === "stop") {
+      await settleDockerMutation(container.handle.stop({ t: 30, ...abortOptions(signal) }), mutationState, signal);
+    } else if (request.kind === "restart") {
+      await settleDockerMutation(container.handle.restart({ t: 30, ...abortOptions(signal) }), mutationState, signal);
+    } else {
+      await settleDockerMutation(
+        container.handle.remove({ force: true, v: false, ...abortOptions(signal) }),
+        mutationState,
+        signal,
+      );
       await this.#removeIngressCredential(runtimeDigest, request.generation);
       const { private_origin: _privateOrigin, ...withoutOrigin } = before;
       return { ...withoutOrigin, exists: false, lifecycle: "removed", health: "unknown", image_ref: REMOVED_RUNTIME_IMAGE_REF };

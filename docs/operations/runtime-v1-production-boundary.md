@@ -87,6 +87,8 @@ slot. If the effect remains unsettled, preserve the managed resources and
 journal directory, collect only redacted service evidence, and restart the
 Supervisor through the approved service procedure so stale-reservation
 recovery and strict resource adoption can reconcile the derived names.
+This includes a Dockerode mutation that rejects on local request abort: its
+daemon-side outcome is unknown until restart/adoption reconciliation.
 
 ## Product-image rollout
 

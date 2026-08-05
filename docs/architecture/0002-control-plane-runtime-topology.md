@@ -178,6 +178,9 @@ result becomes the only durable record. Process shutdown remains bounded; after
 a crash, normal stale-reservation recovery and strict Docker adoption inspect
 the stable derived resource names before any new effect. The Supervisor never
 starts a second in-process effect merely because the transport wait expired.
+In particular, a mutating Dockerode request that rejects locally after abort is
+still remote-uncertain: the adapter keeps it unsettled because local HTTP
+rejection does not prove that Docker daemon work was cancelled.
 
 Development PostgreSQL trust authentication is permitted only on the isolated
 internal control bridge. The official-image bootstrap superuser is not given
