@@ -106,3 +106,42 @@ Run all deterministic checks from a clean worktree, then perform a new three-ang
 3. release-operability review from clean-host assumptions.
 
 Runtime v1 may merge to `main` only if all three approve with no Critical or Important findings. The real Hermes/provider smoke remains an explicit operator opt-in and must be reported honestly if it was not run.
+
+## Second whole-branch review remediation
+
+The first remediation wave closed FR-01 through FR-08, but the next complete-branch review at `bb3b064` found cross-module invariants that task-local reviews did not expose. These findings are release-blocking and extend this plan.
+
+### Task 25 — Bind every successful Runtime terminalization to persisted job intent
+
+- Add RED repository tests for wrong kind, payload/runtime, command, target version, effect state, and attempt across provision success, reconcile success, and superseded completion.
+- Lock and validate the complete persisted job intent before any Runtime, Tenant, Profile, ProductEvent, AuditEvent, Outbox, or job terminal mutation.
+- `finishReconcile` must require the persisted durable dispatch fence where the command path requires an external effect; inspect-proved pre-effect completion must use a separately explicit disposition rather than bypassing intent validation.
+- Required gates: Runtime Core/Worker tests and builds, full deterministic gates, scanner, and diff check. PostgreSQL specifications are committed even when the local URL is unavailable.
+
+### Task 26 — Remove database lock inversions and retry only safe commit work
+
+- Establish and document one lock order for Tenant/Profile/Runtime and one for Conversation/Run.
+- Change Provision success to follow the same Tenant/Profile/Runtime order as Conversation admission.
+- Change Agent Run terminalization to lock Conversation before Run, using a tenant-scoped unlocked lookup followed by locked revalidation when needed.
+- Add a bounded retry helper for PostgreSQL `40P01` and `40001` around database-only transactions. Never replay Docker, Hermes, or another external effect.
+- After an external effect, exhausted database-concurrency retries leave the job for durable reclaim/recovery; they must not convert an accepted Docker/Hermes result into a business failure.
+- Add real-PostgreSQL concurrent regressions for Provision completion versus Conversation admission and Agent Run completion versus retry admission.
+
+### Task 27 — Preserve non-abort Docker transport uncertainty
+
+- Add RED tests where a mutating fake daemon applies the change and then rejects with a response-less transport error while the operation signal remains active.
+- Classify only accessor-safe, response-less transport codes as daemon-uncertain after mutation dispatch. Do not turn Docker policy, HTTP status, validation, or ordinary rejected responses into indefinite reservations.
+- Reconcile provable final state through strict inspection; otherwise retain the stable operation reservation for process restart/adoption without a durable failure journal.
+- Required gates: Supervisor focused/full tests, Runtime Core client tests, full deterministic gates, scanner, and diff check.
+
+### Task 28 — Make clean-host Docker access and acceptance evidence truthful
+
+- Parameterize and validate the daemon-side Docker socket bind source. Support only documented local Unix Docker contexts in v1.
+- Add a fixed Supervisor-image socket preflight that runs with the exact final uid/gid, exact mounted socket, `network_mode: none`, no capabilities/privilege, and performs only a bounded Docker `_ping`. Runtime Supervisor startup depends on its successful completion.
+- Document separate Linux, Docker Desktop, and Colima procedures. For Colima, derive daemon-side socket metadata inside the selected VM rather than from a macOS `/var/run/docker.sock` symlink; the runtime preflight remains the authority.
+- Narrow CIDR wording to Docker-IPAM collision detection plus an explicit operator host/VPN/VM route check unless a portable route check is implemented.
+- Mark runtime-dependent acceptance rows Pending until PostgreSQL, Docker, and real Hermes/provider evidence actually exists.
+- Either configure role-authenticated development PostgreSQL or state explicitly that Compose `trust` is a development convenience and not a role-isolation security boundary.
+- Required gates: runtime topology tests, read-only Compose config, socket-preflight unit tests, docs/static gates, scanner, and full deterministic checks. Actual Linux/Colima startup remains an explicit release gate.
+
+After Task 28, repeat all three complete-branch reviews. Runtime v1 remains unmergeable until they approve with no Critical or Important findings.
