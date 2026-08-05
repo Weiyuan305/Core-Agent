@@ -23,16 +23,21 @@ whose `linux/amd64` and `linux/arm64` references both have the form
 `repository:tag@sha256:<64 lowercase hex characters>`. The same absolute lock
 file is supplied to the smoke through `CORE_AGENT_HERMES_IMAGE_LOCK_FILE`.
 After the Task17 path preflight, the smoke reads that source with stable
-pre/read/post metadata checks, stages an owner-private directory and `0444`
-snapshot below `CORE_AGENT_SUPERVISOR_STATE_ROOT`, verifies the copied bytes,
-and overrides the child-only Compose environment so API and Supervisor mount
-that same snapshot read-only. The caller's source path is never mounted by the
-smoke, and the snapshot path is never printed. The smoke rejects the current
+pre/read/post metadata checks. For a generated tenant
+`synthetic-runtime-v1-<16-hex-suffix>`, it exclusively creates the exact `0700`
+directory
+`$CORE_AGENT_SUPERVISOR_STATE_ROOT/.core-agent-product-lock-<16-hex-suffix>`
+and the exact `0444` file `reviewed-product-images.lock.json` beneath it. A
+collision fails closed. The smoke verifies the copied bytes and overrides the
+child-only Compose environment so API and Supervisor mount that same snapshot
+read-only. The caller's source path is never mounted by the smoke, and the
+snapshot path is never printed. The smoke rejects the current
 `nousresearch/hermes-agent` base lock and rejects an installed image whose
 RepoDigest or `/opt/core-agent/gateway-entrypoint.sh` configuration does not
 match the reviewed product lock. Source mutation during snapshot creation fails
-closed; the staged file is unlinked during resource release, including failure
-paths.
+closed. Default and pre-topology failure paths unlink the staged file; a
+`--keep-runtime` invocation that owns a partial or started topology retains it
+until the exact manual shutdown procedure below.
 
 The release flow is therefore:
 
@@ -129,14 +134,15 @@ event list ends in `run.completed`, and `assistant_message_count` is positive.
 
 Default cleanup attempts runtime `delete`, the exact managed-container removal
 check, and Compose `down` without `-v` independently. A failure in one step does
-not skip the later bounded steps, the first cleanup failure is retained, and
-secret buffers and the product-lock snapshot are released in all cases. The
+not skip the later bounded steps, the first cleanup failure is retained, secret
+buffers are always zeroized, and the product-lock snapshot is released. The
 container-removal check confirms the exact labeled tenant volume remains. The
 PostgreSQL Compose volume also remains because the command never uses
 `--volumes`.
 
-`--keep-runtime` skips runtime deletion and Compose shutdown for inspection but
-does not add output fields:
+`--keep-runtime` skips runtime deletion and Compose shutdown for inspection,
+keeps the immutable snapshot that the running containers require, zeroizes the
+secret buffers, and does not add output fields:
 
 ```bash
 CORE_AGENT_REAL_HERMES_SMOKE=1 npm run smoke:control-plane -- --keep-runtime
@@ -167,12 +173,56 @@ The automated smoke additionally requires the response content type to be
 requires the terminal event's top-level and payload `run_id` to match the
 created Run, and fails closed on its event-count or aggregate-byte bounds.
 
-Stop only the smoke-owned Compose project, never a broader project and never
-with `-v`:
+For a successful kept run, copy the allowlisted `tenant_id` value from the one
+JSON result and derive the exact snapshot path. Validate the identifier before
+using it in a filesystem command:
 
 ```bash
-docker compose --project-name core-agent-runtime-v1-smoke -f infra/runtime/compose.dev.yaml down --remove-orphans --timeout 30
+SMOKE_TENANT_ID='synthetic-runtime-v1-0123456789abcdef'
+[[ "$SMOKE_TENANT_ID" =~ ^synthetic-runtime-v1-[0-9a-f]{16}$ ]] || exit 1
+SMOKE_TENANT_SUFFIX=${SMOKE_TENANT_ID#synthetic-runtime-v1-}
+SMOKE_SNAPSHOT_DIR="${CORE_AGENT_SUPERVISOR_STATE_ROOT}/.core-agent-product-lock-${SMOKE_TENANT_SUFFIX}"
+SMOKE_SNAPSHOT_FILE="${SMOKE_SNAPSHOT_DIR}/reviewed-product-images.lock.json"
+test -d "$SMOKE_SNAPSHOT_DIR"
+test ! -L "$SMOKE_SNAPSHOT_DIR"
+test -f "$SMOKE_SNAPSHOT_FILE"
+test ! -L "$SMOKE_SNAPSHOT_FILE"
 ```
+
+On macOS, inspect owner, mode, link count, and type with:
+
+```bash
+stat -f '%u %Lp %l %HT' "$SMOKE_SNAPSHOT_DIR" "$SMOKE_SNAPSHOT_FILE"
+id -u
+```
+
+On Linux, use:
+
+```bash
+stat -c '%u %a %h %F' "$SMOKE_SNAPSHOT_DIR" "$SMOKE_SNAPSHOT_FILE"
+id -u
+```
+
+The directory must be owned by the current UID with mode `700`. The file must
+be owned by the current UID, be a regular file with mode `444`, and have one
+hard link. If a kept invocation failed before emitting JSON, inspect only the
+exact `core-agent-runtime-v1-smoke` API and Supervisor container mounts and
+accept the source only when both show the same absolute path with the exact
+directory/file shape above; do not select a path with `find` or a wildcard.
+
+Stop only the smoke-owned Compose project, never a broader project and never
+with `-v`. The override is required because the kept project was created from
+the immutable snapshot, not the caller's reviewed source path:
+
+```bash
+CORE_AGENT_HERMES_IMAGE_LOCK_FILE="$SMOKE_SNAPSHOT_FILE" docker compose --project-name core-agent-runtime-v1-smoke -f infra/runtime/compose.dev.yaml down --remove-orphans --timeout 30
+unlink "$SMOKE_SNAPSHOT_FILE"
+rmdir "$SMOKE_SNAPSHOT_DIR"
+```
+
+Run `unlink` and `rmdir` only after Compose shutdown succeeds and the metadata
+checks match. Do not use a wildcard, `find`, a pipeline, recursive removal, or
+the original reviewed-lock path for these deletion commands.
 
 Runtime deletion intentionally preserves the tenant volume. To remove one
 synthetic volume manually, first use the allowlisted IDs from smoke stdout and

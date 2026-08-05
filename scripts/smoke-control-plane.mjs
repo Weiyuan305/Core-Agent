@@ -6,6 +6,7 @@ import { constants } from "node:fs";
 import {
   chmod,
   lstat,
+  mkdir,
   mkdtemp,
   open,
   readFile,
@@ -419,12 +420,12 @@ function validateProductLockMetadata(metadata) {
   ) throw smokeError("SMOKE_PRODUCT_IMAGE_LOCK_INVALID");
 }
 
-export async function stageProductImageLockSnapshot(sourcePath, platform, stateRoot, dependencies = {}) {
+export async function stageProductImageLockSnapshot(sourcePath, platform, stateRoot, tenantId, dependencies = {}) {
   const io = {
     afterSourceRead: dependencies.afterSourceRead,
     chmod: dependencies.chmod ?? chmod,
     lstat: dependencies.lstat ?? lstat,
-    mkdtemp: dependencies.mkdtemp ?? mkdtemp,
+    mkdir: dependencies.mkdir ?? mkdir,
     open: dependencies.open ?? open,
     rmdir: dependencies.rmdir ?? rmdir,
     unlink: dependencies.unlink ?? unlink,
@@ -433,6 +434,8 @@ export async function stageProductImageLockSnapshot(sourcePath, platform, stateR
     || typeof stateRoot !== "string" || !isAbsolute(stateRoot) || resolve(stateRoot) !== stateRoot) {
     throw smokeError("SMOKE_PRODUCT_IMAGE_LOCK_INVALID");
   }
+  const tenantMatch = /^synthetic-runtime-v1-([a-f0-9]{16})$/u.exec(tenantId);
+  if (tenantMatch === null) throw smokeError("SMOKE_PRODUCT_IMAGE_LOCK_INVALID");
   let sourceHandle;
   let sourceBytes;
   try {
@@ -462,12 +465,15 @@ export async function stageProductImageLockSnapshot(sourcePath, platform, stateR
   }
 
   let directory;
+  let directoryCreated = false;
   let snapshotPath;
   let snapshotHandle;
   try {
     const productLock = parseJson(new TextDecoder("utf-8", { fatal: true }).decode(sourceBytes), "SMOKE_PRODUCT_IMAGE_LOCK_INVALID");
     const imageRef = validateProductImageLock(productLock, platform);
-    directory = await io.mkdtemp(join(stateRoot, ".core-agent-product-lock-"));
+    directory = join(stateRoot, `.core-agent-product-lock-${tenantMatch[1]}`);
+    await io.mkdir(directory, { mode: 0o700 });
+    directoryCreated = true;
     await io.chmod(directory, 0o700);
     snapshotPath = join(directory, "reviewed-product-images.lock.json");
     snapshotHandle = await io.open(
@@ -533,7 +539,7 @@ export async function stageProductImageLockSnapshot(sourcePath, platform, stateR
   } catch (error) {
     await snapshotHandle?.close().catch(() => undefined);
     if (snapshotPath !== undefined) await io.unlink(snapshotPath).catch(() => undefined);
-    if (directory !== undefined) await io.rmdir(directory).catch(() => undefined);
+    if (directoryCreated) await io.rmdir(directory).catch(() => undefined);
     if (error instanceof SmokeError) throw error;
     throw smokeError("SMOKE_PRODUCT_IMAGE_LOCK_INVALID");
   } finally {
@@ -1005,6 +1011,7 @@ function createDefaultDependencies(environment, signal) {
         environment.CORE_AGENT_HERMES_IMAGE_LOCK_FILE,
         environment.CORE_AGENT_PLATFORM,
         environment.CORE_AGENT_SUPERVISOR_STATE_ROOT,
+        identifiers.tenantId,
       );
       state.imageRef = state.productImageLockSnapshot.imageRef;
       const productInspection = await validateImageAvailable(state.imageRef, child);
@@ -1196,6 +1203,8 @@ function createDefaultDependencies(environment, signal) {
       state.bootstrapKey = undefined;
       state.providerSecret = undefined;
       state.ingressSecret = undefined;
+    },
+    async releaseProductImageLockSnapshot() {
       const snapshot = state.productImageLockSnapshot;
       state.productImageLockSnapshot = undefined;
       await snapshot?.cleanup();
@@ -1298,6 +1307,13 @@ export async function runControlPlaneSmoke({
       await deps.releaseSecrets?.();
     } catch (error) {
       rememberCleanupError(error);
+    }
+    if (!(keepRuntime && topologyOwned)) {
+      try {
+        await deps.releaseProductImageLockSnapshot?.();
+      } catch (error) {
+        rememberCleanupError(error);
+      }
     }
     if (primaryError === undefined && cleanupError !== undefined) primaryError = cleanupError;
   }
