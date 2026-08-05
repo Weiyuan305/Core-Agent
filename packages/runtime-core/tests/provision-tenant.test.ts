@@ -43,6 +43,8 @@ const providerCatalog = loadProviderCatalog([{
   timeout_ms: 10_000,
   max_safe_retries: 1,
 }]);
+const farFutureNow = new Date("2400-02-01T00:00:00.000Z");
+const expiredRetention = new Date("2000-01-01T00:00:00.000Z");
 
 function withHash<T extends Record<string, unknown>>(request: T): T & { payload_hash: string } {
   return {
@@ -172,6 +174,47 @@ test("provisionTenant atomically creates one runtime and replays the completed r
       generation: 1,
     }).volume,
   });
+});
+
+test("provisioning replays an expired tombstone and permanently rejects a changed payload", async () => {
+  const request = b2bRequest("tenant_provision_expired_tombstone");
+  const context = {
+    tenantId: request.identity_graph.tenant.tenant_id,
+    requestId: "request_provision_expired_tombstone", traceId: "trace_provision_expired_tombstone",
+    actorId: "core_agent_provisioner" as const,
+    membershipId: "core_agent_provisioner_admin" as const,
+    effectiveRole: "admin" as const,
+  };
+  const dependencies = { db, providerCatalog, imageLock, now: () => farFutureNow };
+  const first = await provisionTenant(dependencies, context, request);
+  const admitted = await db.selectFrom("idempotency_records")
+    .select(["created_at", "updated_at", "expires_at", "payload_hash", "operation"])
+    .where("tenant_id", "=", context.tenantId).where("idempotency_key", "=", request.idempotency_key)
+    .executeTakeFirstOrThrow();
+  assert.deepEqual(admitted, {
+    created_at: farFutureNow,
+    updated_at: farFutureNow,
+    expires_at: new Date("2400-02-02T00:00:00.000Z"),
+    payload_hash: request.payload_hash,
+    operation: "tenant.provision",
+  });
+  await db.updateTable("idempotency_records").set({ expires_at: expiredRetention })
+    .where("tenant_id", "=", context.tenantId).where("idempotency_key", "=", request.idempotency_key).execute();
+
+  assert.deepEqual(await provisionTenant(dependencies, context, request), first);
+  const changed = rehash({ ...request, client_request_id: "client_changed_after_expiry" });
+  await assert.rejects(
+    provisionTenant(dependencies, context, changed),
+    (error: unknown) => error instanceof DomainError && error.code === "IDEMPOTENCY_CONFLICT",
+  );
+  assert.deepEqual(
+    await db.selectFrom("idempotency_records").select(["payload_hash", "operation", "expires_at"])
+      .where("tenant_id", "=", context.tenantId).where("idempotency_key", "=", request.idempotency_key)
+      .executeTakeFirstOrThrow(),
+    { payload_hash: request.payload_hash, operation: "tenant.provision", expires_at: expiredRetention },
+  );
+  assert.equal(await db.selectFrom("runtime_containers").selectAll().where("tenant_id", "=", context.tenantId).execute().then((rows) => rows.length), 1);
+  assert.equal(await db.selectFrom("worker_jobs").selectAll().where("tenant_id", "=", context.tenantId).execute().then((rows) => rows.length), 1);
 });
 
 test("provision replay rejects a result reference that does not match the derived runtime", async () => {
@@ -365,6 +408,40 @@ test("runtime commands use expected versions atomically, preserve volume, and re
   assert.equal(unchanged.desired_state, "stopped");
   assert.equal(unchanged.volume_ref, before.volume_ref);
   assert.equal(await db.selectFrom("worker_jobs").selectAll().execute().then((rows) => rows.length), 2);
+});
+
+test("runtime command idempotency uses the same far-future service clock as its resources", async () => {
+  const provisioning = b2bRequest("tenant_command_clock");
+  const context = {
+    tenantId: provisioning.identity_graph.tenant.tenant_id,
+    requestId: "request_command_clock", traceId: "trace_command_clock",
+    actorId: "core_agent_provisioner" as const,
+    membershipId: "core_agent_provisioner_admin" as const,
+    effectiveRole: "admin" as const,
+  };
+  await provisionTenant({ db, providerCatalog, imageLock, now: () => farFutureNow }, context, provisioning);
+  const command = withHash({
+    schema_version: 1 as const,
+    idempotency_key: "idem_command_clock",
+    expected_resource_version: 1,
+    command: "stop" as const,
+  });
+  await commandRuntime({ db, now: () => farFutureNow }, context, command);
+
+  const record = await db.selectFrom("idempotency_records")
+    .select(["created_at", "updated_at", "expires_at"])
+    .where("tenant_id", "=", context.tenantId).where("idempotency_key", "=", command.idempotency_key)
+    .executeTakeFirstOrThrow();
+  assert.deepEqual(record, {
+    created_at: farFutureNow,
+    updated_at: farFutureNow,
+    expires_at: new Date("2400-02-02T00:00:00.000Z"),
+  });
+  assert.deepEqual(
+    await db.selectFrom("worker_jobs").select(["created_at", "updated_at", "next_attempt_at"])
+      .where("tenant_id", "=", context.tenantId).where("job_kind", "=", "reconcile_runtime").executeTakeFirstOrThrow(),
+    { created_at: farFutureNow, updated_at: farFutureNow, next_attempt_at: farFutureNow },
+  );
 });
 
 test("runtime command replay rejects a result reference that does not match the derived runtime", async () => {

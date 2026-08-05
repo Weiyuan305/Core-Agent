@@ -22,6 +22,8 @@ if (databaseUrl === undefined || !new URL(databaseUrl).pathname.slice(1).startsW
 const pool = new Pool({ connectionString: databaseUrl });
 const db = createRuntimeDatabase(pool);
 const conversationValidator = Schema.Compile(ConversationSchema);
+const farFutureNow = new Date("2400-03-01T00:00:00.000Z");
+const expiredRetention = new Date("2000-01-01T00:00:00.000Z");
 
 function conversationRequest(tenantId: string, profileId: string, idempotencyKey = `idem_${tenantId}`) {
   return withPayloadHash({
@@ -72,6 +74,48 @@ test("Conversation admission atomically creates one active Conversation, one Her
   assert.equal(idempotency.status, "completed");
   assert.equal(idempotency.result_ref, first.conversation_id);
   assert.deepEqual(idempotency.response_json, first);
+});
+
+test("Conversation replay and conflict remain stable after idempotency retention expiry", async () => {
+  const tenantId = "tenant_conversation_expired_tombstone";
+  const { profileId } = await seedReadyTenant(db, tenantId);
+  const context = serviceContext(tenantId);
+  const request = conversationRequest(tenantId, profileId, "idem_conversation_expired_tombstone");
+  const dependencies = { db, now: () => farFutureNow };
+  const first = await createConversation(dependencies, context, request);
+  assert.deepEqual(
+    await db.selectFrom("idempotency_records").select(["created_at", "updated_at", "expires_at"])
+      .where("tenant_id", "=", tenantId).where("idempotency_key", "=", request.idempotency_key)
+      .executeTakeFirstOrThrow(),
+    {
+      created_at: farFutureNow,
+      updated_at: farFutureNow,
+      expires_at: new Date("2400-03-02T00:00:00.000Z"),
+    },
+  );
+  await db.updateTable("idempotency_records").set({ expires_at: expiredRetention })
+    .where("tenant_id", "=", tenantId).where("idempotency_key", "=", request.idempotency_key).execute();
+
+  assert.deepEqual(await createConversation(dependencies, context, request), first);
+  const changed = withPayloadHash({
+    schema_version: 1 as const,
+    idempotency_key: request.idempotency_key,
+    tenant_id: tenantId,
+    profile_id: profileId,
+    student_ref: { student_id: "student_after_expiry", source_system: "eduapply" },
+  });
+  await assert.rejects(
+    createConversation(dependencies, context, changed),
+    (error: unknown) => error instanceof DomainError && error.code === "IDEMPOTENCY_CONFLICT",
+  );
+  assert.deepEqual(
+    await db.selectFrom("idempotency_records").select(["payload_hash", "operation", "expires_at"])
+      .where("tenant_id", "=", tenantId).where("idempotency_key", "=", request.idempotency_key)
+      .executeTakeFirstOrThrow(),
+    { payload_hash: request.payload_hash, operation: "conversation.create", expires_at: expiredRetention },
+  );
+  assert.equal(await db.selectFrom("conversations").selectAll().where("tenant_id", "=", tenantId).execute().then((rows) => rows.length), 1);
+  assert.equal(await db.selectFrom("sessions").selectAll().where("tenant_id", "=", tenantId).execute().then((rows) => rows.length), 1);
 });
 
 test("Conversation admission rejects invalid tenant/case authority before writing", async () => {

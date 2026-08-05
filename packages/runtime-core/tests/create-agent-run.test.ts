@@ -24,6 +24,8 @@ if (databaseUrl === undefined || !new URL(databaseUrl).pathname.slice(1).startsW
 const pool = new Pool({ connectionString: databaseUrl });
 const db = createRuntimeDatabase(pool);
 const runValidator = Schema.Compile(AgentRunSchema);
+const farFutureNow = new Date("2400-04-01T00:00:00.000Z");
+const expiredRetention = new Date("2000-01-01T00:00:00.000Z");
 
 function conversationRequest(tenantId: string, profileId: string, key: string) {
   return withPayloadHash({ schema_version: 1 as const, idempotency_key: key, tenant_id: tenantId, profile_id: profileId });
@@ -106,6 +108,47 @@ test("Agent Run admission atomically creates queued Run, completed user Message,
   );
   assert.equal(await db.selectFrom("audit_events").selectAll().where("tenant_id", "=", tenantId).execute().then((rows) => rows.length), 2);
   assert.equal(await db.selectFrom("outbox").selectAll().where("tenant_id", "=", tenantId).execute().then((rows) => rows.length), 3);
+});
+
+test("Agent Run replay and conflict remain stable after idempotency retention expiry", async () => {
+  const tenantId = "tenant_run_expired_tombstone";
+  const { profileId } = await seedReadyTenant(db, tenantId);
+  const context = serviceContext(tenantId);
+  const conversation = await createConversation(
+    { db, now: () => farFutureNow },
+    context,
+    conversationRequest(tenantId, profileId, "idem_conversation_for_expired_run"),
+  );
+  const request = runRequest("idem_run_expired_tombstone", "client_expired_run", "message_expired_run");
+  const dependencies = { db, providerCatalog, now: () => farFutureNow };
+  const first = await createAgentRun(dependencies, context, conversation.conversation_id, request);
+  assert.deepEqual(
+    await db.selectFrom("idempotency_records").select(["created_at", "updated_at", "expires_at"])
+      .where("tenant_id", "=", tenantId).where("idempotency_key", "=", request.idempotency_key)
+      .executeTakeFirstOrThrow(),
+    {
+      created_at: farFutureNow,
+      updated_at: farFutureNow,
+      expires_at: new Date("2400-04-02T00:00:00.000Z"),
+    },
+  );
+  await db.updateTable("idempotency_records").set({ expires_at: expiredRetention })
+    .where("tenant_id", "=", tenantId).where("idempotency_key", "=", request.idempotency_key).execute();
+
+  assert.deepEqual(await createAgentRun(dependencies, context, conversation.conversation_id, request), first);
+  const changed = runRequest(request.idempotency_key, "client_changed_after_expiry", "message_changed_after_expiry", "Changed after expiry");
+  await assert.rejects(
+    createAgentRun(dependencies, context, conversation.conversation_id, changed),
+    (error: unknown) => error instanceof DomainError && error.code === "IDEMPOTENCY_CONFLICT",
+  );
+  assert.deepEqual(
+    await db.selectFrom("idempotency_records").select(["payload_hash", "operation", "expires_at"])
+      .where("tenant_id", "=", tenantId).where("idempotency_key", "=", request.idempotency_key)
+      .executeTakeFirstOrThrow(),
+    { payload_hash: request.payload_hash, operation: "agent_run.create", expires_at: expiredRetention },
+  );
+  assert.equal(await db.selectFrom("agent_runs").selectAll().where("tenant_id", "=", tenantId).execute().then((rows) => rows.length), 1);
+  assert.equal(await db.selectFrom("messages").selectAll().where("tenant_id", "=", tenantId).execute().then((rows) => rows.length), 1);
 });
 
 test("Agent Run rejects absent/cross-tenant Conversation and Session failures with the same generic not found", async () => {
