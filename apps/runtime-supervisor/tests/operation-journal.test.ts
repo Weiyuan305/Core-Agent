@@ -229,6 +229,44 @@ test("journal atomically advances only request-compatible canonical reservation 
   assert.equal((await pending).outcome, "accepted");
 });
 
+test("journal rejects every semantically valid noncanonical reservation encoding", async () => {
+  const stagedRequest = startRequest();
+  const digest = createHash("sha256").update(stagedRequest.operation_id).digest("hex");
+  const reservationPath = join(journalRoot, `${digest}.lock`);
+  const ownerToken = "a".repeat(64);
+  const encodings = [
+    `${JSON.stringify({
+      protocol_version: 1,
+      request_hash: stagedRequest.request_hash,
+      owner_token: ownerToken,
+      stage: "start_pending",
+    })}\n`,
+    `{ "owner_token":"${ownerToken}","protocol_version":1,"request_hash":"${stagedRequest.request_hash}","stage":"start_pending"}\n`,
+    `{"owner_token":"${ownerToken}","protocol_version":1,"protocol_version":1,"request_hash":"${stagedRequest.request_hash}","stage":"start_pending"}\n`,
+    `{"owner_token":"${ownerToken}","protocol_version":1.0,"request_hash":"${stagedRequest.request_hash}","stage":"start_pending"}\n`,
+  ];
+
+  for (const [index, encoding] of encodings.entries()) {
+    const caseRoot = join(temporaryRoot, `noncanonical-reservation-${index}`);
+    await mkdir(caseRoot, { mode: 0o700 });
+    const casePath = join(caseRoot, `${digest}.lock`);
+    await writeFile(casePath, encoding, { mode: 0o600 });
+    const stale = new Date(Date.now() - 151_000);
+    await utimes(casePath, stale, stale);
+    let dispatched = false;
+    await assert.rejects(
+      new OperationJournal({ directory: caseRoot }).run(stagedRequest, async () => {
+        dispatched = true;
+        return response(stagedRequest.operation_id);
+      }),
+      /SUPERVISOR_REJECTED: Operation journal record is unsafe/u,
+    );
+    assert.equal(dispatched, false, `encoding ${index} must fail before dispatch`);
+  }
+
+  await assert.rejects(lstat(reservationPath), { code: "ENOENT" });
+});
+
 test("journal refuses symlinked or permissive records before dispatch", async () => {
   const digest = createHash("sha256").update(request().operation_id).digest("hex");
   await new OperationJournal({ directory: journalRoot }).run(request(), async () => response());

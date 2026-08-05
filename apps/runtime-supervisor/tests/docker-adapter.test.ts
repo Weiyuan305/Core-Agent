@@ -16,11 +16,17 @@ import {
   type SecretMaterial,
   type SecretReference,
   type SecretStore,
+  type SupervisorRequestV1,
+  type SupervisorResponseV1,
 } from "@core-agent/runtime-core";
 import type Dockerode from "dockerode";
 
 import { DockerRuntimeAdapter } from "../src/docker-adapter.js";
-import { OperationJournal } from "../src/operation-journal.js";
+import {
+  OperationJournal,
+  type OperationJournalContext,
+  type OperationJournalStage,
+} from "../src/operation-journal.js";
 import { deriveRuntimeNames, validateSupervisorPolicy } from "../src/policy.js";
 import { RuntimeSupervisorServer } from "../src/server.js";
 
@@ -568,6 +574,14 @@ function buildRecoveryServer(
   adapter: DockerRuntimeAdapter,
   onExecute: () => void = () => undefined,
   onSettled: (value: unknown) => void = () => undefined,
+  options: {
+    readonly maximumConcurrent?: number;
+    readonly execute?: (
+      request: SupervisorRequestV1,
+      signal: AbortSignal,
+      context: OperationJournalContext,
+    ) => Promise<SupervisorResponseV1>;
+  } = {},
 ): RuntimeSupervisorServer {
   return new RuntimeSupervisorServer({
     socketPath,
@@ -575,13 +589,11 @@ function buildRecoveryServer(
     validateRequest: (value) => validateSupervisorPolicy(value, { imageLock, providerCatalog }),
     execute: async (...args: unknown[]) => {
       onExecute();
-      const [request, signal, context] = args as [unknown, AbortSignal, unknown];
+      const [request, signal, context] = args as [SupervisorRequestV1, AbortSignal, OperationJournalContext];
       try {
-        const value = await (adapter.execute as unknown as (
-          value: unknown,
-          operationSignal: AbortSignal,
-          reservationContext: unknown,
-        ) => ReturnType<DockerRuntimeAdapter["execute"]>)(request, signal, context);
+        const value = await (options.execute ?? ((value, operationSignal, reservationContext) => (
+          adapter.execute(value, operationSignal, reservationContext)
+        )))(request, signal, context);
         onSettled(value);
         return value;
       } catch (error) {
@@ -594,7 +606,43 @@ function buildRecoveryServer(
     operationTimeoutMs: 400,
     cancellationSettlementTimeoutMs: 100,
     shutdownTimeoutMs: 10,
+    maximumConcurrent: options.maximumConcurrent,
   });
+}
+
+function recoveryInspect(request: ReturnType<typeof recoveryProvision>, operationId: string) {
+  const data = {
+    protocol_version: 1 as const,
+    operation_id: operationId,
+    kind: "inspect" as const,
+    tenant_id: request.runtime.tenant_id,
+    runtime_id: request.runtime.runtime_id,
+    generation: request.runtime.generation,
+  };
+  return { ...data, request_hash: canonicalSupervisorRequestHash(data) };
+}
+
+function reservationPath(journalRoot: string, request: SupervisorRequestV1): string {
+  const digest = createHash("sha256").update(request.operation_id).digest("hex");
+  return join(journalRoot, `${digest}.lock`);
+}
+
+async function writeStaleReservation(
+  journalRoot: string,
+  request: SupervisorRequestV1,
+  stage: OperationJournalStage,
+): Promise<string> {
+  await mkdir(journalRoot, { recursive: true, mode: 0o700 });
+  const path = reservationPath(journalRoot, request);
+  await writeFile(path, `${canonicalJson({
+    protocol_version: 1,
+    request_hash: request.request_hash,
+    owner_token: "a".repeat(64),
+    stage,
+  })}\n`, { mode: 0o600 });
+  const stale = new Date(Date.now() - 151_000);
+  await utimes(path, stale, stale);
+  return path;
 }
 
 function recoveryProvision(index: number) {
@@ -1152,6 +1200,239 @@ test("stale lifecycle reservations recover applied response-less mutations witho
     assert.equal(journalNames.filter((name) => name.endsWith(".json")).length, 1);
     assert.equal(journalNames.some((name) => name.endsWith(".lock")), false);
   }
+});
+
+test("an admission transient retains an aged non-reserved stage for bounded cross-process recovery", async () => {
+  const caseRoot = join(temporaryRoot, "staged-admission-recovery");
+  const journalRoot = join(caseRoot, "journal");
+  const firstSocket = join(temporaryRoot, "sa1.sock");
+  const recoveredSocket = join(temporaryRoot, "sa2.sock");
+  await mkdir(caseRoot, { mode: 0o700 });
+  const docker = new FakeDocker();
+  const first = buildAdapter(docker);
+  const provisionRequest = recoveryProvision(10);
+  docker.manifestOverride = manifestFor(provisionRequest);
+  await first.adapter.provision(provisionRequest);
+  const target = recoveryLifecycle(provisionRequest, "start");
+  const owner = recoveryInspect(provisionRequest, "operation_recovery_admission_owner");
+  const stagedPath = await writeStaleReservation(journalRoot, target, "start_pending");
+  const gatewayName = deriveRuntimeNames(provisionRequest.runtime).container;
+  const mutationBaseline = docker.mutations.length;
+  let markOwnerEntered!: () => void;
+  const ownerEntered = new Promise<void>((resolve) => { markOwnerEntered = resolve; });
+  let releaseOwner!: () => void;
+  const ownerReleased = new Promise<void>((resolve) => { releaseOwner = resolve; });
+  const firstServer = buildRecoveryServer(
+    firstSocket,
+    new OperationJournal({ directory: journalRoot }),
+    first.adapter,
+    () => undefined,
+    () => undefined,
+    {
+      maximumConcurrent: 1,
+      execute: async (request, signal, context) => {
+        if (request.operation_id === owner.operation_id) {
+          markOwnerEntered();
+          await ownerReleased;
+        }
+        return first.adapter.execute(request, signal, context);
+      },
+    },
+  );
+  await firstServer.start();
+  const firstClient = new RuntimeSupervisorClient({ socketPath: firstSocket, timeoutMs: 1_000 });
+  const ownerResponse = firstClient.execute(owner);
+  try {
+    await ownerEntered;
+    const transient = await firstClient.execute(target);
+    assert.equal(transient.outcome, "failed");
+    if (transient.outcome === "failed") assert.equal(transient.code, "DEPENDENCY_UNAVAILABLE");
+    const retained = JSON.parse(await readFile(stagedPath, "utf8")) as Record<string, unknown>;
+    assert.equal(retained.stage, "start_pending");
+  } finally {
+    releaseOwner();
+    await ownerResponse.catch(() => undefined);
+    await firstServer.close();
+  }
+
+  const recoveredAdapter = buildAdapter(docker, new FakeSecretStore()).adapter;
+  const recoveredServer = buildRecoveryServer(
+    recoveredSocket,
+    new OperationJournal({ directory: journalRoot }),
+    recoveredAdapter,
+  );
+  await recoveredServer.start();
+  try {
+    const recovered = await new RuntimeSupervisorClient({ socketPath: recoveredSocket, timeoutMs: 1_000 })
+      .execute(target);
+    assert.equal(recovered.outcome, "accepted");
+  } finally {
+    await recoveredServer.close();
+  }
+  assert.equal(
+    docker.mutations.slice(mutationBaseline).filter((item) => item === `start:${gatewayName}`).length,
+    0,
+  );
+});
+
+test("abort while a lifecycle stage advance is blocked prevents mutation and leaves the stage recoverable", async () => {
+  const docker = new FakeDocker();
+  const built = buildAdapter(docker);
+  const provisionRequest = signed();
+  await built.adapter.provision(provisionRequest);
+  const gatewayName = deriveRuntimeNames(provisionRequest.runtime).container;
+  docker.containers.get(gatewayName)!.running = false;
+  const startRequest = lifecycle("start", "operation_blocked_stage_advance");
+  let stage: OperationJournalStage = "reserved";
+  let markAdvanceEntered!: () => void;
+  const advanceEntered = new Promise<void>((resolve) => { markAdvanceEntered = resolve; });
+  let releaseAdvance!: () => void;
+  const advanceReleased = new Promise<void>((resolve) => { releaseAdvance = resolve; });
+  const context: OperationJournalContext = Object.freeze({
+    get stage() { return stage; },
+    recovered: false,
+    async advance(next: OperationJournalStage): Promise<void> {
+      markAdvanceEntered();
+      await advanceReleased;
+      stage = next;
+    },
+  });
+  const controller = new AbortController();
+  const baseline = docker.mutations.length;
+  const pending = built.adapter.execute(startRequest, controller.signal, context);
+  await advanceEntered;
+  controller.abort();
+  releaseAdvance();
+  const aborted = await pending;
+  assert.equal(aborted.outcome, "failed");
+  assert.equal(stage, "start_pending");
+  assert.equal(docker.mutations.slice(baseline).some((item) => item === `start:${gatewayName}`), false);
+
+  const recoveredContext: OperationJournalContext = Object.freeze({
+    stage: "start_pending",
+    recovered: true,
+    async advance(): Promise<void> { throw new Error("recovered start must not advance again"); },
+  });
+  const recovered = await built.adapter.execute(startRequest, undefined, recoveredContext);
+  assert.equal(recovered.outcome, "accepted");
+  assert.equal(
+    docker.mutations.slice(baseline).filter((item) => item === `start:${gatewayName}`).length,
+    1,
+  );
+});
+
+test("restart recovers response-less stop from stop_pending without a duplicate stop", async () => {
+  const caseRoot = join(temporaryRoot, "restart-stop-pending");
+  const journalRoot = join(caseRoot, "journal");
+  const socketPath = join(temporaryRoot, "rs.sock");
+  await mkdir(caseRoot, { mode: 0o700 });
+  const docker = new FakeDocker();
+  const first = buildAdapter(docker);
+  const provisionRequest = recoveryProvision(20);
+  docker.manifestOverride = manifestFor(provisionRequest);
+  await first.adapter.provision(provisionRequest);
+  const request = recoveryLifecycle(provisionRequest, "restart");
+  const gatewayName = deriveRuntimeNames(provisionRequest.runtime).container;
+  const baseline = docker.mutations.length;
+  docker.responseLessMutationErrors.set("stop", Object.assign(new Error("synthetic stop reset"), { code: "ECONNRESET" }));
+  const firstServer = buildRecoveryServer(socketPath, new OperationJournal({ directory: journalRoot }), first.adapter);
+  await firstServer.start();
+  const firstResponse = await new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 }).execute(request);
+  assert.equal(firstResponse.outcome, "failed");
+  await firstServer.close();
+  const stagedPath = reservationPath(journalRoot, request);
+  assert.equal((JSON.parse(await readFile(stagedPath, "utf8")) as Record<string, unknown>).stage, "stop_pending");
+  await utimes(stagedPath, new Date(Date.now() - 151_000), new Date(Date.now() - 151_000));
+  docker.responseLessMutationErrors.clear();
+
+  const recovered = buildAdapter(docker, new FakeSecretStore()).adapter;
+  const recoveredServer = buildRecoveryServer(socketPath, new OperationJournal({ directory: journalRoot }), recovered);
+  await recoveredServer.start();
+  try {
+    assert.equal(
+      (await new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 }).execute(request)).outcome,
+      "accepted",
+    );
+  } finally {
+    await recoveredServer.close();
+  }
+  const mutations = docker.mutations.slice(baseline);
+  assert.equal(mutations.filter((item) => item === `stop:${gatewayName}`).length, 1);
+  assert.equal(mutations.filter((item) => item === `start:${gatewayName}`).length, 1);
+});
+
+test("restart recovers start_pending after a durable transition and crash before start dispatch", async () => {
+  const caseRoot = join(temporaryRoot, "restart-transition-crash");
+  const journalRoot = join(caseRoot, "journal");
+  const socketPath = join(temporaryRoot, "rt.sock");
+  await mkdir(caseRoot, { mode: 0o700 });
+  const docker = new FakeDocker();
+  const first = buildAdapter(docker);
+  const provisionRequest = recoveryProvision(21);
+  docker.manifestOverride = manifestFor(provisionRequest);
+  await first.adapter.provision(provisionRequest);
+  const request = recoveryLifecycle(provisionRequest, "restart");
+  const gatewayName = deriveRuntimeNames(provisionRequest.runtime).container;
+  docker.containers.get(gatewayName)!.running = false;
+  const baseline = docker.mutations.length;
+  const stagedPath = await writeStaleReservation(journalRoot, request, "start_pending");
+  assert.equal((JSON.parse(await readFile(stagedPath, "utf8")) as Record<string, unknown>).stage, "start_pending");
+  assert.equal(docker.mutations.slice(baseline).filter((item) => item === `start:${gatewayName}`).length, 0);
+
+  const recovered = buildAdapter(docker, new FakeSecretStore()).adapter;
+  const recoveredServer = buildRecoveryServer(socketPath, new OperationJournal({ directory: journalRoot }), recovered);
+  await recoveredServer.start();
+  try {
+    assert.equal(
+      (await new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 }).execute(request)).outcome,
+      "accepted",
+    );
+  } finally {
+    await recoveredServer.close();
+  }
+  const mutations = docker.mutations.slice(baseline);
+  assert.equal(mutations.filter((item) => item === `stop:${gatewayName}`).length, 0);
+  assert.equal(mutations.filter((item) => item === `start:${gatewayName}`).length, 1);
+});
+
+test("restart recovers an applied response-less start from start_pending without replay", async () => {
+  const caseRoot = join(temporaryRoot, "restart-start-pending");
+  const journalRoot = join(caseRoot, "journal");
+  const socketPath = join(temporaryRoot, "ra.sock");
+  await mkdir(caseRoot, { mode: 0o700 });
+  const docker = new FakeDocker();
+  const first = buildAdapter(docker);
+  const provisionRequest = recoveryProvision(22);
+  docker.manifestOverride = manifestFor(provisionRequest);
+  await first.adapter.provision(provisionRequest);
+  const request = recoveryLifecycle(provisionRequest, "restart");
+  const gatewayName = deriveRuntimeNames(provisionRequest.runtime).container;
+  const baseline = docker.mutations.length;
+  docker.responseLessMutationErrors.set("start", Object.assign(new Error("synthetic start reset"), { code: "ECONNRESET" }));
+  const firstServer = buildRecoveryServer(socketPath, new OperationJournal({ directory: journalRoot }), first.adapter);
+  await firstServer.start();
+  const firstResponse = await new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 }).execute(request);
+  assert.equal(firstResponse.outcome, "failed");
+  await firstServer.close();
+  const stagedPath = reservationPath(journalRoot, request);
+  assert.equal((JSON.parse(await readFile(stagedPath, "utf8")) as Record<string, unknown>).stage, "start_pending");
+  await utimes(stagedPath, new Date(Date.now() - 151_000), new Date(Date.now() - 151_000));
+  docker.responseLessMutationErrors.clear();
+
+  const recovered = buildAdapter(docker, new FakeSecretStore()).adapter;
+  const recoveredServer = buildRecoveryServer(socketPath, new OperationJournal({ directory: journalRoot }), recovered);
+  await recoveredServer.start();
+  try {
+    assert.equal(
+      (await new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 }).execute(request)).outcome,
+      "accepted",
+    );
+  } finally {
+    await recoveredServer.close();
+  }
+  const mutations = docker.mutations.slice(baseline);
+  assert.equal(mutations.filter((item) => item === `stop:${gatewayName}`).length, 1);
+  assert.equal(mutations.filter((item) => item === `start:${gatewayName}`).length, 1);
 });
 
 test("every allowlisted response-less transport code stays daemon-uncertain", async () => {
