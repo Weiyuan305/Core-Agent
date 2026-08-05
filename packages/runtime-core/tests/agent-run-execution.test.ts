@@ -148,7 +148,7 @@ test("dispatch mark rejects a queued Run before begin", { timeout: 5_000 }, asyn
 
 test("dispatch is durably marked unsafe before any delta and pre-dispatch deltas are rejected", { timeout: 5_000 }, async () => {
   const setup = await setupExecution("tenant_execute_dispatch_boundary");
-  const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", runId: setup.run.run_id };
+  const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", attemptCount: setup.job.attemptCount, runId: setup.run.run_id };
   const begun = await setup.repository.begin(ref);
   assert.equal(begun.kind, "admitted");
   if (begun.kind !== "admitted") return;
@@ -172,7 +172,7 @@ test("dispatch is durably marked unsafe before any delta and pre-dispatch deltas
 
 test("dispatch mark loses authority when a worker-job row wait crosses the database lease", { timeout: 5_000 }, async () => {
   const setup = await setupExecution("tenant_execute_mark_wait");
-  const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", runId: setup.run.run_id };
+  const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", attemptCount: setup.job.attemptCount, runId: setup.run.run_id };
   assert.equal((await setup.repository.begin(ref)).kind, "admitted");
   await pool.query(
     "update worker_jobs set lease_expires_at = clock_timestamp() + interval '150 milliseconds' where tenant_id = $1 and job_id = $2",
@@ -199,7 +199,7 @@ test("dispatch mark loses authority when a worker-job row wait crosses the datab
 
 test("a crash after dispatch mark is reclaimed as unsafe and cannot become a safe retry", { timeout: 5_000 }, async () => {
   const setup = await setupExecution("tenant_execute_mark_crash");
-  const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", runId: setup.run.run_id };
+  const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", attemptCount: setup.job.attemptCount, runId: setup.run.run_id };
   assert.equal((await setup.repository.begin(ref)).kind, "admitted");
   assert.deepEqual(await setup.repository.markDispatched(ref), { kind: "updated" });
   await db.updateTable("worker_jobs").set({ lease_expires_at: new Date(0) })
@@ -213,7 +213,7 @@ test("a crash after dispatch mark is reclaimed as unsafe and cannot become a saf
 
 test("unsafe recovery failure atomically terminalizes Run and job without an assistant Message", async () => {
   const setup = await setupExecution("tenant_execute_unsafe_failure");
-  const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", runId: setup.run.run_id };
+  const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", attemptCount: setup.job.attemptCount, runId: setup.run.run_id };
   const begun = await setup.repository.begin(ref);
   assert.equal(begun.kind, "admitted");
   if (begun.kind !== "admitted") return;
@@ -236,7 +236,7 @@ test("unsafe recovery failure atomically terminalizes Run and job without an ass
 test("database-clock lease loss before begin, delta, completion, and failure writes no stale transaction", async () => {
   for (const phase of ["begin", "delta", "complete", "fail"] as const) {
     const setup = await setupExecution(`tenant_execute_lease_${phase}`);
-    const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", runId: setup.run.run_id };
+    const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", attemptCount: setup.job.attemptCount, runId: setup.run.run_id };
     const begun = phase === "begin" ? undefined : await setup.repository.begin(ref);
     if (begun !== undefined) assert.equal(begun.kind, "admitted");
     if (phase === "delta" || phase === "complete") assert.deepEqual(await setup.repository.markDispatched(ref), { kind: "updated" });
@@ -258,7 +258,7 @@ test("database-clock lease loss before begin, delta, completion, and failure wri
 test("lease expiry while waiting on the Run row rolls back delta, completion, and failure transactions", async () => {
   for (const phase of ["delta", "complete", "fail"] as const) {
     const setup = await setupExecution(`tenant_execute_wait_${phase}`);
-    const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", runId: setup.run.run_id };
+    const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", attemptCount: setup.job.attemptCount, runId: setup.run.run_id };
     const begun = await setup.repository.begin(ref);
     assert.equal(begun.kind, "admitted");
     if (begun.kind !== "admitted") continue;
@@ -292,7 +292,7 @@ test("lease expiry while waiting on the Run row rolls back delta, completion, an
 
 test("lease expiry while message.delta waits on the stream sequence rolls back effect state, event, and Outbox", async () => {
   const setup = await setupExecution("tenant_execute_wait_stream");
-  const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", runId: setup.run.run_id };
+  const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", attemptCount: setup.job.attemptCount, runId: setup.run.run_id };
   const begun = await setup.repository.begin(ref);
   assert.equal(begun.kind, "admitted");
   if (begun.kind !== "admitted") return;
@@ -320,7 +320,7 @@ test("lease expiry while message.delta waits on the stream sequence rolls back e
 
 test("two sequential Runs in one Conversation bind durable delta accounting only to the current Run", async () => {
   const setup = await setupExecution("tenant_execute_two_runs");
-  const firstRef = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", runId: setup.run.run_id };
+  const firstRef = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", attemptCount: setup.job.attemptCount, runId: setup.run.run_id };
   const first = await setup.repository.begin(firstRef);
   assert.equal(first.kind, "admitted");
   if (first.kind !== "admitted") return;
@@ -334,7 +334,7 @@ test("two sequential Runs in one Conversation bind durable delta accounting only
   }));
   const secondJobs = await claimJobs(db, { tenantId: setup.tenantId, workerId: "worker_second", limit: 1, leaseMs: 300_000 });
   assert.equal(secondJobs.length, 1);
-  const secondRef = { tenantId: setup.tenantId, jobId: secondJobs[0]!.jobId, workerId: "worker_second", runId: secondRun.run_id };
+  const secondRef = { tenantId: setup.tenantId, jobId: secondJobs[0]!.jobId, workerId: "worker_second", attemptCount: secondJobs[0]!.attemptCount, runId: secondRun.run_id };
   const second = await setup.repository.begin(secondRef);
   assert.equal(second.kind, "admitted");
   if (second.kind !== "admitted") return;
@@ -352,7 +352,7 @@ test("begin fails closed and rolls back run.started when current tenant, Actor, 
     if (authority === "actor") await db.updateTable("actors").set({ status: "disabled" }).where("tenant_id", "=", setup.tenantId).where("actor_id", "=", "core_agent_provisioner").execute();
     if (authority === "membership") await db.updateTable("memberships").set({ status: "suspended" }).where("tenant_id", "=", setup.tenantId).where("membership_id", "=", "core_agent_provisioner_admin").execute();
     if (authority === "role") await db.updateTable("memberships").set({ roles: ["student"] }).where("tenant_id", "=", setup.tenantId).where("membership_id", "=", "core_agent_provisioner_admin").execute();
-    const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", runId: setup.run.run_id };
+    const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", attemptCount: setup.job.attemptCount, runId: setup.run.run_id };
     await assert.rejects(setup.repository.begin(ref));
     const run = await db.selectFrom("agent_runs").select("status").where("tenant_id", "=", setup.tenantId).where("run_id", "=", setup.run.run_id).executeTakeFirstOrThrow();
     assert.equal(run.status, "queued");
@@ -369,7 +369,7 @@ test("begin fails closed without reflecting tenant resource, runtime, provider, 
     if (inconsistency === "provider") await db.updateTable("profiles").set({ model_id: "model_unmanaged" }).where("tenant_id", "=", setup.tenantId).execute();
     if (inconsistency === "provider_secret") await db.updateTable("secret_references").set({ status: "revoked" }).where("tenant_id", "=", setup.tenantId).where("purpose", "=", "provider_credential").execute();
     if (inconsistency === "ingress_secret") await db.updateTable("secret_references").set({ status: "revoked" }).where("tenant_id", "=", setup.tenantId).where("purpose", "=", "integration").execute();
-    const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", runId: setup.run.run_id };
+    const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", attemptCount: setup.job.attemptCount, runId: setup.run.run_id };
     await assert.rejects(setup.repository.begin(ref), (error: unknown) => {
       assert.doesNotMatch(String(error), /provider_secret_admission|ingress_tenant|model_unmanaged/);
       return true;
@@ -380,7 +380,7 @@ test("begin fails closed without reflecting tenant resource, runtime, provider, 
 
 test("tampered in-memory completion facts roll back without an assistant Message or terminal event", async () => {
   const setup = await setupExecution("tenant_execute_tampered_facts");
-  const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", runId: setup.run.run_id };
+  const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", attemptCount: setup.job.attemptCount, runId: setup.run.run_id };
   const begun = await setup.repository.begin(ref);
   assert.equal(begun.kind, "admitted");
   if (begun.kind !== "admitted") return;
@@ -390,4 +390,17 @@ test("tampered in-memory completion facts roll back without an assistant Message
   assert.equal(await db.selectFrom("messages").selectAll().where("tenant_id", "=", setup.tenantId).where("role", "=", "assistant").execute().then((rows) => rows.length), 0);
   assert.equal(await db.selectFrom("product_events").selectAll().where("tenant_id", "=", setup.tenantId).where("event_type", "in", ["message.completed", "run.completed"]).execute().then((rows) => rows.length), 0);
   assert.equal(await db.selectFrom("agent_runs").select("status").where("tenant_id", "=", setup.tenantId).where("run_id", "=", setup.run.run_id).executeTakeFirstOrThrow().then((row) => row.status), "running");
+});
+
+test("same-owner Agent Run reclaim fences a stale unsafe terminal attempt", async () => {
+  const setup = await setupExecution("tenant_execute_same_owner_reclaim");
+  const stale = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", attemptCount: setup.job.attemptCount, runId: setup.run.run_id };
+  assert.equal((await setup.repository.begin(stale)).kind, "admitted");
+  assert.deepEqual(await setup.repository.markDispatched(stale), { kind: "updated" });
+  await db.updateTable("worker_jobs").set({ lease_expires_at: new Date(0) })
+    .where("tenant_id", "=", setup.tenantId).where("job_id", "=", setup.job.jobId).execute();
+  const [current] = await claimJobs(db, { tenantId: setup.tenantId, workerId: "worker_execute", limit: 1, leaseMs: 300_000 });
+  assert.ok(current);
+  assert.deepEqual(await setup.repository.fail(stale, "stale unsafe terminal"), { kind: "lease_lost" });
+  assert.deepEqual(await setup.repository.fail({ ...stale, attemptCount: current.attemptCount }, "current unsafe terminal"), { kind: "updated" });
 });
