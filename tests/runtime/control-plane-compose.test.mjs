@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -498,17 +498,25 @@ test("runtime PostgreSQL initialization separates bootstrap migrator and applica
 test("runtime path preflight creates final-uid 0700 roots and validates bootstrap metadata without reading it", async (t) => {
   const moduleUrl = pathToFileURL(pathFromRoot("scripts/prepare-runtime-paths.mjs")).href;
   const preflight = await import(`${moduleUrl}?red=${Date.now()}`);
-  const root = await mkdtemp(join(tmpdir(), "core-agent-runtime-paths-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "core-agent-runtime-paths-")));
   t.after(() => rm(root, { recursive: true, force: true }));
   const bootstrap = join(root, "bootstrap-key");
   const socketRoot = join(root, "socket");
   const stateRoot = join(root, "state");
+  const providerRoot = join(root, "provider");
+  const ingressRoot = join(root, "ingress");
+  await mkdir(providerRoot, { mode: 0o700 });
+  await mkdir(ingressRoot, { mode: 0o700 });
   assert.deepEqual(preflight.resolveRuntimePathPolicy({
     CORE_AGENT_BOOTSTRAP_KEY_FILE: bootstrap,
+    CORE_AGENT_PROVIDER_SECRET_ROOT: providerRoot,
+    CORE_AGENT_INGRESS_SECRET_ROOT: ingressRoot,
     CORE_AGENT_SUPERVISOR_SOCKET_ROOT: socketRoot,
     CORE_AGENT_SUPERVISOR_STATE_ROOT: stateRoot,
   }), {
     bootstrapPath: bootstrap,
+    providerRoot,
+    ingressRoot,
     socketRoot,
     stateRoot,
     bootstrapUid: 12000,
@@ -521,6 +529,8 @@ test("runtime path preflight creates final-uid 0700 roots and validates bootstra
   const gid = process.getgid?.() ?? 0;
   const environment = {
     CORE_AGENT_BOOTSTRAP_KEY_FILE: bootstrap,
+    CORE_AGENT_PROVIDER_SECRET_ROOT: providerRoot,
+    CORE_AGENT_INGRESS_SECRET_ROOT: ingressRoot,
     CORE_AGENT_RUNTIME_UID: String(uid),
     CORE_AGENT_RUNTIME_GID: String(gid),
     CORE_AGENT_SUPERVISOR_SOCKET_GID: String(gid),
@@ -548,6 +558,80 @@ test("runtime path preflight creates final-uid 0700 roots and validates bootstra
   await assert.rejects(preflight.prepareRuntimePaths({ environment: { ...environment, CORE_AGENT_RUNTIME_UID: String(uid + 1) } }), /runtime path preparation failed/u);
   await chmod(socketRoot, 0o755);
   await assert.rejects(preflight.prepareRuntimePaths({ environment }), /runtime path preparation failed/u);
+});
+
+test("runtime path preflight rejects symlink ancestors and every canonical cross-purpose overlap", async (t) => {
+  const moduleUrl = pathToFileURL(pathFromRoot("scripts/prepare-runtime-paths.mjs")).href;
+  const preflight = await import(`${moduleUrl}?separation=${Date.now()}`);
+  const root = await realpath(await mkdtemp(join(tmpdir(), "core-agent-runtime-separation-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const uid = process.getuid?.() ?? 0;
+  const gid = process.getgid?.() ?? 0;
+  const makeDirectory = async (name) => {
+    const path = join(root, name);
+    await mkdir(path, { mode: 0o700 });
+    return path;
+  };
+  const makeBootstrap = async (path) => {
+    await writeFile(path, "metadata-only\n", { mode: 0o600 });
+    return path;
+  };
+  const base = {
+    CORE_AGENT_RUNTIME_UID: String(uid),
+    CORE_AGENT_RUNTIME_GID: String(gid),
+    CORE_AGENT_SUPERVISOR_SOCKET_GID: String(gid),
+    CORE_AGENT_BOOTSTRAP_KEY_FILE: await makeBootstrap(join(root, "bootstrap")),
+    CORE_AGENT_PROVIDER_SECRET_ROOT: await makeDirectory("provider"),
+    CORE_AGENT_INGRESS_SECRET_ROOT: await makeDirectory("ingress"),
+    CORE_AGENT_SUPERVISOR_SOCKET_ROOT: join(root, "socket"),
+    CORE_AGENT_SUPERVISOR_STATE_ROOT: join(root, "state"),
+  };
+  await preflight.prepareRuntimePaths({ environment: base });
+
+  const actualParent = await makeDirectory("actual-parent");
+  const linkedParent = join(root, "linked-parent");
+  await symlink(actualParent, linkedParent);
+  const linkedBootstrap = await makeBootstrap(join(actualParent, "bootstrap"));
+  await assert.rejects(preflight.prepareRuntimePaths({ environment: {
+    ...base,
+    CORE_AGENT_BOOTSTRAP_KEY_FILE: join(linkedParent, "bootstrap"),
+  } }), /runtime path preparation failed/u);
+  assert.equal(await realpath(join(linkedParent, "bootstrap")), linkedBootstrap);
+
+  const sharedSocket = await makeDirectory("shared-socket");
+  const nestedBootstrap = await makeBootstrap(join(sharedSocket, "bootstrap"));
+  await assert.rejects(preflight.prepareRuntimePaths({ environment: {
+    ...base,
+    CORE_AGENT_BOOTSTRAP_KEY_FILE: nestedBootstrap,
+    CORE_AGENT_SUPERVISOR_SOCKET_ROOT: sharedSocket,
+  } }), /runtime path preparation failed/u);
+
+  const ingressWithProvider = await makeDirectory("ingress-with-provider");
+  const nestedProvider = join(ingressWithProvider, "provider");
+  await mkdir(nestedProvider, { mode: 0o700 });
+  await assert.rejects(preflight.prepareRuntimePaths({ environment: {
+    ...base,
+    CORE_AGENT_INGRESS_SECRET_ROOT: ingressWithProvider,
+    CORE_AGENT_PROVIDER_SECRET_ROOT: nestedProvider,
+  } }), /runtime path preparation failed/u);
+
+  const socketForAlias = await makeDirectory("socket-for-alias");
+  const socketAlias = join(root, "socket-alias");
+  await symlink(socketForAlias, socketAlias);
+  await assert.rejects(preflight.prepareRuntimePaths({ environment: {
+    ...base,
+    CORE_AGENT_SUPERVISOR_SOCKET_ROOT: socketForAlias,
+    CORE_AGENT_SUPERVISOR_STATE_ROOT: join(socketAlias, "state"),
+  } }), /runtime path preparation failed/u);
+
+  const unsafeParent = await makeDirectory("unsafe-parent");
+  await chmod(unsafeParent, 0o770);
+  const unsafeProvider = join(unsafeParent, "provider");
+  await mkdir(unsafeProvider, { mode: 0o700 });
+  await assert.rejects(preflight.prepareRuntimePaths({ environment: {
+    ...base,
+    CORE_AGENT_PROVIDER_SECRET_ROOT: unsafeProvider,
+  } }), /runtime path preparation failed/u);
 });
 
 test("external backplane preparation is idempotent and validates the Supervisor network contract", async () => {
@@ -646,6 +730,9 @@ test("database sentinel scanner inspects every public text surface without retur
     "postgresql://core_agent_ci:do-not-reflect@127.0.0.1:5432/core_agent_control",
     "postgresql://core_agent_ci@127.0.0.1:5432/core_agent_control#remote.example",
     "postgresql://core_agent_ci@127.0.0.1:5432/%63ore_agent_control",
+    "postgresql://core_agent_ci:@127.0.0.1:5432/core_agent_control",
+    "postgresql://core_agent_ci@127.0.0.1:5432/core_agent_control?",
+    "postgresql://core_agent_ci@127.0.0.1:5432/core_agent_control#",
   ]) {
     await assert.rejects(scanner.scanRuntimeDatabase({
       databaseUrl,

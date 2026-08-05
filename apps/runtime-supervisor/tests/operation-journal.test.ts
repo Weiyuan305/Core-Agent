@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -116,6 +117,29 @@ test("two journal instances reserve one digest before either dispatches", async 
   release();
   assert.deepEqual(await second, await first);
   assert.equal(executions, 1);
+});
+
+test("an unsafe FIFO reservation cannot be masked by a valid concurrent completion", async () => {
+  const digest = createHash("sha256").update(request().operation_id).digest("hex");
+  const sourceRoot = join(temporaryRoot, "completed-source");
+  await new OperationJournal({ directory: sourceRoot }).run(request(), async () => response());
+  const completedBytes = await readFile(join(sourceRoot, `${digest}.json`));
+
+  await mkdir(journalRoot, { mode: 0o700 });
+  const reservationPath = join(journalRoot, `${digest}.lock`);
+  execFileSync("mkfifo", [reservationPath]);
+  await chmod(reservationPath, 0o600);
+  let executions = 0;
+  const pending = new OperationJournal({ directory: journalRoot }).run(request(), async () => {
+    executions += 1;
+    return response();
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await writeFile(join(journalRoot, `${digest}.json`), completedBytes, { mode: 0o600 });
+  const writer = await open(reservationPath, "w");
+  await writer.close();
+  await assert.rejects(pending, /SUPERVISOR_REJECTED: Operation journal record is unsafe/u);
+  assert.equal(executions, 0);
 });
 
 test("journal atomically persists a bounded digest-named 0600 record and replays after restart", async () => {
