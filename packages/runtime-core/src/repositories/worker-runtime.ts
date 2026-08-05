@@ -20,6 +20,7 @@ export interface RuntimeWorkerJobRef {
   readonly tenantId: string;
   readonly jobId: string;
   readonly workerId: string;
+  readonly attemptCount: number;
   readonly runtimeId: string;
 }
 export type ProvisionAdmissionResult = { readonly kind: "admitted" | "superseded" | "lease_lost" };
@@ -52,11 +53,13 @@ async function ownsLease(trx: Transaction<RuntimeDatabase>, job: RuntimeWorkerJo
   if (lock) {
     return await trx.selectFrom("worker_jobs").select("job_id").where("tenant_id", "=", job.tenantId)
       .where("job_id", "=", job.jobId).where("lease_owner", "=", job.workerId)
+      .where("attempt_count", "=", job.attemptCount)
       .where("status", "=", "running").where("lease_expires_at", ">", sql<Date>`clock_timestamp()`)
       .forUpdate().executeTakeFirst() !== undefined;
   }
   return await trx.selectFrom("worker_jobs").select("job_id").where("tenant_id", "=", job.tenantId)
     .where("job_id", "=", job.jobId).where("lease_owner", "=", job.workerId)
+    .where("attempt_count", "=", job.attemptCount)
     .where("status", "=", "running").where("lease_expires_at", ">", sql<Date>`clock_timestamp()`)
     .executeTakeFirst() !== undefined;
 }
@@ -84,6 +87,7 @@ async function provisionTransaction<Result extends { readonly kind: string }>(
 async function finishOwnedJob(trx: Transaction<RuntimeDatabase>, job: RuntimeWorkerJobRef, update: Record<string, unknown>): Promise<void> {
   const result = await trx.updateTable("worker_jobs").set(update).where("tenant_id", "=", job.tenantId).where("job_id", "=", job.jobId)
     .where("lease_owner", "=", job.workerId).where("status", "=", "running")
+    .where("attempt_count", "=", job.attemptCount)
     .where("lease_expires_at", ">", sql<Date>`clock_timestamp()`).executeTakeFirst();
   if (Number(result.numUpdatedRows) !== 1) throw new LeaseFenceLost();
 }
@@ -201,7 +205,7 @@ export class WorkerRuntimeRepository {
   public async retryJob(job: RuntimeWorkerJobRef, summary: string, nextAttemptAt: Date): Promise<boolean> {
     const result = await this.db.updateTable("worker_jobs").set({ status: "retrying", lease_owner: null, lease_expires_at: null, next_attempt_at: nextAttemptAt,
       last_error_summary: redactSummary(summary, 1000, this.redactor), updated_at: this.now() }).where("tenant_id", "=", job.tenantId).where("job_id", "=", job.jobId)
-      .where("lease_owner", "=", job.workerId).where("lease_expires_at", ">", sql<Date>`clock_timestamp()`).executeTakeFirst();
+      .where("attempt_count", "=", job.attemptCount).where("lease_owner", "=", job.workerId).where("lease_expires_at", ">", sql<Date>`clock_timestamp()`).executeTakeFirst();
     return Number(result.numUpdatedRows) === 1;
   }
 
@@ -227,7 +231,7 @@ export class WorkerRuntimeRepository {
 
   public async completeSuperseded(job: RuntimeWorkerJobRef): Promise<boolean> {
     const result = await this.db.updateTable("worker_jobs").set({ status: "succeeded", lease_owner: null, lease_expires_at: null, last_error_summary: "Superseded by a newer runtime command", updated_at: this.now() })
-      .where("tenant_id", "=", job.tenantId).where("job_id", "=", job.jobId).where("lease_owner", "=", job.workerId).where("lease_expires_at", ">", sql<Date>`clock_timestamp()`).executeTakeFirst();
+      .where("tenant_id", "=", job.tenantId).where("job_id", "=", job.jobId).where("attempt_count", "=", job.attemptCount).where("lease_owner", "=", job.workerId).where("lease_expires_at", ">", sql<Date>`clock_timestamp()`).executeTakeFirst();
     return Number(result.numUpdatedRows) === 1;
   }
 
@@ -247,7 +251,7 @@ export class WorkerRuntimeRepository {
     return this.db.transaction().execute(async (trx) => {
       const claimed = await trx.selectFrom("worker_jobs").select(["job_kind", "runtime_command", "target_command_version", "effect_state"])
         .where("tenant_id", "=", job.tenantId).where("job_id", "=", job.jobId)
-        .where("lease_owner", "=", job.workerId).where("status", "=", "running")
+        .where("attempt_count", "=", job.attemptCount).where("lease_owner", "=", job.workerId).where("status", "=", "running")
         .where("lease_expires_at", ">", sql<Date>`clock_timestamp()`).forUpdate().executeTakeFirst();
       if (claimed === undefined || claimed.job_kind !== "reconcile_runtime" || claimed.runtime_command !== command
         || claimed.target_command_version === null || safeContractInteger(claimed.target_command_version) !== targetCommandVersion
@@ -259,7 +263,7 @@ export class WorkerRuntimeRepository {
         .where("tenant_id", "=", job.tenantId).where("job_id", "=", job.jobId)
         .where("job_kind", "=", "reconcile_runtime").where("runtime_command", "=", command)
         .where("target_command_version", "=", String(targetCommandVersion)).where("effect_state", "=", "pre_effect")
-        .where("lease_owner", "=", job.workerId).where("status", "=", "running")
+        .where("attempt_count", "=", job.attemptCount).where("lease_owner", "=", job.workerId).where("status", "=", "running")
         .where("lease_expires_at", ">", sql<Date>`clock_timestamp()`).executeTakeFirst();
       return Number(result.numUpdatedRows) === 1;
     });

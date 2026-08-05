@@ -30,16 +30,16 @@ export async function claimOutboxWakeups(db: Kysely<RuntimeDatabase>, input: Cla
   });
 }
 
-async function ownedUpdate(db: Kysely<RuntimeDatabase>, input: { tenantId: string; outboxId: string; workerId: string }, update: Record<string, unknown>): Promise<JobLeaseResult> {
-  const result = await db.updateTable("outbox").set({ ...update, updated_at: sql<Date>`now()` }).where("tenant_id", "=", input.tenantId).where("outbox_id", "=", input.outboxId).where("lease_owner", "=", input.workerId).where("lease_expires_at", ">", sql<Date>`now()`).executeTakeFirst();
+async function ownedUpdate(db: Kysely<RuntimeDatabase>, input: { tenantId: string; outboxId: string; workerId: string; attemptCount: number }, update: Record<string, unknown>): Promise<JobLeaseResult> {
+  const result = await db.updateTable("outbox").set({ ...update, updated_at: sql<Date>`now()` }).where("tenant_id", "=", input.tenantId).where("outbox_id", "=", input.outboxId).where("attempt_count", "=", input.attemptCount).where("lease_owner", "=", input.workerId).where("lease_expires_at", ">", sql<Date>`now()`).executeTakeFirst();
   return Number(result.numUpdatedRows) === 1 ? { kind: "updated" } : { kind: "lease_lost" };
 }
-export function markOutboxDelivered(db: Kysely<RuntimeDatabase>, input: { tenantId: string; outboxId: string; workerId: string }): Promise<JobLeaseResult> {
+export function markOutboxDelivered(db: Kysely<RuntimeDatabase>, input: { tenantId: string; outboxId: string; workerId: string; attemptCount: number }): Promise<JobLeaseResult> {
   return ownedUpdate(db, input, { status: "delivered", delivered_at: sql<Date>`now()`, lease_owner: null, lease_expires_at: null, last_error_summary: null });
 }
-export function rescheduleOutbox(db: Kysely<RuntimeDatabase>, input: { tenantId: string; outboxId: string; workerId: string; nextAttemptAt: Date; lastErrorSummary: string; redactor: Redactor }): Promise<JobLeaseResult> {
+export function rescheduleOutbox(db: Kysely<RuntimeDatabase>, input: { tenantId: string; outboxId: string; workerId: string; attemptCount: number; nextAttemptAt: Date; lastErrorSummary: string; redactor: Redactor }): Promise<JobLeaseResult> {
   return ownedUpdate(db, input, { status: "pending", next_attempt_at: input.nextAttemptAt, lease_owner: null, lease_expires_at: null, last_error_summary: redactSummary(input.lastErrorSummary, 1000, input.redactor) });
 }
-export function failOutbox(db: Kysely<RuntimeDatabase>, input: { tenantId: string; outboxId: string; workerId: string; lastErrorSummary: string; redactor: Redactor }): Promise<JobLeaseResult> {
+export function failOutbox(db: Kysely<RuntimeDatabase>, input: { tenantId: string; outboxId: string; workerId: string; attemptCount: number; lastErrorSummary: string; redactor: Redactor }): Promise<JobLeaseResult> {
   return ownedUpdate(db, input, { status: "failed", lease_owner: null, lease_expires_at: null, last_error_summary: redactSummary(input.lastErrorSummary, 1000, input.redactor) });
 }

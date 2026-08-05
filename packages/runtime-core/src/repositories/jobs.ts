@@ -319,12 +319,13 @@ function safeTargetVersion(value: string): number {
 
 async function updateOwnedLease(
   db: Kysely<RuntimeDatabase>,
-  input: { tenantId: string; jobId: string; workerId: string },
+  input: { tenantId: string; jobId: string; workerId: string; attemptCount: number },
   update: Record<string, unknown>,
 ): Promise<JobLeaseResult> {
   const databaseNow = sql<Date>`now()`;
   const result = await db.updateTable("worker_jobs").set({ ...update, updated_at: databaseNow })
     .where("tenant_id", "=", input.tenantId).where("job_id", "=", input.jobId)
+    .where("attempt_count", "=", input.attemptCount)
     .where("lease_owner", "=", input.workerId).where("lease_expires_at", ">", databaseNow)
     .executeTakeFirst();
   return Number(result.numUpdatedRows) === 1 ? { kind: "updated" } : { kind: "lease_lost" };
@@ -332,7 +333,7 @@ async function updateOwnedLease(
 
 export async function heartbeatJob(
   db: Kysely<RuntimeDatabase>,
-  input: { tenantId: string; jobId: string; workerId: string; leaseMs: number },
+  input: { tenantId: string; jobId: string; workerId: string; attemptCount: number; leaseMs: number },
 ): Promise<JobLeaseResult> {
   if (!Number.isSafeInteger(input.leaseMs) || input.leaseMs < 1 || input.leaseMs > 300_000) throw new RangeError("leaseMs must be bounded");
   return updateOwnedLease(db, input, {
@@ -342,14 +343,14 @@ export async function heartbeatJob(
 
 export async function completeJob(
   db: Kysely<RuntimeDatabase>,
-  input: { tenantId: string; jobId: string; workerId: string },
+  input: { tenantId: string; jobId: string; workerId: string; attemptCount: number },
 ): Promise<JobLeaseResult> {
   return updateOwnedLease(db, input, { status: "succeeded", lease_owner: null, lease_expires_at: null });
 }
 
 export async function rescheduleJob(
   db: Kysely<RuntimeDatabase>,
-  input: { tenantId: string; jobId: string; workerId: string; nextAttemptAt: Date; lastErrorSummary: string; redactor: Redactor },
+  input: { tenantId: string; jobId: string; workerId: string; attemptCount: number; nextAttemptAt: Date; lastErrorSummary: string; redactor: Redactor },
 ): Promise<JobLeaseResult> {
   return updateOwnedLease(db, input, {
     status: "retrying", lease_owner: null, lease_expires_at: null,
@@ -359,7 +360,7 @@ export async function rescheduleJob(
 
 export async function failJob(
   db: Kysely<RuntimeDatabase>,
-  input: { tenantId: string; jobId: string; workerId: string; lastErrorSummary: string; redactor: Redactor },
+  input: { tenantId: string; jobId: string; workerId: string; attemptCount: number; lastErrorSummary: string; redactor: Redactor },
 ): Promise<JobLeaseResult> {
   return updateOwnedLease(db, input, {
     status: "failed", lease_owner: null, lease_expires_at: null,

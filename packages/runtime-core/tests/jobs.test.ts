@@ -401,15 +401,15 @@ test("claimed jobs discriminate reconcile command intent and fail closed on inva
 
 test("stale workers cannot backdate or future-date database lease authority", async () => {
   await insertJob();
-  await claimJobs(db, { tenantId: "tenant_jobs", workerId: "worker_a", limit: 1, leaseMs: 30_000 });
+  const [claimed] = await claimJobs(db, { tenantId: "tenant_jobs", workerId: "worker_a", limit: 1, leaseMs: 30_000 });
   await db.updateTable("worker_jobs").set({ lease_expires_at: new Date(0) })
     .where("tenant_id", "=", "tenant_jobs").where("job_id", "=", "job_1").execute();
   assert.deepEqual(await completeJob(db, {
-    tenantId: "tenant_jobs", jobId: "job_1", workerId: "worker_a",
+    tenantId: "tenant_jobs", jobId: "job_1", workerId: "worker_a", attemptCount: claimed!.attemptCount,
     now: new Date(0),
   } as never), { kind: "lease_lost" });
   assert.deepEqual(await heartbeatJob(db, {
-    tenantId: "tenant_jobs", jobId: "job_1", workerId: "worker_a", leaseMs: 30_000,
+    tenantId: "tenant_jobs", jobId: "job_1", workerId: "worker_a", attemptCount: claimed!.attemptCount, leaseMs: 30_000,
     now: new Date("2100-01-01T00:00:00.000Z"),
   } as never), { kind: "lease_lost" });
 });
@@ -431,10 +431,10 @@ test("a replacement Worker with the same configured owner fences stale claim att
 
 test("persisted job failures use a required registered-material redactor", async () => {
   await insertJob();
-  await claimJobs(db, { tenantId: "tenant_jobs", workerId: "worker_a", limit: 1, leaseMs: 30_000 });
+  const [claimed] = await claimJobs(db, { tenantId: "tenant_jobs", workerId: "worker_a", limit: 1, leaseMs: 30_000 });
   const secret = "sentinel-secret-0123456789";
   assert.deepEqual(await failJob(db, {
-    tenantId: "tenant_jobs", jobId: "job_1", workerId: "worker_a",
+    tenantId: "tenant_jobs", jobId: "job_1", workerId: "worker_a", attemptCount: claimed!.attemptCount,
     lastErrorSummary: `Basic abc api_key=${secret}`, redactor: createRedactor([secret]),
   }), { kind: "updated" });
   const job = await db.selectFrom("worker_jobs").select("last_error_summary")

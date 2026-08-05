@@ -105,6 +105,17 @@ test("environment requires every server-managed value", () => {
   }
 });
 
+test("environment accepts only bounded Worker ID prefixes", () => {
+  assert.throws(
+    () => loadRuntimeEnvironment({ ...runtimeEnvironment, CONTROL_PLANE_WORKER_ID: "worker id" }),
+    /bounded worker identifier/,
+  );
+  assert.throws(
+    () => loadRuntimeEnvironment({ ...runtimeEnvironment, CONTROL_PLANE_WORKER_ID: "w".repeat(92) }),
+    /bounded worker identifier/,
+  );
+});
+
 test("provider catalog parses server-managed provider allowlists", () => {
   const catalog = loadProviderCatalog([provider]);
   assert.deepEqual(catalog.entries, [provider]);

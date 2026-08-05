@@ -43,7 +43,7 @@ export interface WorkerDependencies {
 }
 
 function jobRef(dependencies: WorkerDependencies, job: ClaimedJob) {
-  return { tenantId: job.tenantId, jobId: job.jobId, workerId: dependencies.workerId, runtimeId: job.payloadRef };
+  return { tenantId: job.tenantId, jobId: job.jobId, workerId: dependencies.workerId, attemptCount: job.attemptCount, runtimeId: job.payloadRef };
 }
 function nextAttempt(dependencies: WorkerDependencies, job: ClaimedJob, summary: string): { at: Date; summary: string } {
   const decision = retryDecision({ code: "DEPENDENCY_UNAVAILABLE", retryable: true, summary }, job.attemptCount, job.maxAttempts, dependencies.clock.now(), () => 0, dependencies.repositories.redactor);
@@ -119,11 +119,11 @@ async function dispatchRuntimeJob(dependencies: WorkerDependencies, job: Claimed
   if (job.jobKind === "dispatch_outbox") {
     const recovery = await handleNonReconcileRecovery({
       failRuntime: async () => ({ kind: "lease_lost" }),
-      complete: async () => (await completeJob(dependencies.db, { tenantId: job.tenantId, jobId: job.jobId, workerId: dependencies.workerId })).kind === "updated",
+      complete: async () => (await completeJob(dependencies.db, { tenantId: job.tenantId, jobId: job.jobId, workerId: dependencies.workerId, attemptCount: job.attemptCount })).kind === "updated",
     }, job);
     if (recovery !== undefined) return recovery;
     await pollOutbox(dependencies);
-    await completeJob(dependencies.db, { tenantId: job.tenantId, jobId: job.jobId, workerId: dependencies.workerId });
+    await completeJob(dependencies.db, { tenantId: job.tenantId, jobId: job.jobId, workerId: dependencies.workerId, attemptCount: job.attemptCount });
     return { kind: "succeeded" };
   }
   throw new Error("Stored Worker job kind is not implemented");
@@ -133,10 +133,10 @@ async function pollOutbox(dependencies: WorkerDependencies): Promise<void> {
   await dispatchOutbox({
     claim: (workerId, limit) => claimOutboxWakeups(dependencies.db, { workerId, limit, leaseMs: 30_000 }),
     notify: async (payload) => { await sql`select pg_notify('core_agent_events', ${payload})`.execute(dependencies.db); },
-    delivered: async (row, workerId) => (await markOutboxDelivered(dependencies.db, { tenantId: row.tenantId, outboxId: row.outboxId, workerId })).kind === "updated",
+    delivered: async (row, workerId) => (await markOutboxDelivered(dependencies.db, { tenantId: row.tenantId, outboxId: row.outboxId, workerId, attemptCount: row.attemptCount! })).kind === "updated",
     retry: async (row, workerId, summary) => row.attemptCount !== undefined && row.attemptCount >= 10
-      ? (await failOutbox(dependencies.db, { tenantId: row.tenantId, outboxId: row.outboxId, workerId, lastErrorSummary: summary, redactor: dependencies.repositories.redactor })).kind === "updated"
-      : (await rescheduleOutbox(dependencies.db, { tenantId: row.tenantId, outboxId: row.outboxId, workerId, nextAttemptAt: new Date(dependencies.clock.now().getTime() + Math.min(60_000, 500 * 2 ** Math.max(0, (row.attemptCount ?? 1) - 1))), lastErrorSummary: summary, redactor: dependencies.repositories.redactor })).kind === "updated",
+      ? (await failOutbox(dependencies.db, { tenantId: row.tenantId, outboxId: row.outboxId, workerId, attemptCount: row.attemptCount!, lastErrorSummary: summary, redactor: dependencies.repositories.redactor })).kind === "updated"
+      : (await rescheduleOutbox(dependencies.db, { tenantId: row.tenantId, outboxId: row.outboxId, workerId, attemptCount: row.attemptCount!, nextAttemptAt: new Date(dependencies.clock.now().getTime() + Math.min(60_000, 500 * 2 ** Math.max(0, (row.attemptCount ?? 1) - 1))), lastErrorSummary: summary, redactor: dependencies.repositories.redactor })).kind === "updated",
   }, dependencies.workerId);
 }
 
@@ -144,7 +144,7 @@ export async function runControlPlaneWorker(dependencies: WorkerDependencies, si
   const dispatchPort: DispatchPort = {
     workerId: dependencies.workerId, heartbeatEveryMs: 10_000,
     scheduleHeartbeat: (callback, milliseconds) => dependencies.clock.scheduleEvery(callback, milliseconds),
-    heartbeat: async (job) => (await heartbeatJob(dependencies.db, { tenantId: job.tenantId, jobId: job.jobId, workerId: dependencies.workerId, leaseMs: 30_000 })).kind,
+    heartbeat: async (job) => (await heartbeatJob(dependencies.db, { tenantId: job.tenantId, jobId: job.jobId, workerId: dependencies.workerId, attemptCount: job.attemptCount, leaseMs: 30_000 })).kind,
     handle: (job, operationSignal) => dispatchRuntimeJob(dependencies, job, operationSignal),
   };
   await runWorkerLoop({

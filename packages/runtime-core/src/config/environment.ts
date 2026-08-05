@@ -33,6 +33,11 @@ export function loadRuntimeEnvironment(env: NodeJS.ProcessEnv): RuntimeEnvironme
     throw new Error("CONTROL_PLANE_API_PORT must be an integer from 1024 through 65535");
   }
 
+  const workerId = required("CONTROL_PLANE_WORKER_ID");
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,90}$/.test(workerId)) {
+    throw new Error("CONTROL_PLANE_WORKER_ID must be a bounded worker identifier");
+  }
+
   return {
     databaseUrl: required("CONTROL_PLANE_DATABASE_URL"),
     bootstrapKeyFile: required("CONTROL_PLANE_BOOTSTRAP_KEY_FILE"),
@@ -41,6 +46,6 @@ export function loadRuntimeEnvironment(env: NodeJS.ProcessEnv): RuntimeEnvironme
     secretRoot: required("CONTROL_PLANE_SECRET_ROOT"),
     supervisorSocket: required("CONTROL_PLANE_SUPERVISOR_SOCKET"),
     providerCatalogFile: required("CONTROL_PLANE_PROVIDER_CATALOG_FILE"),
-    workerId: required("CONTROL_PLANE_WORKER_ID"),
+    workerId,
   };
 }

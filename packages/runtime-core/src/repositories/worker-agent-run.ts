@@ -22,6 +22,7 @@ export interface AgentRunWorkerJobRef {
   readonly tenantId: string;
   readonly jobId: string;
   readonly workerId: string;
+  readonly attemptCount: number;
   readonly runId: string;
 }
 
@@ -66,6 +67,7 @@ async function lockedOwnedJob(trx: Transaction<RuntimeDatabase>, job: AgentRunWo
   const row = await trx.selectFrom("worker_jobs")
     .select(["job_id", "job_kind", "status", "attempt_count", "max_attempts", "payload_ref", "run_id", "effect_state"])
     .where("tenant_id", "=", job.tenantId).where("job_id", "=", job.jobId)
+    .where("attempt_count", "=", job.attemptCount)
     .where("lease_owner", "=", job.workerId).where("status", "=", "running")
     .where("lease_expires_at", ">", sql<Date>`clock_timestamp()`)
     .forUpdate().executeTakeFirst();
@@ -79,6 +81,7 @@ async function lockedOwnedJob(trx: Transaction<RuntimeDatabase>, job: AgentRunWo
 async function requireStillOwned(trx: Transaction<RuntimeDatabase>, job: AgentRunWorkerJobRef): Promise<void> {
   const owned = await trx.selectFrom("worker_jobs").select("job_id")
     .where("tenant_id", "=", job.tenantId).where("job_id", "=", job.jobId)
+    .where("attempt_count", "=", job.attemptCount)
     .where("lease_owner", "=", job.workerId).where("status", "=", "running")
     .where("lease_expires_at", ">", sql<Date>`clock_timestamp()`).executeTakeFirst();
   if (owned === undefined) throw new AgentRunLeaseLost();
@@ -91,6 +94,7 @@ async function updateOwnedJob(
 ): Promise<void> {
   const result = await trx.updateTable("worker_jobs").set(update)
     .where("tenant_id", "=", job.tenantId).where("job_id", "=", job.jobId)
+    .where("attempt_count", "=", job.attemptCount)
     .where("lease_owner", "=", job.workerId).where("status", "=", "running")
     .where("lease_expires_at", ">", sql<Date>`clock_timestamp()`).executeTakeFirst();
   if (Number(result.numUpdatedRows) !== 1) throw new AgentRunLeaseLost();

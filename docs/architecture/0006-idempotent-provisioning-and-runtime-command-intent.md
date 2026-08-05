@@ -141,6 +141,19 @@ lease fence, but it may not replay a Supervisor effect. Production scheduling
 continues to exclude `execute_agent_run` until Task 14 implements the matching
 Run-state transaction.
 
+### Worker claim incarnation fence
+
+`attempt_count` is the immutable generation of a Worker claim. Every lease
+heartbeat and Worker terminal mutation, including Agent Run, Runtime, and
+Outbox paths, matches tenant, row ID, lease owner, unexpired lease, and the
+captured attempt. A delayed process therefore cannot change a row reclaimed by
+another process, even if a configured Worker ID were accidentally reused.
+
+`CONTROL_PLANE_WORKER_ID` is a bounded operator-configured prefix, not the
+durable lease identity. Each Worker process appends one fresh cryptographic
+UUID for its lifetime. The derived identity is used only for lease ownership;
+it contains no credential material and is not a security principal.
+
 ## Alternatives considered
 
 ### Trust a provisioning tenant header

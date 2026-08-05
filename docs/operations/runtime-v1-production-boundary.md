@@ -28,6 +28,19 @@ accepted and implemented.
   request hash, tenant/runtime identity, generation, volume, network, and image
   digest before it acts.
 
+## Worker lease ownership
+
+Set `CONTROL_PLANE_WORKER_ID` to a stable, bounded deployment prefix using
+letters, digits, `_`, or `-` (maximum 91 characters). At startup the Worker
+adds a fresh UUID incarnation suffix and uses that derived value for PostgreSQL
+leases. Do not configure the suffix yourself and do not rely on a previous
+process retaining lease authority after replacement.
+
+Worker lease writes are fenced by the claim's `attempt_count`. An operator may
+replace a Worker process after a lease expiry; the prior process can no longer
+heartbeat, retry, complete, fail, or apply a Runtime/Agent Run/Outbox terminal
+update for the reclaimed attempt.
+
 ## PostgreSQL and release roles
 
 Use Supabase PostgreSQL over TLS with certificate and hostname verification.

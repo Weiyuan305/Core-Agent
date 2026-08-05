@@ -23,7 +23,7 @@ export interface ExecuteAgentRunPort {
 }
 
 function ref(workerId: string, job: ExecuteAgentRunJob): AgentRunWorkerJobRef {
-  return { tenantId: job.tenantId, jobId: job.jobId, workerId, runId: job.payloadRef };
+  return { tenantId: job.tenantId, jobId: job.jobId, workerId, attemptCount: job.attemptCount, runId: job.payloadRef };
 }
 
 function leaseLost(): HandlerResult { return { kind: "failed", summary: "Worker job lease lost" }; }

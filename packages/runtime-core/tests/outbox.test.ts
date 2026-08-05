@@ -30,8 +30,8 @@ test("Outbox concurrent claims are exclusive and an expired lease is recoverable
 test("Outbox delivery and retry require current lease ownership", async () => {
   const [row] = await claimOutboxWakeups(db, { workerId: "worker_a", limit: 8, leaseMs: 30_000 });
   assert.ok(row);
-  assert.deepEqual(await markOutboxDelivered(db, { tenantId: row.tenantId, outboxId: row.outboxId, workerId: "wrong" }), { kind: "lease_lost" });
-  assert.deepEqual(await rescheduleOutbox(db, { tenantId: row.tenantId, outboxId: row.outboxId, workerId: "worker_a", nextAttemptAt: new Date(Date.now() + 1000), lastErrorSummary: "Bearer secret-value", redactor: createRedactor(["secret-value"]) }), { kind: "updated" });
+  assert.deepEqual(await markOutboxDelivered(db, { tenantId: row.tenantId, outboxId: row.outboxId, workerId: "wrong", attemptCount: row.attemptCount }), { kind: "lease_lost" });
+  assert.deepEqual(await rescheduleOutbox(db, { tenantId: row.tenantId, outboxId: row.outboxId, workerId: "worker_a", attemptCount: row.attemptCount, nextAttemptAt: new Date(Date.now() + 1000), lastErrorSummary: "Bearer secret-value", redactor: createRedactor(["secret-value"]) }), { kind: "updated" });
   const stored = await db.selectFrom("outbox").select(["status", "last_error_summary", "lease_owner"]).where("outbox_id", "=", "outbox_1").executeTakeFirstOrThrow();
   assert.equal(stored.status, "pending"); assert.equal(stored.lease_owner, null); assert.doesNotMatch(stored.last_error_summary ?? "", /Bearer|secret-value/);
 });
