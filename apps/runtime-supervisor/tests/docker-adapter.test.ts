@@ -349,7 +349,7 @@ class FakeDocker {
   public gatewayInspectionBarrier: Promise<void> | undefined;
   public markGatewayInspection: (() => void) | undefined;
   public readonly hostMappings: Array<{ readonly host: string; readonly local: string }> = [];
-  public readonly cancellationSignals: Array<{ readonly operation: string; readonly signal?: AbortSignal }> = [];
+  public readonly cancellationSignals: Array<{ readonly operation: string; readonly signal: AbortSignal | undefined }> = [];
 
   public localPath(path: string): string {
     const mapping = this.hostMappings.find(({ host }) => path === host || path.startsWith(`${host}/`));

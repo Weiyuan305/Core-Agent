@@ -69,6 +69,25 @@ uid/gid with `0700`. Initializer, verifier, and gateway use that same explicit
 numeric identity; never compensate for mismatch by making provider or ingress
 files group/world-readable.
 
+## Supervisor deadline operations
+
+Deploy Worker, Runtime Supervisor, and Runtime Core from one revision so all
+three use the shared 120-second effect, 150-second operation, 20-second
+cancellation-settlement, and 180-second client-wait budget. Do not lower the
+Worker client wait below the Supervisor operation plus settlement window. A
+Supervisor startup that receives an out-of-range operation or settlement
+limit must fail closed.
+
+A timeout response before cancellation settlement is transient and is not
+proof of a durable timeout journal entry. Retry only with the exact same stable
+operation ID and request hash; the Supervisor will attach it to the existing
+reservation. Do not generate a replacement operation ID, manually repeat a
+Docker lifecycle action, remove a reservation file, or free a held execution
+slot. If the effect remains unsettled, preserve the managed resources and
+journal directory, collect only redacted service evidence, and restart the
+Supervisor through the approved service procedure so stale-reservation
+recovery and strict resource adoption can reconcile the derived names.
+
 ## Product-image rollout
 
 The official Hermes base lock is only a build input. Publish the Core-Agent

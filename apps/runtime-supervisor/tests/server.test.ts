@@ -7,6 +7,7 @@ import test from "node:test";
 
 import {
   RuntimeSupervisorClient,
+  SUPERVISOR_DEADLINE_BUDGET,
   canonicalSupervisorRequestHash,
   validateSupervisorRequest,
   type SupervisorRequestV1,
@@ -176,6 +177,24 @@ test("Unix service refuses unsafe parents and never unlinks a non-socket", async
   assert.equal(await readFile(socketPath, "utf8"), "preserve-me");
 });
 
+test("Unix service rejects deadline configuration outside the shared production budget", () => {
+  const execute = async (value: SupervisorRequestV1) => accepted(value.operation_id);
+  assert.throws(
+    () => buildServer(execute, { operationTimeoutMs: SUPERVISOR_DEADLINE_BUDGET.operationTimeoutMs + 1 }),
+    /SUPERVISOR_REJECTED/,
+  );
+  assert.throws(
+    () => buildServer(execute, {
+      cancellationSettlementTimeoutMs: SUPERVISOR_DEADLINE_BUDGET.cancellationSettlementTimeoutMs + 1,
+    }),
+    /SUPERVISOR_REJECTED/,
+  );
+  assert.throws(
+    () => buildServer(execute, { cancellationSettlementTimeoutMs: 0 }),
+    /SUPERVISOR_REJECTED/,
+  );
+});
+
 test("Unix service caps execution at four and waits for abort settlement before journaling", async () => {
   let active = 0;
   let maximum = 0;
@@ -226,6 +245,8 @@ test("Unix service caps execution at four and waits for abort settlement before 
   }, { operationTimeoutMs: 25, shutdownTimeoutMs: 100 });
   await timed.start();
   try {
+    const journalRecordsBefore = (await readdir(join(temporaryRoot, "journal")))
+      .filter((name) => name.endsWith(".json")).length;
     const client = new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 });
     let firstSettled = false;
     const first = client.execute(request("operation_deadline")).finally(() => { firstSettled = true; });
@@ -235,7 +256,10 @@ test("Unix service caps execution at four and waits for abort settlement before 
     assert.equal(firstSettled, false);
     assert.equal(dispatches, 1);
     assert.equal(mutations, 0);
-    assert.equal((await readdir(join(temporaryRoot, "journal"))).some((name) => name.endsWith(".json")), false);
+    assert.equal(
+      (await readdir(join(temporaryRoot, "journal"))).filter((name) => name.endsWith(".json")).length,
+      journalRecordsBefore,
+    );
 
     let replaySettled = false;
     const replay = client.execute(request("operation_deadline")).finally(() => { replaySettled = true; });
@@ -248,7 +272,10 @@ test("Unix service caps execution at four and waits for abort settlement before 
     assert.equal(response.outcome, "accepted");
     assert.deepEqual(replayed, response);
     assert.equal(mutations, 1);
-    assert.equal((await readdir(join(temporaryRoot, "journal"))).some((name) => name.endsWith(".json")), true);
+    assert.equal(
+      (await readdir(join(temporaryRoot, "journal"))).filter((name) => name.endsWith(".json")).length,
+      journalRecordsBefore + 1,
+    );
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(mutations, 1);
   } finally {

@@ -135,6 +135,7 @@ export {
 export {
   MAX_SUPERVISOR_FRAME_BYTES,
   MAX_SUPERVISOR_TIMEOUT_MS,
+  SUPERVISOR_DEADLINE_BUDGET,
   REMOVED_RUNTIME_IMAGE_REF,
   canonicalSupervisorRequestHash,
   decodeSupervisorFrame,

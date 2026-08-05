@@ -6,6 +6,7 @@ import { dirname, resolve } from "node:path";
 
 import {
   MAX_SUPERVISOR_FRAME_BYTES,
+  SUPERVISOR_DEADLINE_BUDGET,
   decodeSupervisorFrame,
   encodeSupervisorFrame,
   validateSupervisorResponse,
@@ -16,7 +17,8 @@ import {
 import type { OperationJournal } from "./operation-journal.js";
 
 const defaultMaximumConcurrent = 4;
-const defaultOperationTimeoutMs = 120_000;
+const defaultOperationTimeoutMs = SUPERVISOR_DEADLINE_BUDGET.operationTimeoutMs;
+const defaultCancellationSettlementTimeoutMs = SUPERVISOR_DEADLINE_BUDGET.cancellationSettlementTimeoutMs;
 const defaultShutdownTimeoutMs = 30_000;
 const singletonLockFilename = ".core-agent-runtime-supervisor.lock";
 const singletonNoncePattern = /^[a-f0-9]{64}$/;
@@ -42,6 +44,7 @@ export interface RuntimeSupervisorServerOptions {
   readonly execute: (request: SupervisorRequestV1, signal: AbortSignal) => Promise<SupervisorResponseV1>;
   readonly maximumConcurrent?: number;
   readonly operationTimeoutMs?: number;
+  readonly cancellationSettlementTimeoutMs?: number;
   readonly shutdownTimeoutMs?: number;
 }
 
@@ -167,10 +170,14 @@ export class RuntimeSupervisorServer {
   public constructor(options: RuntimeSupervisorServerOptions) {
     const maximumConcurrent = options.maximumConcurrent ?? defaultMaximumConcurrent;
     const operationTimeoutMs = options.operationTimeoutMs ?? defaultOperationTimeoutMs;
+    const cancellationSettlementTimeoutMs = options.cancellationSettlementTimeoutMs
+      ?? defaultCancellationSettlementTimeoutMs;
     const shutdownTimeoutMs = options.shutdownTimeoutMs ?? defaultShutdownTimeoutMs;
     if (
       !positiveBoundedInteger(maximumConcurrent, 4)
       || !positiveBoundedInteger(operationTimeoutMs, defaultOperationTimeoutMs)
+      || !positiveBoundedInteger(cancellationSettlementTimeoutMs, defaultCancellationSettlementTimeoutMs)
+      || operationTimeoutMs + cancellationSettlementTimeoutMs >= SUPERVISOR_DEADLINE_BUDGET.clientTimeoutMs
       || !positiveBoundedInteger(shutdownTimeoutMs, defaultShutdownTimeoutMs)
     ) throw rejectedError();
     this.#options = options;
@@ -453,9 +460,13 @@ export class RuntimeSupervisorServer {
     });
     socket.once("end", () => {
       const operation = this.#respond(socket, chunks, total);
-      this.#activeOperations.add(operation);
-      void operation.finally(() => this.#activeOperations.delete(operation));
+      this.#trackActiveOperation(operation);
     });
+  }
+
+  #trackActiveOperation(operation: Promise<unknown>): void {
+    this.#activeOperations.add(operation);
+    void operation.finally(() => this.#activeOperations.delete(operation)).catch(() => undefined);
   }
 
   async #respond(socket: Socket, chunks: readonly Buffer[], total: number): Promise<void> {
@@ -470,14 +481,37 @@ export class RuntimeSupervisorServer {
     try {
       release = await this.#acquireSlot();
       if (this.#closing) throw rejectedError();
-      const response = await this.#options.journal.run(request, async (reserved) => (
+      const journalResponse = this.#options.journal.run(request, async (reserved) => (
         this.#executeWithDeadline(reserved)
       ));
+      const releaseWhenSettled = release;
+      release = undefined;
+      const completion = journalResponse.finally(releaseWhenSettled);
+      this.#trackActiveOperation(completion);
+      const response = await this.#waitForJournalSettlement(journalResponse, request.operation_id);
       this.#writeResponse(socket, redactResponse(response, request.operation_id));
     } catch {
       this.#writeResponse(socket, unavailableResponse(request.operation_id));
     } finally {
       release?.();
+    }
+  }
+
+  async #waitForJournalSettlement(
+    journalResponse: Promise<SupervisorResponseV1>,
+    operationId: string,
+  ): Promise<SupervisorResponseV1> {
+    const responseTimeoutMs = (this.#options.operationTimeoutMs ?? defaultOperationTimeoutMs)
+      + (this.#options.cancellationSettlementTimeoutMs ?? defaultCancellationSettlementTimeoutMs);
+    let timer: NodeJS.Timeout | undefined;
+    const responseBoundary = new Promise<SupervisorResponseV1>((resolvePromise) => {
+      timer = setTimeout(() => resolvePromise(timeoutResponse(operationId)), responseTimeoutMs);
+      timer.unref?.();
+    });
+    try {
+      return await Promise.race([journalResponse, responseBoundary]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
   }
 
@@ -518,22 +552,22 @@ export class RuntimeSupervisorServer {
   async #executeWithDeadline(request: SupervisorRequestV1): Promise<SupervisorResponseV1> {
     const controller = new AbortController();
     const timeoutMs = this.#options.operationTimeoutMs ?? defaultOperationTimeoutMs;
+    let deadlineExpired = false;
     let timer: NodeJS.Timeout | undefined;
-    const timeout = new Promise<SupervisorResponseV1>((resolvePromise) => {
-      timer = setTimeout(() => {
-        controller.abort();
-        resolvePromise(timeoutResponse(request.operation_id));
-      }, timeoutMs);
-      timer.unref?.();
-    });
-    const execution = Promise.resolve()
-      .then(() => this.#options.execute(request, controller.signal))
-      .then(
-        (value) => redactResponse(value, request.operation_id),
-        () => unavailableResponse(request.operation_id),
-      );
+    timer = setTimeout(() => {
+      deadlineExpired = true;
+      controller.abort();
+    }, timeoutMs);
+    timer.unref?.();
     try {
-      return await Promise.race([execution, timeout]);
+      const response = redactResponse(await this.#options.execute(request, controller.signal), request.operation_id);
+      return deadlineExpired && response.outcome !== "accepted"
+        ? timeoutResponse(request.operation_id)
+        : response;
+    } catch {
+      return deadlineExpired
+        ? timeoutResponse(request.operation_id)
+        : unavailableResponse(request.operation_id);
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }

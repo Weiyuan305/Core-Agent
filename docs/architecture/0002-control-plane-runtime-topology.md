@@ -151,6 +151,34 @@ Production must keep dedicated API `12000`, Worker `12001`, and Supervisor
 `12002` identities and use the real orchestrator's ownership-aware secret,
 state, and UDS projections instead of converging services onto a host user.
 
+### Supervisor deadline and journal ownership
+
+Runtime v1 has one exported production deadline budget. A Docker/initializer
+effect is bounded at 120 seconds, the Supervisor operation deadline is 150
+seconds, cancellation settlement is allowed 20 further seconds, and the
+Runtime Supervisor client waits 180 seconds. Configuration must preserve
+`effect < operation < operation + settlement < client`; test-only values may
+scale the same ordering down, but production components import the shared
+budget rather than restating numbers.
+
+The operation deadline aborts every supported Dockerode inspect, create, wait,
+log, start, stop, restart, and remove request. Reaching that deadline does not
+itself complete the operation journal. The journal callback waits for the
+adapter to settle and records an accepted late result when the effect completed
+despite cancellation, or records a terminal timeout only after the adapter has
+settled without an accepted result. This prevents a timeout record from racing
+an in-process effect that can still mutate Docker.
+
+If an implementation violates the cancellation contract and remains unsettled
+through the 20-second settlement window, the UDS caller receives a bounded,
+retryable timeout but that response is deliberately not a durable journal
+record. The same operation ID remains reserved, its execution slot remains
+owned, and retries attach to the single in-flight promise. A later settled
+result becomes the only durable record. Process shutdown remains bounded; after
+a crash, normal stale-reservation recovery and strict Docker adoption inspect
+the stable derived resource names before any new effect. The Supervisor never
+starts a second in-process effect merely because the transport wait expired.
+
 Development PostgreSQL trust authentication is permitted only on the isolated
 internal control bridge. The official-image bootstrap superuser is not given
 to an application process: a non-superuser migrator owns the database/schema

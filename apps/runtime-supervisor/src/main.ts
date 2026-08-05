@@ -12,7 +12,7 @@ import {
   type SecretStore,
 } from "@core-agent/runtime-core";
 
-import { DockerRuntimeAdapter } from "./docker-adapter.js";
+import { DockerRuntimeAdapter, type DockerClientLike } from "./docker-adapter.js";
 import { OperationJournal } from "./operation-journal.js";
 import { validateSupervisorPolicy } from "./policy.js";
 import { RuntimeSupervisorServer } from "./server.js";
@@ -114,7 +114,7 @@ export async function startRuntimeSupervisor(
     new FileSecretStore(configuration.ingressSecretRoot),
   );
   const adapter = new DockerRuntimeAdapter({
-    docker: new Dockerode({ socketPath: configuration.dockerSocketPath }),
+    docker: new Dockerode({ socketPath: configuration.dockerSocketPath }) as unknown as DockerClientLike,
     secretStore,
     imageLock,
     providerCatalog,

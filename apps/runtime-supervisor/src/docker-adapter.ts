@@ -22,6 +22,7 @@ import {
   deriveManagedRuntimeNames,
   loadRuntimeImageLock,
   REMOVED_RUNTIME_IMAGE_REF,
+  SUPERVISOR_DEADLINE_BUDGET,
   validateSupervisorRequest,
   type ProviderCatalog,
   type RuntimeObservation,
@@ -39,7 +40,7 @@ import {
 } from "./redact-docker-error.js";
 
 const requestHashPattern = /^sha256:[a-f0-9]{64}$/;
-const maximumInitializerWaitMs = 120_000;
+const maximumInitializerWaitMs = SUPERVISOR_DEADLINE_BUDGET.effectTimeoutMs;
 const managedEgressNetwork = "core-agent-egress";
 const managedHomeEnvironment = "HOME=/opt/data";
 const gatewayEnvironment = Object.freeze([
@@ -56,17 +57,17 @@ const egressNetworkConfiguration = Object.freeze({
 });
 
 interface DockerContainerLike {
-  inspect(): Promise<unknown>;
-  start(): Promise<unknown>;
-  stop(options?: unknown): Promise<unknown>;
-  restart(options?: unknown): Promise<unknown>;
-  wait(options?: unknown): Promise<unknown>;
-  logs(options?: unknown): Promise<Buffer | NodeJS.ReadableStream>;
-  remove(options?: Dockerode.ContainerRemoveOptions): Promise<unknown>;
+  inspect(options?: { readonly abortSignal?: AbortSignal }): Promise<unknown>;
+  start(options?: Dockerode.ContainerStartOptions): Promise<unknown>;
+  stop(options?: Dockerode.ContainerStopOptions): Promise<unknown>;
+  restart(options?: Dockerode.ContainerStopOptions): Promise<unknown>;
+  wait(options?: Dockerode.ContainerWaitOptions): Promise<unknown>;
+  logs(options?: Dockerode.ContainerLogsOptions): Promise<Buffer | NodeJS.ReadableStream>;
+  remove(options?: Dockerode.ContainerRemoveOptions & { readonly abortSignal?: AbortSignal }): Promise<unknown>;
 }
 
 interface DockerResourceLike {
-  inspect(): Promise<unknown>;
+  inspect(options?: { readonly abortSignal?: AbortSignal }): Promise<unknown>;
 }
 
 interface LockedImageConfiguration {
@@ -256,9 +257,16 @@ function errorCode(error: unknown): unknown {
   return descriptor !== undefined && "value" in descriptor ? descriptor.value : undefined;
 }
 
-async function inspectOptional<T extends DockerResourceLike>(handle: T): Promise<ExistingResource<T>> {
+function abortOptions(signal?: AbortSignal): { readonly abortSignal?: AbortSignal } {
+  return signal === undefined ? {} : { abortSignal: signal };
+}
+
+async function inspectOptional<T extends DockerResourceLike>(
+  handle: T,
+  signal?: AbortSignal,
+): Promise<ExistingResource<T>> {
   try {
-    return { handle, inspection: await handle.inspect() };
+    return { handle, inspection: await handle.inspect(abortOptions(signal)) };
   } catch (error) {
     if (isNotFound(error)) return { handle };
     throw redactDockerError(error);
@@ -902,6 +910,16 @@ export class DockerRuntimeAdapter {
       ));
       return { protocol_version: 1, operation_id: request.operation_id, outcome: "accepted", observation };
     } catch (error) {
+      if (signal?.aborted === true) {
+        return {
+          protocol_version: 1,
+          operation_id: request.operation_id,
+          outcome: "failed",
+          code: "DEPENDENCY_TIMEOUT",
+          retryable: true,
+          summary: "Docker runtime operation timed out",
+        };
+      }
       if (error instanceof Error && error.message.startsWith("SUPERVISOR_REJECTED:")) {
         return {
           protocol_version: 1,
@@ -951,7 +969,7 @@ export class DockerRuntimeAdapter {
     }
   }
 
-  async #inspectLockedImageConfiguration(imageRef: string): Promise<LockedImageConfiguration> {
+  async #inspectLockedImageConfiguration(imageRef: string, signal?: AbortSignal): Promise<LockedImageConfiguration> {
     let lockedReferences: readonly string[];
     try {
       const lock = loadRuntimeImageLock(this.#options.imageLock);
@@ -962,7 +980,7 @@ export class DockerRuntimeAdapter {
     if (!lockedReferences.includes(imageRef)) throw rejected();
     let inspection: unknown;
     try {
-      inspection = await this.#options.docker.getImage(imageRef).inspect();
+      inspection = await this.#options.docker.getImage(imageRef).inspect(abortOptions(signal));
     } catch (error) {
       throw redactDockerError(error);
     }
@@ -977,7 +995,7 @@ export class DockerRuntimeAdapter {
 
   async #provisionValidated(request: ProvisionRuntimeCommandV1, signal?: AbortSignal): Promise<RuntimeObservation> {
     assertNotAborted(signal);
-    const imageConfiguration = await this.#inspectLockedImageConfiguration(request.runtime.image_ref);
+    const imageConfiguration = await this.#inspectLockedImageConfiguration(request.runtime.image_ref, signal);
     const names = deriveManagedRuntimeNames(request.runtime);
     const runtimeDigest = resourceDigest(request.runtime.tenant_id, request.runtime.runtime_id);
     const ingressParent = join(resolve(this.#options.ingressRoot), runtimeDigest);
@@ -992,12 +1010,12 @@ export class DockerRuntimeAdapter {
     const initializerName = operationInitializerName(names.container, request.operation_id);
     const verifierName = `${initializerName}-manifest`;
 
-    const gateway = await inspectOptional(this.#options.docker.getContainer(names.container));
-    const initializer = await inspectOptional(this.#options.docker.getContainer(initializerName));
-    const verifier = await inspectOptional(this.#options.docker.getContainer(verifierName));
-    const volume = await inspectOptional(this.#options.docker.getVolume(names.volume));
-    const network = await inspectOptional(this.#options.docker.getNetwork(names.network));
-    const egressNetwork = await inspectOptional(this.#options.docker.getNetwork(managedEgressNetwork));
+    const gateway = await inspectOptional(this.#options.docker.getContainer(names.container), signal);
+    const initializer = await inspectOptional(this.#options.docker.getContainer(initializerName), signal);
+    const verifier = await inspectOptional(this.#options.docker.getContainer(verifierName), signal);
+    const volume = await inspectOptional(this.#options.docker.getVolume(names.volume), signal);
+    const network = await inspectOptional(this.#options.docker.getNetwork(names.network), signal);
+    const egressNetwork = await inspectOptional(this.#options.docker.getNetwork(managedEgressNetwork), signal);
 
     await this.#validateIngressGeneration(runtimeDigest, request.runtime.generation);
 
@@ -1027,9 +1045,9 @@ export class DockerRuntimeAdapter {
       }
       if (observation.lifecycle === "running") return observation;
       assertNotAborted(signal);
-      await gateway.handle.start();
+      await gateway.handle.start(abortOptions(signal));
       const resumed = validateGatewayInspection(
-        await gateway.handle.inspect(),
+        await gateway.handle.inspect(abortOptions(signal)),
         request,
         request.runtime,
         names,
@@ -1043,7 +1061,11 @@ export class DockerRuntimeAdapter {
 
     if (volume.inspection === undefined) {
       assertNotAborted(signal);
-      await this.#options.docker.createVolume({ Name: names.volume, Labels: { ...volumeLabels(request, names) } });
+      await this.#options.docker.createVolume({
+        Name: names.volume,
+        Labels: { ...volumeLabels(request, names) },
+        ...abortOptions(signal),
+      });
     }
     if (network.inspection === undefined) {
       assertNotAborted(signal);
@@ -1053,6 +1075,7 @@ export class DockerRuntimeAdapter {
         Internal: true,
         Attachable: false,
         Labels: { ...networkLabels(names.network, "backplane") },
+        ...abortOptions(signal),
       });
     }
     if (egressNetwork.inspection === undefined) {
@@ -1072,6 +1095,7 @@ export class DockerRuntimeAdapter {
           }],
         },
         Labels: { ...networkLabels(managedEgressNetwork, "egress") },
+        ...abortOptions(signal),
       });
     }
 
@@ -1110,28 +1134,29 @@ export class DockerRuntimeAdapter {
       })}\n`);
 
       assertNotAborted(signal);
-      const initializerContainer = await this.#options.docker.createContainer(exactInitializerOptions(
+      const initializerContainer = await this.#options.docker.createContainer({ ...exactInitializerOptions(
         request,
         names,
         initializerName,
         dockerHostPath(this.#options.stagingRoot, this.#options.dockerHostStagingRoot, bundlePath),
         dockerHostPath(this.#options.stagingRoot, this.#options.dockerHostStagingRoot, secretDirectory),
         user,
-      ));
+      ), ...abortOptions(signal) });
       try {
         assertNotAborted(signal);
-        await initializerContainer.start();
+        await initializerContainer.start(abortOptions(signal));
         const waited = await boundedWait(
-          initializerContainer.wait(),
+          initializerContainer.wait(abortOptions(signal)),
           this.#options.initializerTimeoutMs ?? maximumInitializerWaitMs,
           signal,
         );
         if (parseWaitStatus(waited) !== 0) {
-          await initializerContainer.logs({ stdout: false, stderr: true, tail: 64 }).catch(() => Buffer.alloc(0));
+          await initializerContainer.logs({ stdout: false, stderr: true, tail: 64, ...abortOptions(signal) })
+            .catch(() => Buffer.alloc(0));
           throw dockerFailure("DEPENDENCY_UNAVAILABLE", "Docker initializer failed");
         }
       } finally {
-        await initializerContainer.remove({ force: true, v: false }).catch(() => undefined);
+        await initializerContainer.remove({ force: true, v: false, ...abortOptions(signal) }).catch(() => undefined);
       }
 
       await this.#verifyManifest(request, names, verifierName, stageDirectory, signal);
@@ -1146,16 +1171,16 @@ export class DockerRuntimeAdapter {
       assertNotAborted(signal);
       let gatewayContainer: DockerContainerLike | undefined;
       try {
-        gatewayContainer = await this.#options.docker.createContainer(exactGatewayOptions(
+        gatewayContainer = await this.#options.docker.createContainer({ ...exactGatewayOptions(
           request,
           names,
           dockerIngressPath,
           user,
-        ));
+        ), ...abortOptions(signal) });
         assertNotAborted(signal);
-        await gatewayContainer.start();
+        await gatewayContainer.start(abortOptions(signal));
         const observation = validateGatewayInspection(
-          await gatewayContainer.inspect(),
+          await gatewayContainer.inspect(abortOptions(signal)),
           request,
           request.runtime,
           names,
@@ -1167,7 +1192,7 @@ export class DockerRuntimeAdapter {
         return observation;
       } catch (error) {
         if (gatewayContainer !== undefined) {
-          await gatewayContainer.remove({ force: true, v: false }).catch(() => undefined);
+          await gatewayContainer.remove({ force: true, v: false, ...abortOptions(signal) }).catch(() => undefined);
         }
         await this.#removeIngressCredential(runtimeDigest, request.runtime.generation);
         throw error;
@@ -1192,18 +1217,18 @@ export class DockerRuntimeAdapter {
     assertNotAborted(signal);
     const outputDirectory = join(stageDirectory, "output");
     await mkdir(outputDirectory, { mode: 0o700 });
-    const verifierContainer = await this.#options.docker.createContainer(exactManifestVerifierOptions(
+    const verifierContainer = await this.#options.docker.createContainer({ ...exactManifestVerifierOptions(
       request,
       names,
       verifierName,
       dockerHostPath(this.#options.stagingRoot, this.#options.dockerHostStagingRoot, outputDirectory),
       managedUser(this.#options),
-    ));
+    ), ...abortOptions(signal) });
     try {
       assertNotAborted(signal);
-      await verifierContainer.start();
+      await verifierContainer.start(abortOptions(signal));
       const waited = await boundedWait(
-        verifierContainer.wait(),
+        verifierContainer.wait(abortOptions(signal)),
         this.#options.initializerTimeoutMs ?? maximumInitializerWaitMs,
         signal,
       );
@@ -1211,7 +1236,7 @@ export class DockerRuntimeAdapter {
         throw dockerFailure("DEPENDENCY_UNAVAILABLE", "Docker manifest verifier failed");
       }
     } finally {
-      await verifierContainer.remove({ force: true, v: false }).catch(() => undefined);
+      await verifierContainer.remove({ force: true, v: false, ...abortOptions(signal) }).catch(() => undefined);
     }
     assertNotAborted(signal);
     const manifest = await readPrivateManifest(join(outputDirectory, "manifest.json"));
@@ -1237,10 +1262,10 @@ export class DockerRuntimeAdapter {
     const user = managedUser(this.#options);
     await this.#validateIngressGeneration(runtimeDigest, request.generation);
     const [container, volume, network, egressNetwork] = await Promise.all([
-      inspectOptional(this.#options.docker.getContainer(names.container)),
-      inspectOptional(this.#options.docker.getVolume(names.volume)),
-      inspectOptional(this.#options.docker.getNetwork(names.network)),
-      inspectOptional(this.#options.docker.getNetwork(managedEgressNetwork)),
+      inspectOptional(this.#options.docker.getContainer(names.container), signal),
+      inspectOptional(this.#options.docker.getVolume(names.volume), signal),
+      inspectOptional(this.#options.docker.getNetwork(names.network), signal),
+      inspectOptional(this.#options.docker.getNetwork(managedEgressNetwork), signal),
     ]);
     if (container.inspection === undefined) {
       if (request.kind === "delete") {
@@ -1260,7 +1285,7 @@ export class DockerRuntimeAdapter {
       throw rejected();
     }
     if (volume.inspection === undefined || network.inspection === undefined || egressNetwork.inspection === undefined) throw rejected();
-    const imageConfiguration = await this.#inspectLockedImageConfiguration(gatewayImageReference(container.inspection));
+    const imageConfiguration = await this.#inspectLockedImageConfiguration(gatewayImageReference(container.inspection), signal);
     validateVolumeInspection(volume.inspection, request, names);
     validateNetworkInspection(network.inspection, names.network, "backplane", true);
     validateNetworkInspection(egressNetwork.inspection, managedEgressNetwork, "egress", false);
@@ -1276,17 +1301,17 @@ export class DockerRuntimeAdapter {
     );
     if (request.kind === "inspect") return before;
     assertNotAborted(signal);
-    if (request.kind === "start") await container.handle.start();
-    else if (request.kind === "stop") await container.handle.stop({ t: 30 });
-    else if (request.kind === "restart") await container.handle.restart({ t: 30 });
+    if (request.kind === "start") await container.handle.start(abortOptions(signal));
+    else if (request.kind === "stop") await container.handle.stop({ t: 30, ...abortOptions(signal) });
+    else if (request.kind === "restart") await container.handle.restart({ t: 30, ...abortOptions(signal) });
     else {
-      await container.handle.remove({ force: true, v: false });
+      await container.handle.remove({ force: true, v: false, ...abortOptions(signal) });
       await this.#removeIngressCredential(runtimeDigest, request.generation);
       const { private_origin: _privateOrigin, ...withoutOrigin } = before;
       return { ...withoutOrigin, exists: false, lifecycle: "removed", health: "unknown", image_ref: REMOVED_RUNTIME_IMAGE_REF };
     }
     return validateGatewayInspection(
-      await container.handle.inspect(),
+      await container.handle.inspect(abortOptions(signal)),
       undefined,
       request,
       names,

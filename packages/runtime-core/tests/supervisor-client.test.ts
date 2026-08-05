@@ -248,6 +248,7 @@ test("Supervisor production deadline budget orders effect, operation, and client
   const budget = exported.SUPERVISOR_DEADLINE_BUDGET as undefined | {
     readonly effectTimeoutMs: number;
     readonly operationTimeoutMs: number;
+    readonly cancellationSettlementTimeoutMs: number;
     readonly clientTimeoutMs: number;
   };
 
@@ -255,7 +256,8 @@ test("Supervisor production deadline budget orders effect, operation, and client
   assert.equal(Object.isFrozen(budget), true);
   assert(budget.effectTimeoutMs >= 120_000);
   assert(budget.effectTimeoutMs < budget.operationTimeoutMs);
-  assert(budget.operationTimeoutMs < budget.clientTimeoutMs);
+  assert(budget.cancellationSettlementTimeoutMs > 0);
+  assert(budget.operationTimeoutMs + budget.cancellationSettlementTimeoutMs < budget.clientTimeoutMs);
   assert.equal(runtimeCore.MAX_SUPERVISOR_TIMEOUT_MS, budget.clientTimeoutMs);
 });
 
