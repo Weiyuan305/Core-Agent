@@ -404,3 +404,24 @@ test("same-owner Agent Run reclaim fences a stale unsafe terminal attempt", asyn
   assert.deepEqual(await setup.repository.fail(stale, "stale unsafe terminal"), { kind: "lease_lost" });
   assert.deepEqual(await setup.repository.fail({ ...stale, attemptCount: current.attemptCount }, "current unsafe terminal"), { kind: "updated" });
 });
+
+test("same-owner Agent Run reclaim fences a stale pre-effect dispatch attempt", async () => {
+  const setup = await setupExecution("tenant_execute_same_owner_pre_effect_reclaim");
+  const stale = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", attemptCount: setup.job.attemptCount, runId: setup.run.run_id };
+  assert.equal((await setup.repository.begin(stale)).kind, "admitted");
+  await db.updateTable("worker_jobs").set({ lease_expires_at: new Date(0) })
+    .where("tenant_id", "=", setup.tenantId).where("job_id", "=", setup.job.jobId).execute();
+  const [current] = await claimJobs(db, { tenantId: setup.tenantId, workerId: "worker_execute", limit: 1, leaseMs: 300_000 });
+  assert.ok(current);
+
+  assert.deepEqual(await setup.repository.markDispatched(stale), { kind: "lease_lost" });
+  assert.equal(
+    (await db.selectFrom("worker_jobs").select("effect_state").where("tenant_id", "=", setup.tenantId).where("job_id", "=", setup.job.jobId).executeTakeFirstOrThrow()).effect_state,
+    "pre_effect",
+  );
+  assert.deepEqual(await setup.repository.markDispatched({ ...stale, attemptCount: current.attemptCount }), { kind: "updated" });
+  assert.equal(
+    (await db.selectFrom("worker_jobs").select("effect_state").where("tenant_id", "=", setup.tenantId).where("job_id", "=", setup.job.jobId).executeTakeFirstOrThrow()).effect_state,
+    "unsafe_to_replay",
+  );
+});
