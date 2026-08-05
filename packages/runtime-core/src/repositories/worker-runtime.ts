@@ -189,6 +189,7 @@ export class WorkerRuntimeRepository {
     return provisionTransaction(this.db, async (trx) => {
       const claimed = await trx.selectFrom("worker_jobs").select("job_kind")
         .where("tenant_id", "=", job.tenantId).where("job_id", "=", job.jobId)
+        .where("job_kind", "=", "provision_runtime")
         .where("attempt_count", "=", job.attemptCount).where("lease_owner", "=", job.workerId)
         .where("status", "=", "running").where("lease_expires_at", ">", sql<Date>`clock_timestamp()`)
         .forUpdate().executeTakeFirst();
