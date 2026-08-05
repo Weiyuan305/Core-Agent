@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -632,6 +632,37 @@ test("runtime path preflight rejects symlink ancestors and every canonical cross
     ...base,
     CORE_AGENT_PROVIDER_SECRET_ROOT: unsafeProvider,
   } }), /runtime path preparation failed/u);
+});
+
+test("runtime path preflight rejects a hard-linked bootstrap purpose alias", async (t) => {
+  const moduleUrl = pathToFileURL(pathFromRoot("scripts/prepare-runtime-paths.mjs")).href;
+  const preflight = await import(`${moduleUrl}?hardlink=${Date.now()}`);
+  const root = await realpath(await mkdtemp(join(tmpdir(), "core-agent-runtime-hardlink-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const uid = process.getuid?.() ?? 0;
+  const gid = process.getgid?.() ?? 0;
+  const providerRoot = join(root, "provider");
+  const ingressRoot = join(root, "ingress");
+  await mkdir(providerRoot, { mode: 0o700 });
+  await mkdir(ingressRoot, { mode: 0o700 });
+  const bootstrap = join(root, "bootstrap");
+  await writeFile(bootstrap, "hardlink-private-bootstrap-sentinel\n", { mode: 0o600 });
+  await link(bootstrap, join(ingressRoot, "ingress_a.v1"));
+
+  await assert.rejects(preflight.prepareRuntimePaths({ environment: {
+    CORE_AGENT_RUNTIME_UID: String(uid),
+    CORE_AGENT_RUNTIME_GID: String(gid),
+    CORE_AGENT_SUPERVISOR_SOCKET_GID: String(gid),
+    CORE_AGENT_BOOTSTRAP_KEY_FILE: bootstrap,
+    CORE_AGENT_PROVIDER_SECRET_ROOT: providerRoot,
+    CORE_AGENT_INGRESS_SECRET_ROOT: ingressRoot,
+    CORE_AGENT_SUPERVISOR_SOCKET_ROOT: join(root, "socket"),
+    CORE_AGENT_SUPERVISOR_STATE_ROOT: join(root, "state"),
+  } }), (error) => {
+    assert.equal(error?.message, "runtime path preparation failed");
+    assert.doesNotMatch(error.message, /hardlink-private-bootstrap-sentinel/u);
+    return true;
+  });
 });
 
 test("external backplane preparation is idempotent and validates the Supervisor network contract", async () => {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
@@ -63,6 +63,17 @@ test("bootstrap key loader rejects unsafe files and malformed key bytes", async 
   const linkPath = join(target.directory, "linked-key");
   await symlink(target.path, linkPath);
   await assert.rejects(loadBootstrapKeyDigest(linkPath), /Bootstrap key file is invalid/);
+});
+
+test("bootstrap key loader rejects a hard-linked key without reflecting its bytes", async () => {
+  const fixture = await makeKeyFile("hardlink-private-bootstrap-sentinel-0001\n");
+  await link(fixture.path, join(fixture.directory, "alias"));
+  await assert.rejects(loadBootstrapKeyDigest(fixture.path), (error: unknown) => {
+    assert(error instanceof Error);
+    assert.equal(error.message, "Bootstrap key file is invalid");
+    assert.doesNotMatch(error.message, /hardlink-private-bootstrap-sentinel/u);
+    return true;
+  });
 });
 
 test("bootstrap authentication accepts only exact Bearer syntax and constant-length digests", async () => {

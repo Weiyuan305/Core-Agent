@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, mkdir, readFile, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, link, mkdtemp, mkdir, readFile, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -113,6 +113,47 @@ test("file secret store rejects symlinks, non-0600 modes, and oversized files sa
     store.get({ reference_id: "large", version: 1, purpose: "model_provider" }),
     /64 KiB/,
   );
+});
+
+test("file secret stores reject one hard-linked inode across provider and ingress roots", async () => {
+  const ingressRoot = join(temporaryDirectory, "ingress-root");
+  await mkdir(ingressRoot, { mode: 0o700 });
+  const providerPath = join(secretRoot, "provider_a.v1");
+  const ingressPath = join(ingressRoot, "ingress_a.v1");
+  await writeFile(providerPath, "hardlink-private-cross-root-sentinel", { mode: 0o600 });
+  await link(providerPath, ingressPath);
+
+  for (const [store, reference] of [
+    [new FileSecretStore(secretRoot), { reference_id: "provider_a", version: 1, purpose: "model_provider" }],
+    [new FileSecretStore(ingressRoot), { reference_id: "ingress_a", version: 1, purpose: "integration" }],
+  ] as const) {
+    await assert.rejects(store.get(reference), (error: unknown) => {
+      assert(error instanceof Error);
+      assert.match(error.message, /hard link|link count/i);
+      assert.doesNotMatch(error.message, /hardlink-private-cross-root-sentinel/);
+      return true;
+    });
+  }
+});
+
+test("file secret store rejects hard-linked aliases within one root", async () => {
+  const firstPath = join(secretRoot, "provider_a.v1");
+  await writeFile(firstPath, "hardlink-private-single-root-sentinel", { mode: 0o600 });
+  await link(firstPath, join(secretRoot, "provider_b.v1"));
+  const store = new FileSecretStore(secretRoot);
+
+  for (const referenceId of ["provider_a", "provider_b"]) {
+    await assert.rejects(store.get({
+      reference_id: referenceId,
+      version: 1,
+      purpose: "model_provider",
+    }), (error: unknown) => {
+      assert(error instanceof Error);
+      assert.match(error.message, /hard link|link count/i);
+      assert.doesNotMatch(error.message, /hardlink-private-single-root-sentinel/);
+      return true;
+    });
+  }
 });
 
 test("file secret store enforces exact bounded sizes", async () => {
