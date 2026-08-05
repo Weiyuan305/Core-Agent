@@ -15,9 +15,12 @@ domain services and connect through versioned MCP interfaces.
 
 ## Current milestone
 
-The first milestone builds a reproducible Hermes runtime image and a local
-single-company container with two consultant Profiles. It intentionally has no
-business MCP, custom UI, or production tenant provisioning yet.
+Runtime v1 now implements the internal single-node Control Plane: PostgreSQL
+migrations and repositories, the private Fastify API, durable Worker jobs and
+SSE, and the Docker-owning Runtime Supervisor. Deterministic unit, PostgreSQL,
+fake-integration, Compose, and security gates are implemented. The opt-in real
+Hermes acceptance smoke is available but AC10 remains pending until it runs on
+a target platform with a reviewed Core-Agent product-image digest.
 
 ## Control Plane Contracts
 
@@ -31,18 +34,18 @@ npm run contracts:check
 
 See the [contract consumption guide](packages/contracts/README.md) and the
 [Control Plane Contracts v1 design specification](docs/superpowers/specs/2026-08-03-control-plane-contracts-v1-design.md).
-This milestone establishes contracts only. It does not implement the Control
-Plane runtime, database, Web client, Apple client, or MCP Server and business
-Tools.
+The public Web client, Apple client, MCP Server, business Tools, and real-user
+Identity/Consent/Retention/Data Governance remain outside this milestone.
 
-## Next milestone design
+## Runtime v1 design and operations
 
-The approved next milestone is the internal, single-node
+The implemented internal, single-node design is
 [Control Plane Runtime v1](docs/superpowers/specs/2026-08-03-control-plane-runtime-v1-design.md).
-Its architecture decisions are indexed in
-[`docs/architecture`](docs/architecture/README.md). The documents define the
-future implementation; the Runtime service, PostgreSQL schema, Worker, Runtime
-Supervisor, and SSE endpoints are not implemented yet.
+Its decisions are indexed in [`docs/architecture`](docs/architecture/README.md).
+Use the [local smoke guide](docs/operations/runtime-v1-local-smoke.md),
+[production boundary](docs/operations/runtime-v1-production-boundary.md), and
+[acceptance evidence](docs/operations/runtime-v1-acceptance-evidence.md) for
+release work.
 
 ## Prerequisites
 
@@ -61,6 +64,11 @@ docker compose --env-file .env.runtime -f infra/hermes/compose.dev.yaml up -d
 npm run hermes:bootstrap
 set -a; source .env.runtime; set +a; npm run hermes:smoke
 ```
+
+The legacy loopback demo above is separate from Control Plane Runtime v1. The
+Runtime v1 deterministic gate is `npm run test:runtime`; its explicit real
+acceptance command is `CORE_AGENT_REAL_HERMES_SMOKE=1 npm run
+smoke:control-plane` after every prerequisite in the local smoke guide is met.
 
 The development API binds only to `127.0.0.1:18642`.
 The demo bootstrap copies that loopback container ingress key into each named

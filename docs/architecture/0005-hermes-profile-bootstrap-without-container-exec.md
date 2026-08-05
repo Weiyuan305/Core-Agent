@@ -104,3 +104,14 @@ documented upstream/plugin proposal may supersede this ADR under ADR 0001.
 Enabling a general management server, arbitrary exec, environment-configured
 secret values, or a different Profile storage contract requires a superseding
 ADR and threat-model review.
+
+## Runtime v1 operational binding
+
+The official Hermes base-image lock is a build input, not a valid managed
+runtime-image lock: it does not attest the Core-Agent initializer and gateway
+entrypoints described above. Runtime v1 deployments project one reviewed
+Core-Agent product-image lock read-only into both the API and Supervisor. Both
+processes therefore admit the same platform digest, and the real smoke also
+checks the installed image configuration before provisioning. A local product
+tag produced by `npm run hermes:build` is not equivalent to a published
+RepoDigest and cannot satisfy this binding.

@@ -26,6 +26,7 @@
     "runtime:images": "node scripts/resolve-runtime-images.mjs",
     "runtime:network": "node scripts/prepare-runtime-network.mjs",
     "runtime:paths": "node scripts/prepare-runtime-paths.mjs",
+    "smoke:control-plane": "node scripts/smoke-control-plane.mjs",
     "hermes:image-ref": "node scripts/resolve-hermes-image.mjs",
     "hermes:build": "node scripts/build-hermes-image.mjs",
     "hermes:bootstrap": "node scripts/bootstrap-demo-company.mjs",

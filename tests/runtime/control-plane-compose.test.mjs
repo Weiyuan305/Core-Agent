@@ -123,7 +123,10 @@ test("service mounts and networks preserve each process boundary", async () => {
     name: "core-agent-backplane",
   });
 
-  assert.deepEqual(volumeTargets(api), ["/app/infra/runtime/providers.json"]);
+  assert.deepEqual(volumeTargets(api), [
+    "/run/core-agent/config/hermes-images.lock.json",
+    "/app/infra/runtime/providers.json",
+  ]);
   assert.deepEqual(secretTargets(api), ["/run/secrets/bootstrap_key"]);
   assert.deepEqual(api.secrets, [{
     source: "bootstrap-key",
@@ -139,6 +142,7 @@ test("service mounts and networks preserve each process boundary", async () => {
   ]);
   assert.deepEqual(secretTargets(worker), []);
   assert.deepEqual(volumeTargets(supervisor).sort(), [
+    "/run/core-agent/config/hermes-images.lock.json",
     "/run/core-agent/secrets/ingress",
     "/run/core-agent/secrets/provider",
     "/run/core-agent/supervisor",
@@ -251,7 +255,7 @@ test("compose environment carries paths and public configuration but no secret v
   const apiEnvironment = environmentMap(config.services.api);
   assert.equal(apiEnvironment.CONTROL_PLANE_BOOTSTRAP_KEY_FILE, "/run/secrets/bootstrap_key");
   assert.equal(apiEnvironment.CONTROL_PLANE_PROVIDER_CATALOG_FILE, "/app/infra/runtime/providers.json");
-  assert.equal(apiEnvironment.CONTROL_PLANE_IMAGE_LOCK_FILE, "/app/infra/hermes/base-images.lock.json");
+  assert.equal(apiEnvironment.CONTROL_PLANE_IMAGE_LOCK_FILE, "/run/core-agent/config/hermes-images.lock.json");
   assert.equal(apiEnvironment.CONTROL_PLANE_DATABASE_URL, "postgresql://core_agent_app@postgres:5432/core_agent_runtime");
   assert.equal(environmentMap(config.services.migrate).CONTROL_PLANE_DATABASE_URL, "postgresql://core_agent_migrator@postgres:5432/core_agent_runtime");
   const workerEnvironment = environmentMap(config.services.worker);
@@ -265,7 +269,7 @@ test("compose environment carries paths and public configuration but no secret v
   });
   const supervisorEnvironment = environmentMap(config.services.supervisor);
   assert.equal(supervisorEnvironment.CORE_AGENT_PROVIDER_CATALOG_PATH, "/app/infra/runtime/providers.json");
-  assert.equal(supervisorEnvironment.CORE_AGENT_IMAGE_LOCK_PATH, "/app/infra/hermes/base-images.lock.json");
+  assert.equal(supervisorEnvironment.CORE_AGENT_IMAGE_LOCK_PATH, "/run/core-agent/config/hermes-images.lock.json");
   assert.equal(supervisorEnvironment.CORE_AGENT_PROVIDER_SECRET_ROOT, "/run/core-agent/secrets/provider");
   assert.equal(supervisorEnvironment.CORE_AGENT_INGRESS_SECRET_ROOT, "/run/core-agent/secrets/ingress");
   assert.equal(supervisorEnvironment.CORE_AGENT_SUPERVISOR_INGRESS_ROOT, "/var/lib/core-agent/supervisor/ingress");
@@ -478,6 +482,7 @@ test("CI preserves contracts and separates deterministic runtime gates", async (
   assert.match(workflowSource, /postgresql:\/\/core_agent_ci@127\.0\.0\.1:5432\/core_agent_control/u);
   assert.equal(workflow.jobs.compose.steps.find((step) => step.name === "Validate Compose configuration").env.CORE_AGENT_SUPERVISOR_SOCKET_ROOT, "/tmp/core-agent-runtime-socket-path-only");
   assert.equal(workflow.jobs.compose.steps.find((step) => step.name === "Validate Compose configuration").env.CORE_AGENT_SUPERVISOR_STATE_ROOT, "/tmp/core-agent-runtime-state-path-only");
+  assert.equal(workflow.jobs.compose.steps.find((step) => step.name === "Validate Compose configuration").env.CORE_AGENT_HERMES_IMAGE_LOCK_FILE, "/tmp/core-agent-product-image-lock-path-only");
 });
 
 test("runtime example environment contains paths and generated references only", async () => {
