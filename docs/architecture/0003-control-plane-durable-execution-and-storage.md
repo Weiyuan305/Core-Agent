@@ -156,9 +156,66 @@ to bounded `IDEMPOTENCY_CONFLICT`; every other constraint failure remains an
 internal error instead of being mislabeled.
 
 Task 13 only admits durable `execute_agent_run` work. The production Worker
-claim allowlist continues to exclude that kind, and no Hermes streaming or Run
-execution is introduced until Task 14 supplies the matching lease-fenced Run,
-Message, event, and job transactions.
+claim allowlist excluded that kind until Task 14 supplied the matching
+lease-fenced Run, Message, event, and job transactions. Task 14 closes that
+boundary as follows:
+
+- begin, delta, completion, retry, and failure transactions lock the owned
+  `execute_agent_run` job first and authorize its lease against PostgreSQL
+  `clock_timestamp()` both before and after resource-row waits;
+- begin revalidates the active Tenant, service Actor, admin Membership,
+  immutable Conversation/Profile/Session/user Message, ready Runtime, managed
+  ProviderCatalog entry, and active secret-reference metadata under shared or
+  stronger row locks. The existing SecretReference mapping stores the ingress
+  purpose as `integration` and returns the typed `hermes_ingress` reference;
+- `queued -> running` appends one `run.started`; a reclaimed, below-ceiling
+  `pre_effect` job may resume the already-running Run without duplicating it;
+- the first non-empty assistant delta atomically changes the job to
+  `unsafe_to_replay` and appends `message.delta` before the streaming iterator
+  may be pulled again. Delta accounting and completion evidence are filtered by
+  both Conversation stream and Run ID, so sequential Runs cannot share output;
+- durable deltas remain ProductEvents only. No partial assistant Message exists.
+  Exact concatenated output creates one completed assistant Message only in the
+  same transaction that appends `message.completed`, transitions the Run to
+  succeeded, appends `run.completed`, advances Session activity, writes audit
+  and Outbox rows, and completes the job;
+- any failure after the unsafe boundary terminalizes Run and job atomically.
+  Reclaimed unsafe work and both final-attempt recovery phases terminalize
+  without Supervisor inspect, SecretStore access, or Hermes. Worker/process
+  cancellation or lease loss makes no business cancellation or stale terminal
+  claim;
+- only after these normal, safe-retry, unsafe-recovery, and `recoveryOnly`
+  paths were tested did the production Worker allowlist add
+  `execute_agent_run`.
+
+Every delta transaction performs one final database-clock lease check after
+ProductEvent sequence allocation and Outbox insertion. This closes the row-wait
+window: if the Conversation stream-sequence row was locked until the lease
+expired, the final fence aborts and rolls back `unsafe_to_replay`, the delta,
+the sequence allocation, and Outbox together.
+
+Only one Agent Run may use one Conversation's Hermes Session at a time. The
+Worker resolves the immutable Run-to-Conversation binding inside the authority
+tenant, then holds a PostgreSQL session advisory lock across the complete
+`handleExecuteAgentRun` lifecycle: begin, Supervisor inspect, SecretMaterial,
+Hermes stream, every durable delta, and terminal/retry transaction. The key
+uses the separate `agent-session:v1` namespace rather than the Runtime
+lifecycle-lock namespace. It includes tenant and Conversation, so different
+Conversations and different tenants remain concurrent. Lock acquisition uses
+bounded `pg_try_advisory_lock` polling so cancellation does not enter begin or
+Hermes and waiting jobs do not pin every pool connection. After acquisition the
+Worker resolves the tenant-scoped binding again; `begin` then revalidates the
+current database-clock lease and all execution authority before external work.
+
+Runtime inspection before Hermes is deliberately not protected by the runtime
+advisory lock: a model stream may last 90 seconds and must not block a stop or
+delete command. The Worker issues a deterministic Supervisor `inspect`
+operation bound to `(job_id, attempt_count)`. Repeated work within one attempt
+is idempotent, while a safe retry receives a new observation instead of a stale
+Supervisor-journal entry. It requires exact tenant, runtime, generation, image,
+existence, running lifecycle, healthy status, and validated private origin.
+Later runtime drift converges through the pre-effect versus unsafe failure
+policy rather than a conversation-long lifecycle lock.
 
 ## Alternatives considered
 

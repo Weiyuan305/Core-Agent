@@ -72,6 +72,30 @@ introduce WebSocket state before bidirectional real-time behavior is required.
 Hermes Session continuity is runtime state and does not implement the later
 Composite Memory authority or consent model.
 
+The Task 14 Hermes port accepts only one managed `http://` private origin on
+port `8642` and one validated opaque Profile route segment. It rejects
+userinfo, public or loopback routing, path/query/fragment prefixes, alternate
+ports, controls, percent tricks, and redirects. Requests contain only the
+Bearer ingress material, server Session header, selected managed model, one
+user message, and `stream: true`.
+
+Responses must be `text/event-stream`. Parsing is fatal UTF-8 and strict JSON,
+bounds each physical line to 64 KiB and total assistant content to 4,000
+characters, yields only non-empty `choices[0].delta.content`, and succeeds only
+after exact `data: [DONE]` with non-empty output. Provider bodies, headers,
+reasoning, tool arguments, usage, credentials, raw transport errors, and secret
+values never cross the port. Releasable ingress `SecretMaterial` is released
+exactly once in `finally` on success, refusal, malformed/truncated streams,
+timeout, caller abort, and transport failure.
+
+These committed deltas are the only streaming authority. Task 14 does not add
+an HTTP stream: Task 15 separately reads persisted ProductEvents through a
+resumable SSE cursor, so a client connection never owns execution lifetime.
+Within the Worker, the server Session does own ordering: a distinct
+tenant-and-Conversation advisory lock serializes complete Agent Run executions
+that share its `hermes_session_ref`, while unrelated Conversations continue in
+parallel.
+
 ### Secrets and provider configuration
 
 Use a pluggable `SecretStore`. PostgreSQL stores only opaque secret references,

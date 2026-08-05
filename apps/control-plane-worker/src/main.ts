@@ -1,20 +1,22 @@
 import {
   claimOutboxWakeups, claimPlatformWorkerJobs, completeJob, createRedactor, failOutbox,
   heartbeatJob, markOutboxDelivered, rescheduleOutbox, retryDecision,
-  withRuntimeAdvisoryLock, WorkerRuntimeRepository,
-  type ClaimedJob, type ProviderCatalog, type Redactor, type RuntimeDatabase,
+  withAgentRunConversationLock, withRuntimeAdvisoryLock, WorkerAgentRunRepository, WorkerRuntimeRepository,
+  type ClaimedJob, type HermesChatInput, type ProviderCatalog, type Redactor, type RuntimeDatabase,
   type RuntimeSupervisorClient, type SecretStore,
 } from "@core-agent/runtime-core";
 import { sql, type Kysely } from "kysely";
 
 import { dispatchJob, type DispatchPort, type HandlerResult } from "./dispatch-job.js";
 import { dispatchOutbox } from "./handlers/dispatch-outbox.js";
+import { handleExecuteAgentRun } from "./handlers/execute-agent-run.js";
 import { buildProvisionRuntimeRequest, handleProvisionRuntime, validatePrivateHermesOrigin } from "./handlers/provision-runtime.js";
 import { handleReconcileRuntime } from "./handlers/reconcile-runtime.js";
+import { inspectAgentRunRuntime } from "./inspect-agent-runtime.js";
 import { handleNonReconcileRecovery } from "./recovery-boundary.js";
 import { runWorkerLoop } from "./worker-loop.js";
 
-export const implementedWorkerJobKinds = ["provision_runtime", "reconcile_runtime", "dispatch_outbox"] as const;
+export const implementedWorkerJobKinds = ["provision_runtime", "reconcile_runtime", "execute_agent_run", "dispatch_outbox"] as const;
 
 export interface WorkerClock {
   now(): Date;
@@ -25,7 +27,8 @@ export interface WorkerLogger { info(fields: object, message: string): void; err
 export interface HermesReadinessClient {
   probe(input: { origin: string; profileRef: string; sessionId: string; ingressKey: string; modelId: string }, signal: AbortSignal): Promise<void>;
 }
-export interface WorkerRepositories { readonly runtimes: WorkerRuntimeRepository; readonly redactor: Redactor }
+export interface HermesExecutionClient { streamChat(input: HermesChatInput): AsyncIterable<string> }
+export interface WorkerRepositories { readonly runtimes: WorkerRuntimeRepository; readonly agentRuns: WorkerAgentRunRepository; readonly redactor: Redactor }
 export interface WorkerDependencies {
   readonly db: Kysely<RuntimeDatabase>;
   readonly workerId: string;
@@ -36,6 +39,7 @@ export interface WorkerDependencies {
   readonly supervisorClient: Pick<RuntimeSupervisorClient, "execute">;
   readonly ingressSecretStore: SecretStore;
   readonly hermesClient: HermesReadinessClient;
+  readonly executionHermesClient: HermesExecutionClient;
 }
 
 function jobRef(dependencies: WorkerDependencies, job: ClaimedJob) {
@@ -89,6 +93,28 @@ async function dispatchRuntimeJob(dependencies: WorkerDependencies, job: Claimed
     retry: async (_job, summary) => { const retry = nextAttempt(dependencies, job, summary); return dependencies.repositories.runtimes.retryJob(ref, retry.summary, retry.at); },
     fail: (_job, summary) => dependencies.repositories.runtimes.failRuntimeJob(ref, summary),
   }, { tenantId: job.tenantId, jobId: job.jobId, attemptCount: job.attemptCount, maxAttempts: job.maxAttempts, targetCommandVersion: job.targetCommandVersion, command: job.runtimeCommand, effectState: job.effectState, recoveryOnly: job.recoveryOnly }, signal));
+  if (job.jobKind === "execute_agent_run") return withAgentRunConversationLock(
+    dependencies.db,
+    { tenantId: job.tenantId, runId: job.payloadRef, signal },
+    () => handleExecuteAgentRun({
+    begin: (runJob) => dependencies.repositories.agentRuns.begin(runJob),
+    inspectRuntime: (facts, operationSignal) => inspectAgentRunRuntime(dependencies.supervisorClient, facts, job.attemptCount, operationSignal),
+    stream: (facts, origin, operationSignal) => ({ async *[Symbol.asyncIterator]() {
+      const material = await dependencies.ingressSecretStore.get(facts.ingressSecretRef);
+      yield* dependencies.executionHermesClient.streamChat({
+        origin, profileRef: facts.profileRef, sessionRef: facts.sessionRef, ingressMaterial: material,
+        modelId: facts.modelId, timeoutMs: facts.timeoutMs, content: facts.content, signal: operationSignal,
+      });
+    } }),
+    persistDelta: (runJob, messageId, delta) => dependencies.repositories.agentRuns.persistDelta(runJob, messageId, delta),
+    complete: (runJob, facts, content) => dependencies.repositories.agentRuns.complete(runJob, facts, content),
+    retry: (runJob, summary) => {
+      const retry = nextAttempt(dependencies, job, summary);
+      return dependencies.repositories.agentRuns.retry(runJob, retry.summary, retry.at);
+    },
+    fail: (runJob, summary) => dependencies.repositories.agentRuns.fail(runJob, summary),
+    }, job, signal, dependencies.workerId),
+  );
   if (job.jobKind === "dispatch_outbox") {
     const recovery = await handleNonReconcileRecovery({
       failRuntime: async () => ({ kind: "lease_lost" }),
@@ -99,7 +125,7 @@ async function dispatchRuntimeJob(dependencies: WorkerDependencies, job: Claimed
     await completeJob(dependencies.db, { tenantId: job.tenantId, jobId: job.jobId, workerId: dependencies.workerId });
     return { kind: "succeeded" };
   }
-  throw new Error("execute_agent_run is not available before the Run execution milestone");
+  throw new Error("Stored Worker job kind is not implemented");
 }
 
 async function pollOutbox(dependencies: WorkerDependencies): Promise<void> {
@@ -128,6 +154,10 @@ export async function runControlPlaneWorker(dependencies: WorkerDependencies, si
   }, signal);
 }
 
-export function createWorkerRuntimeRepositories(db: Kysely<RuntimeDatabase>, redactor: Redactor = createRedactor([])): WorkerRepositories {
-  return { runtimes: new WorkerRuntimeRepository(db, redactor), redactor };
+export function createWorkerRuntimeRepositories(
+  db: Kysely<RuntimeDatabase>,
+  providerCatalog: ProviderCatalog,
+  redactor: Redactor = createRedactor([]),
+): WorkerRepositories {
+  return { runtimes: new WorkerRuntimeRepository(db, redactor), agentRuns: new WorkerAgentRunRepository(db, providerCatalog, redactor), redactor };
 }

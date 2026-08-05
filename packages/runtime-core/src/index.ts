@@ -60,7 +60,18 @@ export {
   type WorkerJobKind,
 } from "./repositories/jobs.js";
 export { acquireRuntimeTransactionAdvisoryLock, runtimeAdvisoryLockKey, withRuntimeAdvisoryLock } from "./repositories/runtime-lock.js";
+export {
+  agentRunConversationLockKey,
+  withAgentRunConversationLock,
+  type AgentRunConversationLockInput,
+} from "./repositories/agent-run-conversation-lock.js";
 export { WorkerRuntimeRepository, type ProvisionAdmissionResult, type ProvisionCompletionResult, type ProvisionFailureResult, type RuntimeWorkerJobRef, type StoredProvisionFacts, type StoredProvisionProfile, type StoredReconcileFacts } from "./repositories/worker-runtime.js";
+export {
+  WorkerAgentRunRepository,
+  type AgentRunBeginResult,
+  type AgentRunWorkerJobRef,
+  type StoredAgentRunExecutionFacts,
+} from "./repositories/worker-agent-run.js";
 export { claimOutboxWakeups, failOutbox, markOutboxDelivered, rescheduleOutbox, type ClaimedOutboxWakeup, type ClaimOutboxInput } from "./repositories/outbox.js";
 export {
   appendProductEvents,
@@ -96,6 +107,19 @@ export {
   type SecretReference,
   type SecretStore,
 } from "./secrets/secret-store.js";
+export {
+  HermesClient,
+  HermesStreamError,
+  validateManagedHermesOrigin,
+  type HermesChatInput,
+  type HermesClientOptions,
+  type HermesStreamErrorCode,
+} from "./hermes/client.js";
+export {
+  MAX_HERMES_ASSISTANT_CHARACTERS,
+  MAX_HERMES_SSE_LINE_BYTES,
+  parseHermesEventStream,
+} from "./hermes/stream-parser.js";
 export {
   assertSchemaVersion,
   EXPECTED_SCHEMA_VERSION,

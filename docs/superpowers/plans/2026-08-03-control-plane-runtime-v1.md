@@ -2109,7 +2109,7 @@ allowlist.
 - Consumes: queued Run, immutable Conversation/Profile/Session, completed user Message, ready Runtime, Hermes ingress SecretStore reference, and a streaming fetch implementation.
 - Produces: `HermesClient.streamChat` yielding bounded text deltas, `handleExecuteAgentRun`, assistant Message, ordered `run.started`/`message.delta`/`message.completed`/`run.completed`, and safe terminal failure.
 
-- [ ] **Step 1: Write failing stream and unsafe-boundary tests**
+- [x] **Step 1: Write failing stream and unsafe-boundary tests**
 
 ```ts
 test("Hermes client sends selected Profile and server Session headers", async () => {
@@ -2117,7 +2117,7 @@ test("Hermes client sends selected Profile and server Session headers", async ()
     origin: "http://core-agent-runtime-example:8642",
     profileRef: "consultant_a",
     sessionRef: "hermes_session_1",
-    ingressKey: "synthetic-ingress-key-00000001",
+    ingressMaterial: syntheticIngressMaterial,
     modelId: "cywx/gpt-5.6-sol",
     timeoutMs: 90_000,
     content: "Synthetic hello",
@@ -2143,7 +2143,7 @@ test("disconnect after first delta fails terminally without automatic replay", a
 });
 ```
 
-- [ ] **Step 2: Run and confirm failure**
+- [x] **Step 2: Run and confirm failure**
 
 ```bash
 npm test -w @core-agent/runtime-core -- --test-name-pattern="Hermes client"
@@ -2152,7 +2152,7 @@ npm test -w @core-agent/control-plane-worker -- --test-name-pattern="first delta
 
 Expected: FAIL because the Hermes streaming port and handler do not exist.
 
-- [ ] **Step 3: Implement a bounded OpenAI-compatible SSE parser**
+- [x] **Step 3: Implement a bounded OpenAI-compatible SSE parser**
 
 `streamChat`:
 
@@ -2169,7 +2169,7 @@ Expected: FAIL because the Hermes streaming port and handler do not exist.
 
 The caller supplies the key through a releasable SecretMaterial and releases it in `finally`.
 
-- [ ] **Step 4: Implement Run start and durable deltas**
+- [x] **Step 4: Implement Run start and durable deltas**
 
 Before external work, one transaction transitions `queued -> running`, sets `started_at`, appends `run.started`, and marks a worker execution record `pre_effect`. For every non-empty delta, one transaction appends `message.delta` and flips the execution record to `unsafe_to_replay` before acknowledging the chunk in process memory.
 
@@ -2183,7 +2183,7 @@ Do not create the assistant Message until completion. On `[DONE]`, one transacti
 6. appends AuditEvent/Outbox;
 7. completes the job.
 
-- [ ] **Step 5: Implement failure classification around the unsafe boundary**
+- [x] **Step 5: Implement failure classification around the unsafe boundary**
 
 Before any delta/effect, connection refusal and timeout may reschedule
 according to ProviderCatalog retry ceiling. At or after the Worker job's
@@ -2200,7 +2200,7 @@ An expired running job already at `max_attempts` is claimed as
 must not call Hermes; only then may Task 14 add `execute_agent_run` to the
 production Worker allowlist.
 
-- [ ] **Step 6: Run Worker and core gates, then commit**
+- [x] **Step 6: Run Worker and core gates, then commit**
 
 ```bash
 npm run check -w @core-agent/runtime-core
@@ -2210,6 +2210,41 @@ git diff --check
 git add packages/runtime-core/src/hermes packages/runtime-core/tests/hermes-client.test.ts apps/control-plane-worker
 git commit -m "feat(worker): execute durable Hermes agent runs"
 ```
+
+Implementation closure (2026-08-05): the Hermes port enforces a managed
+private-host `http:` origin on fixed port `8642`, opaque Profile segment,
+redirect refusal, fatal-UTF-8/strict-JSON SSE, a 64-KiB physical-line limit, a
+4,000-character assistant limit, exact `[DONE]`, and non-empty output. It
+exposes only assistant text deltas and releases ingress SecretMaterial exactly
+once in `finally`; raw provider response, transport, reasoning, tool, usage,
+header, and credential data are never propagated.
+
+The Worker begins execution in a lease-fenced transaction, then performs a
+Supervisor inspect whose deterministic operation identity is bound to
+`(job_id, attempt_count)`. This preserves same-attempt idempotency while forcing
+a fresh observation on safe retry. The observation must match tenant, runtime,
+generation, image, existence, running lifecycle, health, and managed private
+origin. Execution does not hold the runtime advisory lock across model work,
+so long conversations cannot block stop/delete admission.
+
+Each non-empty delta changes `effect_state` to `unsafe_to_replay` and appends
+the Run-scoped durable event before the iterator advances. No partial assistant
+Message is stored. Completion atomically writes the exact concatenated Message,
+ordered completion events, Run success, Session activity, audit/outbox, and job
+success. Unsafe reclaim and both final-attempt recovery phases terminalize with
+zero external calls; cancellation/lease loss never writes `run.cancelled` or a
+stale terminal state. Production claims `execute_agent_run` only after those
+paths passed. HTTP resumable SSE remains exclusively Task 15.
+
+Concurrency closure (2026-08-05): delta persistence repeats the database-clock
+lease fence after stream-sequence allocation and Outbox insertion, so expiry
+during that row wait rolls the whole unsafe boundary back. A distinct
+`agent-session:v1` PostgreSQL session advisory lock now surrounds the complete
+Agent Run handler. The Worker resolves the tenant-scoped immutable
+Run-to-Conversation binding before and after lock acquisition, then `begin`
+revalidates its lease. Runs sharing a Conversation/Hermes Session serialize;
+different Conversations and tenants remain concurrent. Try-lock polling is
+cancellation-aware and does not reuse the Runtime lifecycle lock namespace.
 
 ### Task 15: Serve durable Conversation events through resumable SSE
 

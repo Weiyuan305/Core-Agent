@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { assertSchemaVersion, createRedactor, createRuntimeDatabase, FileSecretStore, loadProviderCatalog, loadRuntimeEnvironment, RuntimeSupervisorClient } from "@core-agent/runtime-core";
+import { assertSchemaVersion, createRedactor, createRuntimeDatabase, FileSecretStore, HermesClient, loadProviderCatalog, loadRuntimeEnvironment, RuntimeSupervisorClient } from "@core-agent/runtime-core";
 import { Pool } from "pg";
 
 import { HttpHermesReadinessClient } from "./hermes-readiness-client.js";
@@ -38,13 +38,15 @@ export async function startControlPlaneWorker(environment: NodeJS.ProcessEnv = p
   process.once("SIGINT", stop); process.once("SIGTERM", stop);
   try {
     await assertSchemaVersion(db);
+    const providerCatalog = loadProviderCatalog(providerJson);
     await runControlPlaneWorker({
       db, workerId: configuration.workerId, clock, logger: pino(),
-      repositories: createWorkerRuntimeRepositories(db, createRedactor([])),
-      providerCatalog: loadProviderCatalog(providerJson),
+      repositories: createWorkerRuntimeRepositories(db, providerCatalog, createRedactor([])),
+      providerCatalog,
       supervisorClient: new RuntimeSupervisorClient({ socketPath: configuration.supervisorSocket }),
       ingressSecretStore: new FileSecretStore(configuration.secretRoot),
       hermesClient: new HttpHermesReadinessClient(),
+      executionHermesClient: new HermesClient(),
     }, controller.signal);
   } finally {
     process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop);

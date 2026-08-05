@@ -30,9 +30,9 @@ test("normal provision and Outbox jobs continue to their implemented handlers", 
   assert.equal(await handleNonReconcileRecovery(port, job("dispatch_outbox", false)), undefined);
 });
 
-test("production Worker claims only implemented jobs and excludes Agent Run execution", () => {
-  assert.deepEqual(implementedWorkerJobKinds, ["provision_runtime", "reconcile_runtime", "dispatch_outbox"]);
-  assert.equal((implementedWorkerJobKinds as readonly string[]).includes("execute_agent_run"), false);
+test("production Worker claims Agent Run execution only after its normal and recovery handlers are implemented", () => {
+  assert.deepEqual(implementedWorkerJobKinds, ["provision_runtime", "reconcile_runtime", "execute_agent_run", "dispatch_outbox"]);
+  assert.equal((implementedWorkerJobKinds as readonly string[]).includes("execute_agent_run"), true);
 });
 
 test("final non-reconcile recovery reports lease loss instead of claiming terminal ownership", async () => {
@@ -51,4 +51,17 @@ test("dispatch places normal and recovery provision handling inside the runtime 
   assert.notEqual(reconcileStart, -1);
   assert.doesNotMatch(source.slice(dispatchStart, provisionStart), /handleNonReconcileRecovery/);
   assert.match(source.slice(provisionStart, reconcileStart), /handleNonReconcileRecovery/);
+});
+
+test("dispatch holds the distinct Conversation execution lock across the complete Agent Run handler", async () => {
+  const source = await readFile(new URL("../src/main.ts", import.meta.url), "utf8");
+  const executeStart = source.indexOf('if (job.jobKind === "execute_agent_run")');
+  const outboxStart = source.indexOf('if (job.jobKind === "dispatch_outbox")', executeStart);
+  assert.notEqual(executeStart, -1);
+  assert.notEqual(outboxStart, -1);
+  const execution = source.slice(executeStart, outboxStart);
+  assert.match(execution, /withAgentRunConversationLock/);
+  assert.match(execution, /handleExecuteAgentRun/);
+  assert.doesNotMatch(execution, /withRuntimeAdvisoryLock/);
+  assert.equal(execution.indexOf("withAgentRunConversationLock") < execution.indexOf("handleExecuteAgentRun"), true);
 });
