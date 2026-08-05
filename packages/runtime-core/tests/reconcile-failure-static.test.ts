@@ -8,10 +8,11 @@ const repositoryPath = join(dirname(fileURLToPath(import.meta.url)), "..", "src"
 
 test("reconcile retry and failure terminalization share a command-version disposition fence", async () => {
   const source = await readFile(repositoryPath, "utf8");
+  const failProvisionSource = source.slice(source.indexOf("public async failProvisionJob"), source.indexOf("public async retryProvisionJob"));
   assert.doesNotMatch(source, /public async retryJob\(/);
   assert.doesNotMatch(source, /public async failRuntimeJob\(/);
   assert.match(source, /public async retryProvisionJob[\s\S]*\.where\("job_kind", "=", "provision_runtime"\)/);
-  assert.match(source, /public async failProvisionJob[\s\S]*job_kind[\s\S]*provision_runtime/);
+  assert.match(failProvisionSource, /\.where\("job_kind", "=", "provision_runtime"\)/);
   assert.match(source, /export type ReconcileRetryResult = \{ readonly kind: "retried" \| "superseded" \| "lease_lost" \};/);
   assert.match(source, /export type ReconcileFailureResult = \{ readonly kind: "failed" \| "superseded" \| "lease_lost" \};/);
   assert.match(source, /retryReconcile[\s\S]*targetCommandVersion[\s\S]*finalizeReconcileFailure/);
