@@ -362,7 +362,7 @@ test("structured log scanning reaches deep late Error and nonplain data", () => 
   }
 });
 
-test("structured log scanning and snapshotting fail closed without invoking serializers", () => {
+test("structured log scan snapshot and projection fail closed without invoking serializers", () => {
   let invoked = 0;
   const ownSerializer = Object.create(null) as Record<string, unknown>;
   Object.defineProperty(ownSerializer, "secret", {
@@ -413,6 +413,43 @@ test("structured log scanning and snapshotting fail closed without invoking seri
   );
   sentinelError(() => testHarnessInternals.assertStructuredLogsSentinelFree(records));
   assert.equal(JSON.stringify(records).includes(LEAK_SENTINEL), false);
+
+  let revocableOwnKeysCalls = 0;
+  const snapshotRevocable = Proxy.revocable({ detail: LEAK_SENTINEL }, {
+    ownKeys() {
+      revocableOwnKeysCalls += 1;
+      if (revocableOwnKeysCalls === 2) snapshotRevocable.revoke();
+      return [];
+    },
+  });
+  const snapshotRecords: unknown[] = [];
+  assert.doesNotThrow(() => {
+    testHarnessInternals.captureStructuredLog(
+      snapshotRecords,
+      "worker_log",
+      snapshotRevocable.proxy,
+      "safe",
+    );
+  });
+  assert.equal(revocableOwnKeysCalls, 2);
+  assert.notEqual(
+    (snapshotRecords[0] as { fields: unknown }).fields,
+    snapshotRevocable.proxy,
+  );
+  sentinelError(() => testHarnessInternals.assertStructuredLogsSentinelFree(snapshotRecords));
+  assert.equal(JSON.stringify(snapshotRecords).includes(LEAK_SENTINEL), false);
+
+  const projectionRevocable = Proxy.revocable({ detail: LEAK_SENTINEL }, {});
+  projectionRevocable.revoke();
+  const projectionRecords: unknown[] = [];
+  const logger = testHarnessInternals.capturingLogger(projectionRecords);
+  assert.doesNotThrow(() => logger.info(projectionRevocable.proxy, "safe"));
+  assert.notEqual(
+    (projectionRecords[0] as { fields: unknown }).fields,
+    projectionRevocable.proxy,
+  );
+  sentinelError(() => testHarnessInternals.assertStructuredLogsSentinelFree(projectionRecords));
+  assert.equal(JSON.stringify(projectionRecords).includes(LEAK_SENTINEL), false);
   assert.equal(invoked, 0);
 });
 

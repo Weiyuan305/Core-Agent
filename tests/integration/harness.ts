@@ -453,7 +453,14 @@ function safeStructuredValue(
       incomplete: true,
     };
   }
-  const isArray = Array.isArray(value);
+  let isArray: boolean;
+  try { isArray = Array.isArray(value); }
+  catch {
+    return {
+      snapshot: { category: "unscannable" },
+      incomplete: true,
+    };
+  }
   if (!isArray) {
     try {
       const prototype = Object.getPrototypeOf(value);
@@ -497,7 +504,7 @@ function safeStructuredValue(
     }
     return { snapshot: result, incomplete };
   }
-  const result: Record<string, unknown> = {};
+  const result: Record<string, unknown> = Object.create(null);
   let incomplete = keys.length > 100;
   for (const key of keys.slice(0, 100)) {
     if (typeof key !== "string") continue;
@@ -655,21 +662,27 @@ function apiLogCaptureSurface(fields: unknown): {
   readonly fields: unknown;
   readonly incomplete: boolean;
 } {
-  if (typeof fields !== "object" || fields === null || Array.isArray(fields)) {
+  if (typeof fields !== "object" || fields === null) {
     return { fields, incomplete: false };
   }
+  let isArray: boolean;
   let prototype: object | null;
   let keys: readonly PropertyKey[];
   try {
+    isArray = Array.isArray(fields);
+    if (isArray) return { fields, incomplete: false };
     prototype = Object.getPrototypeOf(fields);
     keys = Reflect.ownKeys(fields);
   } catch {
-    return { fields, incomplete: true };
+    return {
+      fields: { category: "unscannable" },
+      incomplete: true,
+    };
   }
   if (prototype !== Object.prototype && prototype !== null) {
     return { fields, incomplete: false };
   }
-  const projected: Record<PropertyKey, unknown> = {};
+  const projected: Record<PropertyKey, unknown> = Object.create(null);
   let incomplete = false;
   for (const key of keys) {
     let descriptor: PropertyDescriptor | undefined;
@@ -735,32 +748,55 @@ function captureStructuredLog(
   message?: string,
   forceIncomplete = false,
 ): void {
-  const scan = scanSentinel(fields, message);
-  const structured = safeStructuredValue(fields);
-  const incompleteCategories = new Set(scan.incompleteCategories);
-  if (forceIncomplete) incompleteCategories.add("capture_surface");
-  if (structured.incomplete) incompleteCategories.add("structured_snapshot");
-  records.push(Object.freeze({
+  let capture: StructuredLogCapture;
+  try {
+    const scan = scanSentinel(fields, message);
+    const structured = safeStructuredValue(fields);
+    const incompleteCategories = new Set(scan.incompleteCategories);
+    if (forceIncomplete) incompleteCategories.add("capture_surface");
+    if (structured.incomplete) incompleteCategories.add("structured_snapshot");
+    capture = Object.freeze({
+      category,
+      fields: structured.snapshot,
+      message,
+      sentinelScan: Object.freeze({
+        ...scan,
+        incomplete: scan.incomplete || forceIncomplete || structured.incomplete,
+        incompleteCategories: [...incompleteCategories].sort(),
+      }),
+    } satisfies StructuredLogCapture);
+  } catch {
+    capture = incompleteStructuredLogCapture(category);
+  }
+  records.push(capture);
+}
+
+function incompleteStructuredLogCapture(category: string): StructuredLogCapture {
+  return Object.freeze({
     category,
-    fields: structured.snapshot,
-    message,
+    fields: Object.freeze({ category: "unscannable" }),
+    message: undefined,
     sentinelScan: Object.freeze({
-      ...scan,
-      incomplete: scan.incomplete || forceIncomplete || structured.incomplete,
-      incompleteCategories: [...incompleteCategories].sort(),
+      detected: false,
+      incomplete: true,
+      incompleteCategories: ["capture_failure"],
     }),
-  } satisfies StructuredLogCapture));
+  } satisfies StructuredLogCapture);
 }
 
 function assertStructuredLogsSentinelFree(records: readonly unknown[]): void {
   for (const record of records) {
-    if (
-      typeof record !== "object"
-      || record === null
-      || !("sentinelScan" in record)
-    ) throw new Error("sentinel category: structured logs");
-    const scan = (record as { sentinelScan?: SentinelScan }).sentinelScan;
-    if (scan?.detected !== false || scan.incomplete !== false) {
+    try {
+      if (
+        typeof record !== "object"
+        || record === null
+        || !("sentinelScan" in record)
+      ) throw new Error("invalid capture");
+      const scan = (record as { sentinelScan?: SentinelScan }).sentinelScan;
+      if (scan?.detected !== false || scan.incomplete !== false) {
+        throw new Error("incomplete capture");
+      }
+    } catch {
       throw new Error("sentinel category: structured logs");
     }
   }
@@ -774,14 +810,18 @@ function assertStructuredLogsSentinelFree(records: readonly unknown[]): void {
 
 function capturingLogger(records: unknown[]): FastifyBaseLogger {
   const capture = (fields: unknown, message?: string): void => {
-    const surface = apiLogCaptureSurface(fields);
-    captureStructuredLog(
-      records,
-      "api_log",
-      surface.fields,
-      message,
-      surface.incomplete,
-    );
+    try {
+      const surface = apiLogCaptureSurface(fields);
+      captureStructuredLog(
+        records,
+        "api_log",
+        surface.fields,
+        message,
+        surface.incomplete,
+      );
+    } catch {
+      records.push(incompleteStructuredLogCapture("api_log"));
+    }
   };
   const logger = {
     level: "silent",
@@ -1556,6 +1596,7 @@ export class IntegrationHarness {
 export const testHarnessInternals = Object.freeze({
   assertStructuredLogsSentinelFree,
   captureStructuredLog,
+  capturingLogger,
   createIsolatedDatabase,
   runCleanupStages,
 });
