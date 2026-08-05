@@ -79,7 +79,7 @@ test.after(async () => db.destroy());
 
 test("Agent Run execution atomically begins, persists ordered unsafe deltas, and completes one assistant Message", async () => {
   const setup = await setupExecution("tenant_execute_lifecycle");
-  const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", runId: setup.run.run_id };
+  const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", attemptCount: setup.job.attemptCount, runId: setup.run.run_id };
 
   const begun = await setup.repository.begin(ref);
   assert.equal(begun.kind, "admitted");
@@ -122,12 +122,12 @@ test("Agent Run execution atomically begins, persists ordered unsafe deltas, and
 
 test("safe pre-effect retry of an already-running Run does not duplicate run.started", async () => {
   const setup = await setupExecution("tenant_execute_safe_retry");
-  const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", runId: setup.run.run_id };
+  const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", attemptCount: setup.job.attemptCount, runId: setup.run.run_id };
   assert.equal((await setup.repository.begin(ref)).kind, "admitted");
   assert.deepEqual(await setup.repository.retry(ref, "Dependency unavailable", executionNow), { kind: "updated" });
   const reclaimed = await claimJobs(db, { tenantId: setup.tenantId, workerId: "worker_retry", limit: 1, leaseMs: 300_000 });
   assert.equal(reclaimed.length, 1);
-  const retryRef = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_retry", runId: setup.run.run_id };
+  const retryRef = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_retry", attemptCount: reclaimed[0]!.attemptCount, runId: setup.run.run_id };
   assert.equal((await setup.repository.begin(retryRef)).kind, "admitted");
   assert.equal(
     await db.selectFrom("product_events").selectAll().where("tenant_id", "=", setup.tenantId).where("event_type", "=", "run.started").execute().then((rows) => rows.length),
@@ -137,7 +137,7 @@ test("safe pre-effect retry of an already-running Run does not duplicate run.sta
 
 test("dispatch mark rejects a queued Run before begin", { timeout: 5_000 }, async () => {
   const setup = await setupExecution("tenant_execute_dispatch_before_begin");
-  const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", runId: setup.run.run_id };
+  const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", attemptCount: setup.job.attemptCount, runId: setup.run.run_id };
 
   await assert.rejects(setup.repository.markDispatched(ref), /Run is not running/);
   assert.deepEqual(

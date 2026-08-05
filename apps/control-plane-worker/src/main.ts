@@ -133,10 +133,10 @@ async function pollOutbox(dependencies: WorkerDependencies): Promise<void> {
   await dispatchOutbox({
     claim: (workerId, limit) => claimOutboxWakeups(dependencies.db, { workerId, limit, leaseMs: 30_000 }),
     notify: async (payload) => { await sql`select pg_notify('core_agent_events', ${payload})`.execute(dependencies.db); },
-    delivered: async (row, workerId) => (await markOutboxDelivered(dependencies.db, { tenantId: row.tenantId, outboxId: row.outboxId, workerId, attemptCount: row.attemptCount! })).kind === "updated",
-    retry: async (row, workerId, summary) => row.attemptCount !== undefined && row.attemptCount >= 10
-      ? (await failOutbox(dependencies.db, { tenantId: row.tenantId, outboxId: row.outboxId, workerId, attemptCount: row.attemptCount!, lastErrorSummary: summary, redactor: dependencies.repositories.redactor })).kind === "updated"
-      : (await rescheduleOutbox(dependencies.db, { tenantId: row.tenantId, outboxId: row.outboxId, workerId, attemptCount: row.attemptCount!, nextAttemptAt: new Date(dependencies.clock.now().getTime() + Math.min(60_000, 500 * 2 ** Math.max(0, (row.attemptCount ?? 1) - 1))), lastErrorSummary: summary, redactor: dependencies.repositories.redactor })).kind === "updated",
+    delivered: async (row, workerId) => (await markOutboxDelivered(dependencies.db, { tenantId: row.tenantId, outboxId: row.outboxId, workerId, attemptCount: row.attemptCount })).kind === "updated",
+    retry: async (row, workerId, summary) => row.attemptCount >= 10
+      ? (await failOutbox(dependencies.db, { tenantId: row.tenantId, outboxId: row.outboxId, workerId, attemptCount: row.attemptCount, lastErrorSummary: summary, redactor: dependencies.repositories.redactor })).kind === "updated"
+      : (await rescheduleOutbox(dependencies.db, { tenantId: row.tenantId, outboxId: row.outboxId, workerId, attemptCount: row.attemptCount, nextAttemptAt: new Date(dependencies.clock.now().getTime() + Math.min(60_000, 500 * 2 ** Math.max(0, row.attemptCount - 1))), lastErrorSummary: summary, redactor: dependencies.repositories.redactor })).kind === "updated",
   }, dependencies.workerId);
 }
 

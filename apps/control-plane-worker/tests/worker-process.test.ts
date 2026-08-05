@@ -37,6 +37,20 @@ test("already-aborted idle waits add no listener", async () => {
   assert.equal(added, 0);
 });
 
+test("aborting after idle listener registration removes that listener", async () => {
+  const controller = new AbortController();
+  let removed = 0;
+  const originalRemove = controller.signal.removeEventListener.bind(controller.signal);
+  controller.signal.removeEventListener = ((...args: Parameters<AbortSignal["removeEventListener"]>) => {
+    removed += 1;
+    return originalRemove(...args);
+  }) as AbortSignal["removeEventListener"];
+  const wait = createWorkerClock().wait(10_000, controller.signal);
+  controller.abort();
+  await wait;
+  assert.equal(removed, 1);
+});
+
 test("each Worker process has a bounded unique lease-owner incarnation", () => {
   const first = createWorkerLeaseOwner("worker_alpha", () => "11111111-1111-4111-8111-111111111111");
   const second = createWorkerLeaseOwner("worker_alpha", () => "22222222-2222-4222-8222-222222222222");

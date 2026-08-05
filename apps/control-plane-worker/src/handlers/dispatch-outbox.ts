@@ -1,4 +1,4 @@
-interface OutboxWakeup { readonly tenantId: string; readonly outboxId: string; readonly streamId: string; readonly lastSequence: number; readonly attemptCount?: number }
+interface OutboxWakeup { readonly tenantId: string; readonly outboxId: string; readonly streamId: string; readonly lastSequence: number; readonly attemptCount: number }
 export interface OutboxDispatchPort {
   claim(workerId: string, limit: number): Promise<readonly OutboxWakeup[]>;
   notify(payload: string): Promise<void>;
@@ -8,6 +8,9 @@ export interface OutboxDispatchPort {
 export async function dispatchOutbox(port: OutboxDispatchPort, workerId: string): Promise<{ delivered: number; retried: number }> {
   let delivered = 0; let retried = 0;
   for (const row of await port.claim(workerId, 64)) {
+    if (!Number.isSafeInteger(row.attemptCount) || row.attemptCount < 1) {
+      throw new Error("Outbox claimed row attemptCount is invalid");
+    }
     try {
       await port.notify(JSON.stringify({ tenant_id: row.tenantId, stream_id: row.streamId, last_committed_sequence: row.lastSequence }));
       if (await port.delivered(row, workerId)) delivered += 1;
