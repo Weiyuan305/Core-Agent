@@ -167,11 +167,20 @@ it contains no credential material and is not a security principal.
 ### Exhausted Outbox recovery
 
 Outbox attempt 10 is the final notification attempt. Before admitting ordinary
-claims, the claim transaction changes any pending row at or above that limit
-with an absent or expired lease to `failed`, clears its lease, and stores a
-fixed redacted-safe summary using the PostgreSQL clock. A live tenth-attempt
-lease remains authoritative. Recovery sends no notification and never creates
-attempt 11.
+claims, the claim transaction selects at most 100 eligible exhausted rows in
+`created_at`, `tenant_id`, `outbox_id` order using `FOR UPDATE SKIP LOCKED`.
+It changes only those composite tenant-and-Outbox identities, rechecking the
+pending status, attempt limit, and absent or expired lease before writing
+`failed`, clearing the lease, and storing a fixed redacted-safe summary using
+the PostgreSQL clock. A live tenth-attempt lease remains authoritative.
+Recovery sends no notification and never creates attempt 11. Concurrent
+Workers skip each other's recovery rows, and later polling transactions advance
+backlogs beyond the fixed batch.
+
+Schema version 8 adds the partial `outbox_exhausted_recovery_idx` covering the
+deterministic order and lease fields for pending rows at or above attempt 10.
+The additive index is rolled forward before applications expecting version 8;
+older application revisions are not started against the newer schema.
 
 A notification can succeed while its durable delivered acknowledgement loses
 the lease race. The stale acknowledgement is non-authoritative; after expiry,

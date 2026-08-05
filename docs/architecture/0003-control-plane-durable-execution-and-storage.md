@@ -224,11 +224,12 @@ eligibility and active ownership before update. A single claim also deduplicates
 Conversation keys. This serializes competing platform claimers without a new
 schema invariant while preserving parallel claims for unrelated Conversations.
 
-Schema version 7 supports this claim shape with composite indexes on Agent Run
+Schema version 8 retains the version-7 composite indexes on Agent Run
 tenant/Conversation/Run identity, Worker job tenant/Run identity, eligible
-queued/retrying claims, and expired-running recovery claims. Migration tests
-prove a genuine v6-to-v7 upgrade, exact index existence, and index-backed plan
-support. A 500-Run same-Conversation regression reduced focused discovery and
+queued/retrying claims, and expired-running recovery claims. It adds a partial
+covering index for bounded exhausted Outbox recovery. Migration tests prove a
+genuine v7-to-v8 upgrade, exact index existence, and index-backed plan support.
+A 500-Run same-Conversation regression reduced focused discovery and
 claim time from the reviewed 11.1 seconds to 274 milliseconds under cold
 statistics. Its analyzed plan also asserts that the maximum per-node work,
 calculated as actual rows multiplied by actual loops, stays below 5,000.

@@ -521,13 +521,18 @@ notifications are not durable. Dispatchers always query undelivered rows, so a
 missed notification or restart cannot lose an event.
 
 The dispatcher permits at most 10 notification attempts. In the same
-transaction and before ordinary claims, it terminalizes pending exhausted rows
-whose lease is absent or expired as `failed`, clears the lease, and records a
-fixed redacted-safe summary using the database clock. It neither sends a
-recovery notification nor creates attempt 11, and it does not disturb a live
-tenth-attempt lease. A successful notification with a lost durable delivered
-acknowledgement may later follow this failure path; ProductEvent database
-polling remains authoritative and discoverable.
+transaction and before ordinary claims, it selects at most 100 pending
+exhausted rows whose lease is absent or expired, ordered by creation time and
+composite identity, with `FOR UPDATE SKIP LOCKED`. It terminalizes only those
+selected identities after rechecking status, attempt, and lease, clears the
+lease, and records a fixed redacted-safe summary using the database clock. The
+partial schema-v8 recovery index covers the ordered identity and lease fields.
+Concurrent dispatchers recover disjoint batches and later polls make bounded
+progress through larger backlogs. Recovery neither sends a notification nor
+creates attempt 11, and it does not disturb a live tenth-attempt lease. A
+successful notification with a lost durable delivered acknowledgement may
+later follow this failure path; ProductEvent database polling remains
+authoritative and discoverable.
 
 ## 10. Provisioning flow
 

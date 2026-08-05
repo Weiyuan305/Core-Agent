@@ -42,10 +42,13 @@ heartbeat, retry, complete, fail, or apply a Runtime/Agent Run/Outbox terminal
 update for the reclaimed attempt.
 
 Outbox delivery has a hard limit of 10 notification attempts. Each polling
-transaction first marks exhausted pending rows with no live lease as `failed`,
-clears their lease, and records the fixed summary `Outbox delivery attempt
-budget exhausted`; it does not send a recovery notification or admit attempt
-11. A live tenth-attempt lease is left untouched. Alert on this fixed summary
+transaction first locks at most 100 exhausted pending rows in deterministic
+creation-and-identity order with `FOR UPDATE SKIP LOCKED`. It rechecks each
+composite identity and dead-lease predicate, marks it `failed`, clears its
+lease, and records the fixed summary `Outbox delivery attempt budget
+exhausted`; it does not send a recovery notification or admit attempt 11. A
+live tenth-attempt lease is left untouched. Concurrent Workers recover disjoint
+batches and subsequent polls drain larger backlogs. Alert on this fixed summary
 and use ProductEvent database polling to recover consumers: a successful
 notification whose delivered acknowledgement lost its lease may still be
 terminalized as failed, but the durable ProductEvent remains available.

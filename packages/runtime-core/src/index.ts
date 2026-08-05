@@ -83,6 +83,7 @@ export {
   markOutboxDelivered,
   OUTBOX_EXHAUSTED_SUMMARY,
   OUTBOX_MAX_ATTEMPTS,
+  OUTBOX_RECOVERY_BATCH_SIZE,
   rescheduleOutbox,
   type ClaimedOutboxWakeup,
   type ClaimOutboxInput,

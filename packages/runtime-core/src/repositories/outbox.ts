@@ -8,16 +8,12 @@ export interface ClaimedOutboxWakeup { readonly tenantId: string; readonly outbo
 export interface ClaimOutboxInput { readonly workerId: string; readonly limit: number; readonly leaseMs: number }
 export const OUTBOX_MAX_ATTEMPTS = 10;
 export const OUTBOX_EXHAUSTED_SUMMARY = "Outbox delivery attempt budget exhausted";
+export const OUTBOX_RECOVERY_BATCH_SIZE = 100;
 
 async function recoverExhaustedOutboxWakeups(trx: Transaction<RuntimeDatabase>): Promise<void> {
   // @platform-worker-cross-tenant-claim reviewed Outbox dispatcher recovery authority
-  await trx.updateTable("outbox").set({
-    status: "failed",
-    lease_owner: null,
-    lease_expires_at: null,
-    last_error_summary: OUTBOX_EXHAUSTED_SUMMARY,
-    updated_at: sql<Date>`clock_timestamp()`,
-  })
+  const candidates = await trx.selectFrom("outbox")
+    .select(["tenant_id", "outbox_id"])
     .where("status", "=", "pending")
     .where("attempt_count", ">=", OUTBOX_MAX_ATTEMPTS)
     .where((expression) => expression.or([
@@ -25,7 +21,30 @@ async function recoverExhaustedOutboxWakeups(trx: Transaction<RuntimeDatabase>):
       expression("lease_expires_at", "is", null),
       expression("lease_expires_at", "<=", sql<Date>`clock_timestamp()`),
     ]))
-    .execute();
+    .orderBy("created_at").orderBy("tenant_id").orderBy("outbox_id")
+    .limit(OUTBOX_RECOVERY_BATCH_SIZE)
+    .forUpdate().skipLocked().execute();
+
+  for (const candidate of candidates) {
+    // @platform-worker-cross-tenant-claim reviewed locked Outbox recovery candidate
+    await trx.updateTable("outbox").set({
+      status: "failed",
+      lease_owner: null,
+      lease_expires_at: null,
+      last_error_summary: OUTBOX_EXHAUSTED_SUMMARY,
+      updated_at: sql<Date>`clock_timestamp()`,
+    })
+      .where("tenant_id", "=", candidate.tenant_id)
+      .where("outbox_id", "=", candidate.outbox_id)
+      .where("status", "=", "pending")
+      .where("attempt_count", ">=", OUTBOX_MAX_ATTEMPTS)
+      .where((expression) => expression.or([
+        expression("lease_owner", "is", null),
+        expression("lease_expires_at", "is", null),
+        expression("lease_expires_at", "<=", sql<Date>`clock_timestamp()`),
+      ]))
+      .execute();
+  }
 }
 
 export async function claimOutboxWakeups(db: Kysely<RuntimeDatabase>, input: ClaimOutboxInput): Promise<ClaimedOutboxWakeup[]> {
