@@ -1,6 +1,5 @@
-import { createHash } from "node:crypto";
-
 import {
+  deriveManagedRuntimeNames,
   validateSupervisorRequest,
   type ProviderCatalog,
   type SupervisorRequestV1,
@@ -21,6 +20,8 @@ export interface SupervisorPolicyDependencies {
 const labelPattern = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const hermesProfilePattern = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 const immutableImagePattern = /^[A-Za-z0-9][A-Za-z0-9./:_-]{0,511}@sha256:[a-f0-9]{64}$/;
+
+export const deriveRuntimeNames = deriveManagedRuntimeNames;
 
 function policyError(): Error {
   return new Error("SUPERVISOR_REJECTED: Runtime policy did not match managed configuration");
@@ -57,25 +58,6 @@ function parseImageLock(value: unknown): ManagedImageLock {
   return value as unknown as ManagedImageLock;
 }
 
-export function deriveRuntimeNames(input: {
-  readonly tenant_id: string;
-  readonly runtime_id: string;
-  readonly generation: number;
-}) {
-  if (!labelPattern.test(input.tenant_id) || !labelPattern.test(input.runtime_id) || !Number.isSafeInteger(input.generation) || input.generation < 1 || input.generation > 2_147_483_647) {
-    throw policyError();
-  }
-  const suffix = createHash("sha256")
-    .update(`${input.tenant_id}\0${input.runtime_id}`)
-    .digest("hex")
-    .slice(0, 16);
-  return {
-    container: `core-agent-runtime-${suffix}-g${input.generation}`,
-    volume: `core-agent-data-${suffix}`,
-    network: "core-agent-backplane",
-  } as const;
-}
-
 export function validateSupervisorPolicy(
   value: unknown,
   dependencies: SupervisorPolicyDependencies,
@@ -83,7 +65,12 @@ export function validateSupervisorPolicy(
   const request = validateSupervisorRequest(value);
   if (request.kind !== "provision") return request;
   const runtime = request.runtime;
-  const names = deriveRuntimeNames(runtime);
+  let names;
+  try {
+    names = deriveManagedRuntimeNames(runtime);
+  } catch {
+    throw policyError();
+  }
   if (!labelPattern.test(runtime.volume_ref)) throw policyError();
   if (runtime.volume_ref !== names.volume) throw policyError();
   const imageLock = parseImageLock(dependencies.imageLock);

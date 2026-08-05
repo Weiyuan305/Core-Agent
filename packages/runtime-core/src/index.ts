@@ -1,5 +1,10 @@
 export { loadRuntimeEnvironment, type RuntimeEnvironment } from "./config/environment.js";
 export {
+  deriveManagedRuntimeNames,
+  type ManagedRuntimeIdentity,
+  type ManagedRuntimeNames,
+} from "./runtime/managed-names.js";
+export {
   loadProviderCatalog,
   type ProviderCatalog,
   type ProviderConfig,

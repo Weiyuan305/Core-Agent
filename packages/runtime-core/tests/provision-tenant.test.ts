@@ -6,6 +6,7 @@ import test from "node:test";
 import { Pool } from "pg";
 
 import { loadProviderCatalog } from "../src/config/provider-catalog.js";
+import { deriveManagedRuntimeNames } from "../src/runtime/managed-names.js";
 import { createRuntimeDatabase } from "../src/db/database.js";
 import { applyMigrations } from "../src/db/migrate.js";
 import { canonicalPayloadHash, DomainError } from "../src/domain/idempotency.js";
@@ -160,8 +161,16 @@ test("provisionTenant atomically creates one runtime and replays the completed r
   assert.equal(idempotency.status, "completed");
   assert.deepEqual(idempotency.response_json, first);
   assert.equal(externalCalls, 0);
-  const internalRuntime = await db.selectFrom("runtime_containers").select(["runtime_platform", "command_version"]).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow();
-  assert.deepEqual(internalRuntime, { runtime_platform: "linux/amd64", command_version: "0" });
+  const internalRuntime = await db.selectFrom("runtime_containers").select(["runtime_platform", "command_version", "volume_ref"]).where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow();
+  assert.deepEqual(internalRuntime, {
+    runtime_platform: "linux/amd64",
+    command_version: "0",
+    volume_ref: deriveManagedRuntimeNames({
+      tenant_id: context.tenantId,
+      runtime_id: first.runtime.container_id,
+      generation: 1,
+    }).volume,
+  });
 });
 
 test("provision replay rejects a result reference that does not match the derived runtime", async () => {

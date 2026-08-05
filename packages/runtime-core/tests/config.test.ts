@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { loadProviderCatalog, loadRuntimeEnvironment, loadRuntimeImageLock } from "../src/index.js";
+import {
+  deriveManagedRuntimeNames,
+  loadProviderCatalog,
+  loadRuntimeEnvironment,
+  loadRuntimeImageLock,
+} from "../src/index.js";
 
 const runtimeEnvironment = {
   CONTROL_PLANE_DATABASE_URL: "postgres://runtime:runtime@127.0.0.1/runtime",
@@ -20,6 +25,21 @@ const provider = {
   timeout_ms: 30_000,
   max_safe_retries: 1,
 };
+
+test("managed runtime naming has one deterministic producer and policy vector", () => {
+  assert.deepEqual(
+    deriveManagedRuntimeNames({
+      tenant_id: "tenant_a",
+      runtime_id: "runtime_a",
+      generation: 7,
+    }),
+    {
+      container: "core-agent-runtime-f7451a3e701c28c5-g7",
+      volume: "core-agent-data-f7451a3e701c28c5",
+      network: "core-agent-backplane",
+    },
+  );
+});
 
 test("environment uses the managed defaults and returns a closed configuration", () => {
   assert.deepEqual(loadRuntimeEnvironment(runtimeEnvironment), {

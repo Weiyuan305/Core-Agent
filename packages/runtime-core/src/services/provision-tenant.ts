@@ -16,6 +16,7 @@ import type { RuntimeDatabase } from "../db/database.js";
 import { assertTenantId, type TenantTransaction } from "../db/transaction.js";
 import { appendAuditEvent, appendProductEvents } from "../repositories/events.js";
 import { ResourceRepositories } from "../repositories/index.js";
+import { deriveManagedRuntimeNames } from "../runtime/managed-names.js";
 import { SecretReferenceRepository } from "../repositories/secret-references.js";
 import { assertSecretReferenceId } from "../secrets/secret-store.js";
 import {
@@ -89,8 +90,11 @@ export function deriveRuntimeContainerId(tenantId: string): string {
 }
 
 export function deriveRuntimeVolumeRef(tenantId: string): string {
-  assertTenantId(tenantId);
-  return deriveId("volume", tenantId);
+  return deriveManagedRuntimeNames({
+    tenant_id: tenantId,
+    runtime_id: deriveRuntimeContainerId(tenantId),
+    generation: 1,
+  }).volume;
 }
 
 function validateInitialMetadata(graph: IdentityGraph): void {

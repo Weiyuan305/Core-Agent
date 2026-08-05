@@ -19,6 +19,7 @@ import { dirname, join, resolve } from "node:path";
 import type Dockerode from "dockerode";
 
 import {
+  deriveManagedRuntimeNames,
   REMOVED_RUNTIME_IMAGE_REF,
   validateSupervisorRequest,
   type ProviderCatalog,
@@ -29,7 +30,7 @@ import {
   type SupervisorResponseV1,
 } from "@core-agent/runtime-core";
 
-import { deriveRuntimeNames, validateSupervisorPolicy } from "./policy.js";
+import { validateSupervisorPolicy } from "./policy.js";
 import {
   BoundedDockerError,
   dockerFailure,
@@ -73,7 +74,7 @@ export interface DockerRuntimeAdapterOptions {
   readonly initializerTimeoutMs?: number;
 }
 
-type RuntimeNames = ReturnType<typeof deriveRuntimeNames>;
+type RuntimeNames = ReturnType<typeof deriveManagedRuntimeNames>;
 type ProvisionRuntimeCommandV1 = Extract<SupervisorRequestV1, { readonly kind: "provision" }>;
 type LifecycleRuntimeCommandV1 = Exclude<SupervisorRequestV1, ProvisionRuntimeCommandV1>;
 
@@ -803,7 +804,7 @@ export class DockerRuntimeAdapter {
 
   async #provisionValidated(request: ProvisionRuntimeCommandV1, signal?: AbortSignal): Promise<RuntimeObservation> {
     assertNotAborted(signal);
-    const names = deriveRuntimeNames(request.runtime);
+    const names = deriveManagedRuntimeNames(request.runtime);
     const runtimeDigest = resourceDigest(request.runtime.tenant_id, request.runtime.runtime_id);
     const ingressParent = join(resolve(this.#options.ingressRoot), runtimeDigest);
     const ingressDirectory = join(ingressParent, `g-${request.runtime.generation}`);
@@ -1007,7 +1008,7 @@ export class DockerRuntimeAdapter {
 
   async #lifecycleValidated(request: LifecycleRuntimeCommandV1, signal?: AbortSignal): Promise<RuntimeObservation> {
     assertNotAborted(signal);
-    const names = deriveRuntimeNames(request);
+    const names = deriveManagedRuntimeNames(request);
     const runtimeDigest = resourceDigest(request.tenant_id, request.runtime_id);
     const ingressParent = join(resolve(this.#options.ingressRoot), runtimeDigest);
     const ingressDirectory = join(ingressParent, `g-${request.generation}`);
