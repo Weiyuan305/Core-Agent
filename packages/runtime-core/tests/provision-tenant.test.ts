@@ -519,6 +519,38 @@ test("Worker command supersession uses command_version independently from observ
   assert.deepEqual(completed, { command_version: "2", observed_state: "ready" });
 });
 
+test("superseded reconcile retry and failure terminalize only their owned jobs", async () => {
+  const tenantId = "tenant_reconcile_failure_supersession";
+  const provisioning = b2bRequest(tenantId);
+  const context = { tenantId, requestId: "request_reconcile_failure", traceId: "trace_reconcile_failure", actorId: "core_agent_provisioner" as const, membershipId: "core_agent_provisioner_admin" as const, effectiveRole: "admin" as const };
+  const accepted = await provisionTenant({ db, providerCatalog, imageLock }, context, provisioning);
+  for (const [key, version, command] of [["v1", 1, "stop"], ["v2", 2, "start"], ["v3", 3, "stop"]] as const) {
+    await commandRuntime({ db }, context, withHash({ schema_version: 1 as const, idempotency_key: `idem_${key}`, expected_resource_version: version, command }));
+  }
+  const jobs = await db.selectFrom("worker_jobs").select(["job_id", "target_command_version", "attempt_count"]).where("tenant_id", "=", tenantId).where("job_kind", "=", "reconcile_runtime").orderBy("target_command_version").execute();
+  const [failedOld, retriedOld, current] = jobs;
+  assert.ok(failedOld && retriedOld && current);
+  await db.updateTable("worker_jobs").set({ status: "running", lease_owner: "worker_a", lease_expires_at: new Date("2100-01-01T00:00:00.000Z") }).where("tenant_id", "=", tenantId).where("job_id", "in", [failedOld.job_id, retriedOld.job_id, current.job_id]).execute();
+  await db.updateTable("worker_jobs").set({ effect_state: "unsafe_to_replay" }).where("tenant_id", "=", tenantId).where("job_id", "=", retriedOld.job_id).execute();
+  const beforeRuntime = await db.selectFrom("runtime_containers").select(["desired_state", "observed_state", "health_status", "failure_summary", "resource_version", "command_version"]).where("tenant_id", "=", tenantId).executeTakeFirstOrThrow();
+  const beforeEvents = await db.selectFrom("product_events").select(({ fn }) => fn.countAll<number>().as("count")).where("tenant_id", "=", tenantId).executeTakeFirstOrThrow();
+  const beforeAudits = await db.selectFrom("audit_events").select(({ fn }) => fn.countAll<number>().as("count")).where("tenant_id", "=", tenantId).executeTakeFirstOrThrow();
+  const repository = new WorkerRuntimeRepository(db, createRedactor([]), () => new Date("2026-08-06T00:00:00.000Z"));
+  const ref = (job: typeof failedOld) => ({ tenantId, runtimeId: accepted.runtime.container_id, jobId: job.job_id, workerId: "worker_a", attemptCount: job.attempt_count });
+
+  assert.deepEqual(await repository.failReconcileJob(ref(failedOld), 1, "stale rejected effect"), { kind: "superseded" });
+  assert.deepEqual(await repository.retryReconcileJob(ref(retriedOld), 2, "stale timeout", new Date("2026-08-06T00:01:00.000Z")), { kind: "superseded" });
+  assert.deepEqual(await db.selectFrom("runtime_containers").select(["desired_state", "observed_state", "health_status", "failure_summary", "resource_version", "command_version"]).where("tenant_id", "=", tenantId).executeTakeFirstOrThrow(), beforeRuntime);
+  assert.deepEqual(await db.selectFrom("product_events").select(({ fn }) => fn.countAll<number>().as("count")).where("tenant_id", "=", tenantId).executeTakeFirstOrThrow(), beforeEvents);
+  assert.deepEqual(await db.selectFrom("audit_events").select(({ fn }) => fn.countAll<number>().as("count")).where("tenant_id", "=", tenantId).executeTakeFirstOrThrow(), beforeAudits);
+  assert.deepEqual(await db.selectFrom("worker_jobs").select(["target_command_version", "status", "last_error_summary"]).where("tenant_id", "=", tenantId).where("job_id", "in", [failedOld.job_id, retriedOld.job_id]).orderBy("target_command_version").execute(), [
+    { target_command_version: "1", status: "succeeded", last_error_summary: "Superseded by a newer runtime command" },
+    { target_command_version: "2", status: "succeeded", last_error_summary: "Superseded by a newer runtime command" },
+  ]);
+  assert.deepEqual(await repository.failReconcileJob({ ...ref(current), attemptCount: current.attempt_count + 1 }, 3, "wrong attempt"), { kind: "lease_lost" });
+  assert.deepEqual(await repository.failReconcileJob(ref(current), 3, "current final failure"), { kind: "failed" });
+});
+
 test("Worker terminal transaction makes no transition after lease loss", async () => {
   const provisioning = b2bRequest("tenant_worker_lease_loss");
   const context = { tenantId: provisioning.identity_graph.tenant.tenant_id, requestId: "request_worker_lease_loss", traceId: "trace_worker_lease_loss", actorId: "core_agent_provisioner" as const, membershipId: "core_agent_provisioner_admin" as const, effectiveRole: "admin" as const };

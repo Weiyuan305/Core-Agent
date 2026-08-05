@@ -7,6 +7,13 @@ import { handleReconcileRuntime } from "../src/handlers/reconcile-runtime.js";
 
 const imageRef = `managed/runtime:v1@sha256:${"a".repeat(64)}`;
 
+function deferred<T>(): { readonly promise: Promise<T>; resolve(value: T): void; reject(error: unknown): void } {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => { resolve = resolvePromise; reject = rejectPromise; });
+  return { promise, resolve, reject };
+}
+
 for (const command of ["start", "stop", "restart", "delete"] as const) {
   test(`reconciliation executes persisted ${command} intent with a stable effect operation`, async () => {
     const kinds: string[] = [];
@@ -286,3 +293,57 @@ for (const [command, exists, lifecycle, health, expected] of [
     assert.equal(result.kind, expected); assert.deepEqual(kinds, ["inspect"]); assert.equal(completed, expected === "succeeded" ? 1 : 0); assert.equal(failed, expected === "failed" ? 1 : 0);
   });
 }
+
+for (const scenario of ["rejected", "thrown", "timeout", "final-attempt"] as const) {
+  test(`a newer command supersedes an old pre-effect ${scenario} result in flight`, async () => {
+    const effect = deferred<Awaited<ReturnType<Parameters<typeof handleReconcileRuntime>[0]["supervisor"]>>>();
+    let enteredEffect!: () => void;
+    const effectEntered = new Promise<void>((resolve) => { enteredEffect = resolve; });
+    let superseded = false;
+    let terminalizations = 0;
+    const attemptCount = scenario === "final-attempt" ? 5 : 1;
+    const handling = handleReconcileRuntime({
+      loadFacts: async () => ({ tenantId: "tenant_a", runtimeId: "runtime_a", generation: 1, imageRef, commandVersion: 1, observedState: "stopped", desiredState: "running" }),
+      supervisor: async (request) => {
+        if (request.kind === "inspect") return { protocol_version: 1, operation_id: request.operation_id, outcome: "accepted", observation: { tenant_id: "tenant_a", runtime_id: "runtime_a", generation: 1, exists: true, lifecycle: "stopped", health: "unknown", image_ref: imageRef } };
+        enteredEffect();
+        return effect.promise;
+      },
+      reprovision: async () => { throw new Error("not expected"); },
+      isCurrent: async () => true,
+      markEffectDispatched: async () => true,
+      succeed: async () => true,
+      retry: async () => { terminalizations += 1; return superseded ? { kind: "superseded" as const } : { kind: "retried" as const }; },
+      fail: async () => { terminalizations += 1; return superseded ? { kind: "superseded" as const } : { kind: "failed" as const }; },
+    }, { tenantId: "tenant_a", jobId: `job_${scenario}`, attemptCount, maxAttempts: 5, targetCommandVersion: 1, command: "start", effectState: "pre_effect", recoveryOnly: false }, new AbortController().signal);
+    await effectEntered;
+    superseded = true;
+    if (scenario === "thrown") effect.reject(new Error("synthetic effect throw"));
+    else if (scenario === "timeout") effect.reject(Object.assign(new Error("synthetic timeout"), { retryable: true }));
+    else effect.resolve({ protocol_version: 1, operation_id: "op_effect", outcome: "failed", code: "DEPENDENCY_UNAVAILABLE", retryable: scenario === "final-attempt", summary: "synthetic rejection" });
+
+    assert.deepEqual(await handling, { kind: "succeeded" });
+    assert.equal(terminalizations, 1);
+  });
+}
+
+test("a newer command supersedes a contradictory unsafe inspection in flight", async () => {
+  const inspection = deferred<Awaited<ReturnType<Parameters<typeof handleReconcileRuntime>[0]["supervisor"]>>>();
+  let enteredInspect!: () => void;
+  const inspectEntered = new Promise<void>((resolve) => { enteredInspect = resolve; });
+  let superseded = false;
+  const handling = handleReconcileRuntime({
+    loadFacts: async () => ({ tenantId: "tenant_a", runtimeId: "runtime_a", generation: 1, imageRef, commandVersion: 1, observedState: "ready", desiredState: "running" }),
+    supervisor: async () => { enteredInspect(); return inspection.promise; },
+    reprovision: async () => { throw new Error("unsafe work must not replay"); },
+    isCurrent: async () => { throw new Error("unsafe work must not readmit an effect"); },
+    markEffectDispatched: async () => { throw new Error("already dispatched"); },
+    succeed: async () => true,
+    retry: async () => ({ kind: "retried" as const }),
+    fail: async () => superseded ? { kind: "superseded" as const } : { kind: "failed" as const },
+  }, { tenantId: "tenant_a", jobId: "job_unsafe_superseded", attemptCount: 2, maxAttempts: 5, targetCommandVersion: 1, command: "restart", effectState: "unsafe_to_replay", recoveryOnly: false }, new AbortController().signal);
+  await inspectEntered;
+  superseded = true;
+  inspection.resolve({ protocol_version: 1, operation_id: "op_inspect", outcome: "accepted", observation: { tenant_id: "tenant_a", runtime_id: "runtime_a", generation: 1, exists: true, lifecycle: "stopped", health: "unknown", image_ref: imageRef } });
+  assert.deepEqual(await handling, { kind: "succeeded" });
+});

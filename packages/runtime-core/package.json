@@ -13,7 +13,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node --import tsx --test tests/config.test.ts tests/repository-static-gate.test.ts tests/idempotency-static.test.ts tests/outbox-static.test.ts tests/redaction.test.ts tests/secrets.test.ts tests/supervisor-client.test.ts tests/hermes-client.test.ts",
+    "test": "node --import tsx --test tests/config.test.ts tests/repository-static-gate.test.ts tests/idempotency-static.test.ts tests/outbox-static.test.ts tests/reconcile-failure-static.test.ts tests/redaction.test.ts tests/secrets.test.ts tests/supervisor-client.test.ts tests/hermes-client.test.ts",
     "test:postgres": "node --import tsx --test --test-concurrency=1 tests/migrations.test.ts tests/tenant-isolation.test.ts tests/optimistic-concurrency.test.ts tests/idempotency.test.ts tests/jobs.test.ts tests/events.test.ts tests/outbox.test.ts tests/provision-tenant.test.ts tests/create-conversation.test.ts tests/create-agent-run.test.ts tests/agent-run-execution.test.ts tests/agent-run-conversation-lock.test.ts",
     "check": "npm run build && npm test"
   },
