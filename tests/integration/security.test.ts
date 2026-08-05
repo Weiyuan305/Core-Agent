@@ -9,6 +9,8 @@ import {
 } from "./harness.js";
 import {
   rehash,
+  SYNTHETIC_INGRESS_KEY,
+  SYNTHETIC_MODEL_ID,
   syntheticB2BProvisioningRequest,
   syntheticConversationRequest,
   syntheticRuntimeCommand,
@@ -261,7 +263,7 @@ test("secret-like request properties fail before logs or persistence", async () 
   assert.equal(JSON.stringify(harness.errorEnvelopes).includes(LEAK_SENTINEL), false);
 });
 
-test("Supervisor protocol extras and secret bytes are rejected without capture", async () => {
+test("Supervisor protocol extras are rejected by frame decoding and policy", async () => {
   const provisioned = await provisionReady();
   const request = harness.fakeSupervisor.requests.find(
     (candidate) => candidate.kind === "provision"
@@ -272,8 +274,54 @@ test("Supervisor protocol extras and secret bytes are rejected without capture",
   const rejectedBefore = harness.fakeSupervisor.rejectedFrameCount;
   await harness.sendUnsafeSupervisorRequest({
     ...request,
-    environment: { API_KEY: LEAK_SENTINEL },
+    unexpected_protocol_field: "synthetic-extra-only",
   });
   assert.equal(harness.fakeSupervisor.requests.length, requestsBefore);
   assert.equal(harness.fakeSupervisor.rejectedFrameCount, rejectedBefore + 1);
+});
+
+test("Supervisor secret bytes are rejected by the pre-filter without capture", async () => {
+  const provisioned = await provisionReady();
+  const request = harness.fakeSupervisor.requests.find(
+    (candidate) => candidate.kind === "provision"
+      && candidate.runtime.tenant_id === provisioned.tenant_id,
+  );
+  assert(request !== undefined);
+  const requestsBefore = harness.fakeSupervisor.requests.length;
+  const secretRejectedBefore = harness.fakeSupervisor.secretRejectedFrameCount;
+  await harness.sendUnsafeSupervisorRequest({
+    ...request,
+    operation_id: SYNTHETIC_INGRESS_KEY,
+  });
+  assert.equal(harness.fakeSupervisor.requests.length, requestsBefore);
+  assert.equal(
+    harness.fakeSupervisor.secretRejectedFrameCount,
+    secretRejectedBefore + 1,
+  );
+});
+
+test("fake Hermes rejects a query-bearing Profile route and records only its category", async () => {
+  const requestsBefore = harness.fakeHermes.requests.length;
+  const response = await fetch(
+    `${harness.fakeHermes.origin}/p/hermes_query_probe/v1/chat/completions?unexpected=1`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${SYNTHETIC_INGRESS_KEY}`,
+        "content-type": "application/json",
+        "x-hermes-session-id": "hermes_session_query_probe",
+      },
+      body: JSON.stringify({
+        model: SYNTHETIC_MODEL_ID,
+        messages: [{ role: "user", content: "Synthetic query probe" }],
+        stream: true,
+      }),
+      signal: AbortSignal.timeout(1_000),
+    },
+  );
+  assert.equal(response.status, 400);
+  assert.equal(harness.fakeHermes.requests.length, requestsBefore);
+  assert.deepEqual(harness.fakeHermes.rejections.at(-1), {
+    category: "route_query",
+  });
 });

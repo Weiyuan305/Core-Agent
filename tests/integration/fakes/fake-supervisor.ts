@@ -15,14 +15,15 @@ import {
 
 import { validateSupervisorPolicy } from "../../../apps/runtime-supervisor/src/policy.js";
 
+const fakeExternalTimeoutMs = 1_500;
+
 export type SupervisorScript =
   | { readonly kind: "accept" }
   | {
       readonly kind: "reject";
       readonly retryable: boolean;
       readonly summary: string;
-    }
-  | { readonly kind: "protocol_response_extra" };
+    };
 
 interface JournalEntry {
   readonly requestHash: string;
@@ -35,6 +36,7 @@ export interface FakeSupervisorState {
   readonly requests: SupervisorRequestV1[];
   readonly scripts: SupervisorScript[];
   rejectedFrameCount: number;
+  secretRejectedFrameCount: number;
 }
 
 export function createFakeSupervisorState(): FakeSupervisorState {
@@ -44,6 +46,7 @@ export function createFakeSupervisorState(): FakeSupervisorState {
     requests: [],
     scripts: [],
     rejectedFrameCount: 0,
+    secretRejectedFrameCount: 0,
   };
 }
 
@@ -109,6 +112,10 @@ export class FakeSupervisor {
     return this.#options.state.rejectedFrameCount;
   }
 
+  public get secretRejectedFrameCount(): number {
+    return this.#options.state.secretRejectedFrameCount;
+  }
+
   public enqueue(...scripts: readonly SupervisorScript[]): void {
     this.#options.state.scripts.push(...scripts);
   }
@@ -116,9 +123,19 @@ export class FakeSupervisor {
   public async start(): Promise<void> {
     await rm(this.#options.socketPath, { force: true }).catch(() => undefined);
     await new Promise<void>((resolve, reject) => {
-      const onError = (error: Error): void => reject(error);
+      const timer = setTimeout(() => {
+        this.#server.off("error", onError);
+        try { this.#server.close(() => undefined); }
+        catch { /* The bounded caller still receives only the stage category. */ }
+        reject(new Error("Fake Supervisor start failed"));
+      }, fakeExternalTimeoutMs);
+      const onError = (): void => {
+        clearTimeout(timer);
+        reject(new Error("Fake Supervisor start failed"));
+      };
       this.#server.once("error", onError);
       this.#server.listen(this.#options.socketPath, () => {
+        clearTimeout(timer);
         this.#server.off("error", onError);
         resolve();
       });
@@ -128,7 +145,16 @@ export class FakeSupervisor {
   public async close(): Promise<void> {
     for (const socket of this.#sockets) socket.destroy();
     if (this.#server.listening) {
-      await new Promise<void>((resolve) => this.#server.close(() => resolve()));
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error("Fake Supervisor close failed")),
+          fakeExternalTimeoutMs,
+        );
+        this.#server.close(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
     }
     await rm(this.#options.socketPath, { force: true }).catch(() => undefined);
   }
@@ -157,7 +183,10 @@ export class FakeSupervisor {
 
   async #respond(socket: Socket, frame: Buffer): Promise<void> {
     try {
-      if (this.#containsSecret(frame)) throw new Error("secret bytes rejected");
+      if (this.#containsSecret(frame)) {
+        this.#options.state.secretRejectedFrameCount += 1;
+        throw new Error("secret bytes rejected");
+      }
       const request = validateSupervisorPolicy(decodeSupervisorFrame(frame), {
         imageLock: this.#options.imageLock,
         providerCatalog: this.#options.providerCatalog,
@@ -172,13 +201,6 @@ export class FakeSupervisor {
         const recorded = cloneRequest(request);
         this.#options.state.requests.push(recorded);
         const script = this.#options.state.scripts.shift() ?? { kind: "accept" };
-        if (script.kind === "protocol_response_extra") {
-          socket.end(encodeSupervisorFrame({
-            ...this.#accepted(request),
-            environment: { forbidden: true },
-          }));
-          return;
-        }
         response = script.kind === "reject"
           ? rejection(request, script)
           : this.#accepted(request);

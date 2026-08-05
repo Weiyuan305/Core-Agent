@@ -8,6 +8,8 @@ import type { Socket } from "node:net";
 
 import { MAX_HERMES_SSE_LINE_BYTES } from "@core-agent/runtime-core";
 
+const fakeExternalTimeoutMs = 1_500;
+
 export type HermesFailureScript =
   | "success"
   | "pre_delta_timeout"
@@ -31,6 +33,10 @@ export interface SanitizedHermesRequest {
   readonly modelId: string;
   readonly authorizationAccepted: true;
   readonly bodyClosed: true;
+}
+
+export interface SanitizedHermesRejection {
+  readonly category: "request" | "route_query";
 }
 
 interface FakeHermesOptions {
@@ -93,6 +99,7 @@ export class FakeHermes {
   readonly #sockets = new Set<Socket>();
   readonly #scripts: HermesScript[] = [];
   readonly #requests: SanitizedHermesRequest[] = [];
+  readonly #rejections: SanitizedHermesRejection[] = [];
   #origin: string | undefined;
 
   public constructor(options: FakeHermesOptions) {
@@ -119,6 +126,10 @@ export class FakeHermes {
     return this.#requests.filter((request) => request.kind === "execution").length;
   }
 
+  public get rejections(): readonly SanitizedHermesRejection[] {
+    return this.#rejections;
+  }
+
   public enqueue(...scripts: readonly HermesFailureScript[]): void {
     this.#scripts.push(...scripts);
   }
@@ -134,9 +145,19 @@ export class FakeHermes {
 
   public async start(): Promise<void> {
     await new Promise<void>((resolve, reject) => {
-      const onError = (error: Error): void => reject(error);
+      const timer = setTimeout(() => {
+        this.#server.off("error", onError);
+        try { this.#server.close(() => undefined); }
+        catch { /* The bounded caller still receives only the stage category. */ }
+        reject(new Error("Fake Hermes start failed"));
+      }, fakeExternalTimeoutMs);
+      const onError = (): void => {
+        clearTimeout(timer);
+        reject(new Error("Fake Hermes start failed"));
+      };
       this.#server.once("error", onError);
       this.#server.listen(0, "127.0.0.1", () => {
+        clearTimeout(timer);
         this.#server.off("error", onError);
         const address = this.#server.address();
         if (address === null || typeof address === "string") {
@@ -156,7 +177,16 @@ export class FakeHermes {
   public async closeListening(): Promise<void> {
     for (const socket of this.#sockets) socket.destroy();
     if (this.#server.listening) {
-      await new Promise<void>((resolve) => this.#server.close(() => resolve()));
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error("Fake Hermes close failed")),
+          fakeExternalTimeoutMs,
+        );
+        this.#server.close(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
     }
   }
 
@@ -165,9 +195,15 @@ export class FakeHermes {
   }
 
   async #handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    let rejectionCategory: SanitizedHermesRejection["category"] = "request";
     try {
       if (request.method !== "POST") throw new Error("method");
-      const route = new URL(request.url ?? "", "http://fake.invalid").pathname;
+      const target = new URL(request.url ?? "", "http://fake.invalid");
+      if (target.search.length > 0 || target.hash.length > 0) {
+        rejectionCategory = "route_query";
+        throw new Error("route query");
+      }
+      const route = target.pathname;
       const match = /^\/p\/([A-Za-z0-9_.%-]+)\/v1\/chat\/completions$/.exec(route);
       if (match === null) throw new Error("route");
       const profileRef = decodeURIComponent(match[1]!);
@@ -229,6 +265,7 @@ export class FakeHermes {
         "",
       ].join("\n"));
     } catch {
+      this.#rejections.push(Object.freeze({ category: rejectionCategory }));
       response.writeHead(400, { "content-type": "application/json" });
       response.end("{}");
     }

@@ -70,6 +70,9 @@ const integrationTemporaryRoot = join(
   ".tmp",
 );
 const databaseNamePattern = /^core_agent_test_[a-f0-9]{16}$/;
+const externalStageTimeoutMs = 6_000;
+const cleanupStageTimeoutMs = 2_000;
+const sentinelScanNodeBudget = 100_000;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -82,6 +85,83 @@ interface WakeHint {
 interface NotifierWaiter {
   readonly input: EventWaitInput;
   readonly finish: () => void;
+}
+
+interface DatabaseControlPool {
+  query(sql: string): Promise<unknown>;
+  end(): Promise<void>;
+}
+
+interface CleanupStage {
+  readonly category: string;
+  readonly work: () => Promise<void>;
+  readonly failureCategory?: (error: unknown) => string;
+}
+
+interface SentinelScan {
+  readonly detected: boolean;
+  readonly incomplete: boolean;
+  readonly incompleteCategories: readonly string[];
+}
+
+interface StructuredLogCapture {
+  readonly category: string;
+  readonly fields: unknown;
+  readonly message: string | undefined;
+  readonly sentinelScan: SentinelScan;
+}
+
+function runWithDeadline<T>(work: () => Promise<T>, timeoutMs: number): Promise<T> {
+  assert(Number.isSafeInteger(timeoutMs) && timeoutMs > 0);
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback();
+    };
+    const timer = setTimeout(() => {
+      finish(() => reject(new Error("Integration stage timed out")));
+    }, timeoutMs);
+    void Promise.resolve().then(work).then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
+}
+
+async function boundedExternal<T>(
+  category: string,
+  work: () => Promise<T>,
+  timeoutMs = externalStageTimeoutMs,
+): Promise<T> {
+  try {
+    return await runWithDeadline(work, timeoutMs);
+  } catch {
+    throw new Error(`Integration stage failed: ${category}`);
+  }
+}
+
+async function runCleanupStages(
+  stages: readonly CleanupStage[],
+  timeoutMs = cleanupStageTimeoutMs,
+): Promise<string[]> {
+  const failures: string[] = [];
+  for (const stage of stages) {
+    try {
+      await runWithDeadline(stage.work, timeoutMs);
+    } catch (error) {
+      let category = stage.category;
+      try {
+        category = stage.failureCategory?.(error) ?? category;
+      } catch {
+        category = stage.category;
+      }
+      failures.push(category);
+    }
+  }
+  return failures;
 }
 
 class PostgresEventNotifier implements EventNotifier {
@@ -158,7 +238,7 @@ class PostgresEventNotifier implements EventNotifier {
 
   public async close(): Promise<void> {
     for (const waiter of [...this.#waiters]) waiter.finish();
-    await this.#client.end().catch(() => undefined);
+    await this.#client.end();
   }
 }
 
@@ -188,12 +268,20 @@ function databaseUrlFor(controlUrl: URL, databaseName: string): string {
   return value.toString();
 }
 
-async function createIsolatedDatabase(): Promise<{
-  readonly controlPool: Pool;
+async function createIsolatedDatabase(options: {
+  readonly configuredUrl?: string;
+  readonly databaseName?: string;
+  readonly controlPool?: DatabaseControlPool;
+  readonly cleanupControlPool?: DatabaseControlPool;
+  readonly timeoutMs?: number;
+} = {}): Promise<{
+  readonly controlPool: DatabaseControlPool;
+  readonly controlDatabaseUrl: string;
   readonly databaseName: string;
   readonly databaseUrl: string;
 }> {
-  const configured = process.env.CONTROL_PLANE_TEST_DATABASE_URL;
+  const configured = options.configuredUrl
+    ?? process.env.CONTROL_PLANE_TEST_DATABASE_URL;
   if (configured === undefined) {
     throw new Error("CONTROL_PLANE_TEST_DATABASE_URL is required for integration tests");
   }
@@ -201,12 +289,58 @@ async function createIsolatedDatabase(): Promise<{
   if (!controlUrl.pathname.slice(1).startsWith("core_agent_")) {
     throw new Error("Integration control PostgreSQL database is not disposable");
   }
-  const databaseName = `core_agent_test_${randomBytes(8).toString("hex")}`;
+  const databaseName = options.databaseName
+    ?? `core_agent_test_${randomBytes(8).toString("hex")}`;
   assert.match(databaseName, databaseNamePattern);
-  const controlPool = new Pool({ connectionString: controlUrl.toString(), max: 2 });
-  await controlPool.query(`create database "${databaseName}"`);
+  const timeoutMs = options.timeoutMs ?? externalStageTimeoutMs;
+  const controlPool = options.controlPool ?? new Pool({
+    connectionString: controlUrl.toString(),
+    max: 2,
+    connectionTimeoutMillis: timeoutMs,
+    query_timeout: timeoutMs,
+    statement_timeout: timeoutMs,
+  });
+  const createOperation = Promise.resolve(
+    controlPool.query(`create database "${databaseName}"`),
+  ).then(() => undefined);
+  try {
+    await boundedExternal(
+      "database create",
+      () => createOperation,
+      timeoutMs,
+    );
+  } catch (error) {
+    const cleanupControlPool = options.cleanupControlPool ?? new Pool({
+      connectionString: controlUrl.toString(),
+      max: 1,
+      connectionTimeoutMillis: timeoutMs,
+      query_timeout: timeoutMs,
+      statement_timeout: timeoutMs,
+    });
+    await runCleanupStages([
+      {
+        category: "database create settle",
+        work: async () => { await createOperation.catch(() => undefined); },
+      },
+      {
+        category: "database create cleanup",
+        work: async () => {
+          await cleanupControlPool.query(
+            `drop database if exists "${databaseName}" with (force)`,
+          );
+        },
+      },
+      { category: "control pool", work: () => controlPool.end() },
+      ...(cleanupControlPool === controlPool ? [] : [{
+        category: "cleanup control pool",
+        work: () => cleanupControlPool.end(),
+      }]),
+    ], timeoutMs);
+    throw error;
+  }
   return {
     controlPool,
+    controlDatabaseUrl: controlUrl.toString(),
     databaseName,
     databaseUrl: databaseUrlFor(controlUrl, databaseName),
   };
@@ -246,18 +380,45 @@ function safeStructuredValue(
     || value === undefined
   ) return value;
   if (typeof value === "bigint") return "bigint";
-  if (typeof value !== "object" || depth >= 6) return typeof value;
+  if ((typeof value !== "object" && typeof value !== "function") || depth >= 6) {
+    return typeof value;
+  }
   if (seen.has(value)) return "circular";
   seen.add(value);
-  if (Array.isArray(value)) {
-    return value.slice(0, 100).map((item) => safeStructuredValue(item, depth + 1, seen));
+  let keys: readonly PropertyKey[];
+  try { keys = Reflect.ownKeys(value); }
+  catch { return { category: "unscannable" }; }
+  const isArray = Array.isArray(value);
+  if (!isArray) {
+    try {
+      const prototype = Object.getPrototypeOf(value);
+      if (prototype !== Object.prototype && prototype !== null) {
+        return { category: "nonplain" };
+      }
+    } catch {
+      return { category: "unscannable" };
+    }
   }
-  if (Object.getPrototypeOf(value) !== Object.prototype) {
-    return { category: value.constructor?.name ?? "object" };
+  if (isArray) {
+    const result: unknown[] = [];
+    for (const key of keys) {
+      if (result.length >= 100) break;
+      if (typeof key !== "string" || !/^(0|[1-9][0-9]*)$/.test(key)) continue;
+      let descriptor: PropertyDescriptor | undefined;
+      try { descriptor = Object.getOwnPropertyDescriptor(value, key); }
+      catch { return { category: "unscannable" }; }
+      if (descriptor !== undefined && "value" in descriptor) {
+        result.push(safeStructuredValue(descriptor.value, depth + 1, seen));
+      }
+    }
+    return result;
   }
   const result: Record<string, unknown> = {};
-  for (const key of Object.keys(value).slice(0, 100)) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  for (const key of keys.slice(0, 100)) {
+    if (typeof key !== "string") continue;
+    let descriptor: PropertyDescriptor | undefined;
+    try { descriptor = Object.getOwnPropertyDescriptor(value, key); }
+    catch { return { category: "unscannable" }; }
     if (descriptor !== undefined && "value" in descriptor && descriptor.enumerable) {
       result[key] = safeStructuredValue(descriptor.value, depth + 1, seen);
     }
@@ -265,13 +426,155 @@ function safeStructuredValue(
   return result;
 }
 
+function scanSentinel(...roots: readonly unknown[]): SentinelScan {
+  const pending = roots.map((value) => ({
+    accessorsAreSerializationSurface: true,
+    value,
+  }));
+  const seen = new WeakSet<object>();
+  let visited = 0;
+  let incomplete = false;
+  const incompleteCategories = new Set<string>();
+  while (pending.length > 0) {
+    visited += 1;
+    if (visited > sentinelScanNodeBudget) {
+      return {
+        detected: false,
+        incomplete: true,
+        incompleteCategories: ["budget"],
+      };
+    }
+    const current = pending.pop();
+    assert(current !== undefined);
+    const { accessorsAreSerializationSurface, value } = current;
+    if (typeof value === "string") {
+      if (value.includes(LEAK_SENTINEL)) {
+        return {
+          detected: true,
+          incomplete,
+          incompleteCategories: [...incompleteCategories].sort(),
+        };
+      }
+      continue;
+    }
+    if ((typeof value !== "object" || value === null) && typeof value !== "function") {
+      continue;
+    }
+    if (seen.has(value)) continue;
+    seen.add(value);
+    let serializerTraversesProperties = Array.isArray(value);
+    try {
+      const prototype = Object.getPrototypeOf(value);
+      serializerTraversesProperties ||= prototype === Object.prototype || prototype === null;
+    } catch {
+      incomplete = true;
+      incompleteCategories.add("prototype");
+      continue;
+    }
+    let keys: readonly PropertyKey[];
+    try { keys = Reflect.ownKeys(value); }
+    catch {
+      incomplete = true;
+      incompleteCategories.add("own_keys");
+      continue;
+    }
+    for (const key of keys) {
+      if (typeof key === "string" && key.includes(LEAK_SENTINEL)) {
+        return {
+          detected: true,
+          incomplete,
+          incompleteCategories: [...incompleteCategories].sort(),
+        };
+      }
+      let descriptor: PropertyDescriptor | undefined;
+      try { descriptor = Object.getOwnPropertyDescriptor(value, key); }
+      catch {
+        incomplete = true;
+        incompleteCategories.add("descriptor");
+        continue;
+      }
+      if (descriptor === undefined) {
+        incomplete = true;
+        incompleteCategories.add("descriptor");
+      } else if ("value" in descriptor) {
+        if (
+          accessorsAreSerializationSurface
+          && serializerTraversesProperties
+          && key === "toJSON"
+          && typeof descriptor.value === "function"
+        ) {
+          incomplete = true;
+          incompleteCategories.add("to_json");
+        } else {
+          const childIsStructured = (
+            typeof descriptor.value === "object"
+            && descriptor.value !== null
+          ) || typeof descriptor.value === "function";
+          if (
+            childIsStructured
+            && !serializerTraversesProperties
+            && !(value instanceof Error)
+          ) continue;
+          pending.push({
+            accessorsAreSerializationSurface:
+              accessorsAreSerializationSurface && serializerTraversesProperties,
+            value: descriptor.value,
+          });
+        }
+      } else if (
+        accessorsAreSerializationSurface
+        && serializerTraversesProperties
+        && descriptor.enumerable
+      ) {
+        incomplete = true;
+        incompleteCategories.add("accessor");
+      }
+    }
+  }
+  return {
+    detected: false,
+    incomplete,
+    incompleteCategories: [...incompleteCategories].sort(),
+  };
+}
+
+function captureStructuredLog(
+  records: unknown[],
+  category: string,
+  fields: unknown,
+  message?: string,
+): void {
+  records.push(Object.freeze({
+    category,
+    fields: safeStructuredValue(fields),
+    message,
+    sentinelScan: Object.freeze(scanSentinel(fields, message)),
+  } satisfies StructuredLogCapture));
+}
+
+function assertStructuredLogsSentinelFree(records: readonly unknown[]): void {
+  for (const record of records) {
+    if (
+      typeof record !== "object"
+      || record === null
+      || !("sentinelScan" in record)
+    ) throw new Error("sentinel category: structured logs");
+    const scan = (record as { sentinelScan?: SentinelScan }).sentinelScan;
+    if (scan?.detected !== false || scan.incomplete !== false) {
+      throw new Error("sentinel category: structured logs");
+    }
+  }
+  let serialized: string;
+  try { serialized = JSON.stringify(records); }
+  catch { throw new Error("sentinel category: structured logs"); }
+  if (serialized.includes(LEAK_SENTINEL)) {
+    throw new Error("sentinel category: structured logs");
+  }
+}
+
 function capturingLogger(records: unknown[]): FastifyBaseLogger {
   const capture = (fields: unknown, message?: string): void => {
-    records.push(Object.freeze({
-      category: "api_log",
-      fields: safeStructuredValue(fields),
-      message,
-    }));
+    captureStructuredLog(records, "api_log", fields, message);
   };
   const logger = {
     level: "silent",
@@ -357,7 +660,8 @@ export class IntegrationHarness {
   };
 
   readonly #suite: string;
-  readonly #controlPool: Pool;
+  readonly #controlPool: DatabaseControlPool;
+  readonly #controlDatabaseUrl: string;
   readonly #childPool: Pool;
   readonly #directory: string;
   readonly #socketPath: string;
@@ -375,7 +679,8 @@ export class IntegrationHarness {
 
   private constructor(input: {
     readonly suite: string;
-    readonly controlPool: Pool;
+    readonly controlPool: DatabaseControlPool;
+    readonly controlDatabaseUrl: string;
     readonly databaseName: string;
     readonly databaseUrl: string;
     readonly childPool: Pool;
@@ -389,6 +694,7 @@ export class IntegrationHarness {
   }) {
     this.#suite = input.suite;
     this.#controlPool = input.controlPool;
+    this.#controlDatabaseUrl = input.controlDatabaseUrl;
     this.databaseName = input.databaseName;
     this.databaseUrl = input.databaseUrl;
     this.#childPool = input.childPool;
@@ -431,19 +737,34 @@ export class IntegrationHarness {
     let fakeHermes: FakeHermes | undefined;
     let supervisor: FakeSupervisor | undefined;
     try {
-      childPool = new Pool({ connectionString: isolated.databaseUrl, max: 12 });
-      await applyMigrations(childPool, migrationsDirectory);
-      db = createRuntimeDatabase(childPool);
-      await mkdir(integrationTemporaryRoot, { recursive: true, mode: 0o700 });
-      await chmod(integrationTemporaryRoot, 0o700);
-      directory = await mkdtemp(join(integrationTemporaryRoot, `${suite}-`));
-      await chmod(directory, 0o700);
-      const bootstrapKeyFile = join(directory, "bootstrap-key");
-      await writeFile(bootstrapKeyFile, `${SYNTHETIC_BOOTSTRAP_KEY}\n`, {
-        mode: 0o600,
+      childPool = new Pool({
+        connectionString: isolated.databaseUrl,
+        max: 12,
+        connectionTimeoutMillis: externalStageTimeoutMs,
+        query_timeout: externalStageTimeoutMs,
       });
+      await boundedExternal(
+        "database migrations",
+        () => applyMigrations(childPool!, migrationsDirectory),
+      );
+      db = createRuntimeDatabase(childPool);
+      await boundedExternal("temporary root", async () => {
+        await mkdir(integrationTemporaryRoot, { recursive: true, mode: 0o700 });
+        await chmod(integrationTemporaryRoot, 0o700);
+      });
+      directory = await boundedExternal(
+        "temporary directory create",
+        () => mkdtemp(join(integrationTemporaryRoot, `${suite}-`)),
+      );
+      await boundedExternal("temporary directory permissions", () => chmod(directory!, 0o700));
+      const bootstrapKeyFile = join(directory, "bootstrap-key");
+      await boundedExternal("bootstrap file", () => writeFile(
+        bootstrapKeyFile,
+        `${SYNTHETIC_BOOTSTRAP_KEY}\n`,
+        { mode: 0o600 },
+      ));
       fakeHermes = new FakeHermes({ ingressKey: SYNTHETIC_INGRESS_KEY });
-      await fakeHermes.start();
+      await boundedExternal("Hermes start", () => fakeHermes!.start());
       const socketPath = join(
         "/private/tmp",
         `ca-t16-${randomBytes(6).toString("hex")}.sock`,
@@ -461,10 +782,11 @@ export class IntegrationHarness {
           LEAK_SENTINEL,
         ],
       });
-      await supervisor.start();
+      await boundedExternal("Supervisor start", () => supervisor!.start());
       const harness = new IntegrationHarness({
         suite,
         controlPool: isolated.controlPool,
+        controlDatabaseUrl: isolated.controlDatabaseUrl,
         databaseName: isolated.databaseName,
         databaseUrl: isolated.databaseUrl,
         childPool,
@@ -480,17 +802,32 @@ export class IntegrationHarness {
       await harness.startWorker();
       return harness;
     } catch (error) {
-      await supervisor?.close().catch(() => undefined);
-      await fakeHermes?.close().catch(() => undefined);
-      await db?.destroy().catch(() => undefined);
-      if (db === undefined) await childPool?.end().catch(() => undefined);
-      if (directory !== undefined) await rm(directory, { recursive: true, force: true });
-      if (databaseNamePattern.test(isolated.databaseName)) {
-        await isolated.controlPool.query(
-          `drop database if exists "${isolated.databaseName}" with (force)`,
-        ).catch(() => undefined);
-      }
-      await isolated.controlPool.end().catch(() => undefined);
+      const cleanupControlPool = new Pool({
+        connectionString: isolated.controlDatabaseUrl,
+        max: 1,
+        connectionTimeoutMillis: 750,
+        query_timeout: 750,
+        statement_timeout: 750,
+      });
+      await runCleanupStages([
+        { category: "supervisor", work: async () => { await supervisor?.close(); } },
+        { category: "hermes", work: async () => { await fakeHermes?.close(); } },
+        { category: "database pool", work: async () => {
+          if (db !== undefined) await db.destroy();
+          else await childPool?.end();
+        } },
+        { category: "database drop", work: async () => {
+          assert.match(isolated.databaseName, databaseNamePattern);
+          await cleanupControlPool.query(
+            `drop database if exists "${isolated.databaseName}" with (force)`,
+          );
+        } },
+        { category: "cleanup control pool", work: () => cleanupControlPool.end() },
+        { category: "control pool", work: () => isolated.controlPool.end() },
+        { category: "temporary directory", work: async () => {
+          if (directory !== undefined) await rm(directory, { recursive: true, force: true });
+        } },
+      ]);
       throw error;
     }
   }
@@ -510,18 +847,10 @@ export class IntegrationHarness {
     ]);
     const logger: WorkerLogger = {
       info: (fields, message) => {
-        this.structuredLogs.push({
-          category: "worker_log",
-          fields: safeStructuredValue(fields),
-          message,
-        });
+        captureStructuredLog(this.structuredLogs, "worker_log", fields, message);
       },
       error: (fields, message) => {
-        this.structuredLogs.push({
-          category: "worker_log",
-          fields: safeStructuredValue(fields),
-          message,
-        });
+        captureStructuredLog(this.structuredLogs, "worker_log", fields, message);
       },
     };
     this.#workerController = controller;
@@ -551,9 +880,16 @@ export class IntegrationHarness {
 
   public async stopWorker(): Promise<void> {
     this.#workerController?.abort();
-    await this.#workerPromise;
-    this.#workerController = undefined;
-    this.#workerPromise = undefined;
+    try {
+      await boundedExternal(
+        "worker stop",
+        async () => { await this.#workerPromise; },
+        cleanupStageTimeoutMs,
+      );
+    } finally {
+      this.#workerController = undefined;
+      this.#workerPromise = undefined;
+    }
     if (this.#workerFailed) throw new Error("Worker loop crashed");
   }
 
@@ -563,7 +899,11 @@ export class IntegrationHarness {
   }
 
   public async restartSupervisor(): Promise<void> {
-    await this.#supervisor.close();
+    await boundedExternal(
+      "Supervisor restart close",
+      () => this.#supervisor.close(),
+      cleanupStageTimeoutMs,
+    );
     this.#supervisor = new FakeSupervisor({
       socketPath: this.#socketPath,
       imageLock: syntheticImageLock,
@@ -576,7 +916,11 @@ export class IntegrationHarness {
         LEAK_SENTINEL,
       ],
     });
-    await this.#supervisor.start();
+    await boundedExternal(
+      "Supervisor restart start",
+      () => this.#supervisor.start(),
+      cleanupStageTimeoutMs,
+    );
   }
 
   public async executeSupervisor(
@@ -685,18 +1029,29 @@ export class IntegrationHarness {
     options: { readonly tenantId?: string; readonly payload?: unknown } = {},
   ): Promise<{ readonly status: number; readonly body: unknown }> {
     if (this.#apiOrigin === undefined) throw new Error("API is unavailable");
-    const response = await fetch(`${this.#apiOrigin}${path}`, {
-      method,
-      headers: {
-        authorization: `Bearer ${SYNTHETIC_BOOTSTRAP_KEY}`,
-        ...(options.tenantId === undefined
-          ? {}
-          : { "x-core-agent-tenant-id": options.tenantId }),
-        ...(options.payload === undefined ? {} : { "content-type": "application/json" }),
-      },
-      ...(options.payload === undefined ? {} : { body: JSON.stringify(options.payload) }),
-    });
-    const body = await response.json() as unknown;
+    const controller = new AbortController();
+    const deadline = setTimeout(() => controller.abort(), externalStageTimeoutMs);
+    let response: Response;
+    let body: unknown;
+    try {
+      response = await fetch(`${this.#apiOrigin}${path}`, {
+        method,
+        headers: {
+          authorization: `Bearer ${SYNTHETIC_BOOTSTRAP_KEY}`,
+          ...(options.tenantId === undefined
+            ? {}
+            : { "x-core-agent-tenant-id": options.tenantId }),
+          ...(options.payload === undefined ? {} : { "content-type": "application/json" }),
+        },
+        ...(options.payload === undefined ? {} : { body: JSON.stringify(options.payload) }),
+        signal: controller.signal,
+      });
+      body = await response.json() as unknown;
+    } catch {
+      throw new Error("Integration stage failed: API request");
+    } finally {
+      clearTimeout(deadline);
+    }
     if (
       typeof body === "object"
       && body !== null
@@ -777,40 +1132,61 @@ export class IntegrationHarness {
   public async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
-    const failures: string[] = [];
-    const capture = async (category: string, work: () => Promise<void>): Promise<void> => {
-      try { await work(); }
-      catch (error) {
-        const message = error instanceof Error ? error.message : "";
-        failures.push(
-          category === "sentinel" && message.startsWith("sentinel category:")
-            ? message
-            : category,
-        );
-      }
-    };
-    await capture("worker", () => this.stopWorker());
-    await capture("api", () => this.#closeApi());
-    await capture("supervisor", () => this.#supervisor.close());
-    await capture("hermes", () => this.fakeHermes.close());
-    await capture("lease", () => this.#assertNoUnhandledLease());
-    await capture("sentinel", () => this.#assertSentinelAbsent());
-    await capture("database pool", () => this.db.destroy());
-    await capture("database drop", async () => {
-      assert.match(this.databaseName, databaseNamePattern);
-      await this.#controlPool.query(
-        `drop database if exists "${this.databaseName}"`,
-      );
-    });
-    await capture("control pool", () => this.#controlPool.end());
-    await capture("temporary directory", () => rm(this.#directory, { recursive: true, force: true }));
+    const failures = await runCleanupStages([
+      { category: "worker", work: () => this.stopWorker() },
+      { category: "api", work: () => this.#closeApi() },
+      { category: "supervisor", work: () => this.#supervisor.close() },
+      { category: "hermes", work: () => this.fakeHermes.close() },
+      { category: "lease", work: () => this.#assertNoUnhandledLease() },
+      {
+        category: "sentinel",
+        work: () => this.#assertSentinelAbsent(),
+        failureCategory: (error) => {
+          const message = error instanceof Error ? error.message : "";
+          return message.startsWith("sentinel category:") ? message : "sentinel";
+        },
+      },
+      { category: "database pool", work: () => this.db.destroy() },
+      { category: "database drop", work: async () => {
+        assert.match(this.databaseName, databaseNamePattern);
+        try {
+          await boundedExternal("database drop", async () => {
+            await this.#controlPool.query(
+              `drop database if exists "${this.databaseName}"`,
+            );
+          }, 500);
+        } catch {
+          const cleanupPool = new Pool({
+            connectionString: this.#controlDatabaseUrl,
+            max: 1,
+            connectionTimeoutMillis: 500,
+            query_timeout: 500,
+            statement_timeout: 500,
+          });
+          try {
+            await boundedExternal("database force drop", async () => {
+              await cleanupPool.query(
+                `drop database if exists "${this.databaseName}" with (force)`,
+              );
+            }, 500);
+          } finally {
+            await boundedExternal("database cleanup pool", () => cleanupPool.end(), 500);
+          }
+        }
+      } },
+      { category: "control pool", work: () => this.#controlPool.end() },
+      {
+        category: "temporary directory",
+        work: () => rm(this.#directory, { recursive: true, force: true }),
+      },
+    ]);
     if (failures.length > 0) throw new Error(`Integration teardown failed: ${failures.join(", ")}`);
   }
 
   async #startApi(): Promise<void> {
     const notifier = new PostgresEventNotifier(this.databaseUrl);
-    await notifier.start();
-    const app = await buildControlPlaneApp({
+    await boundedExternal("event notifier start", () => notifier.start());
+    const app = await boundedExternal("API build", () => buildControlPlaneApp({
       environment: {
         databaseUrl: this.databaseUrl,
         bootstrapKeyFile: this.#bootstrapKeyFile,
@@ -831,15 +1207,20 @@ export class IntegrationHarness {
         LEAK_SENTINEL,
       ]),
       eventNotifier: notifier,
-    });
+    }));
     try {
-      const address = await app.listen({ host: "127.0.0.1", port: 0 });
+      const address = await boundedExternal(
+        "API listen",
+        () => app.listen({ host: "127.0.0.1", port: 0 }),
+      );
       this.#app = app;
       this.#apiOrigin = address.replace(/\/$/, "");
       this.#notifier = notifier;
     } catch (error) {
-      await app.close().catch(() => undefined);
-      await notifier.close().catch(() => undefined);
+      await runCleanupStages([
+        { category: "API", work: () => app.close() },
+        { category: "notifier", work: () => notifier.close() },
+      ]);
       throw error;
     }
   }
@@ -850,9 +1231,15 @@ export class IntegrationHarness {
     this.#app = undefined;
     this.#apiOrigin = undefined;
     this.#notifier = undefined;
-    await notifier?.close();
-    app?.server.closeAllConnections();
-    await app?.close();
+    const failures = await runCleanupStages([
+      {
+        category: "API connections",
+        work: async () => { app?.server.closeAllConnections(); },
+      },
+      { category: "notifier", work: async () => { await notifier?.close(); } },
+      { category: "API", work: async () => { await app?.close(); } },
+    ]);
+    if (failures.length > 0) throw new Error(`API close failed: ${failures.join(", ")}`);
   }
 
   #nextId(prefix: string): string {
@@ -942,13 +1329,14 @@ export class IntegrationHarness {
       throw new Error("sentinel category: event audit scan");
     }
     const categories: readonly [string, unknown][] = [
-      ["structured logs", this.structuredLogs],
       ["ErrorEnvelopes", this.errorEnvelopes],
       ["events", events.rows],
       ["audit", audit.rows],
       ["fake Supervisor requests", this.supervisorState.requests],
       ["fake Hermes requests", this.fakeHermes.requests],
+      ["fake Hermes rejections", this.fakeHermes.rejections],
     ];
+    assertStructuredLogsSentinelFree(this.structuredLogs);
     for (const [category, value] of categories) {
       let serialized: string;
       try { serialized = JSON.stringify(value); }
@@ -957,6 +1345,13 @@ export class IntegrationHarness {
     }
   }
 }
+
+export const testHarnessInternals = Object.freeze({
+  assertStructuredLogsSentinelFree,
+  captureStructuredLog,
+  createIsolatedDatabase,
+  runCleanupStages,
+});
 
 export async function createIntegrationHarness(
   suite: string,
