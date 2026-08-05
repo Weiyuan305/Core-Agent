@@ -442,6 +442,11 @@ test("runtime command idempotency uses the same far-future service clock as its 
       .where("tenant_id", "=", context.tenantId).where("job_kind", "=", "reconcile_runtime").executeTakeFirstOrThrow(),
     { created_at: farFutureNow, updated_at: farFutureNow, next_attempt_at: farFutureNow },
   );
+  assert.deepEqual(
+    await db.selectFrom("runtime_containers").select(["desired_state", "updated_at"])
+      .where("tenant_id", "=", context.tenantId).executeTakeFirstOrThrow(),
+    { desired_state: "stopped", updated_at: farFutureNow },
+  );
 });
 
 test("runtime command replay rejects a result reference that does not match the derived runtime", async () => {

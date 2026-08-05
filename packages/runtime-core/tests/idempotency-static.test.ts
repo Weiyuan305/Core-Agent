@@ -28,3 +28,11 @@ test("every idempotent service supplies its single transaction clock to admissio
     assert.match(admissions[0]![0], /\n\s*now,\s*\n/);
   }
 });
+
+test("Runtime desired-state updates do not read an ambient wall clock", async () => {
+  const source = await readFile(join(sourceDirectory, "repositories", "runtime.ts"), "utf8");
+  const methods = source.match(/public async updateDesiredState\([\s\S]*?\n\s*}\n}\s*$/)?.[0];
+
+  assert.notEqual(methods, undefined, "RuntimeRepository.updateDesiredState must remain statically inspectable");
+  assert.doesNotMatch(methods!, /\bnew\s+Date\s*\(\s*\)/);
+});
