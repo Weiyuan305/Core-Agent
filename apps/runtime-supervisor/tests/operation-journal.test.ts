@@ -28,6 +28,18 @@ function request(generation = 1) {
   return { ...data, request_hash: canonicalSupervisorRequestHash(data) };
 }
 
+function startRequest() {
+  const data = {
+    protocol_version: 1 as const,
+    operation_id: "operation_journal_stage",
+    kind: "start" as const,
+    tenant_id: "tenant_a",
+    runtime_id: "runtime_a",
+    generation: 1,
+  };
+  return { ...data, request_hash: canonicalSupervisorRequestHash(data) };
+}
+
 function response(operationId = request().operation_id): SupervisorResponseV1 {
   return {
     protocol_version: 1,
@@ -178,6 +190,45 @@ test("journal atomically persists a bounded digest-named 0600 record and replays
   assert.equal(executions, 1);
 });
 
+test("journal atomically advances only request-compatible canonical reservation stages", async () => {
+  const stagedRequest = startRequest();
+  const digest = createHash("sha256").update(stagedRequest.operation_id).digest("hex");
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  let markAdvanced!: () => void;
+  const advanced = new Promise<void>((resolve) => { markAdvanced = resolve; });
+  const pending = new OperationJournal({ directory: journalRoot }).run(stagedRequest, async (...args: unknown[]) => {
+    const context = args[1] as {
+      readonly stage: string;
+      readonly recovered: boolean;
+      advance(stage: string): Promise<void>;
+    } | undefined;
+    assert.ok(context, "journal must supply a durable reservation context");
+    assert.equal(context.stage, "reserved");
+    assert.equal(context.recovered, false);
+    await assert.rejects(context.advance("delete_pending"), /SUPERVISOR_REJECTED/u);
+    await context.advance("start_pending");
+    assert.equal(context.stage, "start_pending");
+    markAdvanced();
+    await blocked;
+    return response(stagedRequest.operation_id);
+  });
+  await Promise.race([advanced, pending]);
+
+  const reservationPath = join(journalRoot, `${digest}.lock`);
+  assert.equal((await lstat(reservationPath)).mode & 0o777, 0o600);
+  const reservationText = await readFile(reservationPath, "utf8");
+  const reservation = JSON.parse(reservationText) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(reservation), ["owner_token", "protocol_version", "request_hash", "stage"]);
+  assert.equal(reservation.protocol_version, 1);
+  assert.equal(reservation.request_hash, stagedRequest.request_hash);
+  assert.equal(reservation.stage, "start_pending");
+  assert.doesNotMatch(reservationText, /operation_journal_stage|tenant_a|runtime_a|secret/u);
+
+  release();
+  assert.equal((await pending).outcome, "accepted");
+});
+
 test("journal refuses symlinked or permissive records before dispatch", async () => {
   const digest = createHash("sha256").update(request().operation_id).digest("hex");
   await new OperationJournal({ directory: journalRoot }).run(request(), async () => response());
@@ -272,6 +323,7 @@ test("journal recovers a digest-scoped stale reservation and bounds staleness be
     protocol_version: 1,
     request_hash: request().request_hash,
     owner_token: "a".repeat(64),
+    stage: "reserved",
   })}\n`, { mode: 0o600 });
   const stale = new Date(Date.now() - 151_000);
   await utimes(lockPath, stale, stale);

@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, readdir, rm, rmdir, stat, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, rmdir, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
   REMOVED_RUNTIME_IMAGE_REF,
+  RuntimeSupervisorClient,
   SUPERVISOR_DEADLINE_BUDGET,
   canonicalSupervisorRequestHash,
   loadProviderCatalog,
@@ -19,7 +20,8 @@ import type Dockerode from "dockerode";
 
 import { DockerRuntimeAdapter } from "../src/docker-adapter.js";
 import { OperationJournal } from "../src/operation-journal.js";
-import { deriveRuntimeNames } from "../src/policy.js";
+import { deriveRuntimeNames, validateSupervisorPolicy } from "../src/policy.js";
+import { RuntimeSupervisorServer } from "../src/server.js";
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const imageLock = JSON.parse(await readFile(join(repositoryRoot, "infra", "hermes", "base-images.lock.json"), "utf8")) as unknown;
@@ -271,6 +273,8 @@ class FakeContainer {
       throw this.docker.gatewayStartError;
     }
     this.running = true;
+    const failure = this.docker.responseLessMutationErrors.get("start");
+    if (failure !== undefined) throw failure;
   }
 
   public async stop(options?: { readonly abortSignal?: AbortSignal }): Promise<void> {
@@ -278,6 +282,8 @@ class FakeContainer {
     this.actions.push("stop");
     this.docker.mutations.push(`stop:${this.name}`);
     this.running = false;
+    const failure = this.docker.responseLessMutationErrors.get("stop");
+    if (failure !== undefined) throw failure;
   }
 
   public async restart(options?: { readonly abortSignal?: AbortSignal }): Promise<void> {
@@ -285,6 +291,8 @@ class FakeContainer {
     this.actions.push("restart");
     this.docker.mutations.push(`restart:${this.name}`);
     this.running = true;
+    const failure = this.docker.responseLessMutationErrors.get("restart");
+    if (failure !== undefined) throw failure;
   }
 
   public async wait(options?: { readonly abortSignal?: AbortSignal }): Promise<{ StatusCode: number }> {
@@ -332,6 +340,8 @@ class FakeContainer {
     }
     this.removed = true;
     this.docker.containers.delete(this.name);
+    const responseLessFailure = this.docker.responseLessMutationErrors.get("remove");
+    if (responseLessFailure !== undefined) throw responseLessFailure;
     if (resource !== undefined && this.docker.failAbsenceInspectionAfterRemoval.has(resource)) {
       this.docker.failedInspectionNames.add(this.name);
     }
@@ -390,6 +400,7 @@ class FakeDocker {
   public failGatewayStart = false;
   public gatewayStartError: unknown;
   public applyGatewayStartBeforeError = false;
+  public readonly responseLessMutationErrors = new Map<"start" | "stop" | "restart" | "remove", unknown>();
   public mergeImageConfiguration = true;
   public gatewayInspections = 0;
   public gatewayInspectionBarrier: Promise<void> | undefined;
@@ -548,6 +559,64 @@ function buildAdapter(
       reconciliationTimeoutMs: timeouts.reconciliationTimeoutMs ?? 25,
     } as never),
   };
+}
+
+function buildRecoveryServer(
+  socketPath: string,
+  journal: OperationJournal,
+  adapter: DockerRuntimeAdapter,
+): RuntimeSupervisorServer {
+  return new RuntimeSupervisorServer({
+    socketPath,
+    journal,
+    validateRequest: (value) => validateSupervisorPolicy(value, { imageLock, providerCatalog }),
+    execute: (...args: unknown[]) => {
+      const [request, signal, context] = args as [unknown, AbortSignal, unknown];
+      return (adapter.execute as unknown as (
+        value: unknown,
+        operationSignal: AbortSignal,
+        reservationContext: unknown,
+      ) => ReturnType<DockerRuntimeAdapter["execute"]>)(request, signal, context);
+    },
+    admissionTimeoutMs: 25,
+    effectTimeoutMs: 50,
+    operationTimeoutMs: 100,
+    cancellationSettlementTimeoutMs: 30,
+    shutdownTimeoutMs: 10,
+  });
+}
+
+function recoveryProvision(index: number) {
+  const identity = {
+    tenant_id: `tenant_recovery_${index}`,
+    runtime_id: `runtime_recovery_${index}`,
+    generation: 7,
+  };
+  const base = provisionData();
+  return signed({
+    ...base,
+    operation_id: `operation_recovery_provision_${index}`,
+    runtime: {
+      ...base.runtime,
+      ...identity,
+      volume_ref: deriveRuntimeNames(identity).volume,
+    },
+  });
+}
+
+function recoveryLifecycle(
+  request: ReturnType<typeof recoveryProvision>,
+  kind: "start" | "stop" | "restart" | "delete",
+) {
+  const data = {
+    protocol_version: 1 as const,
+    operation_id: `operation_recovery_${kind}`,
+    kind,
+    tenant_id: request.runtime.tenant_id,
+    runtime_id: request.runtime.runtime_id,
+    generation: request.runtime.generation,
+  };
+  return { ...data, request_hash: canonicalSupervisorRequestHash(data) };
 }
 
 test("adapter rejects helper deadlines outside the aggregate production budget", () => {
@@ -989,6 +1058,83 @@ test("an applied gateway start followed by a response-less reset stays non-termi
   assert.equal(docker.mutations.filter((mutation) => mutation === `start:${gatewayName}`).length, 1);
 });
 
+test("stale lifecycle reservations recover applied response-less mutations without replay", async () => {
+  const cases = ["start", "stop", "restart", "delete"] as const;
+  for (const [index, kind] of cases.entries()) {
+    const caseRoot = join(temporaryRoot, `lifecycle-recovery-${kind}`);
+    await mkdir(caseRoot, { mode: 0o700 });
+    const journalRoot = join(caseRoot, "journal");
+    const socketPath = join(temporaryRoot, `s${index}.sock`);
+    const docker = new FakeDocker();
+    const first = buildAdapter(docker);
+    const provisionRequest = recoveryProvision(index);
+    docker.manifestOverride = manifestFor(provisionRequest);
+    await first.adapter.provision(provisionRequest);
+    const lifecycleRequest = recoveryLifecycle(provisionRequest, kind);
+    const gatewayName = deriveRuntimeNames(provisionRequest.runtime).container;
+    const gateway = docker.containers.get(gatewayName)!;
+    if (kind === "start") gateway.running = false;
+    const baseline = docker.mutations.length;
+    const reset = Object.assign(new Error("synthetic applied response-less lifecycle reset"), {
+      code: "ECONNRESET",
+    });
+    if (kind === "restart") {
+      docker.responseLessMutationErrors.set("restart", reset);
+      docker.responseLessMutationErrors.set("start", reset);
+    } else {
+      docker.responseLessMutationErrors.set(kind === "delete" ? "remove" : kind, reset);
+    }
+
+    const firstJournal = new OperationJournal({ directory: journalRoot });
+    const firstServer = buildRecoveryServer(socketPath, firstJournal, first.adapter);
+    await firstServer.start();
+    const firstResponse = await new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 })
+      .execute(lifecycleRequest);
+    assert.equal(firstResponse.outcome, "failed");
+    if (firstResponse.outcome === "failed") assert.equal(firstResponse.code, "DEPENDENCY_TIMEOUT");
+    await firstServer.close();
+
+    const digest = createHash("sha256").update(lifecycleRequest.operation_id).digest("hex");
+    const reservationPath = join(journalRoot, `${digest}.lock`);
+    const reservationText = await readFile(reservationPath, "utf8");
+    const reservation = JSON.parse(reservationText) as Record<string, unknown>;
+    assert.equal(reservation.stage, kind === "restart" ? "start_pending" : `${kind}_pending`);
+    assert.equal((await lstat(reservationPath)).mode & 0o777, 0o600);
+    assert.doesNotMatch(reservationText, new RegExp(`${provisionRequest.runtime.tenant_id}|${provisionRequest.runtime.runtime_id}`));
+    const stale = new Date(Date.now() - 151_000);
+    await utimes(reservationPath, stale, stale);
+    docker.responseLessMutationErrors.clear();
+
+    const recoveredAdapter = buildAdapter(docker, new FakeSecretStore()).adapter;
+    const recoveredServer = buildRecoveryServer(
+      socketPath,
+      new OperationJournal({ directory: journalRoot }),
+      recoveredAdapter,
+    );
+    await recoveredServer.start();
+    try {
+      const recovered = await new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 })
+        .execute(lifecycleRequest);
+      assert.equal(recovered.outcome, "accepted");
+    } finally {
+      await recoveredServer.close();
+    }
+
+    const lifecycleMutations = docker.mutations.slice(baseline);
+    if (kind === "restart") {
+      assert.equal(lifecycleMutations.filter((item) => item === `restart:${gatewayName}`).length, 0);
+      assert.equal(lifecycleMutations.filter((item) => item === `stop:${gatewayName}`).length, 1);
+      assert.equal(lifecycleMutations.filter((item) => item === `start:${gatewayName}`).length, 1);
+    } else {
+      const mutation = kind === "delete" ? `remove:${gatewayName}` : `${kind}:${gatewayName}`;
+      assert.equal(lifecycleMutations.filter((item) => item === mutation).length, 1);
+    }
+    const journalNames = await readdir(journalRoot);
+    assert.equal(journalNames.filter((name) => name.endsWith(".json")).length, 1);
+    assert.equal(journalNames.some((name) => name.endsWith(".lock")), false);
+  }
+});
+
 test("every allowlisted response-less transport code stays daemon-uncertain", async () => {
   const docker = new FakeDocker();
   const request = signed();
@@ -1022,6 +1168,20 @@ test("only response-less data-property transport codes are daemon-uncertain", as
       throw new Error("code accessor must not run");
     },
   });
+  const inheritedStatusError = Object.assign(new Error("synthetic inherited HTTP status"), { code: "ECONNRESET" });
+  Object.setPrototypeOf(inheritedStatusError, Object.create(Error.prototype, {
+    statusCode: { value: 500, enumerable: true },
+  }));
+  const inheritedResponseError = Object.assign(new Error("synthetic inherited response accessor"), { code: "ECONNRESET" });
+  Object.setPrototypeOf(inheritedResponseError, Object.create(Error.prototype, {
+    response: {
+      enumerable: true,
+      get() {
+        accessorReads += 1;
+        throw new Error("response accessor must not run");
+      },
+    },
+  }));
   const failures: readonly unknown[] = [
     new Error("ordinary Docker failure"),
     Object.assign(new Error("connection refused before daemon acceptance"), { code: "ECONNREFUSED" }),
@@ -1029,15 +1189,20 @@ test("only response-less data-property transport codes are daemon-uncertain", as
     Object.assign(new Error("Docker not found response"), { code: 404 }),
     accessorError,
     { code: "ECONNRESET" },
+    inheritedStatusError,
+    inheritedResponseError,
   ];
 
   for (const [index, failure] of failures.entries()) {
     const docker = new FakeDocker();
     docker.gatewayStartError = failure;
-    const response = await buildAdapter(docker).adapter.execute(signed({
+    const timeout = Symbol("unexpected daemon-uncertain classification");
+    const response = await Promise.race([buildAdapter(docker).adapter.execute(signed({
       ...provisionData(),
       operation_id: `operation_negative_transport_${index}`,
-    }));
+    })), new Promise<typeof timeout>((resolve) => setTimeout(() => resolve(timeout), 30))]);
+    assert.notEqual(response, timeout);
+    if (response === timeout) continue;
     assert.equal(response.outcome, "failed");
     if (response.outcome === "failed") assert.equal(response.code, "DEPENDENCY_UNAVAILABLE");
   }
