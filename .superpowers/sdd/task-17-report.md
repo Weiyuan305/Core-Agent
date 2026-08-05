@@ -175,3 +175,62 @@ was attempted. This does not claim image-build evidence.
   accurately bounded above. Deterministic Task 17 gates are green.
 
 No blocking Task 17 concern remains.
+
+## Independent review Round 2 correction
+
+Round 2 rejected the prior correction with one Critical and two Important
+findings. The focused RED is committed as `0f9abe6`
+`test(runtime): reproduce second topology review gaps`:
+
+- path preflight failed 2/2 because provider/ingress were absent from policy,
+  a symlink ancestor was accepted, and canonical cross-purpose containment was
+  not rejected;
+- scanner failed 1/1 because raw empty password, query, and fragment
+  delimiters reached client construction;
+- the legitimate two-instance journal replay test passed, while the new FIFO
+  reservation plus valid completion probe failed because unsafe metadata was
+  masked by the broad catch.
+
+Preflight now treats bootstrap, provider, ingress, socket, and state as five
+pairwise-separated purposes. Existing paths must equal `realpath`; ancestors
+must be root/caller-owned non-symlink directories without group/other write;
+all existing projections are opened with `O_NOFOLLOW` and compared to their
+named inode. Provider/ingress require exact final-UID-owned `0700` directories.
+Absent socket/state leaves are created only beneath a canonical protected
+parent, then every projection is canonicalized and identity-checked again.
+Any canonical equality or ancestor/descendant overlap is rejected, including
+provider under ingress and bootstrap/state under Worker-visible roots. Tests
+canonicalize the macOS temporary root first rather than permitting configured
+symlink ancestors such as `/var`.
+
+The journal no longer catches reservation errors. `#readReservation` returns
+one private release sentinel only after the opened reservation has passed
+regular-file, owner, exact `0600`, bounded size, bounded content, strict JSON,
+request-hash/token, and stable handle-snapshot validation, and only when the
+final pathname `lstat` fails with exact `ENOENT`. Only that sentinel may load a
+fully validated completed record. FIFO, mode, owner, size, JSON, inode, and any
+other `lstat` failure preserve the original unsafe rejection.
+
+The scanner now applies an anchored grammar to the raw input before URL
+normalization. It accepts only `postgres`/`postgresql`, one `core_agent_*`
+user/database, exact IPv4 or bracketed IPv6 loopback, and an optional bounded
+numeric port. Password delimiters, query/fragment delimiters including empty
+ones, percent encoding, extra paths, and every other raw form are rejected
+before `pg.Client` construction.
+
+### Round 2 verification
+
+- Focused path-preflight regression: 2/2 pass.
+- Focused raw-database-URL regression: 1/1 pass.
+- Focused journal replay and unsafe-FIFO regression: 2/2 pass.
+- `node --test tests/runtime/control-plane-compose.test.mjs`: 15/15 pass.
+- Complete Supervisor suite: 41/41 pass.
+- `npm run check`: exit 0; contracts 143/143, runtime-core 51/51, API 13/13,
+  Worker 60/60, Supervisor 41/41, and all builds/schema/fixture/compat gates
+  pass.
+- `npm test`: exit 0; runtime 45/45, contracts 143/143, runtime-core 51/51
+  (239 tests total).
+- No Compose startup, Docker network creation, image pull/build, or external
+  access was performed during the Round 2 correction.
+
+No blocking Task 17 concern remains after the Round 2 correction.

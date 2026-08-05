@@ -88,16 +88,28 @@ controls the bootstrap projection and `CORE_AGENT_SUPERVISOR_SOCKET_GID`
 controls the private runtime roots.
 
 The socket and Supervisor-state mounts are caller-named bind roots, never
-Docker named volumes. Before Compose, `npm run runtime:paths` creates an absent
-leaf or rejects it unless it is a non-symlink directory owned by the exact
-effective Supervisor UID/GID with mode `0700`. With no override this means
-`12002:12002`; a caller who cannot create that ownership must prepare it
-explicitly rather than receive a silent chmod/chown. With a host override the
-same numeric value drives both the container user and preflight policy. Worker
-mounts only the socket root and mounts it read-only; migration never receives
-either runtime root. The bootstrap source is separately rejected unless it is
-a non-symlink regular file owned by the exact effective API UID/GID with mode
-`0600`; preflight opens only metadata and never reads key bytes.
+Docker named volumes. Before Compose, `npm run runtime:paths` validates all
+five caller-controlled projections as separate purposes: bootstrap file,
+provider root, ingress root, socket root, and state root. Every configured
+existing path must already equal its canonical path. Every ancestor must be a
+non-symlink directory owned by root or the preflight caller and prohibit group
+and other writes, so an attacker cannot replace a validated leaf through a
+writable parent. Provider and ingress must be existing exact `0700`
+directories. Socket and state may be absent, but preflight creates them only
+below a canonical protected parent and then repeats canonical, opened-handle,
+named-inode, owner, group, type, and exact `0700` checks.
+
+The five canonical paths are pairwise rejected if they are equal or if either
+is an ancestor of the other. This prevents the Worker-visible ingress or
+socket mount from containing bootstrap, provider, or state bytes. With no UID
+override the runtime roots must be `12002:12002`; a caller who cannot create
+that ownership must prepare it explicitly rather than receive a silent
+chmod/chown. With a host override the same numeric value drives both the
+container user and preflight policy. Worker mounts only ingress and the socket
+root, with the socket mount read-only; migration receives no runtime root. The
+bootstrap source is separately rejected unless it is a regular file owned by
+the exact effective API UID/GID with mode `0600`. Preflight opens metadata only
+and never reads secret bytes.
 
 This UID convergence is strictly a local-development compatibility mechanism.
 Production must keep dedicated API `12000`, Worker `12001`, and Supervisor

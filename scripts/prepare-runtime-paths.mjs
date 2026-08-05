@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import { constants } from "node:fs";
-import { mkdir, open } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { lstat, mkdir, open, realpath } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 function preparationError() {
@@ -23,29 +23,8 @@ function absolutePath(environment, name) {
   return value;
 }
 
-async function metadata(path) {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    return await handle.stat();
-  } finally {
-    await handle.close();
-  }
-}
-
-function requireIdentity(value, uid, gid, mode, kind) {
-  const expectedKind = kind === "directory" ? value.isDirectory() : value.isFile();
-  if (!expectedKind || value.uid !== uid || value.gid !== gid || (value.mode & 0o7777) !== mode) {
-    throw preparationError();
-  }
-}
-
-async function ensurePrivateDirectory(path, uid, gid) {
-  try {
-    await mkdir(path, { mode: 0o700 });
-  } catch (error) {
-    if (error?.code !== "EEXIST") throw preparationError();
-  }
-  requireIdentity(await metadata(path), uid, gid, 0o700, "directory");
+function sameIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
 }
 
 function pathsOverlap(left, right) {
@@ -55,19 +34,81 @@ function pathsOverlap(left, right) {
     || (!fromRight.startsWith("..") && !isAbsolute(fromRight));
 }
 
+async function requireProtectedAncestors(canonicalPath) {
+  const callerUid = process.getuid?.();
+  if (callerUid === undefined) throw preparationError();
+  let path = dirname(canonicalPath);
+  while (true) {
+    const value = await lstat(path);
+    if (
+      !value.isDirectory()
+      || (value.uid !== 0 && value.uid !== callerUid)
+      || (value.mode & 0o022) !== 0
+    ) throw preparationError();
+    const parent = dirname(path);
+    if (parent === path) return;
+    path = parent;
+  }
+}
+
+async function canonicalExisting(path) {
+  const canonical = await realpath(path);
+  if (canonical !== path) throw preparationError();
+  return canonical;
+}
+
+async function inspectProjection({ path, kind, uid, gid, mode }) {
+  const canonical = await canonicalExisting(path);
+  await requireProtectedAncestors(canonical);
+  const namedBefore = await lstat(canonical);
+  const flags = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+    | (kind === "directory" ? constants.O_DIRECTORY : 0);
+  const handle = await open(canonical, flags);
+  try {
+    const held = await handle.stat();
+    const namedAfter = await lstat(canonical);
+    const expectedKind = kind === "directory" ? held.isDirectory() : held.isFile();
+    if (
+      !expectedKind
+      || held.uid !== uid
+      || held.gid !== gid
+      || (held.mode & 0o7777) !== mode
+      || !sameIdentity(namedBefore, held)
+      || !sameIdentity(held, namedAfter)
+    ) throw preparationError();
+    return canonical;
+  } finally {
+    await handle.close();
+  }
+}
+
+async function canonicalCreatableDirectory(path) {
+  const parent = dirname(path);
+  const canonicalParent = await canonicalExisting(parent);
+  await requireProtectedAncestors(join(canonicalParent, basename(path)));
+  if (join(canonicalParent, basename(path)) !== path) throw preparationError();
+  return path;
+}
+
+function requirePurposeSeparation(projections) {
+  for (let left = 0; left < projections.length; left += 1) {
+    for (let right = left + 1; right < projections.length; right += 1) {
+      if (pathsOverlap(projections[left].canonical, projections[right].canonical)) throw preparationError();
+    }
+  }
+}
+
 export function resolveRuntimePathPolicy(environment = process.env) {
   try {
-    const bootstrapPath = absolutePath(environment, "CORE_AGENT_BOOTSTRAP_KEY_FILE");
-    const socketRoot = absolutePath(environment, "CORE_AGENT_SUPERVISOR_SOCKET_ROOT");
-    const stateRoot = absolutePath(environment, "CORE_AGENT_SUPERVISOR_STATE_ROOT");
-    if (pathsOverlap(socketRoot, stateRoot)) throw preparationError();
     const runtimeUid = environment.CORE_AGENT_RUNTIME_UID === undefined
       ? undefined
       : identity(environment, "CORE_AGENT_RUNTIME_UID", 0);
     return {
-      bootstrapPath,
-      socketRoot,
-      stateRoot,
+      bootstrapPath: absolutePath(environment, "CORE_AGENT_BOOTSTRAP_KEY_FILE"),
+      providerRoot: absolutePath(environment, "CORE_AGENT_PROVIDER_SECRET_ROOT"),
+      ingressRoot: absolutePath(environment, "CORE_AGENT_INGRESS_SECRET_ROOT"),
+      socketRoot: absolutePath(environment, "CORE_AGENT_SUPERVISOR_SOCKET_ROOT"),
+      stateRoot: absolutePath(environment, "CORE_AGENT_SUPERVISOR_STATE_ROOT"),
       bootstrapUid: runtimeUid ?? 12000,
       bootstrapGid: identity(environment, "CORE_AGENT_RUNTIME_GID", 12000),
       supervisorUid: runtimeUid ?? 12002,
@@ -81,10 +122,45 @@ export function resolveRuntimePathPolicy(environment = process.env) {
 export async function prepareRuntimePaths({ environment = process.env } = {}) {
   try {
     const policy = resolveRuntimePathPolicy(environment);
+    const existing = [
+      { purpose: "bootstrap", path: policy.bootstrapPath, kind: "file", uid: policy.bootstrapUid, gid: policy.bootstrapGid, mode: 0o600 },
+      { purpose: "provider", path: policy.providerRoot, kind: "directory", uid: policy.supervisorUid, gid: policy.supervisorGid, mode: 0o700 },
+      { purpose: "ingress", path: policy.ingressRoot, kind: "directory", uid: policy.supervisorUid, gid: policy.supervisorGid, mode: 0o700 },
+    ];
+    const creatable = [
+      { purpose: "socket", path: policy.socketRoot, kind: "directory", uid: policy.supervisorUid, gid: policy.supervisorGid, mode: 0o700 },
+      { purpose: "state", path: policy.stateRoot, kind: "directory", uid: policy.supervisorUid, gid: policy.supervisorGid, mode: 0o700 },
+    ];
 
-    requireIdentity(await metadata(policy.bootstrapPath), policy.bootstrapUid, policy.bootstrapGid, 0o600, "file");
-    await ensurePrivateDirectory(policy.socketRoot, policy.supervisorUid, policy.supervisorGid);
-    await ensurePrivateDirectory(policy.stateRoot, policy.supervisorUid, policy.supervisorGid);
+    const inspected = [];
+    for (const projection of existing) {
+      inspected.push({ ...projection, canonical: await inspectProjection(projection) });
+    }
+    for (const projection of creatable) {
+      let canonical;
+      try {
+        canonical = await canonicalExisting(projection.path);
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+        canonical = await canonicalCreatableDirectory(projection.path);
+      }
+      inspected.push({ ...projection, canonical });
+    }
+    requirePurposeSeparation(inspected);
+
+    for (const projection of creatable) {
+      try {
+        await mkdir(projection.path, { mode: 0o700 });
+      } catch (error) {
+        if (error?.code !== "EEXIST") throw error;
+      }
+      const canonical = await inspectProjection(projection);
+      if (canonical !== projection.path) throw preparationError();
+    }
+    requirePurposeSeparation(await Promise.all(inspected.map(async (projection) => ({
+      ...projection,
+      canonical: await inspectProjection(projection),
+    }))));
   } catch {
     throw preparationError();
   }

@@ -29,6 +29,7 @@ const defaultReservationWaitMs = 330_000;
 const completedAtPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const hashPattern = /^sha256:[a-f0-9]{64}$/;
 const tokenPattern = /^[a-f0-9]{64}$/;
+const reservationReleasedAfterValidation = Symbol("reservationReleasedAfterValidation");
 
 interface JournalRecordV1 {
   readonly protocol_version: 1;
@@ -290,13 +291,11 @@ export class OperationJournal {
           }
         }
 
-        let active;
-        try {
-          active = await this.#readReservation(directory, request.operation_id);
-        } catch (error) {
+        const active = await this.#readReservation(directory, request.operation_id);
+        if (active === reservationReleasedAfterValidation) {
           const completedDuringRelease = await this.#read(directory, request.operation_id);
           if (completedDuringRelease !== undefined) return this.#replay(request, completedDuringRelease);
-          throw error;
+          throw journalError();
         }
         if (active !== undefined && active.record.request_hash !== request.request_hash) return conflict(request.operation_id);
         if (active !== undefined && Date.now() - Number(active.metadata.mtimeMs) > this.#reservationStaleMs) {
@@ -467,7 +466,11 @@ export class OperationJournal {
   async #readReservation(
     directory: FileHandle,
     operationId: string,
-  ): Promise<{ readonly record: ReservationRecordV1; readonly metadata: BigIntStats } | undefined> {
+  ): Promise<
+    { readonly record: ReservationRecordV1; readonly metadata: BigIntStats }
+    | typeof reservationReleasedAfterValidation
+    | undefined
+  > {
     const filename = `${this.#digest(operationId)}.lock`;
     const handle = await this.#openChild(directory, filename);
     if (handle === undefined) return undefined;
@@ -481,10 +484,18 @@ export class OperationJournal {
       ) throw journalError();
       const payload = await boundedRead(handle, maximumReservationBytes);
       try {
+        const record = parseReservation(safeJsonParse(payload));
         const after = await handle.stat({ bigint: true });
-        const named = await lstat(this.#childPath(directory, filename), { bigint: true }).catch(() => { throw journalError(); });
-        if (!sameIdentity(before, after) || !sameIdentity(after, named)) throw journalError();
-        return { record: parseReservation(safeJsonParse(payload)), metadata: after };
+        if (!sameSnapshot(before, after)) throw journalError();
+        let named: BigIntStats;
+        try {
+          named = await lstat(this.#childPath(directory, filename), { bigint: true });
+        } catch (error) {
+          if (errorCode(error) === "ENOENT") return reservationReleasedAfterValidation;
+          throw journalError();
+        }
+        if (!sameSnapshot(after, named)) throw journalError();
+        return { record, metadata: after };
       } finally {
         payload.fill(0);
       }

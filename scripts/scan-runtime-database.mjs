@@ -6,6 +6,7 @@ import { Client } from "pg";
 
 const identifierPattern = /^[a-z][a-z0-9_]{0,62}$/u;
 const principalPattern = /^core_agent_[a-z0-9_]+$/u;
+const loopbackDatabaseUrlPattern = /^(postgres(?:ql)?):\/\/(core_agent_[a-z0-9_]+)@(127\.0\.0\.1|\[::1\])(?::([1-9]\d{0,4}))?\/(core_agent_[a-z0-9_]+)$/u;
 
 function scanError() {
   return new Error("database sentinel scan failed");
@@ -17,35 +18,25 @@ function quotedIdentifier(value) {
 }
 
 function validateInput(databaseUrl, sentinel) {
-  if (typeof databaseUrl !== "string" || databaseUrl.includes("%")) throw scanError();
-  let url;
-  try {
-    url = new URL(databaseUrl);
-  } catch {
-    throw scanError();
-  }
+  if (typeof databaseUrl !== "string") throw scanError();
+  const match = databaseUrl.match(loopbackDatabaseUrlPattern);
+  if (match === null) throw scanError();
+  const [, , user, rawHost, rawPort, database] = match;
   if (
-    !["postgres:", "postgresql:"].includes(url.protocol)
-    || !["127.0.0.1", "[::1]"].includes(url.hostname)
-    || url.password !== ""
-    || url.search !== ""
-    || url.hash !== ""
-    || !principalPattern.test(url.username)
-    || !principalPattern.test(url.pathname.slice(1))
-    || url.pathname !== `/${url.pathname.slice(1)}`
-    || (url.port !== "" && !/^\d{1,5}$/u.test(url.port))
+    !principalPattern.test(user)
+    || !principalPattern.test(database)
     || typeof sentinel !== "string"
     || sentinel.length < 16
     || Buffer.byteLength(sentinel) > 256
     || /[\u0000-\u001f\u007f]/u.test(sentinel)
   ) throw scanError();
-  const port = url.port === "" ? 5432 : Number(url.port);
+  const port = rawPort === undefined ? 5432 : Number(rawPort);
   if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) throw scanError();
   return {
-    host: url.hostname === "[::1]" ? "::1" : "127.0.0.1",
+    host: rawHost === "[::1]" ? "::1" : "127.0.0.1",
     port,
-    user: url.username,
-    database: url.pathname.slice(1),
+    user,
+    database,
   };
 }
 
