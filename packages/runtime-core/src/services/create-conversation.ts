@@ -16,6 +16,7 @@ import Type from "typebox";
 import Schema from "typebox/schema";
 
 import type { RuntimeDatabase } from "../db/database.js";
+import { withDatabaseTransactionRetry } from "../db/transaction-retry.js";
 import { assertTenantId, type TenantTransaction } from "../db/transaction.js";
 import {
   beginIdempotentCommand,
@@ -84,23 +85,11 @@ function payloadWithoutHash(request: CreateConversationRequest): Omit<CreateConv
   return payload;
 }
 
-function retryableSerializationFailure(error: unknown): boolean {
-  return typeof error === "object" && error !== null
-    && ["40001", "40P01"].includes(String((error as { code?: unknown }).code));
-}
-
 async function serializable<T>(
   db: Kysely<RuntimeDatabase>,
   work: (trx: Transaction<RuntimeDatabase>) => Promise<T>,
 ): Promise<T> {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      return await db.transaction().setIsolationLevel("serializable").execute(work);
-    } catch (error) {
-      if (!retryableSerializationFailure(error) || attempt === 2) throw error;
-    }
-  }
-  throw new DomainError("INTERNAL_ERROR", "Serializable transaction retry exhausted");
+  return withDatabaseTransactionRetry(db, work, { isolationLevel: "serializable" });
 }
 
 function assertReplay(
@@ -147,15 +136,15 @@ export async function createConversation(
       .where("tenant_id", "=", tenantId).forShare().executeTakeFirst();
     const profile = await trx.selectFrom("profiles").select(["status"])
       .where("tenant_id", "=", tenantId).where("profile_id", "=", request.profile_id).forShare().executeTakeFirst();
-    const actor = await trx.selectFrom("actors").select(["actor_kind", "status"])
-      .where("tenant_id", "=", tenantId).where("actor_id", "=", context.actorId).forShare().executeTakeFirst();
-    const membership = await trx.selectFrom("memberships").select(["actor_id", "roles", "status"])
-      .where("tenant_id", "=", tenantId).where("membership_id", "=", context.membershipId).forShare().executeTakeFirst();
     const runtime = await trx.selectFrom("runtime_containers")
       .select(["desired_state", "observed_state", "health_status"])
       .where("tenant_id", "=", tenantId)
       .where("container_id", "=", deriveRuntimeContainerId(tenantId))
       .forShare().executeTakeFirst();
+    const actor = await trx.selectFrom("actors").select(["actor_kind", "status"])
+      .where("tenant_id", "=", tenantId).where("actor_id", "=", context.actorId).forShare().executeTakeFirst();
+    const membership = await trx.selectFrom("memberships").select(["actor_id", "roles", "status"])
+      .where("tenant_id", "=", tenantId).where("membership_id", "=", context.membershipId).forShare().executeTakeFirst();
     const tenantTransaction: TenantTransaction = { tenantId, trx };
     if (
       tenant?.status !== "active"

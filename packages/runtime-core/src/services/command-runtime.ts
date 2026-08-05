@@ -6,6 +6,7 @@ import Schema from "typebox/schema";
 import { sql, type Kysely, type Transaction } from "kysely";
 
 import type { RuntimeDatabase } from "../db/database.js";
+import { withDatabaseTransactionRetry } from "../db/transaction-retry.js";
 import { assertTenantId, type TenantTransaction } from "../db/transaction.js";
 import {
   beginIdempotentCommand,
@@ -97,20 +98,8 @@ function assertResponse(
   ) throw new DomainError("INTERNAL_ERROR", "Stored runtime command response is invalid");
 }
 
-function retryableSerializationFailure(error: unknown): boolean {
-  return typeof error === "object" && error !== null
-    && ["40001", "40P01"].includes(String((error as { code?: unknown }).code));
-}
-
 async function serializable<T>(db: Kysely<RuntimeDatabase>, work: (trx: Transaction<RuntimeDatabase>) => Promise<T>): Promise<T> {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      return await db.transaction().setIsolationLevel("serializable").execute(work);
-    } catch (error) {
-      if (!retryableSerializationFailure(error) || attempt === 2) throw error;
-    }
-  }
-  throw new DomainError("INTERNAL_ERROR", "Serializable transaction retry exhausted");
+  return withDatabaseTransactionRetry(db, work, { isolationLevel: "serializable" });
 }
 
 export async function getTenantRuntime(

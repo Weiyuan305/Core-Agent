@@ -70,6 +70,17 @@ the claimed Runtime identity, command, target, and exact `pre_effect` or
 identity mismatch prevents the mark and therefore prevents the external
 effect.
 
+Investigate lock waits against the enforced row order. Provision success and
+Conversation admission acquire Tenant, Profiles ordered by `profile_id`,
+Runtime, then Worker job when present. Agent Run execution mutations acquire
+Conversation, Agent Run, then Worker job; a Worker must revalidate the unlocked
+Run-to-Conversation discovery after locking. PostgreSQL `40P01` and `40001`
+receive at most three fresh database transactions. The retry closure must never
+contain Supervisor, Docker, Hermes, SecretStore, or notification calls. If the
+fixed retry budget is exhausted after an accepted external effect, the Worker
+must emit no business failure or retry mutation: the running lease expires and
+normal recovery inspects or terminalizes it under the persisted effect phase.
+
 Outbox delivery has a hard limit of 10 notification attempts. Each polling
 transaction first locks at most 100 exhausted pending rows in deterministic
 creation-and-identity order with `FOR UPDATE SKIP LOCKED`. It rechecks each

@@ -80,12 +80,33 @@ begin, success, and failure transactions repeat the command-version defense so
 a misplaced caller cannot overwrite newer reconcile truth.
 
 Worker transactions that start or terminalize leased runtime work fence the
-lease before and after any runtime-row wait. They first lock the owned
-`worker_jobs` row, lock the runtime row, then re-check owner, running status,
-and expiry against PostgreSQL `clock_timestamp()`. A failed fence aborts the
-whole transaction, including runtime transitions, events, audit, and job
-completion. Transaction-stable `now()` is deliberately not used for this
-authorization decision because it can predate time spent waiting on a lock.
+lease before every write and again in the terminal update. Transactions that
+touch only Runtime and job state use one consistent order for that path.
+Provision success also activates Tenant and Profile identity, so it shares the
+global order used by Conversation admission: Tenant, Profiles in `profile_id`
+order, Runtime, then `worker_jobs`. It may discover the tenant-scoped Profile
+IDs without locks first, but re-locks and revalidates the complete set before
+locking Runtime; the job kind, payload/container identity, effect phase,
+attempt, owner, status, and database-clock expiry are validated only after the
+final job lock. A failed fence aborts the whole transaction, including runtime
+transitions, events, audit, and job completion. Transaction-stable `now()` is
+deliberately not used for lease authorization because it can predate time
+spent waiting on a lock.
+
+Transactions that touch an Agent Run use Conversation, Agent Run, then Worker
+job order. A Worker that begins with only a Run ID performs an unlocked,
+tenant-scoped Conversation-ID lookup, locks Conversation then Run, revalidates
+the immutable association, and finally locks and revalidates the owned job.
+This order is shared by begin, dispatch marking, delta persistence, completion,
+and failure, and is compatible with parent-Run retry admission.
+
+Database-only transaction closures receive at most three fresh attempts for
+PostgreSQL `40P01` or `40001`. SQLSTATE classification reads only an own data
+property and never invokes accessors or reflects driver messages. Docker,
+Hermes, and notification effects are outside this retry boundary. Exhaustion
+after an accepted Runtime effect or unsafe Agent execution is propagated out
+of the handler, leaving the leased job for expiry and recovery rather than
+writing a business failure for a database concurrency condition.
 
 `worker_jobs.effect_state` is interpreted by job kind rather than as one
 generic retry flag:

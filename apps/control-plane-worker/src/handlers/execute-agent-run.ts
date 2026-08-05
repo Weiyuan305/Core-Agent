@@ -1,5 +1,6 @@
 import {
   HermesStreamError,
+  isDatabaseTransactionRetryExhaustedError,
   type AgentRunBeginResult,
   type AgentRunWorkerJobRef,
   type ClaimedJob,
@@ -61,7 +62,8 @@ export async function handleExecuteAgentRun(
 
   let begun: AgentRunBeginResult;
   try { begun = await port.begin(jobRef); }
-  catch {
+  catch (error) {
+    if (isDatabaseTransactionRetryExhaustedError(error)) throw error;
     if (signal.aborted) return leaseLost();
     return terminalFailure(port, jobRef, "Agent execution admission failed");
   }
@@ -86,6 +88,7 @@ export async function handleExecuteAgentRun(
     const completed = await port.complete(jobRef, begun.facts, content);
     return completed.kind === "lease_lost" ? leaseLost() : { kind: "succeeded" };
   } catch (error) {
+    if (isDatabaseTransactionRetryExhaustedError(error)) throw error;
     if (signal.aborted) return leaseLost();
     if (dispatched) return terminalFailure(port, jobRef, "Agent execution failed after dispatch");
     if (retryable(error) && job.attemptCount < job.maxAttempts) {

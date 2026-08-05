@@ -3,6 +3,7 @@ import { isIP } from "node:net";
 
 import {
   canonicalSupervisorRequestHash,
+  isDatabaseTransactionRetryExhaustedError,
   type ProvisionRuntimeCommandDataV1,
   type ProvisionAdmissionResult,
   type ProvisionCompletionResult,
@@ -137,6 +138,7 @@ export async function handleProvisionRuntime(port: ProvisionRuntimePort, job: Pr
     if (completed.kind === "lease_lost") return { kind: "failed", summary: "Worker job lease lost" };
     return { kind: "succeeded" };
   } catch (error) {
+    if (isDatabaseTransactionRetryExhaustedError(error)) throw error;
     const summary = boundedSummary(error);
     if (signal.aborted) return { kind: "failed", summary: "Worker job lease lost" };
     if (job.attemptCount < job.maxAttempts && isTypedRetryable(error)) {

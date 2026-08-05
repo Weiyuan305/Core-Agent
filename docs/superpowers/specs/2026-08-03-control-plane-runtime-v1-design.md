@@ -565,6 +565,17 @@ target version, and captured effect phase, and validates those exact values
 with reconcile kind, running status, attempt, owner, and live lease before
 changing the job. Either legal phase is accepted only when captured exactly.
 
+Cross-domain transactions use explicit global row orders. Provision completion
+and Conversation admission share Tenant, Profiles in stable ID order, Runtime,
+then Worker job; the provision job lease and intent are revalidated after the
+last lock. Agent Run Worker mutations use Conversation, Run, then Worker job,
+with tenant-scoped unlocked association discovery followed by locked
+association revalidation. Database-only closures retry `40P01` and `40001` in
+at most three fresh transactions using accessor-safe SQLSTATE classification.
+External Supervisor, Docker, Hermes, SecretStore, and notification effects are
+never inside that closure. Exhaustion after an accepted effect propagates and
+leaves the leased job for recovery instead of manufacturing business failure.
+
 ## 10. Provisioning flow
 
 1. API authenticates the bootstrap key, derives the provisioner service

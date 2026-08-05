@@ -13,6 +13,7 @@ import type { Kysely, Transaction } from "kysely";
 import type { ProviderCatalog } from "../config/provider-catalog.js";
 import { loadRuntimeImageLock } from "../config/image-lock.js";
 import type { RuntimeDatabase } from "../db/database.js";
+import { withDatabaseTransactionRetry } from "../db/transaction-retry.js";
 import { assertTenantId, type TenantTransaction } from "../db/transaction.js";
 import { appendAuditEvent, appendProductEvents } from "../repositories/events.js";
 import { ResourceRepositories } from "../repositories/index.js";
@@ -175,20 +176,8 @@ function assertProvisioningResponse(
   ) throw new DomainError("INTERNAL_ERROR", "Stored provisioning response is invalid");
 }
 
-function isRetryableSerializationFailure(error: unknown): boolean {
-  return typeof error === "object" && error !== null
-    && ["40001", "40P01"].includes(String((error as { code?: unknown }).code));
-}
-
 async function serializable<T>(db: Kysely<RuntimeDatabase>, work: (trx: Transaction<RuntimeDatabase>) => Promise<T>): Promise<T> {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      return await db.transaction().setIsolationLevel("serializable").execute(work);
-    } catch (error) {
-      if (!isRetryableSerializationFailure(error) || attempt === 2) throw error;
-    }
-  }
-  throw new DomainError("INTERNAL_ERROR", "Serializable transaction retry exhausted");
+  return withDatabaseTransactionRetry(db, work, { isolationLevel: "serializable" });
 }
 
 export async function provisionTenant(

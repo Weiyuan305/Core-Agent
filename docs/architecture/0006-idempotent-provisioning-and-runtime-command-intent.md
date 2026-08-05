@@ -181,9 +181,12 @@ before the Runtime is locked or mutated; there is no generic Runtime-failure
 entry point that can bypass this command-aware disposition.
 
 Successful terminalization has the same persisted-intent boundary. Provision
-success locks the owned job and requires provision kind, matching `payload_ref`
-and `container_id`, and `pre_effect` before touching Runtime, Tenant, Profile,
-event, audit, or job state. Reconcile success locks and validates kind, both
+success locks Tenant, the discovered Profile set in stable ID order, Runtime,
+and finally the owned job. Only after that final lock does it revalidate the
+Profile set and require provision kind, matching `payload_ref` and
+`container_id`, `pre_effect`, attempt, owner, running status, and live lease
+before touching Runtime, Tenant, Profile, event, audit, or job state. Reconcile
+success locks and validates kind, both
 Runtime identities, command, target version, and effect phase. Its API separates
 an `inspect_proved` start/stop/delete completion, which requires `pre_effect`,
 from `effect_dispatched`, which requires `unsafe_to_replay` and includes every
@@ -196,6 +199,15 @@ structured intent, then independently locks and validates all four persisted
 values plus reconcile kind, status, attempt, owner, and lease. Both
 `pre_effect` and `unsafe_to_replay` are legal only when the caller's captured
 phase exactly matches the locked row.
+
+Agent Run Worker mutations that also participate in retry admission use the
+single order Conversation, Agent Run, Worker job. The preliminary
+Run-to-Conversation lookup is tenant-scoped and unlocked; every fresh
+transaction revalidates that association after both identity rows are locked,
+then validates the job lease before writes. Database deadlock and serialization
+failures receive a fixed three-attempt, database-only retry. Exhaustion is a
+fixed internal concurrency signal, not a business failure: after Runtime or
+Hermes effects it escapes the handler so lease recovery owns the next action.
 
 `CONTROL_PLANE_WORKER_ID` is a bounded operator-configured prefix, not the
 durable lease identity. Each Worker process appends one fresh cryptographic

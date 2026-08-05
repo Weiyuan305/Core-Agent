@@ -5,6 +5,7 @@ import { sql, type Kysely, type Transaction } from "kysely";
 
 import type { ProviderCatalog } from "../config/provider-catalog.js";
 import type { RuntimeDatabase } from "../db/database.js";
+import { withDatabaseTransactionRetry } from "../db/transaction-retry.js";
 import type { TenantTransaction } from "../db/transaction.js";
 import { redactSummary, type Redactor } from "../domain/redaction.js";
 import { assertAgentRunTransition } from "../domain/transitions.js";
@@ -78,6 +79,13 @@ async function lockedOwnedJob(trx: Transaction<RuntimeDatabase>, job: AgentRunWo
   return row;
 }
 
+async function resolveRunConversationId(db: Kysely<RuntimeDatabase>, job: AgentRunWorkerJobRef): Promise<string> {
+  const row = await db.selectFrom("agent_runs").select("conversation_id")
+    .where("tenant_id", "=", job.tenantId).where("run_id", "=", job.runId).executeTakeFirst();
+  if (row === undefined) throw new Error("Stored Agent Run Conversation identity is unavailable");
+  return row.conversation_id;
+}
+
 async function requireStillOwned(trx: Transaction<RuntimeDatabase>, job: AgentRunWorkerJobRef): Promise<void> {
   const owned = await trx.selectFrom("worker_jobs").select("job_id")
     .where("tenant_id", "=", job.tenantId).where("job_id", "=", job.jobId)
@@ -104,7 +112,7 @@ async function fenced<Result>(
   db: Kysely<RuntimeDatabase>,
   work: (trx: Transaction<RuntimeDatabase>) => Promise<Result>,
 ): Promise<Result | { readonly kind: "lease_lost" }> {
-  try { return await db.transaction().execute(work); }
+  try { return await withDatabaseTransactionRetry(db, work); }
   catch (error) {
     if (error instanceof AgentRunLeaseLost) return { kind: "lease_lost" };
     throw error;
@@ -166,16 +174,17 @@ export class WorkerAgentRunRepository {
   ) {}
 
   public async begin(job: AgentRunWorkerJobRef): Promise<AgentRunBeginResult> {
+    const conversationId = await resolveRunConversationId(this.db, job);
     return fenced(this.db, async (trx) => {
-      const claimed = await lockedOwnedJob(trx, job);
-      if (claimed.effect_state !== "pre_effect") throw new Error("Unsafe Agent execution cannot begin");
+      const tenant = await trx.selectFrom("tenants").select("status").where("tenant_id", "=", job.tenantId).forShare().executeTakeFirst();
+      const conversation = await trx.selectFrom("conversations").selectAll()
+        .where("tenant_id", "=", job.tenantId).where("conversation_id", "=", conversationId).forUpdate().executeTakeFirst();
+      if (conversation === undefined || conversation.status !== "active") throw new Error("Stored Agent Run Conversation is unavailable");
       const run = await trx.selectFrom("agent_runs").selectAll()
         .where("tenant_id", "=", job.tenantId).where("run_id", "=", job.runId).forUpdate().executeTakeFirst();
-      if (run === undefined) throw new Error("Stored Agent Run execution identity is unavailable");
-      const conversation = await trx.selectFrom("conversations").selectAll()
-        .where("tenant_id", "=", job.tenantId).where("conversation_id", "=", run.conversation_id).forUpdate().executeTakeFirst();
-      if (conversation === undefined || conversation.status !== "active") throw new Error("Stored Agent Run Conversation is unavailable");
-      const tenant = await trx.selectFrom("tenants").select("status").where("tenant_id", "=", job.tenantId).forShare().executeTakeFirst();
+      if (run === undefined || run.conversation_id !== conversationId) throw new Error("Stored Agent Run execution identity is unavailable");
+      const claimed = await lockedOwnedJob(trx, job);
+      if (claimed.effect_state !== "pre_effect") throw new Error("Unsafe Agent execution cannot begin");
       const actor = await trx.selectFrom("actors").select(["actor_kind", "status"]).where("tenant_id", "=", job.tenantId)
         .where("actor_id", "=", conversation.created_by_actor_id).forShare().executeTakeFirst();
       const membership = await trx.selectFrom("memberships").select(["actor_id", "roles", "status"]).where("tenant_id", "=", job.tenantId)
@@ -260,17 +269,16 @@ export class WorkerAgentRunRepository {
 
   public async persistDelta(job: AgentRunWorkerJobRef, messageId: string, delta: string): Promise<JobLeaseResult> {
     if (delta.length < 1 || delta.length > 4_000) throw new Error("Agent Run delta is invalid");
+    const conversationId = await resolveRunConversationId(this.db, job);
     return fenced(this.db, async (trx) => {
-      const claimed = await lockedOwnedJob(trx, job);
-      if (claimed.effect_state !== "unsafe_to_replay") {
-        throw new Error("Agent Run delta requires durable dispatch");
-      }
+      const conversation = await trx.selectFrom("conversations").select(["profile_id"]).where("tenant_id", "=", job.tenantId)
+        .where("conversation_id", "=", conversationId).forUpdate().executeTakeFirst();
+      if (conversation === undefined) throw new Error("Stored Agent Run Conversation is unavailable");
       const run = await trx.selectFrom("agent_runs").select(["tenant_id", "run_id", "conversation_id", "request_id", "trace_id", "status"])
         .where("tenant_id", "=", job.tenantId).where("run_id", "=", job.runId).forUpdate().executeTakeFirst();
-      if (run === undefined || run.status !== "running" || messageId !== assistantMessageId(job.tenantId, job.runId)) throw new Error("Stored Agent Run delta identity is inconsistent");
-      const conversation = await trx.selectFrom("conversations").select(["profile_id"]).where("tenant_id", "=", job.tenantId)
-        .where("conversation_id", "=", run.conversation_id).forUpdate().executeTakeFirst();
-      if (conversation === undefined) throw new Error("Stored Agent Run Conversation is unavailable");
+      if (run === undefined || run.conversation_id !== conversationId || run.status !== "running" || messageId !== assistantMessageId(job.tenantId, job.runId)) throw new Error("Stored Agent Run delta identity is inconsistent");
+      const claimed = await lockedOwnedJob(trx, job);
+      if (claimed.effect_state !== "unsafe_to_replay") throw new Error("Agent Run delta requires durable dispatch");
       await requireStillOwned(trx, job);
       const prior = await trx.selectFrom("product_events").select("payload").where("tenant_id", "=", job.tenantId)
         .where("stream_id", "=", `conversation_${run.conversation_id}`).where("run_id", "=", job.runId)
@@ -299,15 +307,17 @@ export class WorkerAgentRunRepository {
   }
 
   public async markDispatched(job: AgentRunWorkerJobRef): Promise<JobLeaseResult> {
+    const conversationId = await resolveRunConversationId(this.db, job);
     return fenced(this.db, async (trx) => {
-      const claimed = await lockedOwnedJob(trx, job);
-      if (claimed.effect_state !== "pre_effect") {
-        throw new Error("Agent Run dispatch is already unsafe to replay");
-      }
-      const run = await trx.selectFrom("agent_runs").select("status")
+      const conversation = await trx.selectFrom("conversations").select("conversation_id")
+        .where("tenant_id", "=", job.tenantId).where("conversation_id", "=", conversationId).forUpdate().executeTakeFirst();
+      if (conversation === undefined) throw new Error("Stored Agent Run Conversation is unavailable");
+      const run = await trx.selectFrom("agent_runs").select(["status", "conversation_id"])
         .where("tenant_id", "=", job.tenantId).where("run_id", "=", job.runId)
         .forUpdate().executeTakeFirst();
-      if (run?.status !== "running") throw new Error("Agent Run is not running for dispatch");
+      if (run === undefined || run.conversation_id !== conversationId || run.status !== "running") throw new Error("Agent Run is not running for dispatch");
+      const claimed = await lockedOwnedJob(trx, job);
+      if (claimed.effect_state !== "pre_effect") throw new Error("Agent Run dispatch is already unsafe to replay");
       await requireStillOwned(trx, job);
       await updateOwnedJob(trx, job, { effect_state: "unsafe_to_replay", updated_at: this.now() });
       await requireStillOwned(trx, job);
@@ -322,14 +332,16 @@ export class WorkerAgentRunRepository {
     ) {
       throw new Error("Agent Run completion is invalid");
     }
+    const conversationId = await resolveRunConversationId(this.db, job);
     return fenced(this.db, async (trx) => {
+      const conversation = await trx.selectFrom("conversations").select("profile_id").where("tenant_id", "=", job.tenantId).where("conversation_id", "=", conversationId).forUpdate().executeTakeFirst();
+      if (conversation === undefined) throw new Error("Stored Agent Run Conversation is unavailable");
+      const run = await trx.selectFrom("agent_runs").selectAll().where("tenant_id", "=", job.tenantId).where("run_id", "=", job.runId).forUpdate().executeTakeFirst();
+      if (run === undefined || run.conversation_id !== conversationId || run.status !== "running" || run.conversation_id !== facts.conversationId) throw new Error("Stored Agent Run completion identity is inconsistent");
       const claimed = await lockedOwnedJob(trx, job);
       if (claimed.effect_state !== "unsafe_to_replay") throw new Error("Agent Run completion lacks durable output");
-      const run = await trx.selectFrom("agent_runs").selectAll().where("tenant_id", "=", job.tenantId).where("run_id", "=", job.runId).forUpdate().executeTakeFirst();
-      if (run === undefined || run.status !== "running" || run.conversation_id !== facts.conversationId) throw new Error("Stored Agent Run completion identity is inconsistent");
-      const conversation = await trx.selectFrom("conversations").select("profile_id").where("tenant_id", "=", job.tenantId).where("conversation_id", "=", run.conversation_id).forUpdate().executeTakeFirst();
       const sessions = await trx.selectFrom("sessions").selectAll().where("tenant_id", "=", job.tenantId).where("conversation_id", "=", run.conversation_id).where("status", "=", "active").forUpdate().execute();
-      if (conversation === undefined || sessions.length !== 1 || sessions[0]!.hermes_session_ref !== facts.sessionRef) throw new Error("Stored Agent Run completion Session is inconsistent");
+      if (sessions.length !== 1 || sessions[0]!.hermes_session_ref !== facts.sessionRef) throw new Error("Stored Agent Run completion Session is inconsistent");
       await requireStillOwned(trx, job);
       const deltas = await trx.selectFrom("product_events").select("payload").where("tenant_id", "=", job.tenantId)
         .where("stream_id", "=", `conversation_${run.conversation_id}`).where("run_id", "=", job.runId)
@@ -375,12 +387,13 @@ export class WorkerAgentRunRepository {
 
   public async fail(job: AgentRunWorkerJobRef, summary: string): Promise<JobLeaseResult> {
     const redacted = redactSummary(summary, 1_000, this.redactor) || "Agent execution failed";
+    const conversationId = await resolveRunConversationId(this.db, job);
     return fenced(this.db, async (trx) => {
-      await lockedOwnedJob(trx, job);
-      const run = await trx.selectFrom("agent_runs").selectAll().where("tenant_id", "=", job.tenantId).where("run_id", "=", job.runId).forUpdate().executeTakeFirst();
-      if (run === undefined || !["queued", "running"].includes(run.status)) throw new Error("Stored Agent Run failure identity is inconsistent");
-      const conversation = await trx.selectFrom("conversations").select("profile_id").where("tenant_id", "=", job.tenantId).where("conversation_id", "=", run.conversation_id).forUpdate().executeTakeFirst();
+      const conversation = await trx.selectFrom("conversations").select("profile_id").where("tenant_id", "=", job.tenantId).where("conversation_id", "=", conversationId).forUpdate().executeTakeFirst();
       if (conversation === undefined) throw new Error("Stored Agent Run Conversation is unavailable");
+      const run = await trx.selectFrom("agent_runs").selectAll().where("tenant_id", "=", job.tenantId).where("run_id", "=", job.runId).forUpdate().executeTakeFirst();
+      if (run === undefined || run.conversation_id !== conversationId || !["queued", "running"].includes(run.status)) throw new Error("Stored Agent Run failure identity is inconsistent");
+      await lockedOwnedJob(trx, job);
       await requireStillOwned(trx, job);
       assertAgentRunTransition(run.status as AgentRun["status"], "failed");
       const now = this.now();

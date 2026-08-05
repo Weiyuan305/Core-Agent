@@ -16,6 +16,13 @@ export {
   type RuntimeBigInt,
   type RuntimeDatabase,
 } from "./db/database.js";
+export {
+  DatabaseTransactionRetryAbortedError,
+  DatabaseTransactionRetryExhaustedError,
+  isDatabaseTransactionRetryExhaustedError,
+  isRetryableDatabaseTransactionError,
+  withDatabaseTransactionRetry,
+} from "./db/transaction-retry.js";
 export { applyMigrations } from "./db/migrate.js";
 export {
   assertTenantId,

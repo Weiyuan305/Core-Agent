@@ -5,6 +5,7 @@ import { sql, type Kysely, type Transaction } from "kysely";
 
 import type { ProviderCatalog } from "../config/provider-catalog.js";
 import type { RuntimeDatabase } from "../db/database.js";
+import { withDatabaseTransactionRetry } from "../db/transaction-retry.js";
 import type { TenantTransaction } from "../db/transaction.js";
 import { assertRuntimeObservedTransition } from "../domain/transitions.js";
 import { redactSummary, type Redactor } from "../domain/redaction.js";
@@ -127,7 +128,7 @@ async function requireLease(trx: Transaction<RuntimeDatabase>, job: RuntimeWorke
 }
 async function fencedTransaction(db: Kysely<RuntimeDatabase>, work: (trx: Transaction<RuntimeDatabase>) => Promise<void>): Promise<boolean> {
   try {
-    await db.transaction().execute(work);
+    await withDatabaseTransactionRetry(db, work);
     return true;
   } catch (error) {
     if (error instanceof LeaseFenceLost) return false;
@@ -137,7 +138,7 @@ async function fencedTransaction(db: Kysely<RuntimeDatabase>, work: (trx: Transa
 async function provisionTransaction<Result extends { readonly kind: string }>(
   db: Kysely<RuntimeDatabase>, work: (trx: Transaction<RuntimeDatabase>) => Promise<Result>,
 ): Promise<Result | { readonly kind: "lease_lost" }> {
-  try { return await db.transaction().execute(work); }
+  try { return await withDatabaseTransactionRetry(db, work); }
   catch (error) {
     if (error instanceof LeaseFenceLost) return { kind: "lease_lost" };
     throw error;
@@ -221,16 +222,27 @@ export class WorkerRuntimeRepository {
   }
 
   public async finishProvision(job: RuntimeWorkerJobRef): Promise<ProvisionCompletionResult> {
+    const discoveredProfiles = await this.db.selectFrom("profiles").select("profile_id")
+      .where("tenant_id", "=", job.tenantId).orderBy("profile_id").execute();
+    if (discoveredProfiles.length === 0) throw new Error("Runtime provisioning Profiles are unavailable");
     return provisionTransaction(this.db, async (trx) => {
+      const tenant = await trx.selectFrom("tenants").select("status")
+        .where("tenant_id", "=", job.tenantId).forUpdate().executeTakeFirst();
+      const profiles = await trx.selectFrom("profiles").select(["profile_id", "status"])
+        .where("tenant_id", "=", job.tenantId).orderBy("profile_id").forUpdate().execute();
+      const current = await trx.selectFrom("runtime_containers").select(["observed_state", "command_version"])
+        .where("tenant_id", "=", job.tenantId).where("container_id", "=", job.runtimeId).forUpdate().executeTakeFirst();
       const claimed = await trx.selectFrom("worker_jobs").select(["job_kind", "payload_ref", "container_id", "effect_state"])
         .where("tenant_id", "=", job.tenantId).where("job_id", "=", job.jobId)
         .where("attempt_count", "=", job.attemptCount).where("lease_owner", "=", job.workerId)
         .where("status", "=", "running").where("lease_expires_at", ">", sql<Date>`clock_timestamp()`)
         .forUpdate().executeTakeFirst();
-      if (claimed === undefined || claimed.job_kind !== "provision_runtime" || claimed.payload_ref !== job.runtimeId
+      const discoveredProfileIds = discoveredProfiles.map((profile) => profile.profile_id);
+      if (tenant === undefined || !["provisioning", "active"].includes(tenant.status)
+        || profiles.length !== discoveredProfileIds.length || profiles.some((profile, index) => profile.profile_id !== discoveredProfileIds[index]
+          || !["provisioning", "active"].includes(profile.status))
+        || current === undefined || claimed === undefined || claimed.job_kind !== "provision_runtime" || claimed.payload_ref !== job.runtimeId
         || claimed.container_id !== job.runtimeId || claimed.effect_state !== "pre_effect") throw new LeaseFenceLost();
-      const current = await trx.selectFrom("runtime_containers").select(["observed_state", "command_version"]).where("tenant_id", "=", job.tenantId).where("container_id", "=", job.runtimeId).forUpdate().executeTakeFirstOrThrow();
-      await requireLease(trx, job);
       if (safeContractInteger(current.command_version) > 0) {
         await finishOwnedJob(trx, job, { status: "succeeded", lease_owner: null, lease_expires_at: null, last_error_summary: "Superseded by a newer runtime command", updated_at: this.now() });
         return { kind: "superseded" } as const;
@@ -344,7 +356,7 @@ export class WorkerRuntimeRepository {
   }
 
   public async isCurrentCommand(job: RuntimeWorkerJobRef, targetCommandVersion: number): Promise<boolean> {
-    return this.db.transaction().execute(async (trx) => {
+    return withDatabaseTransactionRetry(this.db, async (trx) => {
       if (!await ownsLease(trx, job, true)) return false;
       const row = await trx.selectFrom("runtime_containers").select("command_version").where("tenant_id", "=", job.tenantId).where("container_id", "=", job.runtimeId).executeTakeFirst();
       return row !== undefined && safeContractInteger(row.command_version) === targetCommandVersion;
@@ -356,7 +368,7 @@ export class WorkerRuntimeRepository {
     command: "start" | "stop" | "restart" | "delete",
     targetCommandVersion: number,
   ): Promise<boolean> {
-    return this.db.transaction().execute(async (trx) => {
+    return withDatabaseTransactionRetry(this.db, async (trx) => {
       const claimed = await trx.selectFrom("worker_jobs").select(["job_kind", "payload_ref", "container_id", "runtime_command", "target_command_version", "effect_state"])
         .where("tenant_id", "=", job.tenantId).where("job_id", "=", job.jobId)
         .where("attempt_count", "=", job.attemptCount).where("lease_owner", "=", job.workerId).where("status", "=", "running")
