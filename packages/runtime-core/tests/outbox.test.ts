@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { Pool } from "pg";
-import { applyMigrations, claimOutboxWakeups, createRedactor, createRuntimeDatabase, failOutbox, markOutboxDelivered, readEventsAfter, rescheduleOutbox } from "../src/index.js";
+import { applyMigrations, claimOutboxWakeups, createRedactor, createRuntimeDatabase, failOutbox, markOutboxDelivered, OUTBOX_RECOVERY_BATCH_SIZE, readEventsAfter, rescheduleOutbox } from "../src/index.js";
 
 const databaseUrl = process.env.CONTROL_PLANE_TEST_DATABASE_URL;
 if (databaseUrl === undefined || !new URL(databaseUrl).pathname.slice(1).startsWith("core_agent_")) throw new Error("CONTROL_PLANE_TEST_DATABASE_URL must name a disposable core_agent_ database");
@@ -17,6 +17,29 @@ async function seedOutbox(tenantId: string): Promise<void> {
   await db.insertInto("product_events").values({ tenant_id: tenantId, event_id: "event_1", stream_id: "runtime_1", schema_version: 1, sequence: 1, event_type: "runtime.status_changed", occurred_at: new Date(0), request_id: "request_1", trace_id: "trace_1", correlation_id: "runtime_1", causation_id: "job_1", profile_id: null, conversation_id: null, run_id: null, task_id: null, approval_id: null, student_ref: null, case_ref: null, capability_id: null, payload: { container_id: "runtime_1", observed_state: "requested" } }).execute();
   await db.insertInto("stream_sequences").values({ tenant_id: tenantId, stream_id: "runtime_1", last_sequence: 1 }).execute();
   await db.insertInto("outbox").values({ tenant_id: tenantId, outbox_id: "outbox_1", event_id: "event_1", delivery_target: "internal_event_stream", status: "pending", attempt_count: 0, next_attempt_at: new Date(0), lease_owner: null, lease_expires_at: null, last_error_summary: null, delivered_at: null, created_at: new Date(0), updated_at: new Date(0) }).execute();
+}
+
+async function seedExhaustedOutboxBacklog(total: number): Promise<void> {
+  assert.ok(total >= 1);
+  await db.updateTable("stream_sequences").set({ last_sequence: total })
+    .where("tenant_id", "=", "tenant_outbox").where("stream_id", "=", "runtime_1").execute();
+  await db.updateTable("outbox").set({ attempt_count: 10, lease_owner: null, lease_expires_at: null, created_at: new Date(1) })
+    .where("tenant_id", "=", "tenant_outbox").where("outbox_id", "=", "outbox_1").execute();
+  if (total === 1) return;
+  const indexes = Array.from({ length: total - 1 }, (_, offset) => offset + 2);
+  await db.insertInto("product_events").values(indexes.map((index) => ({
+    tenant_id: "tenant_outbox", event_id: `event_${String(index).padStart(4, "0")}`, stream_id: "runtime_1",
+    schema_version: 1, sequence: index, event_type: "runtime.status_changed", occurred_at: new Date(index),
+    request_id: `request_${index}`, trace_id: `trace_${index}`, correlation_id: "runtime_1", causation_id: `job_${index}`,
+    profile_id: null, conversation_id: null, run_id: null, task_id: null, approval_id: null, student_ref: null,
+    case_ref: null, capability_id: null, payload: { container_id: "runtime_1", observed_state: "requested" },
+  }))).execute();
+  await db.insertInto("outbox").values(indexes.map((index) => ({
+    tenant_id: "tenant_outbox", outbox_id: `outbox_${String(index).padStart(4, "0")}`,
+    event_id: `event_${String(index).padStart(4, "0")}`, delivery_target: "internal_event_stream", status: "pending",
+    attempt_count: 10, next_attempt_at: new Date(0), lease_owner: null, lease_expires_at: null,
+    last_error_summary: null, delivered_at: null, created_at: new Date(index), updated_at: new Date(0),
+  }))).execute();
 }
 
 test.beforeEach(async () => {
@@ -132,4 +155,54 @@ test("a live tenth lease is untouched and an expired ninth lease receives exactl
       .where("tenant_id", "=", "tenant_outbox").where("outbox_id", "=", "outbox_1").executeTakeFirstOrThrow(),
     { status: "pending", attempt_count: 10, lease_owner: "worker_ten" },
   );
+});
+
+test("exhausted recovery terminalizes one bounded batch and the next claim advances the backlog", async () => {
+  await seedExhaustedOutboxBacklog(OUTBOX_RECOVERY_BATCH_SIZE + 5);
+
+  assert.deepEqual(await claimOutboxWakeups(db, { workerId: "worker_batch_one", limit: 1, leaseMs: 30_000 }), []);
+  assert.deepEqual(
+    (await pool.query<{ status: string; count: string }>("select status, count(*)::text as count from outbox group by status order by status")).rows,
+    [{ status: "failed", count: String(OUTBOX_RECOVERY_BATCH_SIZE) }, { status: "pending", count: "5" }],
+  );
+
+  assert.deepEqual(await claimOutboxWakeups(db, { workerId: "worker_batch_two", limit: 1, leaseMs: 30_000 }), []);
+  assert.deepEqual(
+    (await pool.query<{ status: string; count: string }>("select status, count(*)::text as count from outbox group by status order by status")).rows,
+    [{ status: "failed", count: String(OUTBOX_RECOVERY_BATCH_SIZE + 5) }],
+  );
+});
+
+test("concurrent exhausted recovery skips another worker's locked batch", { timeout: 5_000 }, async () => {
+  await seedExhaustedOutboxBacklog(OUTBOX_RECOVERY_BATCH_SIZE + 50);
+  const blocker = await pool.connect();
+  try {
+    await blocker.query("begin");
+    const locked = await blocker.query(`
+      select tenant_id, outbox_id from outbox
+      where status = 'pending' and attempt_count >= 10
+        and (lease_owner is null or lease_expires_at is null or lease_expires_at <= clock_timestamp())
+      order by created_at, tenant_id, outbox_id
+      limit ${OUTBOX_RECOVERY_BATCH_SIZE}
+      for update
+    `);
+    assert.equal(locked.rowCount, OUTBOX_RECOVERY_BATCH_SIZE);
+    const claim = claimOutboxWakeups(db, { workerId: "worker_skip_locked", limit: 1, leaseMs: 30_000 });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const lockWait = new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(() => reject(new Error("recovery waited on another worker's row locks")), 1_000);
+    });
+    const result = await Promise.race([claim, lockWait]).finally(() => clearTimeout(timeout));
+    assert.deepEqual(result, []);
+    assert.deepEqual(
+      (await pool.query<{ status: string; count: string }>("select status, count(*)::text as count from outbox group by status order by status")).rows,
+      [{ status: "failed", count: "50" }, { status: "pending", count: String(OUTBOX_RECOVERY_BATCH_SIZE) }],
+    );
+  } finally {
+    await blocker.query("rollback");
+    blocker.release();
+  }
+
+  assert.deepEqual(await claimOutboxWakeups(db, { workerId: "worker_after_unlock", limit: 1, leaseMs: 30_000 }), []);
+  assert.equal((await pool.query<{ count: number }>("select count(*)::integer as count from outbox where status = 'failed'")).rows[0]?.count, OUTBOX_RECOVERY_BATCH_SIZE + 50);
 });

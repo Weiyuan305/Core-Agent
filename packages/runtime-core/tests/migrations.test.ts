@@ -90,14 +90,14 @@ test.after(async () => {
   await db.destroy();
 });
 
-test("empty database migrates exactly to schema version 7 with Agent Run claim indexes", async () => {
+test("empty database migrates exactly to schema version 8 with Worker claim indexes", async () => {
   await applyMigrations(pool, migrationsDirectory);
 
-  assert.equal(EXPECTED_SCHEMA_VERSION, 7);
+  assert.equal(EXPECTED_SCHEMA_VERSION, 8);
   assert.equal(await readSchemaVersion(db), EXPECTED_SCHEMA_VERSION);
   await assert.doesNotReject(assertSchemaVersion(db, EXPECTED_SCHEMA_VERSION));
   await assert.rejects(assertSchemaVersion(db, 3), /ahead/);
-  await assert.rejects(assertSchemaVersion(db, 8), /behind/);
+  await assert.rejects(assertSchemaVersion(db, 9), /behind/);
   const runtimeCommandColumn = await sql<{ column_name: string }>`
     select column_name from information_schema.columns
     where table_schema = 'public' and table_name = 'worker_jobs' and column_name = 'runtime_command'
@@ -119,26 +119,28 @@ test("empty database migrates exactly to schema version 7 with Agent Run claim i
       'agent_runs_tenant_conversation_run_idx',
       'worker_jobs_tenant_run_idx',
       'worker_jobs_platform_eligible_idx',
-      'worker_jobs_platform_recovery_idx'
+      'worker_jobs_platform_recovery_idx',
+      'outbox_exhausted_recovery_idx'
     ) order by indexname
   `.execute(db);
   assert.deepEqual(indexes.rows.map((row) => row.indexname), [
     "agent_runs_tenant_conversation_run_idx",
+    "outbox_exhausted_recovery_idx",
     "worker_jobs_platform_eligible_idx",
     "worker_jobs_platform_recovery_idx",
     "worker_jobs_tenant_run_idx",
   ]);
 });
 
-test("version 7 upgrades a genuine v6 database and supports Conversation-aware claim plans", { timeout: 10_000 }, async () => {
-  const v6Directory = await mkdtemp(join(tmpdir(), "core-agent-v6-migrations-"));
-  await cp(migrationsDirectory, v6Directory, { recursive: true });
-  await rm(join(v6Directory, "007_agent_run_claim_indexes.sql"));
+test("version 8 upgrades a genuine v7 database and supports Worker claim plans", { timeout: 10_000 }, async () => {
+  const v7Directory = await mkdtemp(join(tmpdir(), "core-agent-v7-migrations-"));
+  await cp(migrationsDirectory, v7Directory, { recursive: true });
+  await rm(join(v7Directory, "008_outbox_exhausted_recovery_index.sql"));
   try {
-    await applyMigrations(pool, v6Directory);
-    assert.equal(await readSchemaVersion(db), 6);
-    await applyMigrations(pool, migrationsDirectory);
+    await applyMigrations(pool, v7Directory);
     assert.equal(await readSchemaVersion(db), 7);
+    await applyMigrations(pool, migrationsDirectory);
+    assert.equal(await readSchemaVersion(db), 8);
 
     const plans = await db.connection().execute(async (connection) => {
       await sql`set enable_seqscan = off`.execute(connection);
@@ -158,7 +160,14 @@ test("version 7 upgrades a genuine v6 database and supports Conversation-aware c
             and next_attempt_at <= now()
           order by created_at limit 4
         `.execute(connection);
-        return [...agentRuns.rows, ...jobRun.rows, ...eligible.rows].map((row) => row["QUERY PLAN"]).join("\n");
+        const exhaustedOutbox = await sql<{ "QUERY PLAN": string }>`
+          explain select tenant_id, outbox_id from outbox
+          where status = 'pending' and attempt_count >= 10
+            and (lease_owner is null or lease_expires_at is null or lease_expires_at <= clock_timestamp())
+          order by created_at, tenant_id, outbox_id
+          limit 100 for update skip locked
+        `.execute(connection);
+        return [...agentRuns.rows, ...jobRun.rows, ...eligible.rows, ...exhaustedOutbox.rows].map((row) => row["QUERY PLAN"]).join("\n");
       } finally {
         await sql`reset enable_seqscan`.execute(connection);
       }
@@ -166,8 +175,9 @@ test("version 7 upgrades a genuine v6 database and supports Conversation-aware c
     assert.match(plans, /agent_runs_tenant_conversation_run_idx/);
     assert.match(plans, /worker_jobs_tenant_run_idx/);
     assert.match(plans, /worker_jobs_platform_eligible_idx/);
+    assert.match(plans, /outbox_exhausted_recovery_idx/);
   } finally {
-    await rm(v6Directory, { recursive: true, force: true });
+    await rm(v7Directory, { recursive: true, force: true });
   }
 });
 
@@ -178,6 +188,7 @@ test("version 4 terminalizes ambiguous legacy reconcile jobs and enforces the jo
   await rm(join(legacyDirectory, "005_worker_runtime_facts.sql"));
   await rm(join(legacyDirectory, "006_worker_job_attempt_fence.sql"));
   await rm(join(legacyDirectory, "007_agent_run_claim_indexes.sql"));
+  await rm(join(legacyDirectory, "008_outbox_exhausted_recovery_index.sql"));
   try {
     await applyMigrations(pool, legacyDirectory);
     await seedTenant("tenant_upgrade");
@@ -290,6 +301,7 @@ test("version 5 fails genuine active v4 command intent closed and preserves term
   await rm(join(v4Directory, "005_worker_runtime_facts.sql"));
   await rm(join(v4Directory, "006_worker_job_attempt_fence.sql"));
   await rm(join(v4Directory, "007_agent_run_claim_indexes.sql"));
+  await rm(join(v4Directory, "008_outbox_exhausted_recovery_index.sql"));
   try {
     await applyMigrations(pool, v4Directory);
     await seedTenant("tenant_v4_worker_upgrade");
@@ -320,6 +332,7 @@ test("latest schema upgrades a genuine v5 database through the version 6 Worker 
   await cp(migrationsDirectory, v5Directory, { recursive: true });
   await rm(join(v5Directory, "006_worker_job_attempt_fence.sql"));
   await rm(join(v5Directory, "007_agent_run_claim_indexes.sql"));
+  await rm(join(v5Directory, "008_outbox_exhausted_recovery_index.sql"));
   try {
     await applyMigrations(pool, v5Directory);
     assert.equal(await readSchemaVersion(db), 5);
@@ -349,6 +362,7 @@ test("version 6 fails closed when genuine v5 storage already exceeds the Worker 
   await cp(migrationsDirectory, v5Directory, { recursive: true });
   await rm(join(v5Directory, "006_worker_job_attempt_fence.sql"));
   await rm(join(v5Directory, "007_agent_run_claim_indexes.sql"));
+  await rm(join(v5Directory, "008_outbox_exhausted_recovery_index.sql"));
   try {
     await applyMigrations(pool, v5Directory);
     await seedTenant("tenant_v5_invalid_attempt");
