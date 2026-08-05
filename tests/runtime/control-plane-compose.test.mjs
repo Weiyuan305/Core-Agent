@@ -93,6 +93,21 @@ test("only API publishes a loopback port and only Supervisor mounts Docker", asy
   assert.equal(config.services.supervisor.network_mode, "none");
 });
 
+test("API and Supervisor share one caller-supplied reviewed Hermes product lock", async () => {
+  const config = await yaml("infra/runtime/compose.dev.yaml");
+  const target = "/run/core-agent/config/hermes-images.lock.json";
+  for (const [serviceName, environmentName] of [
+    ["api", "CONTROL_PLANE_IMAGE_LOCK_FILE"],
+    ["supervisor", "CORE_AGENT_IMAGE_LOCK_PATH"],
+  ]) {
+    const service = config.services[serviceName];
+    assert.equal(environmentMap(service)[environmentName], target);
+    const mount = volumeAt(service, target);
+    assert.equal(mount.source, "${CORE_AGENT_HERMES_IMAGE_LOCK_FILE:?set CORE_AGENT_HERMES_IMAGE_LOCK_FILE}");
+    assert.equal(mount.read_only, true);
+  }
+});
+
 test("service mounts and networks preserve each process boundary", async () => {
   const config = await yaml("infra/runtime/compose.dev.yaml");
   const { api, migrate, postgres, supervisor, worker } = config.services;

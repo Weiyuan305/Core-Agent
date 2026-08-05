@@ -15,6 +15,7 @@ import {
   readProtectedSecret,
   runBoundedChild,
   runControlPlaneSmoke,
+  validateProductImageLock,
   validateSmokeEnvironment,
   validateSyntheticIdentifiers,
 } from "../../scripts/smoke-control-plane.mjs";
@@ -29,6 +30,7 @@ const smokeEnvironment = Object.freeze({
   CORE_AGENT_PLATFORM: "linux/arm64",
   CORE_AGENT_NODE_IMAGE: "node:22-bookworm-slim@sha256:" + "a".repeat(64),
   CORE_AGENT_POSTGRES_IMAGE: "postgres:17-bookworm@sha256:" + "b".repeat(64),
+  CORE_AGENT_HERMES_IMAGE_LOCK_FILE: "/safe/config/reviewed-product-images.lock.json",
   CORE_AGENT_BOOTSTRAP_KEY_FILE: "/safe/bootstrap/key",
   CORE_AGENT_PROVIDER_SECRET_ROOT: "/safe/provider",
   CORE_AGENT_INGRESS_SECRET_ROOT: "/safe/ingress",
@@ -247,6 +249,52 @@ test("canonical smoke payload hashing is key-order deterministic", () => {
     canonicalPayloadHash({ b: [2, 1], a: { z: true, y: null } }),
     canonicalPayloadHash({ a: { y: null, z: true }, b: [2, 1] }),
   );
+});
+
+test("REAL_HERMES smoke accepts only a reviewed Core-Agent product image lock", () => {
+  const productLock = {
+    schemaVersion: 1,
+    repository: "core-agent/hermes-runtime",
+    tag: "v2026.8.5",
+    platforms: {
+      "linux/amd64": { reference: "core-agent/hermes-runtime:v2026.8.5@sha256:" + "a".repeat(64) },
+      "linux/arm64": { reference: "core-agent/hermes-runtime:v2026.8.5@sha256:" + "b".repeat(64) },
+    },
+  };
+  assert.equal(validateProductImageLock(productLock, "linux/arm64"), productLock.platforms["linux/arm64"].reference);
+  assert.throws(
+    () => validateProductImageLock({
+      ...productLock,
+      repository: "nousresearch/hermes-agent",
+      platforms: {
+        "linux/amd64": { reference: "nousresearch/hermes-agent:v2026.7.30@sha256:" + "a".repeat(64) },
+        "linux/arm64": { reference: "nousresearch/hermes-agent:v2026.7.30@sha256:" + "b".repeat(64) },
+      },
+    }, "linux/arm64"),
+    /SMOKE_PRODUCT_IMAGE_LOCK_INVALID/,
+  );
+});
+
+test("control-plane API and Supervisor load one caller-supplied product image lock", async () => {
+  const controlPlaneCompose = await readFile(
+    new URL("../../infra/runtime/compose.dev.yaml", import.meta.url),
+    "utf8",
+  );
+  const runtimeEnvironmentExample = await readFile(
+    new URL("../../.env.runtime.example", import.meta.url),
+    "utf8",
+  );
+  assert.match(runtimeEnvironmentExample, /^CORE_AGENT_HERMES_IMAGE_LOCK_FILE=\/absolute\/path\/to\/reviewed-product-images\.lock\.json$/m);
+  assert.equal(
+    controlPlaneCompose.match(/source: \$\{CORE_AGENT_HERMES_IMAGE_LOCK_FILE:\?set CORE_AGENT_HERMES_IMAGE_LOCK_FILE\}/g)?.length,
+    2,
+  );
+  assert.equal(
+    controlPlaneCompose.match(/target: \/run\/core-agent\/config\/hermes-images\.lock\.json/g)?.length,
+    2,
+  );
+  assert.match(controlPlaneCompose, /CONTROL_PLANE_IMAGE_LOCK_FILE: \/run\/core-agent\/config\/hermes-images\.lock\.json/);
+  assert.match(controlPlaneCompose, /CORE_AGENT_IMAGE_LOCK_PATH: \/run\/core-agent\/config\/hermes-images\.lock\.json/);
 });
 
 const dockerfile = await readFile(
