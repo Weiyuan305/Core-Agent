@@ -317,7 +317,8 @@ function successfulSmokeDependencies(overrides = {}) {
       calls.push("wait-delete");
     },
     stopTopology: async ({ projectName, removeVolumes }) => calls.push(`stop:${projectName}:${removeVolumes}`),
-    releaseSecrets: async () => calls.push("release"),
+    releaseSecrets: async () => calls.push("zeroize-secrets"),
+    releaseProductImageLockSnapshot: async () => calls.push("release-snapshot"),
     emit: (value) => {
       calls.push("emit");
       emitted = value;
@@ -346,11 +347,11 @@ test("REAL_HERMES full workflow emits exact output after ordered default cleanup
   assert.deepEqual(fixture.calls, [
     "validate", "start:core-agent-runtime-v1-smoke", "prepare-context", "provision", "poll",
     "conversation", "run", "events", "query-run", "count-messages", "inspect", "scan-database",
-    "delete", "wait-delete", "stop:core-agent-runtime-v1-smoke:false", "release", "emit",
+    "delete", "wait-delete", "stop:core-agent-runtime-v1-smoke:false", "zeroize-secrets", "release-snapshot", "emit",
   ]);
 });
 
-test("REAL_HERMES --keep-runtime skips runtime and Compose cleanup but releases secrets", async () => {
+test("REAL_HERMES --keep-runtime skips topology cleanup, zeroizes secrets, and preserves its snapshot", async () => {
   const fixture = successfulSmokeDependencies();
   await runControlPlaneSmoke({
     environment: smokeEnvironment,
@@ -360,7 +361,8 @@ test("REAL_HERMES --keep-runtime skips runtime and Compose cleanup but releases 
   assert(!fixture.calls.includes("delete"));
   assert(!fixture.calls.includes("wait-delete"));
   assert(!fixture.calls.some((call) => call.startsWith("stop:")));
-  assert.deepEqual(fixture.calls.slice(-2), ["release", "emit"]);
+  assert(!fixture.calls.includes("release-snapshot"));
+  assert.deepEqual(fixture.calls.slice(-2), ["zeroize-secrets", "emit"]);
 });
 
 test("REAL_HERMES cleanup preserves its first error while continuing exact later cleanup", async () => {
@@ -383,8 +385,8 @@ test("REAL_HERMES cleanup preserves its first error while continuing exact later
     runControlPlaneSmoke({ environment: smokeEnvironment, argv: [], dependencies: fixture.dependencies }),
     (error) => error?.code === "SMOKE_STAGE_FAILED" && error.cause === deleteFailure,
   );
-  assert.deepEqual(fixture.calls.slice(-4), [
-    "delete", "wait-delete", "stop:core-agent-runtime-v1-smoke:false", "release",
+  assert.deepEqual(fixture.calls.slice(-5), [
+    "delete", "wait-delete", "stop:core-agent-runtime-v1-smoke:false", "zeroize-secrets", "release-snapshot",
   ]);
   assert.equal(fixture.emitted(), undefined);
 });
@@ -404,7 +406,47 @@ test("REAL_HERMES recovers a response-loss orphan through its precomputed cleanu
   );
   assert.deepEqual(fixture.calls, [
     "validate", "start:core-agent-runtime-v1-smoke", "prepare-context", "provision-response-lost",
-    "delete", "wait-delete", "stop:core-agent-runtime-v1-smoke:false", "release",
+    "delete", "wait-delete", "stop:core-agent-runtime-v1-smoke:false", "zeroize-secrets", "release-snapshot",
+  ]);
+});
+
+test("REAL_HERMES --keep-runtime releases a preflight snapshot before topology ownership", async () => {
+  const preflightFailure = new Error("synthetic preflight failure after snapshot");
+  const fixture = successfulSmokeDependencies({
+    validatePrerequisites: async () => {
+      fixture.calls.push("preflight-snapshot-staged");
+      throw preflightFailure;
+    },
+  });
+  await assert.rejects(
+    runControlPlaneSmoke({
+      environment: smokeEnvironment,
+      argv: ["--keep-runtime"],
+      dependencies: fixture.dependencies,
+    }),
+    (error) => error?.code === "SMOKE_STAGE_FAILED" && error.cause === preflightFailure,
+  );
+  assert.deepEqual(fixture.calls, ["preflight-snapshot-staged", "zeroize-secrets", "release-snapshot"]);
+});
+
+test("REAL_HERMES --keep-runtime preserves a snapshot after partial topology ownership", async () => {
+  const startFailure = new Error("synthetic partial topology failure");
+  const fixture = successfulSmokeDependencies({
+    startTopology: async ({ projectName }) => {
+      fixture.calls.push(`partial-start:${projectName}`);
+      throw startFailure;
+    },
+  });
+  await assert.rejects(
+    runControlPlaneSmoke({
+      environment: smokeEnvironment,
+      argv: ["--keep-runtime"],
+      dependencies: fixture.dependencies,
+    }),
+    (error) => error?.code === "SMOKE_STAGE_FAILED" && error.cause === startFailure,
+  );
+  assert.deepEqual(fixture.calls, [
+    "validate", "partial-start:core-agent-runtime-v1-smoke", "zeroize-secrets",
   ]);
 });
 
@@ -511,6 +553,7 @@ test("REAL_HERMES stages a stable read-only product-lock snapshot in the Supervi
   const stateRoot = await mkdtemp(join(tmpdir(), "core-agent-smoke-state-test-"));
   await chmod(stateRoot, 0o700);
   const source = join(stateRoot, "reviewed-source.json");
+  const snapshotTenantId = "synthetic-runtime-v1-0123456789abcdef";
   const productLock = {
     schemaVersion: 1,
     repository: "core-agent/hermes-runtime",
@@ -527,9 +570,12 @@ test("REAL_HERMES stages a stable read-only product-lock snapshot in the Supervi
     await unlink(source).catch(() => undefined);
     await rmdir(stateRoot).catch(() => undefined);
   });
-  snapshot = await stageProductImageLockSnapshot(source, "linux/arm64", stateRoot);
+  snapshot = await stageProductImageLockSnapshot(source, "linux/arm64", stateRoot, snapshotTenantId);
   assert.notEqual(snapshot.path, source);
-  assert.equal(snapshot.path.startsWith(`${stateRoot}/`), true);
+  assert.equal(
+    snapshot.path,
+    `${stateRoot}/.core-agent-product-lock-0123456789abcdef/reviewed-product-images.lock.json`,
+  );
   assert.equal((await stat(snapshot.path)).mode & 0o777, 0o444);
   assert.deepEqual(JSON.parse(await readFile(snapshot.path, "utf8")), productLock);
   assert.equal(snapshot.imageRef, productLock.platforms["linux/arm64"].reference);
@@ -537,7 +583,11 @@ test("REAL_HERMES stages a stable read-only product-lock snapshot in the Supervi
   assert.equal(childEnvironment.CORE_AGENT_HERMES_IMAGE_LOCK_FILE, snapshot.path);
   assert.equal(smokeEnvironment.CORE_AGENT_HERMES_IMAGE_LOCK_FILE, "/safe/config/reviewed-product-images.lock.json");
   await assert.rejects(
-    stageProductImageLockSnapshot(source, "linux/arm64", stateRoot, {
+    stageProductImageLockSnapshot(source, "linux/arm64", stateRoot, snapshotTenantId),
+    /SMOKE_PRODUCT_IMAGE_LOCK_INVALID/,
+  );
+  await assert.rejects(
+    stageProductImageLockSnapshot(source, "linux/arm64", stateRoot, snapshotTenantId, {
       afterSourceRead: async () => writeFile(source, `${JSON.stringify({ ...productLock, tag: "mutated" })}\n`),
     }),
     /SMOKE_PRODUCT_IMAGE_LOCK_INVALID/,
