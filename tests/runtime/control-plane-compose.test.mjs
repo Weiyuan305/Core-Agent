@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
@@ -114,7 +115,7 @@ test("service mounts and networks preserve each process boundary", async () => {
     target: "bootstrap_key",
     uid: "${CORE_AGENT_RUNTIME_UID:-12000}",
     gid: "${CORE_AGENT_RUNTIME_GID:-12000}",
-    mode: 0o400,
+    mode: 0o600,
   }]);
   assert.deepEqual(volumeTargets(worker).sort(), [
     "/app/infra/runtime/providers.json",
@@ -134,18 +135,28 @@ test("service mounts and networks preserve each process boundary", async () => {
   assert.equal(volumeAt(worker, "/app/infra/runtime/providers.json").read_only, true);
   assert.equal(volumeAt(worker, "/run/core-agent/ingress").read_only, true);
   assert.equal(volumeAt(worker, "/run/core-agent/supervisor").read_only, true);
+  assert.equal(
+    volumeAt(worker, "/run/core-agent/supervisor").source,
+    "${CORE_AGENT_SUPERVISOR_SOCKET_ROOT:?set CORE_AGENT_SUPERVISOR_SOCKET_ROOT}",
+  );
   assert.equal(volumeAt(supervisor, "/run/core-agent/secrets/provider").read_only, true);
   assert.equal(volumeAt(supervisor, "/run/core-agent/secrets/ingress").read_only, true);
   assert.equal(volumeAt(supervisor, "/run/core-agent/supervisor").read_only, undefined);
+  assert.equal(
+    volumeAt(supervisor, "/run/core-agent/supervisor").source,
+    "${CORE_AGENT_SUPERVISOR_SOCKET_ROOT:?set CORE_AGENT_SUPERVISOR_SOCKET_ROOT}",
+  );
   assert.equal(volumeAt(supervisor, "/var/lib/core-agent/supervisor").read_only, undefined);
+  assert.equal(
+    volumeAt(supervisor, "/var/lib/core-agent/supervisor").source,
+    "${CORE_AGENT_SUPERVISOR_STATE_ROOT:?set CORE_AGENT_SUPERVISOR_STATE_ROOT}",
+  );
   assert.equal(volumeAt(supervisor, "/var/run/docker.sock").read_only, undefined);
 
   assert(!volumeTargets(api).some((target) => /secrets\/provider|ingress|docker|supervisor/u.test(target)));
   assert(!volumeTargets(worker).some((target) => /secrets\/provider|docker/u.test(target)));
   assert(![...volumeTargets(supervisor), ...secretTargets(supervisor)].some((target) => /bootstrap/u.test(target)));
-  assert.deepEqual(Object.keys(config.volumes).sort(), [
-    "postgres-data", "supervisor-socket", "supervisor-state",
-  ]);
+  assert.deepEqual(Object.keys(config.volumes), ["postgres-data"]);
   assert.deepEqual(Object.keys(config.secrets), ["bootstrap-key"]);
   assert.deepEqual(config.secrets["bootstrap-key"], {
     file: "${CORE_AGENT_BOOTSTRAP_KEY_FILE:?set CORE_AGENT_BOOTSTRAP_KEY_FILE}",
@@ -173,7 +184,7 @@ test("application services use least privilege and bounded resources", async () 
     assert(service.tmpfs !== undefined);
   }
   assert.equal(config.services.api.user, "${CORE_AGENT_RUNTIME_UID:-12000}:${CORE_AGENT_RUNTIME_GID:-12000}");
-  assert.equal(config.services.worker.user, "${CORE_AGENT_RUNTIME_UID:-12001}:${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}");
+  assert.equal(config.services.worker.user, "${CORE_AGENT_RUNTIME_UID:-12002}:${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}");
   assert.equal(config.services.supervisor.user, "${CORE_AGENT_RUNTIME_UID:-12002}:${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}");
   assert.deepEqual(config.services.api.group_add, undefined);
   assert.deepEqual(config.services.worker.group_add, ["${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}"]);
@@ -226,9 +237,17 @@ test("compose environment carries paths and public configuration but no secret v
   assert.equal(apiEnvironment.CONTROL_PLANE_BOOTSTRAP_KEY_FILE, "/run/secrets/bootstrap_key");
   assert.equal(apiEnvironment.CONTROL_PLANE_PROVIDER_CATALOG_FILE, "/app/infra/runtime/providers.json");
   assert.equal(apiEnvironment.CONTROL_PLANE_IMAGE_LOCK_FILE, "/app/infra/hermes/base-images.lock.json");
+  assert.equal(apiEnvironment.CONTROL_PLANE_DATABASE_URL, "postgresql://core_agent_app@postgres:5432/core_agent_runtime");
+  assert.equal(environmentMap(config.services.migrate).CONTROL_PLANE_DATABASE_URL, "postgresql://core_agent_migrator@postgres:5432/core_agent_runtime");
   const workerEnvironment = environmentMap(config.services.worker);
   assert.equal(workerEnvironment.CONTROL_PLANE_PROVIDER_CATALOG_FILE, "/app/infra/runtime/providers.json");
   assert.equal(workerEnvironment.CONTROL_PLANE_SECRET_ROOT, "/run/core-agent/ingress");
+  assert.equal(workerEnvironment.CONTROL_PLANE_DATABASE_URL, "postgresql://core_agent_app@postgres:5432/core_agent_runtime");
+  assert.deepEqual(environmentMap(config.services.postgres), {
+    POSTGRES_DB: "core_agent_runtime",
+    POSTGRES_HOST_AUTH_METHOD: "trust",
+    POSTGRES_USER: "core_agent_bootstrap",
+  });
   const supervisorEnvironment = environmentMap(config.services.supervisor);
   assert.equal(supervisorEnvironment.CORE_AGENT_PROVIDER_CATALOG_PATH, "/app/infra/runtime/providers.json");
   assert.equal(supervisorEnvironment.CORE_AGENT_IMAGE_LOCK_PATH, "/app/infra/hermes/base-images.lock.json");
@@ -421,11 +440,15 @@ test("CI preserves contracts and separates deterministic runtime gates", async (
     const service = workflow.jobs[jobName].services.postgres;
     assert.equal(service.image, lock.images.postgres.platforms["linux/amd64"]);
     assert.deepEqual(service.env, {
-      POSTGRES_DB: "core_agent_control",
+      POSTGRES_DB: "postgres",
       POSTGRES_HOST_AUTH_METHOD: "trust",
-      POSTGRES_USER: "core_agent_ci",
+      POSTGRES_USER: "postgres",
     });
-    assert.match(service.options, /pg_isready -U core_agent_ci -d core_agent_control/u);
+    assert.match(service.options, /pg_isready -U postgres -d postgres/u);
+    const setup = workflow.jobs[jobName].steps.find((step) => step.name === "Create least-privilege CI database role");
+    assert(setup);
+    assert.match(setup.run, /CREATE ROLE core_agent_ci LOGIN NOSUPERUSER CREATEDB NOCREATEROLE/u);
+    assert.match(setup.run, /CREATE DATABASE core_agent_control OWNER core_agent_ci/u);
   }
   assert.match(workflowSource, /npm run test:postgres/u);
   assert.match(workflowSource, /npm run test:integration/u);
@@ -444,17 +467,68 @@ test("runtime example environment contains paths and generated references only",
   assert.match(text, /CORE_AGENT_BOOTSTRAP_KEY_FILE=\/absolute\/path\/to\/bootstrap-key/u);
   assert.match(text, /CORE_AGENT_PROVIDER_SECRET_ROOT=\/absolute\/path\/to\/provider-secret-directory/u);
   assert.match(text, /CORE_AGENT_INGRESS_SECRET_ROOT=\/absolute\/path\/to\/ingress-secret-directory/u);
+  assert.match(text, /CORE_AGENT_SUPERVISOR_SOCKET_ROOT=\/absolute\/path\/to\/runtime-socket-directory/u);
+  assert.match(text, /CORE_AGENT_SUPERVISOR_STATE_ROOT=\/absolute\/path\/to\/runtime-state-directory/u);
   assert.match(text, /CORE_AGENT_RUNTIME_UID=<numeric-output-of-id-u>/u);
   assert.match(text, /CORE_AGENT_RUNTIME_GID=<numeric-output-of-id-g>/u);
   assert.match(text, /CORE_AGENT_SUPERVISOR_SOCKET_GID=<numeric-output-of-id-g>/u);
+  assert.match(text, /bootstrap source must be a regular file owned by the API runtime UID with mode 0600/iu);
   assert(!/^.*(?:PASSWORD|TOKEN|SECRET|KEY)=(?!\/absolute\/path\/to\/|$).+$/gmu.test(text));
   assert(!/sk-[A-Za-z0-9]|bearer\s+/iu.test(text));
 });
 
-test("runtime PostgreSQL initialization creates only the disposable control database", async () => {
+test("runtime PostgreSQL initialization separates bootstrap migrator and application roles", async () => {
   const sql = await source("infra/runtime/postgres/init/00-create-test-database.sql");
-  assert.match(sql, /^CREATE DATABASE core_agent_control;\n$/u);
-  assert(!/DROP|ALTER|GRANT|PASSWORD/iu.test(sql));
+  assert.match(sql, /CREATE ROLE core_agent_migrator LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE/u);
+  assert.match(sql, /CREATE ROLE core_agent_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE/u);
+  assert.match(sql, /ALTER DATABASE core_agent_runtime OWNER TO core_agent_migrator/u);
+  assert.match(sql, /CREATE DATABASE core_agent_control OWNER core_agent_migrator/u);
+  assert.match(sql, /ALTER DEFAULT PRIVILEGES FOR ROLE core_agent_migrator[\s\S]+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO core_agent_app/u);
+  assert.match(sql, /GRANT CONNECT ON DATABASE core_agent_runtime TO core_agent_app/u);
+  assert.match(sql, /GRANT CONNECT ON DATABASE core_agent_control TO core_agent_app/u);
+  assert(!/PASSWORD|SUPERUSER(?!\s+NOCREATEDB)/u.test(sql.replaceAll("NOSUPERUSER", "")));
+});
+
+test("runtime path preflight creates final-uid 0700 roots and validates bootstrap metadata without reading it", async (t) => {
+  const moduleUrl = pathToFileURL(pathFromRoot("scripts/prepare-runtime-paths.mjs")).href;
+  const preflight = await import(`${moduleUrl}?red=${Date.now()}`);
+  const root = await mkdtemp(join(tmpdir(), "core-agent-runtime-paths-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const bootstrap = join(root, "bootstrap-key");
+  const socketRoot = join(root, "socket");
+  const stateRoot = join(root, "state");
+  await writeFile(bootstrap, "not-read-by-preflight\n", { mode: 0o600 });
+  const uid = process.getuid?.() ?? 0;
+  const gid = process.getgid?.() ?? 0;
+  const environment = {
+    CORE_AGENT_BOOTSTRAP_KEY_FILE: bootstrap,
+    CORE_AGENT_RUNTIME_UID: String(uid),
+    CORE_AGENT_RUNTIME_GID: String(gid),
+    CORE_AGENT_SUPERVISOR_SOCKET_GID: String(gid),
+    CORE_AGENT_SUPERVISOR_SOCKET_ROOT: socketRoot,
+    CORE_AGENT_SUPERVISOR_STATE_ROOT: stateRoot,
+  };
+  await preflight.prepareRuntimePaths({ environment });
+  for (const path of [socketRoot, stateRoot]) {
+    const metadata = await stat(path);
+    assert.equal(metadata.mode & 0o777, 0o700);
+    assert.equal(metadata.uid, uid);
+    assert.equal(metadata.gid, gid);
+  }
+  assert(!/readFile|createReadStream/u.test(await source("scripts/prepare-runtime-paths.mjs")));
+
+  await chmod(bootstrap, 0o644);
+  await assert.rejects(preflight.prepareRuntimePaths({ environment }), (error) => error?.message === "runtime path preparation failed");
+  await chmod(bootstrap, 0o600);
+  const linkedBootstrap = join(root, "bootstrap-link");
+  await symlink(bootstrap, linkedBootstrap);
+  await assert.rejects(preflight.prepareRuntimePaths({ environment: { ...environment, CORE_AGENT_BOOTSTRAP_KEY_FILE: linkedBootstrap } }), /runtime path preparation failed/u);
+  const directoryBootstrap = join(root, "bootstrap-directory");
+  await mkdir(directoryBootstrap, { mode: 0o700 });
+  await assert.rejects(preflight.prepareRuntimePaths({ environment: { ...environment, CORE_AGENT_BOOTSTRAP_KEY_FILE: directoryBootstrap } }), /runtime path preparation failed/u);
+  await assert.rejects(preflight.prepareRuntimePaths({ environment: { ...environment, CORE_AGENT_RUNTIME_UID: String(uid + 1) } }), /runtime path preparation failed/u);
+  await chmod(socketRoot, 0o755);
+  await assert.rejects(preflight.prepareRuntimePaths({ environment }), /runtime path preparation failed/u);
 });
 
 test("external backplane preparation is idempotent and validates the Supervisor network contract", async () => {
@@ -505,11 +579,14 @@ test("database sentinel scanner inspects every public text surface without retur
   const moduleUrl = pathToFileURL(pathFromRoot("scripts/scan-runtime-database.mjs")).href;
   const scanner = await import(`${moduleUrl}?red=${Date.now()}`);
   const queries = [];
+  let clientConfiguration;
   let ended = false;
   await scanner.scanRuntimeDatabase({
     databaseUrl: "postgresql://core_agent_ci@127.0.0.1:5432/core_agent_control",
     sentinel: "synthetic-ci-sentinel-runtime-v1",
-    createClient: () => ({
+    createClient: (configuration) => {
+      clientConfiguration = configuration;
+      return ({
       connect: async () => undefined,
       query: async (sql, parameters) => {
         queries.push({ sql, parameters });
@@ -520,8 +597,19 @@ test("database sentinel scanner inspects every public text surface without retur
         return { rows: [{ present: false }] };
       },
       end: async () => { ended = true; },
-    }),
+      });
+    },
   });
+  assert.deepEqual(clientConfiguration, {
+    host: "127.0.0.1",
+    port: 5432,
+    user: "core_agent_ci",
+    database: "core_agent_control",
+    connectionTimeoutMillis: 5_000,
+    query_timeout: 5_000,
+    statement_timeout: 5_000,
+  });
+  assert.equal("connectionString" in clientConfiguration, false);
   assert.equal(ended, true);
   assert.equal(queries.length, 3);
   assert.deepEqual(queries.slice(1).map((entry) => entry.parameters), [
@@ -534,4 +622,16 @@ test("database sentinel scanner inspects every public text surface without retur
     sentinel: "synthetic-ci-sentinel-runtime-v1",
     createClient: () => assert.fail("must reject before connect"),
   }), /database sentinel scan failed/u);
+  for (const databaseUrl of [
+    "postgresql://core_agent_ci@127.0.0.1:5432/core_agent_control?host=remote.example",
+    "postgresql://core_agent_ci:do-not-reflect@127.0.0.1:5432/core_agent_control",
+    "postgresql://core_agent_ci@127.0.0.1:5432/core_agent_control#remote.example",
+    "postgresql://core_agent_ci@127.0.0.1:5432/%63ore_agent_control",
+  ]) {
+    await assert.rejects(scanner.scanRuntimeDatabase({
+      databaseUrl,
+      sentinel: "synthetic-ci-sentinel-runtime-v1",
+      createClient: () => assert.fail("must reject before client construction"),
+    }), (error) => error?.message === "database sentinel scan failed");
+  }
 });
