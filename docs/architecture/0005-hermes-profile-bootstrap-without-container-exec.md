@@ -33,7 +33,8 @@ The initializer:
 - receives a versioned RuntimeBootstrapBundle through a server-derived,
   read-only file path;
 - validates the bundle inside the initializer;
-- mounts only the target company volume and read-only secret staging files;
+- mounts only the target company volume and read-only secret staging files
+  mapped from canonical Docker-host roots;
 - has no network, Docker Socket, shell API, added capability, host namespace,
   or arbitrary command;
 - invokes the pinned Hermes Profile creation behavior with fixed safe flags;
@@ -45,8 +46,15 @@ The initializer:
 
 Supervisor resolves opaque SecretStore references; secret values never cross
 the Control Plane HTTP API or appear in the Unix protocol. Temporary bootstrap
-files live in a Supervisor-owned restricted directory or tmpfs and are removed
-after the initializer exits.
+files live in a Supervisor-owned restricted `0700` directory mounted from a
+canonical daemon-visible host root and are removed after initializer exit. A
+Supervisor-container-only tmpfs cannot be a sibling-container bind source.
+
+Initializer, manifest verifier, and gateway use one trusted explicit numeric
+runtime uid/gid. The product image's empty `/opt/data` seed is root-owned sticky
+`01777` only so Docker volume copy-up supports that arbitrary uid. Tenant
+children and secret-bearing leaves below it remain owner-only `0700` and
+`0600`.
 
 The product gateway entrypoint receives the ingress secret as a read-only file,
 reads it immediately before process start, and exports `API_SERVER_KEY` only in

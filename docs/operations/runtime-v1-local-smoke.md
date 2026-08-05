@@ -103,8 +103,12 @@ platform entries generated in `infra/runtime/base-images.lock.json`.
 Load the non-secret environment, then execute the Task17 prerequisites in this
 order. `runtime:images` performs registry access and writes the Node/PostgreSQL
 lock only when the resolved indexes are valid. `runtime:network` creates or
-validates the labeled private backplane. `runtime:paths` enforces all five
-canonical path, owner, mode, link-count, and non-overlap rules.
+validates the labeled internal backplane and dedicated non-internal egress
+bridge. `runtime:paths` enforces all five canonical path, owner, mode,
+link-count, and non-overlap rules and creates private state-root `staging` and
+`ingress` children. On macOS/Colima, keep state below a canonical Docker-shared
+host path such as `/Users/...`; Supervisor passes those host child paths to the
+daemon rather than a private `/run` path.
 
 ```bash
 set -a

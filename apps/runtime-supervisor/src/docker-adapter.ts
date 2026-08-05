@@ -14,7 +14,7 @@ import {
   unlink,
   type FileHandle,
 } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import type Dockerode from "dockerode";
 
@@ -39,7 +39,7 @@ import {
 
 const requestHashPattern = /^sha256:[a-f0-9]{64}$/;
 const maximumInitializerWaitMs = 120_000;
-const managedGatewayUser = "hermes";
+const managedEgressNetwork = "core-agent-egress";
 
 interface DockerContainerLike {
   inspect(): Promise<unknown>;
@@ -70,7 +70,11 @@ export interface DockerRuntimeAdapterOptions {
   readonly imageLock: unknown;
   readonly providerCatalog: ProviderCatalog;
   readonly stagingRoot: string;
+  readonly dockerHostStagingRoot: string;
   readonly ingressRoot: string;
+  readonly dockerHostIngressRoot: string;
+  readonly managedRuntimeUid: number;
+  readonly managedRuntimeGid: number;
   readonly initializerTimeoutMs?: number;
 }
 
@@ -226,12 +230,32 @@ function volumeLabels(
   });
 }
 
-function networkLabels(names: RuntimeNames): Readonly<Record<string, string>> {
+function networkLabels(name: string, resource: "backplane" | "egress"): Readonly<Record<string, string>> {
   return Object.freeze({
     "core-agent.managed": "runtime-v1",
-    "core-agent.resource": "backplane",
-    "core-agent.network": names.network,
+    "core-agent.resource": resource,
+    "core-agent.network": name,
   });
+}
+
+function managedUser(options: DockerRuntimeAdapterOptions): string {
+  return `${options.managedRuntimeUid}:${options.managedRuntimeGid}`;
+}
+
+function dockerHostPath(localRoot: string, hostRoot: string, localPath: string): string {
+  const local = resolve(localRoot);
+  const host = resolve(hostRoot);
+  const child = resolve(localPath);
+  const suffix = relative(local, child);
+  if (suffix === "" || suffix.startsWith("..") || isAbsolute(suffix)) throw rejected();
+  return join(host, suffix);
+}
+
+function pathsOverlap(left: string, right: string): boolean {
+  const leftToRight = relative(left, right);
+  const rightToLeft = relative(right, left);
+  return leftToRight === "" || (!leftToRight.startsWith("..") && !isAbsolute(leftToRight))
+    || (!rightToLeft.startsWith("..") && !isAbsolute(rightToLeft));
 }
 
 async function ensurePrivateDirectory(path: string): Promise<void> {
@@ -320,10 +344,12 @@ function exactInitializerOptions(
   initializerName: string,
   bundlePath: string,
   secretDirectory: string,
+  user: string,
 ): Dockerode.ContainerCreateOptions {
   return {
     name: initializerName,
     Image: request.runtime.image_ref,
+    User: user,
     Entrypoint: ["/opt/hermes/.venv/bin/python", "/opt/core-agent/initialize.py"],
     Cmd: [
       "--bundle", "/run/core-agent/bootstrap/bundle.json",
@@ -358,11 +384,12 @@ function exactGatewayOptions(
   request: ProvisionRuntimeCommandV1,
   names: RuntimeNames,
   ingressSecretPath: string,
+  user: string,
 ): Dockerode.ContainerCreateOptions {
   return {
     name: names.container,
     Image: request.runtime.image_ref,
-    User: managedGatewayUser,
+    User: user,
     Entrypoint: ["/opt/core-agent/gateway-entrypoint.sh"],
     Cmd: [],
     Env: [
@@ -396,6 +423,12 @@ function exactGatewayOptions(
       PidsLimit: 512,
       RestartPolicy: { Name: "unless-stopped" },
     },
+    NetworkingConfig: {
+      EndpointsConfig: {
+        [names.network]: {},
+        [managedEgressNetwork]: {},
+      },
+    },
     Healthcheck: {
       Test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1:8642/health >/dev/null || exit 1"],
       Interval: 10_000_000_000,
@@ -411,14 +444,12 @@ function exactManifestVerifierOptions(
   names: RuntimeNames,
   verifierName: string,
   outputDirectory: string,
+  user: string,
 ): Dockerode.ContainerCreateOptions {
-  const uid = process.getuid?.();
-  const gid = process.getgid?.();
-  if (uid === undefined || gid === undefined) throw rejected();
   return {
     name: verifierName,
     Image: request.runtime.image_ref,
-    User: `${uid}:${gid}`,
+    User: user,
     Entrypoint: ["/opt/hermes/.venv/bin/python"],
     Cmd: [
       "-c",
@@ -538,14 +569,19 @@ function validateVolumeInspection(
   // Deliberately do not read Docker's volume Mountpoint/host-path field.
 }
 
-function validateNetworkInspection(value: unknown, names: RuntimeNames): void {
+function validateNetworkInspection(
+  value: unknown,
+  name: string,
+  resource: "backplane" | "egress",
+  internal: boolean,
+): void {
   if (
-    stringProperty(value, "Name") !== names.network
+    stringProperty(value, "Name") !== name
     || stringProperty(value, "Driver") !== "bridge"
-    || booleanProperty(value, "Internal") !== true
+    || booleanProperty(value, "Internal") !== internal
     || booleanProperty(value, "Attachable") !== false
   ) throw rejected();
-  exactStringRecord(dataProperty(value, "Labels"), networkLabels(names));
+  exactStringRecord(dataProperty(value, "Labels"), networkLabels(name, resource));
 }
 
 function validateGatewayInspection(
@@ -554,6 +590,7 @@ function validateGatewayInspection(
   identity: { readonly tenant_id: string; readonly runtime_id: string; readonly generation: number },
   names: RuntimeNames,
   ingressPath: string,
+  user: string,
 ): RuntimeObservation {
   if (stringProperty(value, "Name") !== `/${names.container}`) throw rejected();
   const config = dataProperty(value, "Config");
@@ -580,7 +617,7 @@ function validateGatewayInspection(
     },
   }, names);
   exactStringRecord(labels, expectedLabels);
-  if (stringProperty(config, "Image") !== imageRef || stringProperty(config, "User") !== managedGatewayUser) throw rejected();
+  if (stringProperty(config, "Image") !== imageRef || stringProperty(config, "User") !== user) throw rejected();
   equalStringArrays(dataProperty(config, "Env"), [
     "API_SERVER_ENABLED=true",
     "API_SERVER_HOST=0.0.0.0",
@@ -642,7 +679,12 @@ function validateGatewayInspection(
       ? "unhealthy"
       : "unknown";
   const networks = dataProperty(dataProperty(value, "NetworkSettings"), "Networks");
-  if (Reflect.ownKeys(networks as object).length !== 1 || !Object.hasOwn(networks as object, names.network)) throw rejected();
+  const expectedNetworks = [names.network, managedEgressNetwork];
+  const actualNetworks = Reflect.ownKeys(networks as object);
+  if (
+    actualNetworks.length !== expectedNetworks.length
+    || actualNetworks.some((key) => typeof key !== "string" || !expectedNetworks.includes(key))
+  ) throw rejected();
   const network = dataProperty(networks, names.network);
   const address = stringProperty(network, "IPAddress");
   if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(address)) throw rejected();
@@ -727,6 +769,18 @@ export class DockerRuntimeAdapter {
         || options.initializerTimeoutMs < 1
         || options.initializerTimeoutMs > maximumInitializerWaitMs)
     ) throw dockerFailure("DEPENDENCY_TIMEOUT", "Initializer timeout configuration is invalid");
+    const uid = process.getuid?.();
+    const gid = process.getgid?.();
+    if (
+      uid === undefined || gid === undefined
+      || options.managedRuntimeUid !== uid || options.managedRuntimeGid !== gid
+      || resolve(options.stagingRoot) !== options.stagingRoot
+      || resolve(options.ingressRoot) !== options.ingressRoot
+      || resolve(options.dockerHostStagingRoot) !== options.dockerHostStagingRoot
+      || resolve(options.dockerHostIngressRoot) !== options.dockerHostIngressRoot
+      || pathsOverlap(options.stagingRoot, options.ingressRoot)
+      || pathsOverlap(options.dockerHostStagingRoot, options.dockerHostIngressRoot)
+    ) throw rejected();
     this.#options = options;
   }
 
@@ -809,6 +863,12 @@ export class DockerRuntimeAdapter {
     const ingressParent = join(resolve(this.#options.ingressRoot), runtimeDigest);
     const ingressDirectory = join(ingressParent, `g-${request.runtime.generation}`);
     const ingressPath = join(ingressDirectory, "hermes_ingress");
+    const dockerIngressPath = dockerHostPath(
+      this.#options.ingressRoot,
+      this.#options.dockerHostIngressRoot,
+      ingressPath,
+    );
+    const user = managedUser(this.#options);
     const initializerName = operationInitializerName(names.container, request.operation_id);
     const verifierName = `${initializerName}-manifest`;
 
@@ -817,16 +877,18 @@ export class DockerRuntimeAdapter {
     const verifier = await inspectOptional(this.#options.docker.getContainer(verifierName));
     const volume = await inspectOptional(this.#options.docker.getVolume(names.volume));
     const network = await inspectOptional(this.#options.docker.getNetwork(names.network));
+    const egressNetwork = await inspectOptional(this.#options.docker.getNetwork(managedEgressNetwork));
 
     await this.#validateIngressGeneration(runtimeDigest, request.runtime.generation);
 
     if (volume.inspection !== undefined) validateVolumeInspection(volume.inspection, request, names);
-    if (network.inspection !== undefined) validateNetworkInspection(network.inspection, names);
+    if (network.inspection !== undefined) validateNetworkInspection(network.inspection, names.network, "backplane", true);
+    if (egressNetwork.inspection !== undefined) validateNetworkInspection(egressNetwork.inspection, managedEgressNetwork, "egress", false);
     if (initializer.inspection !== undefined || verifier.inspection !== undefined) throw rejected();
     if (gateway.inspection !== undefined) {
-      if (volume.inspection === undefined || network.inspection === undefined) throw rejected();
+      if (volume.inspection === undefined || network.inspection === undefined || egressNetwork.inspection === undefined) throw rejected();
       await validatePersistentIngress(ingressPath);
-      const observation = validateGatewayInspection(gateway.inspection, request, request.runtime, names, ingressPath);
+      const observation = validateGatewayInspection(gateway.inspection, request, request.runtime, names, dockerIngressPath, user);
       await ensurePrivateDirectory(this.#options.stagingRoot);
       const adoptionStage = await mkdtemp(join(resolve(this.#options.stagingRoot), "operation-"));
       await chmod(adoptionStage, 0o700);
@@ -843,7 +905,8 @@ export class DockerRuntimeAdapter {
         request,
         request.runtime,
         names,
-        ingressPath,
+        dockerIngressPath,
+        user,
       );
       if (resumed.lifecycle !== "running") throw rejected();
       return resumed;
@@ -860,7 +923,17 @@ export class DockerRuntimeAdapter {
         Driver: "bridge",
         Internal: true,
         Attachable: false,
-        Labels: { ...networkLabels(names) },
+        Labels: { ...networkLabels(names.network, "backplane") },
+      });
+    }
+    if (egressNetwork.inspection === undefined) {
+      assertNotAborted(signal);
+      await this.#options.docker.createNetwork({
+        Name: managedEgressNetwork,
+        Driver: "bridge",
+        Internal: false,
+        Attachable: false,
+        Labels: { ...networkLabels(managedEgressNetwork, "egress") },
       });
     }
 
@@ -903,8 +976,9 @@ export class DockerRuntimeAdapter {
         request,
         names,
         initializerName,
-        bundlePath,
-        secretDirectory,
+        dockerHostPath(this.#options.stagingRoot, this.#options.dockerHostStagingRoot, bundlePath),
+        dockerHostPath(this.#options.stagingRoot, this.#options.dockerHostStagingRoot, secretDirectory),
+        user,
       ));
       try {
         assertNotAborted(signal);
@@ -937,7 +1011,8 @@ export class DockerRuntimeAdapter {
         gatewayContainer = await this.#options.docker.createContainer(exactGatewayOptions(
           request,
           names,
-          ingressPath,
+          dockerIngressPath,
+          user,
         ));
         assertNotAborted(signal);
         await gatewayContainer.start();
@@ -946,7 +1021,8 @@ export class DockerRuntimeAdapter {
           request,
           request.runtime,
           names,
-          ingressPath,
+          dockerIngressPath,
+          user,
         );
         if (observation.lifecycle !== "running") throw rejected();
         return observation;
@@ -981,7 +1057,8 @@ export class DockerRuntimeAdapter {
       request,
       names,
       verifierName,
-      outputDirectory,
+      dockerHostPath(this.#options.stagingRoot, this.#options.dockerHostStagingRoot, outputDirectory),
+      managedUser(this.#options),
     ));
     try {
       assertNotAborted(signal);
@@ -1013,11 +1090,18 @@ export class DockerRuntimeAdapter {
     const ingressParent = join(resolve(this.#options.ingressRoot), runtimeDigest);
     const ingressDirectory = join(ingressParent, `g-${request.generation}`);
     const ingressPath = join(ingressDirectory, "hermes_ingress");
+    const dockerIngressPath = dockerHostPath(
+      this.#options.ingressRoot,
+      this.#options.dockerHostIngressRoot,
+      ingressPath,
+    );
+    const user = managedUser(this.#options);
     await this.#validateIngressGeneration(runtimeDigest, request.generation);
-    const [container, volume, network] = await Promise.all([
+    const [container, volume, network, egressNetwork] = await Promise.all([
       inspectOptional(this.#options.docker.getContainer(names.container)),
       inspectOptional(this.#options.docker.getVolume(names.volume)),
       inspectOptional(this.#options.docker.getNetwork(names.network)),
+      inspectOptional(this.#options.docker.getNetwork(managedEgressNetwork)),
     ]);
     if (container.inspection === undefined) {
       if (request.kind === "delete") {
@@ -1036,11 +1120,12 @@ export class DockerRuntimeAdapter {
       }
       throw rejected();
     }
-    if (volume.inspection === undefined || network.inspection === undefined) throw rejected();
+    if (volume.inspection === undefined || network.inspection === undefined || egressNetwork.inspection === undefined) throw rejected();
     validateVolumeInspection(volume.inspection, request, names);
-    validateNetworkInspection(network.inspection, names);
+    validateNetworkInspection(network.inspection, names.network, "backplane", true);
+    validateNetworkInspection(egressNetwork.inspection, managedEgressNetwork, "egress", false);
     await validatePersistentIngress(ingressPath);
-    const before = validateGatewayInspection(container.inspection, undefined, request, names, ingressPath);
+    const before = validateGatewayInspection(container.inspection, undefined, request, names, dockerIngressPath, user);
     if (request.kind === "inspect") return before;
     assertNotAborted(signal);
     if (request.kind === "start") await container.handle.start();
@@ -1052,7 +1137,7 @@ export class DockerRuntimeAdapter {
       const { private_origin: _privateOrigin, ...withoutOrigin } = before;
       return { ...withoutOrigin, exists: false, lifecycle: "removed", health: "unknown", image_ref: REMOVED_RUNTIME_IMAGE_REF };
     }
-    return validateGatewayInspection(await container.handle.inspect(), undefined, request, names, ingressPath);
+    return validateGatewayInspection(await container.handle.inspect(), undefined, request, names, dockerIngressPath, user);
   }
 
   async #validateIngressGeneration(runtimeDigest: string, generation: number): Promise<void> {

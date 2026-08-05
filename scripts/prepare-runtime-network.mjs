@@ -5,15 +5,13 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const networkName = "core-agent-backplane";
-const labels = Object.freeze({
-  "core-agent.managed": "runtime-v1",
-  "core-agent.resource": "backplane",
-  "core-agent.network": networkName,
-});
+const networkContracts = Object.freeze([
+  Object.freeze({ name: "core-agent-backplane", resource: "backplane", internal: true }),
+  Object.freeze({ name: "core-agent-egress", resource: "egress", internal: false }),
+]);
 
 function invalidNetwork() {
-  return new Error("runtime backplane is invalid");
+  return new Error("runtime network is invalid");
 }
 
 async function docker(args) {
@@ -26,7 +24,7 @@ async function docker(args) {
   return stdout;
 }
 
-function validateInspection(raw) {
+function validateInspection(raw, contract) {
   let value;
   try {
     value = JSON.parse(raw);
@@ -35,33 +33,38 @@ function validateInspection(raw) {
   }
   if (
     typeof value !== "object" || value === null || Array.isArray(value)
-    || value.Name !== networkName
+    || value.Name !== contract.name
     || value.Driver !== "bridge"
-    || value.Internal !== true
+    || value.Internal !== contract.internal
     || value.Attachable !== false
     || typeof value.Labels !== "object" || value.Labels === null || Array.isArray(value.Labels)
-    || Object.keys(value.Labels).length !== Object.keys(labels).length
-    || Object.entries(labels).some(([key, expected]) => value.Labels[key] !== expected)
+    || Object.keys(value.Labels).length !== 3
+    || value.Labels["core-agent.managed"] !== "runtime-v1"
+    || value.Labels["core-agent.resource"] !== contract.resource
+    || value.Labels["core-agent.network"] !== contract.name
   ) throw invalidNetwork();
 }
 
 export async function prepareRuntimeNetwork({ runDocker = docker } = {}) {
-  const listed = (await runDocker([
-    "network", "ls", "--filter", `name=^${networkName}$`, "--format", "{{.Name}}",
-  ])).trim();
-  if (listed !== "" && listed !== networkName) throw invalidNetwork();
-  if (listed === "") {
-    await runDocker([
-      "network", "create", "--driver", "bridge", "--internal",
-      "--label", "core-agent.managed=runtime-v1",
-      "--label", "core-agent.resource=backplane",
-      "--label", `core-agent.network=${networkName}`,
-      networkName,
-    ]);
+  for (const contract of networkContracts) {
+    const listed = (await runDocker([
+      "network", "ls", "--filter", `name=^${contract.name}$`, "--format", "{{.Name}}",
+    ])).trim();
+    if (listed !== "" && listed !== contract.name) throw invalidNetwork();
+    if (listed === "") {
+      await runDocker([
+        "network", "create", "--driver", "bridge",
+        ...(contract.internal ? ["--internal"] : []),
+        "--label", "core-agent.managed=runtime-v1",
+        "--label", `core-agent.resource=${contract.resource}`,
+        "--label", `core-agent.network=${contract.name}`,
+        contract.name,
+      ]);
+    }
+    validateInspection(await runDocker([
+      "network", "inspect", "--format", "{{json .}}", contract.name,
+    ]), contract);
   }
-  validateInspection(await runDocker([
-    "network", "inspect", "--format", "{{json .}}", networkName,
-  ]));
 }
 
 async function main() {
@@ -71,7 +74,7 @@ async function main() {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch(() => {
-    process.stderr.write("runtime backplane preparation failed\n");
+    process.stderr.write("runtime network preparation failed\n");
     process.exitCode = 1;
   });
 }

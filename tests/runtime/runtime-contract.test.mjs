@@ -204,7 +204,7 @@ test("REAL_HERMES managed container inspection enforces digest labels private ne
       },
     },
     HostConfig: { NetworkMode: "core-agent-backplane", PortBindings: {} },
-    NetworkSettings: { Ports: {}, Networks: { "core-agent-backplane": {} } },
+    NetworkSettings: { Ports: {}, Networks: { "core-agent-backplane": {}, "core-agent-egress": {} } },
   };
   assert.doesNotThrow(() => assertManagedContainerInspection(inspected, {
     imageRef,

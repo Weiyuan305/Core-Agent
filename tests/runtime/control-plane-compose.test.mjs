@@ -147,10 +147,11 @@ test("service mounts and networks preserve each process boundary", async () => {
   assert.deepEqual(secretTargets(worker), []);
   assert.deepEqual(volumeTargets(supervisor).sort(), [
     "/run/core-agent/config/hermes-images.lock.json",
+    "/run/core-agent/ingress",
     "/run/core-agent/secrets/ingress",
     "/run/core-agent/secrets/provider",
-    "/run/core-agent/supervisor",
     "/run/core-agent/staging",
+    "/run/core-agent/supervisor",
     "/var/lib/core-agent/supervisor",
     "/var/run/docker.sock",
   ]);
@@ -178,6 +179,8 @@ test("service mounts and networks preserve each process boundary", async () => {
   assert.equal(volumeAt(supervisor, "/var/run/docker.sock").read_only, undefined);
   assert.equal(volumeAt(supervisor, "/run/core-agent/staging").source, "${CORE_AGENT_SUPERVISOR_STATE_ROOT:?set CORE_AGENT_SUPERVISOR_STATE_ROOT}/staging");
   assert.equal(volumeAt(supervisor, "/run/core-agent/staging").read_only, undefined);
+  assert.equal(volumeAt(supervisor, "/run/core-agent/ingress").source, "${CORE_AGENT_SUPERVISOR_STATE_ROOT:?set CORE_AGENT_SUPERVISOR_STATE_ROOT}/ingress");
+  assert.equal(volumeAt(supervisor, "/run/core-agent/ingress").read_only, undefined);
 
   assert(!volumeTargets(api).some((target) => /secrets\/provider|ingress|docker|supervisor/u.test(target)));
   assert(!volumeTargets(worker).some((target) => /secrets\/provider|docker/u.test(target)));
@@ -246,7 +249,12 @@ test("compose environment carries paths and public configuration but no secret v
       assert(!forbiddenName.test(key), `${name} must not carry ${key} in Docker environment`);
       assert(!forbiddenLiteral.test(String(value)), `${name} embeds a credential-like value`);
       if (/(?:_FILE|_PATH|_ROOT|_SOCKET)$/u.test(key)) {
-        assert(String(value).startsWith("/"), `${name} path configuration must be absolute`);
+        assert(
+          String(value).startsWith("/")
+            || (/^CORE_AGENT_DOCKER_HOST_(?:STAGING|INGRESS)_ROOT$/u.test(key)
+              && String(value).startsWith("${CORE_AGENT_SUPERVISOR_STATE_ROOT:?set CORE_AGENT_SUPERVISOR_STATE_ROOT}/")),
+          `${name} path configuration must be absolute`,
+        );
       }
     }
   }
@@ -270,7 +278,7 @@ test("compose environment carries paths and public configuration but no secret v
   assert.equal(supervisorEnvironment.CORE_AGENT_IMAGE_LOCK_PATH, "/run/core-agent/config/hermes-images.lock.json");
   assert.equal(supervisorEnvironment.CORE_AGENT_PROVIDER_SECRET_ROOT, "/run/core-agent/secrets/provider");
   assert.equal(supervisorEnvironment.CORE_AGENT_INGRESS_SECRET_ROOT, "/run/core-agent/secrets/ingress");
-  assert.equal(supervisorEnvironment.CORE_AGENT_SUPERVISOR_INGRESS_ROOT, "/var/lib/core-agent/supervisor/ingress");
+  assert.equal(supervisorEnvironment.CORE_AGENT_SUPERVISOR_INGRESS_ROOT, "/run/core-agent/ingress");
   assert.equal(supervisorEnvironment.CORE_AGENT_SUPERVISOR_STAGING_ROOT, "/run/core-agent/staging");
   assert.equal(supervisorEnvironment.CORE_AGENT_DOCKER_HOST_STAGING_ROOT, "${CORE_AGENT_SUPERVISOR_STATE_ROOT:?set CORE_AGENT_SUPERVISOR_STATE_ROOT}/staging");
   assert.equal(supervisorEnvironment.CORE_AGENT_DOCKER_HOST_INGRESS_ROOT, "${CORE_AGENT_SUPERVISOR_STATE_ROOT:?set CORE_AGENT_SUPERVISOR_STATE_ROOT}/ingress");

@@ -49,21 +49,37 @@ Runtime v1 must finish a real vertical slice: provision a company and Profiles,
 reach a healthy Hermes container, execute one Profile conversation, and expose
 durable events. Container-only CRUD is insufficient evidence.
 
-### Development network ownership
+### Development network and bind ownership
 
-The development Compose project treats `core-agent-backplane` as an external,
-pre-existing internal bridge. `npm run runtime:network` creates it idempotently
-with the exact labels enforced by the Runtime Supervisor, or refuses an
-existing network whose driver, internal flag, attachability, name, or labels
-drift from that contract. This prerequisite prevents Compose teardown from
-claiming a network that contains Supervisor-managed Hermes containers.
+The development Compose project treats `core-agent-backplane` and
+`core-agent-egress` as external, pre-existing bridges. `npm run runtime:network`
+creates both idempotently with the exact labels enforced by Runtime Supervisor,
+or refuses a network whose driver, internal flag, attachability, name, or
+labels drift. Backplane is internal; egress is deliberately non-internal so
+Hermes can reach the selected HTTPS model provider. Neither is attachable.
+Compose teardown therefore cannot claim a network containing
+Supervisor-managed Hermes containers.
 
 The Worker joins the backplane so it can call the private Hermes gateway. The
 Supervisor container itself uses `network_mode: none`: Docker socket authority,
 not membership in an application network, lets it create each Hermes container
 with `NetworkMode=core-agent-backplane`. Dynamically created Hermes containers
-join only that backplane and publish no host port. The API, PostgreSQL, and the
-one-shot migration process join only the separate internal control network.
+join exactly backplane plus the dedicated egress bridge and publish no host
+port. Runtime observations select the backplane address, never the egress
+address. Worker joins only the ingress side; API, PostgreSQL, and migration join
+only the separate internal control network. Egress is a single-host v1 trust
+boundary, not a tenant firewall: Docker authority and host networking remain
+trusted. A later proxy can narrow provider destinations without changing the
+Worker-to-Hermes protocol.
+
+Supervisor file creation and Docker bind construction use paired roots. The
+Supervisor writes through fixed local staging/ingress roots, then maps only a
+validated relative descendant to a separately configured canonical Docker-host
+root. Requests cannot supply either form. The staging view is a real bind mount,
+not private tmpfs, because sibling containers are created by the host daemon.
+On Linux the Docker-host value is the canonical host path. On macOS/Colima it
+must be a canonical shared host path, normally below `/Users`; a path that
+exists only inside Supervisor is invalid.
 
 The API normally accepts only a loopback listen address. Its container image
 may bind `0.0.0.0` only when the deployment sets the exact
@@ -98,6 +114,16 @@ writable parent. Provider and ingress must be existing exact `0700`
 directories. Socket and state may be absent, but preflight creates them only
 below a canonical protected parent and then repeats canonical, opened-handle,
 named-inode, owner, group, type, and exact `0700` checks.
+
+Preflight also creates and revalidates exact `0700` `staging` and `ingress`
+children below the state root. Initializer, manifest verifier, and gateway run
+with the same explicit numeric uid/gid as Supervisor. Those values are trusted
+startup configuration, must equal Supervisor's effective identity, and are
+never request fields. The product image seeds an empty root-owned sticky
+`01777` volume root so Docker copy-up supports that arbitrary uid; initializer
+then creates tenant metadata, Profile directories, and secret-bearing leaves
+as the managed uid with `0700`/`0600`. The sticky root contains no secrets and
+does not relax its private children.
 
 The five canonical paths are pairwise rejected if they are equal or if either
 is an ancestor of the other. This prevents the Worker-visible ingress or

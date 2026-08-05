@@ -617,7 +617,9 @@ export function assertManagedContainerInspection(inspection, expected) {
   }
   const networks = dataProperty(networkSettings, "Networks", code);
   if (typeof networks !== "object" || networks === null
-    || Reflect.ownKeys(networks).length !== 1 || !Object.hasOwn(networks, "core-agent-backplane")) throw smokeError(code);
+    || Reflect.ownKeys(networks).length !== 2
+    || !Object.hasOwn(networks, "core-agent-backplane")
+    || !Object.hasOwn(networks, "core-agent-egress")) throw smokeError(code);
 }
 
 function composeArgs(...args) {

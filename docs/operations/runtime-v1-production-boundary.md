@@ -17,8 +17,11 @@ accepted and implemented.
 - Place the Worker/Supervisor UDS in a dedicated `0700` parent. Give the socket
   an explicit owner/group and `0660` or stricter mode. Only Worker joins that
   group. Do not reuse the development shared UID arrangement in production.
-- Keep Hermes containers on the labeled private backplane with no host port
-  bindings. Supervisor adoption must validate the complete prior label set,
+- Keep Hermes containers on exactly the labeled internal backplane and the
+  dedicated non-internal egress bridge, with no host port bindings. Worker
+  reaches only the backplane address. Treat egress as a trusted single-host
+  boundary, restrict host forwarding/firewall policy, and attach no unrelated
+  container. Supervisor adoption must validate the complete prior label set,
   request hash, tenant/runtime identity, generation, volume, network, and image
   digest before it acts.
 
@@ -54,6 +57,14 @@ projection mechanism; do not assume Compose file-secret UID/GID semantics are
 portable. Rotate by atomically replacing the approved projection. Never pass
 secret bytes through process environment, command line, Docker labels, logs,
 events, traces, errors, or PostgreSQL rows.
+
+Supervisor receives paired local and Docker-host roots for staging and managed
+ingress. On Linux they are namespace views of the same canonical host
+directories. Never pass a container-private `/run/...` path to the host Docker
+daemon. Pre-create state-root `staging` and `ingress` children as Supervisor's
+uid/gid with `0700`. Initializer, verifier, and gateway use that same explicit
+numeric identity; never compensate for mismatch by making provider or ingress
+files group/world-readable.
 
 ## Product-image rollout
 

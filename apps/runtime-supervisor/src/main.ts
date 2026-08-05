@@ -21,7 +21,9 @@ const configurationKeys = {
   socketPath: "CORE_AGENT_SUPERVISOR_SOCKET_PATH",
   journalRoot: "CORE_AGENT_SUPERVISOR_JOURNAL_ROOT",
   stagingRoot: "CORE_AGENT_SUPERVISOR_STAGING_ROOT",
+  dockerHostStagingRoot: "CORE_AGENT_DOCKER_HOST_STAGING_ROOT",
   ingressRoot: "CORE_AGENT_SUPERVISOR_INGRESS_ROOT",
+  dockerHostIngressRoot: "CORE_AGENT_DOCKER_HOST_INGRESS_ROOT",
   providerSecretRoot: "CORE_AGENT_PROVIDER_SECRET_ROOT",
   ingressSecretRoot: "CORE_AGENT_INGRESS_SECRET_ROOT",
   dockerSocketPath: "CORE_AGENT_DOCKER_SOCKET_PATH",
@@ -33,7 +35,11 @@ export interface SupervisorConfiguration {
   readonly socketPath: string;
   readonly journalRoot: string;
   readonly stagingRoot: string;
+  readonly dockerHostStagingRoot: string;
   readonly ingressRoot: string;
+  readonly dockerHostIngressRoot: string;
+  readonly managedRuntimeUid: number;
+  readonly managedRuntimeGid: number;
   readonly providerSecretRoot: string;
   readonly ingressSecretRoot: string;
   readonly dockerSocketPath: string;
@@ -56,12 +62,24 @@ function managedAbsolutePath(value: string | undefined): string {
   return value;
 }
 
+function managedIdentity(value: string | undefined, current: number | undefined): number {
+  if (value === undefined || !/^[1-9]\d{0,9}$/u.test(value) || current === undefined) throw configurationError();
+  const identity = Number(value);
+  if (!Number.isSafeInteger(identity) || identity > 4_294_967_294 || identity !== current) throw configurationError();
+  return identity;
+}
+
 export function readSupervisorConfiguration(
   environment: Readonly<Record<string, string | undefined>> = process.env,
 ): SupervisorConfiguration {
-  return Object.fromEntries(
+  const paths = Object.fromEntries(
     Object.entries(configurationKeys).map(([field, key]) => [field, managedAbsolutePath(environment[key])]),
-  ) as unknown as SupervisorConfiguration;
+  ) as unknown as Omit<SupervisorConfiguration, "managedRuntimeUid" | "managedRuntimeGid">;
+  return {
+    ...paths,
+    managedRuntimeUid: managedIdentity(environment.CORE_AGENT_MANAGED_RUNTIME_UID, process.getuid?.()),
+    managedRuntimeGid: managedIdentity(environment.CORE_AGENT_MANAGED_RUNTIME_GID, process.getgid?.()),
+  };
 }
 
 export class PurposeScopedSecretStore implements SecretStore {
@@ -101,7 +119,11 @@ export async function startRuntimeSupervisor(
     imageLock,
     providerCatalog,
     stagingRoot: configuration.stagingRoot,
+    dockerHostStagingRoot: configuration.dockerHostStagingRoot,
     ingressRoot: configuration.ingressRoot,
+    dockerHostIngressRoot: configuration.dockerHostIngressRoot,
+    managedRuntimeUid: configuration.managedRuntimeUid,
+    managedRuntimeGid: configuration.managedRuntimeGid,
   });
   const server = new RuntimeSupervisorServer({
     socketPath: configuration.socketPath,

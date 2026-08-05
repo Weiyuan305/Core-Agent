@@ -158,6 +158,22 @@ export async function prepareRuntimePaths({ environment = process.env } = {}) {
       const canonical = await inspectProjection(projection);
       if (canonical !== projection.path) throw preparationError();
     }
+    for (const name of ["staging", "ingress"]) {
+      const projection = {
+        purpose: `state-${name}`,
+        path: join(policy.stateRoot, name),
+        kind: "directory",
+        uid: policy.supervisorUid,
+        gid: policy.supervisorGid,
+        mode: 0o700,
+      };
+      try {
+        await mkdir(projection.path, { mode: 0o700 });
+      } catch (error) {
+        if (error?.code !== "EEXIST") throw error;
+      }
+      if (await inspectProjection(projection) !== projection.path) throw preparationError();
+    }
     requirePurposeSeparation(await Promise.all(inspected.map(async (projection) => ({
       ...projection,
       canonical: await inspectProjection(projection),

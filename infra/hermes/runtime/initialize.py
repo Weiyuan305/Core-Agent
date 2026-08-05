@@ -271,18 +271,22 @@ def file_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
     )
 
 
-def validate_directory(metadata: os.stat_result, label: str, exact_mode: int | None = None) -> None:
+def validate_directory(metadata: os.stat_result, label: str, exact_mode: int | None = None,
+                       allow_sticky_volume_root: bool = False) -> None:
     mode = stat.S_IMODE(metadata.st_mode)
-    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid():
+    owned_private = metadata.st_uid == os.geteuid() and (exact_mode is not None or not mode & 0o022)
+    sticky_volume_root = allow_sticky_volume_root and mode == 0o1777 and metadata.st_uid in (0, os.geteuid())
+    if not stat.S_ISDIR(metadata.st_mode) or not (owned_private or sticky_volume_root):
         raise InitializerError(f"{label} directory is unsafe")
     if exact_mode is not None:
         if mode != exact_mode:
             raise InitializerError(f"{label} directory mode is unsafe")
-    elif mode & 0o022:
+    elif not sticky_volume_root and mode & 0o022:
         raise InitializerError(f"{label} directory mode is unsafe")
 
 
-def open_root_directory(path: Path, label: str, exact_mode: int | None = None) -> tuple[int, tuple[int, int]]:
+def open_root_directory(path: Path, label: str, exact_mode: int | None = None,
+                        allow_sticky_volume_root: bool = False) -> tuple[int, tuple[int, int]]:
     normalized = Path(os.path.abspath(path))
     if not path.is_absolute():
         raise InitializerError(f"{label} directory path is invalid")
@@ -293,7 +297,7 @@ def open_root_directory(path: Path, label: str, exact_mode: int | None = None) -
         raise InitializerError(f"{label} directory cannot be opened safely") from error
     try:
         metadata = os.fstat(descriptor)
-        validate_directory(metadata, label, exact_mode)
+        validate_directory(metadata, label, exact_mode, allow_sticky_volume_root)
         if (before.st_dev, before.st_ino) != (metadata.st_dev, metadata.st_ino):
             raise InitializerError(f"{label} directory changed while opening")
         return descriptor, (metadata.st_dev, metadata.st_ino)
@@ -303,13 +307,13 @@ def open_root_directory(path: Path, label: str, exact_mode: int | None = None) -
 
 
 def assert_root_directory(path: Path, descriptor: int, identity: tuple[int, int], label: str,
-                          exact_mode: int | None = None) -> None:
+                          exact_mode: int | None = None, allow_sticky_volume_root: bool = False) -> None:
     try:
         metadata = os.fstat(descriptor)
         named = os.stat(path, follow_symlinks=False)
     except OSError as error:
         raise InitializerError(f"{label} directory changed") from error
-    validate_directory(metadata, label, exact_mode)
+    validate_directory(metadata, label, exact_mode, allow_sticky_volume_root)
     if identity != (metadata.st_dev, metadata.st_ino) or identity != (named.st_dev, named.st_ino):
         raise InitializerError(f"{label} directory changed")
 
@@ -575,7 +579,9 @@ def initialize(bundle_path: Path, data_root: Path, manifest_path: Path, secret_r
     if not manifest_path.is_absolute() or Path(os.path.abspath(manifest_path)) != expected_manifest_path:
         raise InitializerError("Manifest path is outside the fixed data root")
 
-    data_descriptor, data_identity = open_root_directory(data_root, "Data root")
+    data_descriptor, data_identity = open_root_directory(
+        data_root, "Data root", allow_sticky_volume_root=True
+    )
     core_descriptor = -1
     lock_descriptor = -1
     profiles_descriptor = -1
@@ -583,7 +589,9 @@ def initialize(bundle_path: Path, data_root: Path, manifest_path: Path, secret_r
     try:
         core_descriptor = open_or_create_directory(data_descriptor, ".core-agent", "Core metadata")
         lock_descriptor = open_lock(core_descriptor)
-        assert_root_directory(data_root, data_descriptor, data_identity, "Data root")
+        assert_root_directory(
+            data_root, data_descriptor, data_identity, "Data root", allow_sticky_volume_root=True
+        )
         assert_named_directory(data_descriptor, ".core-agent", core_descriptor, "Core metadata")
 
         existing = read_manifest(core_descriptor)
@@ -626,7 +634,9 @@ def initialize(bundle_path: Path, data_root: Path, manifest_path: Path, secret_r
             )
             remove_profile_directory(profiles_descriptor, removed_ref)
 
-        assert_root_directory(data_root, data_descriptor, data_identity, "Data root")
+        assert_root_directory(
+            data_root, data_descriptor, data_identity, "Data root", allow_sticky_volume_root=True
+        )
         assert_named_directory(data_descriptor, ".core-agent", core_descriptor, "Core metadata")
         assert_named_directory(data_descriptor, "profiles", profiles_descriptor, "Profiles")
         atomic_write(core_descriptor, MANIFEST_NAME, canonical_json(manifest) + b"\n", MANIFEST_MODE)
