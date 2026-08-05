@@ -208,7 +208,7 @@ test("a crash after dispatch mark is reclaimed as unsafe and cannot become a saf
   const [reclaimed] = await claimJobs(db, { tenantId: setup.tenantId, workerId: "worker_recovery", limit: 1, leaseMs: 300_000 });
   assert.equal(reclaimed?.effectState, "unsafe_to_replay");
   assert.equal(reclaimed?.recoveryOnly, false);
-  assert.deepEqual(await setup.repository.fail({ ...ref, workerId: "worker_recovery" }, "Unsafe dispatched request cannot replay"), { kind: "updated" });
+  assert.deepEqual(await setup.repository.fail({ ...ref, workerId: "worker_recovery", attemptCount: reclaimed!.attemptCount }, "Unsafe dispatched request cannot replay"), { kind: "updated" });
 });
 
 test("unsafe recovery failure atomically terminalizes Run and job without an assistant Message", async () => {
