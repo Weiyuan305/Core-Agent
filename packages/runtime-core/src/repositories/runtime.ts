@@ -64,7 +64,11 @@ export class RuntimeRepository {
     containerId: string,
     desiredState: RuntimeContainer["desired_state"],
     expectedVersion: number,
+    now: Date,
   ): Promise<VersionedWriteResult> {
+    if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
+      throw new Error("Runtime update timestamp must be a valid Date");
+    }
     if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
       throw new Error("Expected resource version must be a positive safe integer");
     }
@@ -72,10 +76,10 @@ export class RuntimeRepository {
       throw new RangeError("Expected resource version cannot be incremented within the safe integer range");
     }
     if (this.context.transactional) {
-      return this.updateDesiredStateInTransaction(this.context.db, containerId, desiredState, expectedVersion);
+      return this.updateDesiredStateInTransaction(this.context.db, containerId, desiredState, expectedVersion, now);
     }
     return this.context.db.transaction().execute(async (trx) => (
-      this.updateDesiredStateInTransaction(trx, containerId, desiredState, expectedVersion)
+      this.updateDesiredStateInTransaction(trx, containerId, desiredState, expectedVersion, now)
     ));
   }
 
@@ -84,6 +88,7 @@ export class RuntimeRepository {
     containerId: string,
     desiredState: RuntimeContainer["desired_state"],
     expectedVersion: number,
+    now: Date,
   ): Promise<VersionedWriteResult> {
     const current = await trx.selectFrom("runtime_containers")
       .select("resource_version")
@@ -103,7 +108,7 @@ export class RuntimeRepository {
       throw new RangeError("Resource version cannot be incremented within the safe integer range");
     }
     const updated = await trx.updateTable("runtime_containers")
-      .set({ desired_state: desiredState, resource_version: sql`resource_version + 1`, updated_at: new Date() })
+      .set({ desired_state: desiredState, resource_version: sql`resource_version + 1`, updated_at: now })
       .where("tenant_id", "=", this.context.tenantId)
       .where("container_id", "=", containerId)
       .where("resource_version", "=", expectedVersion.toString())

@@ -22,6 +22,7 @@ function assertDisposableDatabaseUrl(url: string | undefined): string {
 const pool = new Pool({ connectionString: assertDisposableDatabaseUrl(testDatabaseUrl) });
 const db = createRuntimeDatabase(pool);
 const repositories = new ResourceRepositories(db);
+const updateNow = new Date("2400-05-01T00:00:00.000Z");
 
 async function resetDatabase(): Promise<void> {
   await pool.query("drop schema public cascade; create schema public;");
@@ -74,11 +75,11 @@ test("expected resource version prevents a lost runtime update", async () => {
   await repo.insert(syntheticRuntime());
 
   assert.deepEqual(
-    await repo.updateDesiredState("runtime_a", "stopped", 1),
+    await repo.updateDesiredState("runtime_a", "stopped", 1, updateNow),
     { kind: "updated", resource_version: 2 },
   );
   assert.deepEqual(
-    await repo.updateDesiredState("runtime_a", "running", 1),
+    await repo.updateDesiredState("runtime_a", "running", 1, updateNow),
     { kind: "version_conflict", current_resource_version: 2 },
   );
 });
@@ -88,7 +89,7 @@ test("maximum safe resource version cannot be incremented or persisted out of co
   await repo.insert(syntheticRuntime({ resource_version: Number.MAX_SAFE_INTEGER }));
 
   await assert.rejects(
-    repo.updateDesiredState("runtime_a", "stopped", Number.MAX_SAFE_INTEGER),
+    repo.updateDesiredState("runtime_a", "stopped", Number.MAX_SAFE_INTEGER, updateNow),
     /safe integer/i,
   );
   const stored = await db.selectFrom("runtime_containers")
@@ -165,7 +166,7 @@ test("CAS classification does not observe a replacement row created during the w
   });
 
   await lockAcquired;
-  const result = repo.updateDesiredState("runtime_a", "stopped", 1);
+  const result = repo.updateDesiredState("runtime_a", "stopped", 1, updateNow);
   await waitForBlockedRuntimeQuery().catch(async (error) => {
     releaseLock?.();
     await replacement;

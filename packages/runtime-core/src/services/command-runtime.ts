@@ -182,7 +182,7 @@ export async function commandRuntime(
     }
 
     const runtimeRepository = new ResourceRepositories(dependencies.db).forTransaction(tenantTransaction).runtimes;
-    const result = await runtimeRepository.updateDesiredState(containerId, targetState, request.expected_resource_version);
+    const result = await runtimeRepository.updateDesiredState(containerId, targetState, request.expected_resource_version, now);
     if (result.kind === "not_found") notFound();
     if (result.kind === "version_conflict") throw new DomainError("RESOURCE_VERSION_CONFLICT", "Runtime version has changed");
     const jobId = deriveId("job_reconcile", tenantId, request.idempotency_key);
