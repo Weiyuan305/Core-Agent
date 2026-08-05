@@ -49,6 +49,7 @@ const smokeEnvironment = Object.freeze({
   CORE_AGENT_RUNTIME_GID: "20",
   CORE_AGENT_SUPERVISOR_SOCKET_GID: "20",
   CORE_AGENT_DOCKER_GID: "100",
+  CORE_AGENT_DOCKER_SOCKET_SOURCE: "/var/run/docker.sock.raw",
 });
 
 test("smoke output is an allowlist of IDs, states, event types, and counts", () => {

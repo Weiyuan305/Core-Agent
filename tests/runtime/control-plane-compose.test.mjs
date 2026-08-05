@@ -73,10 +73,10 @@ function parseDockerfile(text) {
 test("only API publishes a loopback port and only Supervisor mounts Docker", async () => {
   const config = await yaml("infra/runtime/compose.dev.yaml");
   assert.deepEqual(Object.keys(config.services).sort(), [
-    "api", "migrate", "postgres", "supervisor", "worker",
+    "api", "migrate", "postgres", "supervisor", "supervisor-socket-preflight", "worker",
   ]);
   assert.deepEqual(config.services.api.ports, ["127.0.0.1:8787:8787"]);
-  for (const name of ["postgres", "migrate", "worker", "supervisor"]) {
+  for (const name of ["postgres", "migrate", "worker", "supervisor", "supervisor-socket-preflight"]) {
     assert.equal(config.services[name].ports, undefined);
   }
   for (const name of ["postgres", "migrate", "api", "worker"]) {
@@ -89,6 +89,7 @@ test("only API publishes a loopback port and only Supervisor mounts Docker", asy
     assert.equal(service.cgroup, undefined);
   }
   assert(JSON.stringify(config.services.supervisor).includes("docker.sock"));
+  assert(JSON.stringify(config.services["supervisor-socket-preflight"]).includes("docker.sock"));
   assert.equal(config.services.supervisor.privileged, false);
   assert.equal(config.services.supervisor.network_mode, "none");
 });
@@ -236,6 +237,9 @@ test("startup order gates applications on one successful migration", async () =>
     postgres: { condition: "service_healthy" },
     supervisor: { condition: "service_started" },
   });
+  assert.deepEqual(config.services.supervisor.depends_on, {
+    "supervisor-socket-preflight": { condition: "service_completed_successfully" },
+  });
   assert.equal(config.services.postgres.volumes[0].target, "/var/lib/postgresql/data");
   assert.equal(config.services.postgres.healthcheck.test[0], "CMD-SHELL");
 });
@@ -284,6 +288,36 @@ test("compose environment carries paths and public configuration but no secret v
   assert.equal(supervisorEnvironment.CORE_AGENT_DOCKER_HOST_INGRESS_ROOT, "${CORE_AGENT_SUPERVISOR_STATE_ROOT:?set CORE_AGENT_SUPERVISOR_STATE_ROOT}/ingress");
   assert.equal(supervisorEnvironment.CORE_AGENT_MANAGED_RUNTIME_UID, "${CORE_AGENT_RUNTIME_UID:-12002}");
   assert.equal(supervisorEnvironment.CORE_AGENT_MANAGED_RUNTIME_GID, "${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}");
+  assert.equal(supervisorEnvironment.CORE_AGENT_DOCKER_SOCKET_PATH, "/var/run/docker.sock");
+  const preflightService = config.services["supervisor-socket-preflight"];
+  assert(preflightService, "Supervisor socket preflight service must exist");
+  const preflightEnvironment = environmentMap(preflightService);
+  assert.equal(preflightEnvironment.CORE_AGENT_DOCKER_SOCKET_SOURCE, "${CORE_AGENT_DOCKER_SOCKET_SOURCE:?set CORE_AGENT_DOCKER_SOCKET_SOURCE}");
+  assert.equal(preflightEnvironment.CORE_AGENT_DOCKER_SOCKET_PATH, "/var/run/docker.sock");
+});
+
+test("Supervisor startup is gated by one fixed-image least-privilege Docker socket preflight", async () => {
+  const config = await yaml("infra/runtime/compose.dev.yaml");
+  const supervisor = config.services.supervisor;
+  const preflight = config.services["supervisor-socket-preflight"];
+  assert(preflight, "Supervisor socket preflight service must exist");
+  assert.equal(preflight.image, supervisor.image);
+  assert.deepEqual(preflight.build, supervisor.build);
+  assert.equal(preflight.user, supervisor.user);
+  assert.deepEqual(preflight.group_add, supervisor.group_add);
+  assert.equal(preflight.network_mode, "none");
+  assert.equal(preflight.read_only, true);
+  assert.equal(preflight.privileged, false);
+  assert.deepEqual(preflight.cap_drop, ["ALL"]);
+  assert.deepEqual(preflight.security_opt, ["no-new-privileges:true"]);
+  assert.equal(preflight.restart, "no");
+  assert.deepEqual(preflight.entrypoint, ["node", "scripts/preflight-runtime-docker-socket.mjs"]);
+  assert.deepEqual(volumeAt(preflight, "/var/run/docker.sock"), volumeAt(supervisor, "/var/run/docker.sock"));
+  assert.equal(volumeAt(preflight, "/var/run/docker.sock").source, "${CORE_AGENT_DOCKER_SOCKET_SOURCE:?set CORE_AGENT_DOCKER_SOCKET_SOURCE}");
+  assert.equal(volumeAt(preflight, "/var/run/docker.sock").read_only, true);
+  assert.deepEqual(supervisor.depends_on, {
+    "supervisor-socket-preflight": { condition: "service_completed_successfully" },
+  });
 });
 
 test("runtime image lock contains exact registry-derived platform references", async () => {
@@ -509,9 +543,30 @@ test("runtime example environment contains paths and generated references only",
   assert.match(text, /CORE_AGENT_RUNTIME_UID=<numeric-output-of-id-u>/u);
   assert.match(text, /CORE_AGENT_RUNTIME_GID=<numeric-output-of-id-g>/u);
   assert.match(text, /CORE_AGENT_SUPERVISOR_SOCKET_GID=<numeric-output-of-id-g>/u);
+  assert.match(text, /CORE_AGENT_DOCKER_SOCKET_SOURCE=\/absolute\/daemon-side\/docker\.sock/u);
   assert.match(text, /bootstrap source must be a regular file owned by the API runtime UID with mode 0600/iu);
   assert(!/^.*(?:PASSWORD|TOKEN|SECRET|KEY)=(?!\/absolute\/path\/to\/|$).+$/gmu.test(text));
   assert(!/sk-[A-Za-z0-9]|bearer\s+/iu.test(text));
+});
+
+test("runtime operating evidence distinguishes socket platforms and keeps runtime acceptance pending", async () => {
+  const runbook = await source("docs/operations/runtime-v1-local-smoke.md");
+  assert.match(runbook, /^### Linux Docker Engine$/mu);
+  assert.match(runbook, /^### Docker Desktop for macOS$/mu);
+  assert.match(runbook, /^### Colima$/mu);
+  assert.match(runbook, /CORE_AGENT_DOCKER_SOCKET_SOURCE=\/var\/run\/docker\.sock\.raw/u);
+  assert.match(runbook, /colima ssh --profile[\s\S]*stat -c[\s\S]*\/var\/run\/docker\.sock/u);
+  assert.match(runbook, /do not derive[\s\S]*macOS `\/var\/run\/docker\.sock` symlink/iu);
+  assert.match(runbook, /Docker IPAM overlap/iu);
+  assert.match(runbook, /host, VPN, and VM route/iu);
+  assert.doesNotMatch(runbook, /fails closed on a host CIDR collision/iu);
+
+  const boundary = await source("docs/operations/runtime-v1-production-boundary.md");
+  assert.match(boundary, /development convenience, not a role-isolation security boundary/iu);
+  const evidence = await source("docs/operations/runtime-v1-acceptance-evidence.md");
+  for (const criterion of ["AC1", "AC2", "AC3", "AC4", "AC5", "AC6", "AC7", "AC8", "AC10"]) {
+    assert.match(evidence, new RegExp(`\\| ${criterion} [^\\n]+\\| \\*\\*Pending`, "u"), criterion);
+  }
 });
 
 test("runtime PostgreSQL initialization separates bootstrap migrator and application roles", async () => {
