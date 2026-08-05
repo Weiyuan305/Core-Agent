@@ -92,6 +92,12 @@ interface DatabaseControlPool {
   end(): Promise<void>;
 }
 
+interface DatabaseCreateSession {
+  connect(): Promise<void>;
+  query(sql: string): Promise<unknown>;
+  close(): Promise<void>;
+}
+
 interface CleanupStage {
   readonly category: string;
   readonly work: () => Promise<void>;
@@ -271,6 +277,7 @@ function databaseUrlFor(controlUrl: URL, databaseName: string): string {
 async function createIsolatedDatabase(options: {
   readonly configuredUrl?: string;
   readonly databaseName?: string;
+  readonly createSession?: DatabaseCreateSession;
   readonly controlPool?: DatabaseControlPool;
   readonly cleanupControlPool?: DatabaseControlPool;
   readonly timeoutMs?: number;
@@ -293,6 +300,19 @@ async function createIsolatedDatabase(options: {
     ?? `core_agent_test_${randomBytes(8).toString("hex")}`;
   assert.match(databaseName, databaseNamePattern);
   const timeoutMs = options.timeoutMs ?? externalStageTimeoutMs;
+  const createClient = options.createSession === undefined
+    ? new Client({
+        connectionString: controlUrl.toString(),
+        connectionTimeoutMillis: timeoutMs,
+        query_timeout: timeoutMs,
+        statement_timeout: timeoutMs,
+      })
+    : undefined;
+  const createSession = options.createSession ?? {
+    connect: () => createClient!.connect(),
+    query: (sql: string) => createClient!.query(sql),
+    close: () => createClient!.end(),
+  };
   const controlPool = options.controlPool ?? new Pool({
     connectionString: controlUrl.toString(),
     max: 2,
@@ -300,16 +320,52 @@ async function createIsolatedDatabase(options: {
     query_timeout: timeoutMs,
     statement_timeout: timeoutMs,
   });
-  const createOperation = Promise.resolve(
-    controlPool.query(`create database "${databaseName}"`),
-  ).then(() => undefined);
+  let createOperation: Promise<void> | undefined;
   try {
+    await boundedExternal(
+      "database create connect",
+      () => createSession.connect(),
+      timeoutMs,
+    );
+    createOperation = Promise.resolve().then(async () => {
+      await createSession.query(`create database "${databaseName}"`);
+    });
     await boundedExternal(
       "database create",
       () => createOperation,
       timeoutMs,
     );
+    await boundedExternal(
+      "database create session close",
+      () => createSession.close(),
+      timeoutMs,
+    );
   } catch (error) {
+    let cancellationConfirmed = false;
+    try {
+      await runWithDeadline(async () => {
+        const results = await Promise.allSettled([
+          createSession.close(),
+          createOperation ?? Promise.resolve(),
+        ]);
+        if (results[0]?.status !== "fulfilled") {
+          throw new Error("Database create session did not close");
+        }
+      }, timeoutMs);
+      cancellationConfirmed = true;
+    } catch {
+      cancellationConfirmed = false;
+    }
+    if (!cancellationConfirmed) {
+      await runCleanupStages([
+        { category: "control pool", work: () => controlPool.end() },
+        ...(options.cleanupControlPool === undefined ? [] : [{
+          category: "cleanup control pool",
+          work: () => options.cleanupControlPool!.end(),
+        }]),
+      ], timeoutMs);
+      throw new Error("Integration stage failed: database create cancellation");
+    }
     const cleanupControlPool = options.cleanupControlPool ?? new Pool({
       connectionString: controlUrl.toString(),
       max: 1,
@@ -317,11 +373,7 @@ async function createIsolatedDatabase(options: {
       query_timeout: timeoutMs,
       statement_timeout: timeoutMs,
     });
-    await runCleanupStages([
-      {
-        category: "database create settle",
-        work: async () => { await createOperation.catch(() => undefined); },
-      },
+    const cleanupFailures = await runCleanupStages([
       {
         category: "database create cleanup",
         work: async () => {
@@ -336,6 +388,9 @@ async function createIsolatedDatabase(options: {
         work: () => cleanupControlPool.end(),
       }]),
     ], timeoutMs);
+    if (cleanupFailures.length > 0) {
+      throw new Error("Integration stage failed: database create cleanup");
+    }
     throw error;
   }
   return {
@@ -427,10 +482,7 @@ function safeStructuredValue(
 }
 
 function scanSentinel(...roots: readonly unknown[]): SentinelScan {
-  const pending = roots.map((value) => ({
-    accessorsAreSerializationSurface: true,
-    value,
-  }));
+  const pending = [...roots];
   const seen = new WeakSet<object>();
   let visited = 0;
   let incomplete = false;
@@ -444,9 +496,7 @@ function scanSentinel(...roots: readonly unknown[]): SentinelScan {
         incompleteCategories: ["budget"],
       };
     }
-    const current = pending.pop();
-    assert(current !== undefined);
-    const { accessorsAreSerializationSurface, value } = current;
+    const value = pending.pop();
     if (typeof value === "string") {
       if (value.includes(LEAK_SENTINEL)) {
         return {
@@ -462,14 +512,55 @@ function scanSentinel(...roots: readonly unknown[]): SentinelScan {
     }
     if (seen.has(value)) continue;
     seen.add(value);
-    let serializerTraversesProperties = Array.isArray(value);
-    try {
-      const prototype = Object.getPrototypeOf(value);
-      serializerTraversesProperties ||= prototype === Object.prototype || prototype === null;
-    } catch {
+    let prototype: object | null;
+    try { prototype = Object.getPrototypeOf(value); }
+    catch {
       incomplete = true;
       incompleteCategories.add("prototype");
       continue;
+    }
+    const seenPrototypes = new Set<object>();
+    while (prototype !== null && !seenPrototypes.has(prototype)) {
+      seenPrototypes.add(prototype);
+      let prototypeKeys: readonly PropertyKey[];
+      try { prototypeKeys = Reflect.ownKeys(prototype); }
+      catch {
+        incomplete = true;
+        incompleteCategories.add("prototype_keys");
+        break;
+      }
+      for (const key of prototypeKeys) {
+        let descriptor: PropertyDescriptor | undefined;
+        try { descriptor = Object.getOwnPropertyDescriptor(prototype, key); }
+        catch {
+          incomplete = true;
+          incompleteCategories.add("prototype_descriptor");
+          continue;
+        }
+        if (descriptor === undefined) {
+          incomplete = true;
+          incompleteCategories.add("prototype_descriptor");
+        } else if (
+          key === "toJSON"
+          && "value" in descriptor
+          && typeof descriptor.value === "function"
+        ) {
+          incomplete = true;
+          incompleteCategories.add("prototype_to_json");
+        } else if (
+          !(prototype === Object.prototype && key === "__proto__")
+          && !("value" in descriptor)
+        ) {
+          incomplete = true;
+          incompleteCategories.add("prototype_accessor");
+        }
+      }
+      try { prototype = Object.getPrototypeOf(prototype); }
+      catch {
+        incomplete = true;
+        incompleteCategories.add("prototype");
+        break;
+      }
     }
     let keys: readonly PropertyKey[];
     try { keys = Reflect.ownKeys(value); }
@@ -498,33 +589,16 @@ function scanSentinel(...roots: readonly unknown[]): SentinelScan {
         incompleteCategories.add("descriptor");
       } else if ("value" in descriptor) {
         if (
-          accessorsAreSerializationSurface
-          && serializerTraversesProperties
-          && key === "toJSON"
+          key === "toJSON"
           && typeof descriptor.value === "function"
         ) {
           incomplete = true;
           incompleteCategories.add("to_json");
         } else {
-          const childIsStructured = (
-            typeof descriptor.value === "object"
-            && descriptor.value !== null
-          ) || typeof descriptor.value === "function";
-          if (
-            childIsStructured
-            && !serializerTraversesProperties
-            && !(value instanceof Error)
-          ) continue;
-          pending.push({
-            accessorsAreSerializationSurface:
-              accessorsAreSerializationSurface && serializerTraversesProperties,
-            value: descriptor.value,
-          });
+          pending.push(descriptor.value);
         }
       } else if (
-        accessorsAreSerializationSurface
-        && serializerTraversesProperties
-        && descriptor.enumerable
+        descriptor.enumerable
       ) {
         incomplete = true;
         incompleteCategories.add("accessor");
@@ -538,17 +612,102 @@ function scanSentinel(...roots: readonly unknown[]): SentinelScan {
   };
 }
 
+function apiLogCaptureSurface(fields: unknown): {
+  readonly fields: unknown;
+  readonly incomplete: boolean;
+} {
+  if (typeof fields !== "object" || fields === null || Array.isArray(fields)) {
+    return { fields, incomplete: false };
+  }
+  let prototype: object | null;
+  let keys: readonly PropertyKey[];
+  try {
+    prototype = Object.getPrototypeOf(fields);
+    keys = Reflect.ownKeys(fields);
+  } catch {
+    return { fields, incomplete: true };
+  }
+  if (prototype !== Object.prototype && prototype !== null) {
+    return { fields, incomplete: false };
+  }
+  const projected: Record<PropertyKey, unknown> = {};
+  let incomplete = false;
+  for (const key of keys) {
+    let descriptor: PropertyDescriptor | undefined;
+    try { descriptor = Object.getOwnPropertyDescriptor(fields, key); }
+    catch {
+      incomplete = true;
+      continue;
+    }
+    if (descriptor === undefined) {
+      incomplete = true;
+      continue;
+    }
+    if (!("value" in descriptor)) {
+      if (descriptor.enumerable) incomplete = true;
+      continue;
+    }
+    if (key === "req" && typeof descriptor.value === "object" && descriptor.value !== null) {
+      const request = descriptor.value as {
+        readonly headers?: Record<string, unknown>;
+        readonly host?: unknown;
+        readonly ip?: unknown;
+        readonly method?: unknown;
+        readonly socket?: { readonly remotePort?: unknown };
+        readonly url?: unknown;
+      };
+      try {
+        projected[key] = {
+          method: request.method,
+          url: request.url,
+          version: request.headers?.["accept-version"],
+          host: request.host,
+          remoteAddress: request.ip,
+          remotePort: request.socket?.remotePort,
+        };
+      } catch {
+        projected[key] = { category: "request_serializer_failed" };
+        incomplete = true;
+      }
+    } else if (
+      key === "res"
+      && typeof descriptor.value === "object"
+      && descriptor.value !== null
+    ) {
+      try {
+        projected[key] = {
+          statusCode: (descriptor.value as { readonly statusCode?: unknown }).statusCode,
+        };
+      } catch {
+        projected[key] = { category: "response_serializer_failed" };
+        incomplete = true;
+      }
+    } else {
+      projected[key] = descriptor.value;
+    }
+  }
+  return { fields: projected, incomplete };
+}
+
 function captureStructuredLog(
   records: unknown[],
   category: string,
   fields: unknown,
   message?: string,
+  forceIncomplete = false,
 ): void {
+  const scan = scanSentinel(fields, message);
   records.push(Object.freeze({
     category,
     fields: safeStructuredValue(fields),
     message,
-    sentinelScan: Object.freeze(scanSentinel(fields, message)),
+    sentinelScan: Object.freeze({
+      ...scan,
+      incomplete: scan.incomplete || forceIncomplete,
+      incompleteCategories: forceIncomplete
+        ? [...scan.incompleteCategories, "capture_surface"].sort()
+        : scan.incompleteCategories,
+    }),
   } satisfies StructuredLogCapture));
 }
 
@@ -574,7 +733,14 @@ function assertStructuredLogsSentinelFree(records: readonly unknown[]): void {
 
 function capturingLogger(records: unknown[]): FastifyBaseLogger {
   const capture = (fields: unknown, message?: string): void => {
-    captureStructuredLog(records, "api_log", fields, message);
+    const surface = apiLogCaptureSurface(fields);
+    captureStructuredLog(
+      records,
+      "api_log",
+      surface.fields,
+      message,
+      surface.incomplete,
+    );
   };
   const logger = {
     level: "silent",

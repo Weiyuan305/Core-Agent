@@ -16,7 +16,7 @@
     "test": "npm run test:unit",
     "test:unit": "npm run test:runtime && npm run test -w @core-agent/contracts && npm run test -w @core-agent/runtime-core",
     "test:postgres": "node --import tsx --test tests/postgres/*.test.ts",
-    "test:integration": "node --import tsx --test --test-concurrency=1 tests/integration/harness.test.ts tests/integration/provisioning.test.ts tests/integration/agent-run.test.ts tests/integration/recovery.test.ts tests/integration/security.test.ts",
+    "test:integration": "node --import tsx --test --test-concurrency=1 tests/integration/provisioning.test.ts tests/integration/agent-run.test.ts tests/integration/recovery.test.ts tests/integration/security.test.ts",
     "test:runtime": "node --test tests/runtime/*.test.mjs",
     "contracts:build": "npm run build -w @core-agent/contracts",
     "contracts:test": "npm run test -w @core-agent/contracts",

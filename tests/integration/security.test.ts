@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   createIntegrationHarness,
   LEAK_SENTINEL,
+  testHarnessInternals,
   type IntegrationHarness,
 } from "./harness.js";
 import {
@@ -17,6 +18,16 @@ import {
 } from "./fixtures/synthetic-tenant.js";
 
 let harness: IntegrationHarness;
+
+function sentinelError(work: () => void): Error {
+  let captured: unknown;
+  try { work(); }
+  catch (error) { captured = error; }
+  assert(captured instanceof Error);
+  assert.equal(captured.message, "sentinel category: structured logs");
+  assert.doesNotMatch(captured.message, new RegExp(LEAK_SENTINEL));
+  return captured;
+}
 
 function uniqueTenant(label: string): string {
   return `tenant_security_${label}_${randomBytes(3).toString("hex")}`;
@@ -324,4 +335,173 @@ test("fake Hermes rejects a query-bearing Profile route and records only its cat
   assert.deepEqual(harness.fakeHermes.rejections.at(-1), {
     category: "route_query",
   });
+});
+
+test("structured log scanning reaches deep late Error and nonplain data", () => {
+  let nestedValue: unknown = { value: LEAK_SENTINEL };
+  for (let depth = 0; depth < 8; depth += 1) nestedValue = { nested: nestedValue };
+  const objectBeyondSnapshot: Record<string, string> = {};
+  for (let index = 0; index < 101; index += 1) {
+    objectBeyondSnapshot[`field_${index}`] = index === 100 ? LEAK_SENTINEL : "safe";
+  }
+  class NestedNonPlain {
+    readonly nested = { detail: LEAK_SENTINEL };
+  }
+  for (const fields of [
+    nestedValue,
+    objectBeyondSnapshot,
+    Array.from({ length: 101 }, (_, index) => index === 100 ? LEAK_SENTINEL : "safe"),
+    new Error(`nested failure ${LEAK_SENTINEL}`, {
+      cause: { detail: LEAK_SENTINEL },
+    }),
+    new NestedNonPlain(),
+  ]) {
+    const records: unknown[] = [];
+    testHarnessInternals.captureStructuredLog(records, "worker_log", fields, "safe");
+    sentinelError(() => testHarnessInternals.assertStructuredLogsSentinelFree(records));
+  }
+});
+
+test("structured log scanning fails closed without invoking serializers", () => {
+  let invoked = 0;
+  const ownSerializer = Object.create(null) as Record<string, unknown>;
+  Object.defineProperty(ownSerializer, "secret", {
+    enumerable: true,
+    get() { invoked += 1; return LEAK_SENTINEL; },
+  });
+  Object.defineProperty(ownSerializer, "toJSON", {
+    enumerable: true,
+    value() { invoked += 1; return LEAK_SENTINEL; },
+  });
+  class PrototypeToJson {
+    toJSON() { invoked += 1; return LEAK_SENTINEL; }
+  }
+  class PrototypeAccessor {
+    get detail() { invoked += 1; return LEAK_SENTINEL; }
+  }
+  for (const fields of [
+    ownSerializer,
+    new PrototypeToJson(),
+    new PrototypeAccessor(),
+    Array.from({ length: 100_001 }, () => "safe"),
+    new Proxy({}, {
+      ownKeys() { throw new Error(`proxy ${LEAK_SENTINEL}`); },
+    }),
+  ]) {
+    const records: unknown[] = [];
+    testHarnessInternals.captureStructuredLog(records, "worker_log", fields, "safe");
+    sentinelError(() => testHarnessInternals.assertStructuredLogsSentinelFree(records));
+  }
+  assert.equal(invoked, 0);
+});
+
+test("bounded cleanup continues through hangs and partial setup failures", async () => {
+  const resources = { controlPoolOpen: true, databaseExists: true, poolOpen: true };
+  const failures = await testHarnessInternals.runCleanupStages([
+    { category: "hanging close", work: () => new Promise<void>(() => undefined) },
+    { category: "earlier close", work: async () => { throw new Error(LEAK_SENTINEL); } },
+    { category: "database pool", work: async () => { resources.poolOpen = false; } },
+    { category: "database drop", work: async () => {
+      assert.equal(resources.poolOpen, false);
+      resources.databaseExists = false;
+    } },
+    { category: "control pool", work: async () => { resources.controlPoolOpen = false; } },
+  ], 25);
+  assert.deepEqual(failures, ["hanging close", "earlier close"]);
+  assert.deepEqual(resources, {
+    controlPoolOpen: false,
+    databaseExists: false,
+    poolOpen: false,
+  });
+  assert.doesNotMatch(failures.join(","), new RegExp(LEAK_SENTINEL));
+});
+
+for (const failure of ["reject", "timeout"] as const) {
+  test(`isolated database ${failure} cancels CREATE before exact cleanup`, async () => {
+    const createCalls: string[] = [];
+    const cleanupCalls: string[] = [];
+    let rejectCreate!: (error: Error) => void;
+    const pendingCreate = new Promise<unknown>((_resolve, reject) => { rejectCreate = reject; });
+    await assert.rejects(testHarnessInternals.createIsolatedDatabase({
+      configuredUrl: "postgresql://test:test@127.0.0.1/core_agent_control",
+      databaseName: "core_agent_test_0123456789abcdef",
+      createSession: {
+        connect: async () => { createCalls.push("connect"); },
+        query: async (sql: string) => {
+          createCalls.push(sql);
+          if (failure === "reject") throw new Error("raw create failure");
+          return pendingCreate;
+        },
+        close: async () => {
+          createCalls.push("close");
+          if (failure === "timeout") rejectCreate(new Error("cancelled create"));
+        },
+      },
+      controlPool: {
+        query: async (sql: string) => { createCalls.push(sql); },
+        end: async () => { createCalls.push("end"); },
+      },
+      cleanupControlPool: {
+        query: async (sql: string) => { cleanupCalls.push(sql); },
+        end: async () => { cleanupCalls.push("end"); },
+      },
+      timeoutMs: 25,
+    }), /^Error: Integration stage failed: database create$/);
+    assert(cleanupCalls.includes(
+      'drop database if exists "core_agent_test_0123456789abcdef" with (force)',
+    ));
+    assert.equal(createCalls.at(-1), "end");
+    assert.equal(cleanupCalls.at(-1), "end");
+  });
+}
+
+test("timed out delayed CREATE cannot advance after cleanup", async () => {
+  let cancelled = false;
+  let created = false;
+  let rejectCreate!: (error: Error) => void;
+  const createOperation = new Promise<unknown>((_resolve, reject) => { rejectCreate = reject; });
+  const cleanupCalls: string[] = [];
+  await assert.rejects(testHarnessInternals.createIsolatedDatabase({
+    configuredUrl: "postgresql://test:test@127.0.0.1/core_agent_control",
+    databaseName: "core_agent_test_0123456789abcdef",
+    createSession: {
+      connect: async () => undefined,
+      query: () => createOperation,
+      close: async () => {
+        cancelled = true;
+        rejectCreate(new Error("cancelled create"));
+      },
+    },
+    controlPool: { query: async () => undefined, end: async () => undefined },
+    cleanupControlPool: {
+      query: async (sql: string) => { cleanupCalls.push(sql); },
+      end: async () => { cleanupCalls.push("end"); },
+    },
+    timeoutMs: 25,
+  }), /^Error: Integration stage failed: database create$/);
+  const advanceDelayedCreate = (): void => { if (!cancelled) created = true; };
+  advanceDelayedCreate();
+  assert.equal(cancelled, true);
+  assert.equal(created, false);
+  assert(cleanupCalls.some((sql) => sql.startsWith("drop database")));
+});
+
+test("unconfirmed CREATE cancellation fails closed without claiming cleanup", async () => {
+  const cleanupCalls: string[] = [];
+  await assert.rejects(testHarnessInternals.createIsolatedDatabase({
+    configuredUrl: "postgresql://test:test@127.0.0.1/core_agent_control",
+    databaseName: "core_agent_test_0123456789abcdef",
+    createSession: {
+      connect: async () => undefined,
+      query: () => new Promise(() => undefined),
+      close: () => new Promise(() => undefined),
+    },
+    controlPool: { query: async () => undefined, end: async () => undefined },
+    cleanupControlPool: {
+      query: async (sql: string) => { cleanupCalls.push(sql); },
+      end: async () => { cleanupCalls.push("end"); },
+    },
+    timeoutMs: 25,
+  }), /^Error: Integration stage failed: database create cancellation$/);
+  assert.equal(cleanupCalls.some((sql) => sql.startsWith("drop database")), false);
 });
