@@ -444,6 +444,7 @@ class FakeDocker {
   public readonly created: Dockerode.ContainerCreateOptions[] = [];
   public readonly mutations: string[] = [];
   public readonly stagedModes: number[] = [];
+  public readonly stagedSecretNames: string[] = [];
   public initializerExitCode = 0;
   public initializerLogs = "";
   public manifestOverride: unknown;
@@ -501,6 +502,7 @@ class FakeDocker {
       this.stagedModes.push((await lstat(bundlePath)).mode & 0o777);
       this.stagedModes.push((await lstat(secretDirectory)).mode & 0o777);
       for (const filename of await readdir(secretDirectory)) {
+        this.stagedSecretNames.push(filename);
         this.stagedModes.push((await lstat(join(secretDirectory, filename))).mode & 0o777);
       }
     }
@@ -832,8 +834,10 @@ test("initializer and gateway use daemon-visible binds, one numeric identity, an
   assert.equal(JSON.stringify(initializer.HostConfig?.Binds).includes("tenant_a"), false);
   assert.equal(JSON.stringify(initializer.HostConfig?.Binds).includes("runtime_a"), false);
   assert.equal(JSON.stringify(initializer.HostConfig?.Binds).includes("profile_a"), false);
-  assert.deepEqual(docker.stagedModes, [0o600, 0o700, 0o600]);
-  assert.equal(secretStore.materials.length, 2);
+  assert.deepEqual(docker.stagedModes, [0o600, 0o700, 0o600, 0o600]);
+  assert.equal(docker.stagedSecretNames.length, 2);
+  assert(docker.stagedSecretNames.includes("hermes_ingress"));
+  assert.equal(secretStore.materials.length, 3);
   assert.equal(secretStore.materials.every((material) => material.released), true);
 
   assert.deepEqual(await readdir(roots.stagingRoot), []);
@@ -1631,7 +1635,7 @@ test("provision validates the fixed non-secret manifest before starting the gate
   await assert.rejects(adapter.provision(signed()), /SUPERVISOR_REJECTED/);
   assert.equal(docker.created.length, 2);
   assert.equal(docker.created.some((created) => created.Labels?.["core-agent.resource"] === "runtime"), false);
-  assert.equal(secretStore.materials.length, 1);
+  assert.equal(secretStore.materials.length, 2);
   assert.equal(secretStore.materials.every((material) => material.released), true);
 });
 
@@ -1874,6 +1878,19 @@ test("lifecycle rejects unsupported or provider-restrictive egress network confi
     assert.equal(result.outcome, "rejected");
     assert.deepEqual(built.docker.mutations, before);
   }
+});
+
+test("lifecycle accepts Docker 29 empty egress IPAM options encoding", async () => {
+  const built = buildAdapter();
+  await built.adapter.provision(signed());
+  const egress = built.docker.networks.get("core-agent-egress") as Record<string, unknown>;
+  egress.IPAM = {
+    ...(egress.IPAM as Record<string, unknown>),
+    Options: {},
+  };
+
+  const result = await built.adapter.execute(lifecycle("inspect", "operation_docker29_ipam_options"));
+  assert.equal(result.outcome, "accepted");
 });
 
 test("lifecycle rejects user privilege capability device and extra-network drift before action", async () => {

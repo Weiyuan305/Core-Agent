@@ -972,7 +972,9 @@ function validateNetworkInspection(
     exactStringRecord(dataProperty(value, "Options"), egressNetworkConfiguration.options);
     const ipam = dataProperty(value, "IPAM");
     exactDataKeys(ipam, ["Driver", "Options", "Config"]);
-    if (stringProperty(ipam, "Driver") !== "default" || dataProperty(ipam, "Options") !== null) throw rejected();
+    if (stringProperty(ipam, "Driver") !== "default") throw rejected();
+    const ipamOptions = dataProperty(ipam, "Options");
+    if (ipamOptions !== null) exactEmptyRecord(ipamOptions);
     const configurations = dataProperty(ipam, "Config");
     if (!Array.isArray(configurations) || Object.getPrototypeOf(configurations) !== Array.prototype || configurations.length !== 1) {
       throw rejected();
@@ -1559,6 +1561,11 @@ export class DockerRuntimeAdapter {
           provider_secret_file: `/run/core-agent/secrets/${secretFilename}`,
         });
       }
+      await writeSecretMaterial(
+        this.#options.secretStore,
+        request.runtime.ingress_secret_ref,
+        join(secretDirectory, "hermes_ingress"),
+      );
       const bundlePath = join(stageDirectory, "bundle.json");
       await writeExclusive(bundlePath, `${JSON.stringify({
         bundle_version: 1,

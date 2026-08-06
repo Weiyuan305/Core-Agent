@@ -54,6 +54,7 @@ async function harness(t) {
   await mkdir(bin);
   await mkdir(dataRoot, { mode: 0o700 });
   await mkdir(secretRoot, { mode: 0o700 });
+  await writeFile(join(secretRoot, "hermes_ingress"), "sentinel-ingress-key-0123456789", { mode: 0o600 });
   const fakeHermes = join(bin, "hermes");
   await writeFile(fakeHermes, `#!/usr/bin/env node
 import { appendFileSync, existsSync } from "node:fs";
@@ -213,6 +214,7 @@ test("initializer creates sorted profiles, exact env projections, and an idempot
       `OPENAI_API_KEY=${secret}`,
       "OPENAI_BASE_URL=https://tokenhub.infplacex.com/v1/chat/completions",
       "LLM_MODEL=cywx/gpt-5.6-sol",
+      "API_SERVER_KEY=sentinel-ingress-key-0123456789",
       ""
     ].join("\n"));
     assert.deepEqual((await readdir(join(paths.dataRoot, "profiles", profileRef))).sort(), [".env"]);
@@ -225,7 +227,7 @@ test("initializer creates sorted profiles, exact env projections, and an idempot
     { profile_id: "profile_a", hermes_profile_ref: "consultant-a" },
     { profile_id: "profile_b", hermes_profile_ref: "consultant-b" }
   ]);
-  assert.doesNotMatch(manifestText, /sentinel-secret|provider_secret_file|OPENAI_API_KEY/);
+  assert.doesNotMatch(manifestText, /sentinel-secret|sentinel-ingress|provider_secret_file|OPENAI_API_KEY|API_SERVER_KEY/);
 
   const before = await stat(paths.manifestPath);
   const second = runInitializer(paths);

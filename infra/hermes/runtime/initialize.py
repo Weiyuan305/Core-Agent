@@ -29,6 +29,7 @@ PRIVATE_DIRECTORY_MODE = 0o700
 LOCK_MODE = 0o600
 MANIFEST_NAME = "manifest.json"
 LOCK_NAME = "initialize.lock"
+INGRESS_SECRET_NAME = "hermes_ingress"
 OPAQUE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 PROFILE_REF = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 IMAGE_REF = re.compile(
@@ -512,7 +513,12 @@ def atomic_write(core_descriptor: int, name: str, payload: bytes, mode: int) -> 
             pass
 
 
-def configure_profile(profiles_descriptor: int, profile: dict[str, object], provider_key: str) -> None:
+def configure_profile(
+    profiles_descriptor: int,
+    profile: dict[str, object],
+    provider_key: str,
+    ingress_key: str,
+) -> None:
     profile_ref = str(profile["hermes_profile_ref"])
     description = str(profile["description"])
     profile_descriptor = open_or_create_directory(profiles_descriptor, profile_ref, "Profile")
@@ -544,6 +550,7 @@ def configure_profile(profiles_descriptor: int, profile: dict[str, object], prov
             f"OPENAI_API_KEY={provider_key}\n"
             f"OPENAI_BASE_URL={profile['provider_base_url']}\n"
             f"LLM_MODEL={profile['model_id']}\n"
+            f"API_SERVER_KEY={ingress_key}\n"
         ).encode("utf-8")
         atomic_write(profile_descriptor, ".env", environment, 0o600)
     finally:
@@ -613,6 +620,12 @@ def initialize(bundle_path: Path, data_root: Path, manifest_path: Path, secret_r
 
         profiles_descriptor = open_or_create_directory(data_descriptor, "profiles", "Profiles")
         secret_descriptor, secret_identity = open_root_directory(secret_root, "Provider secret root")
+        ingress_key = read_secret(
+            secret_descriptor,
+            secret_root,
+            secret_identity,
+            str(Path(os.path.abspath(secret_root)) / INGRESS_SECRET_NAME),
+        )
         prepared = [
             (profile, read_secret(
                 secret_descriptor,
@@ -625,7 +638,7 @@ def initialize(bundle_path: Path, data_root: Path, manifest_path: Path, secret_r
         assert_root_directory(secret_root, secret_descriptor, secret_identity, "Provider secret root")
 
         for profile, provider_key in prepared:
-            configure_profile(profiles_descriptor, profile, provider_key)
+            configure_profile(profiles_descriptor, profile, provider_key, ingress_key)
 
         current_refs = {str(profile["hermes_profile_ref"]) for profile in bundle["profiles"]}
         previous_refs = set()
