@@ -641,13 +641,11 @@ test("runtime operating evidence distinguishes socket platforms and records only
   const boundary = await source("docs/operations/runtime-v1-production-boundary.md");
   assert.match(boundary, /development convenience, not a role-isolation security boundary/iu);
   const evidence = await source("docs/operations/runtime-v1-acceptance-evidence.md");
-  for (const criterion of ["AC1", "AC3", "AC4", "AC5", "AC6", "AC7", "AC8", "AC10"]) {
+  for (const criterion of ["AC1", "AC2", "AC3", "AC4", "AC5", "AC6", "AC7", "AC8", "AC9", "AC10"]) {
     assert.match(evidence, new RegExp(`\\| ${criterion} [^\\n]+\\| \\*\\*Pass\\*\\* \\|`, "u"), criterion);
   }
-  for (const criterion of ["AC2", "AC9"]) {
-    assert.match(evidence, new RegExp(`\\| ${criterion} [^\\n]+\\| \\*\\*Pending final CI\\*\\* \\|`, "u"), criterion);
-  }
   assert.match(evidence, /GitHub Actions run 31089294718/u);
+  assert.match(evidence, /GitHub Actions run 31091492854/u);
   assert.doesNotMatch(evidence, /prompt or assistant text:[^\n]+/iu);
 });
 

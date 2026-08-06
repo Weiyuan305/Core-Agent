@@ -41,6 +41,16 @@ Supervisor, private Hermes Runtime provisioning, the selected HTTPS provider,
 durable SSE, exact managed-container inspection, database/container no-secret
 scans, and ordered default cleanup.
 
+## Clean-checkout quality gates
+
+- Verified commit: `6c093b4a1091153d5fc8ce2a103ff0c266e5efea`
+- Runtime Contract: [GitHub Actions run 31091492854](https://github.com/Weiyuan305/Core-Agent/actions/runs/31091492854)
+- Passing jobs: `contract`, `unit`, `postgres`, `integration`, `compose`
+- The PostgreSQL job completed the real migration/repository suites and database
+  sentinel scan. The Integration job completed duplicate provisioning, fake
+  Supervisor/Hermes vertical-slice, recovery, security, and evidence scans from
+  a fresh checkout.
+
 ## Interactive lifecycle acceptance
 
 The anonymous synthetic interactive client completed all of these assertions
@@ -69,16 +79,15 @@ tests alone.
 | Criterion | Automated evidence | Target-platform evidence | Result |
 | --- | --- | --- | --- |
 | AC1 migrations/readiness | PostgreSQL migration and API health suites | Real migration completed; API, Worker, and dependencies reached readiness | **Pass** |
-| AC2 idempotent provisioning | `tests/integration/provisioning.test.ts` contains duplicate request/resource assertions | One real deterministic provisioning completed; clean-CI duplicate replay is pending | **Pending final CI** |
+| AC2 idempotent provisioning | Clean CI ran `tests/integration/provisioning.test.ts` duplicate request/resource assertions | One real deterministic provisioning completed; fresh-checkout duplicate replay also passed | **Pass** |
 | AC3 isolated healthy runtime | Supervisor adapter/policy and Compose topology suites | Managed arm64 container passed exact labels, digest, private-network, command, and readiness inspection | **Pass** |
 | AC4 accepted Profile Run | Conversation/Run admission and full-slice suites | Real Profile Run reached `succeeded` with one assistant message | **Pass** |
 | AC5 ordered durable SSE | API SSE and ProductEvent scope/bounds suites | PostgreSQL-backed event stream ended with `message.completed`, `run.completed` | **Pass** |
 | AC6 restart recovery | Recovery, lease, cursor, and restart unit/integration coverage | `/restart` preserved state and the next real Run succeeded | **Pass** |
 | AC7 fail-closed boundaries | Supervisor unsafe-operation matrix, auth tests, static security topology, and bounded-error tests ran locally | Exact image, container, context, socket, path, secret, and network inspections passed before mutation | **Pass** |
 | AC8 no secret leakage | Synthetic sentinel, tracked-evidence, database-surface, and output-allowlist scanners | Real smoke scanned database and container surfaces and emitted only allowlisted metadata | **Pass** |
-| AC9 CI quality gates | Split contract/unit/PostgreSQL/integration/Compose workflow exists with pinned actions and images | Final clean-checkout workflow rerun is pending | **Pending final CI** |
+| AC9 CI quality gates | Split contract/unit/PostgreSQL/integration/Compose workflow passed with pinned actions and images | Run 31091492854 passed all five jobs from a fresh checkout | **Pass** |
 | AC10 real Hermes response | Opt-in smoke structure, product-lock, inspection, SSE, child-process, and cleanup suites | Reviewed arm64 product digest returned a non-empty assistant result and cleanup completed | **Pass** |
 
-When the clean-checkout Runtime Contract workflow passes, update only AC2 and
-AC9 with its commit and workflow link. Do not add logs, prompts, responses,
-keys, raw dependency output, Docker JSON, database rows, or secret paths.
+Future evidence updates must not add logs, prompts, responses, keys, raw
+dependency output, Docker JSON, database rows, or secret paths.
