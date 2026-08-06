@@ -36,7 +36,12 @@ export function validateSourceCommit(value) {
   return value;
 }
 
-function exactDataRecord(value, keys, code = "RELEASE_MANIFEST_INVALID") {
+function exactDataRecord(
+  value,
+  keys,
+  code = "RELEASE_MANIFEST_INVALID",
+  allowedKeys = keys,
+) {
   if (
     typeof value !== "object"
     || value === null
@@ -48,14 +53,14 @@ function exactDataRecord(value, keys, code = "RELEASE_MANIFEST_INVALID") {
 
   const actualKeys = Reflect.ownKeys(value);
   if (
-    actualKeys.length !== keys.length
-    || actualKeys.some((key) => typeof key !== "string" || !keys.includes(key))
+    actualKeys.some((key) => typeof key !== "string" || !allowedKeys.includes(key))
+    || keys.some((key) => !actualKeys.includes(key))
   ) {
     throw new ReleaseError(code);
   }
 
   const values = Object.create(null);
-  for (const key of keys) {
+  for (const key of actualKeys) {
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true) {
       throw new ReleaseError(code);
@@ -93,7 +98,12 @@ function validateDigest(value, code = "RELEASE_MANIFEST_INVALID") {
 }
 
 export function parsePlatformManifest(value) {
-  const manifest = exactDataRecord(value, ["schemaVersion", "mediaType", "manifests"]);
+  const manifest = exactDataRecord(
+    value,
+    ["schemaVersion", "mediaType", "manifests"],
+    "RELEASE_MANIFEST_INVALID",
+    ["schemaVersion", "mediaType", "manifests", "annotations", "artifactType", "subject"],
+  );
   if (
     manifest.schemaVersion !== 2
     || typeof manifest.mediaType !== "string"
@@ -105,9 +115,25 @@ export function parsePlatformManifest(value) {
   const descriptors = exactArrayValues(manifest.manifests, supportedPlatforms.length);
   const discovered = Object.create(null);
   for (const descriptorValue of descriptors) {
-    const descriptor = exactDataRecord(descriptorValue, ["digest", "platform"]);
-    const platform = exactDataRecord(descriptor.platform, ["os", "architecture"]);
+    const descriptor = exactDataRecord(
+      descriptorValue,
+      ["digest", "platform"],
+      "RELEASE_MANIFEST_INVALID",
+      ["mediaType", "digest", "size", "urls", "annotations", "data", "artifactType", "platform"],
+    );
+    const platform = exactDataRecord(
+      descriptor.platform,
+      ["os", "architecture"],
+      "RELEASE_MANIFEST_INVALID",
+      ["os", "architecture", "os.version", "os.features", "variant"],
+    );
     if (typeof platform.os !== "string" || typeof platform.architecture !== "string") {
+      throw new ReleaseError("RELEASE_MANIFEST_INVALID");
+    }
+    if (
+      platform.variant !== undefined
+      && !(platform.architecture === "arm64" && platform.variant === "v8")
+    ) {
       throw new ReleaseError("RELEASE_MANIFEST_INVALID");
     }
     const platformName = `${platform.os}/${platform.architecture}`;

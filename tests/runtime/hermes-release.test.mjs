@@ -15,6 +15,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { tsImport } from "tsx/esm/api";
+import { parse as parseYaml } from "yaml";
 
 import {
   assertCompatibleExistingManifest,
@@ -36,6 +37,10 @@ const amd64Digest = `sha256:${"a".repeat(64)}`;
 const arm64Digest = `sha256:${"b".repeat(64)}`;
 const helperPath = fileURLToPath(
   new URL("../../scripts/generate-hermes-product-lock.mjs", import.meta.url),
+);
+const workflowUrl = new URL(
+  "../../.github/workflows/publish-hermes-runtime.yml",
+  import.meta.url,
 );
 
 function manifestFixture() {
@@ -138,6 +143,21 @@ test("Hermes release manifests create one deterministic frozen product lock", ()
   assert.ok(Object.isFrozen(lock.platforms["linux/amd64"]));
   assert.equal(serializeProductImageLock(lock), `${JSON.stringify(lock, null, 2)}\n`);
   assert.doesNotThrow(() => assertCompatibleExistingManifest(lock, manifestFixture()));
+});
+
+test("Hermes release parsing accepts standard OCI descriptor metadata", () => {
+  const manifest = manifestFixture();
+  manifest.annotations = { "org.opencontainers.image.ref.name": "v0.1.0" };
+  for (const descriptor of manifest.manifests) {
+    descriptor.mediaType = "application/vnd.oci.image.manifest.v1+json";
+    descriptor.size = 1_024;
+  }
+  manifest.manifests[1].platform.variant = "v8";
+
+  assert.deepEqual(parsePlatformManifest(manifest), {
+    "linux/amd64": amd64Digest,
+    "linux/arm64": arm64Digest,
+  });
 });
 
 test("Hermes release manifest validation rejects ambiguous or unsafe input", () => {
@@ -284,4 +304,81 @@ test("Hermes release CLI fails closed without reflecting manifest or path data",
   assert.equal(occupied.stderr, "RELEASE_LOCK_WRITE_FAILED\n");
   assert.equal(await readFile(outputPath, "utf8"), "occupied");
   assert.ok((constants.O_NOFOLLOW ?? 0) >= 0);
+});
+
+test("Hermes runtime publishing is manual, private, pinned, and multi-platform", async () => {
+  const workflowSource = await readFile(workflowUrl, "utf8");
+  const workflow = parseYaml(workflowSource);
+
+  assert.deepEqual(Object.keys(workflow.on), ["workflow_dispatch"]);
+  assert.deepEqual(workflow.permissions, { contents: "read", packages: "write" });
+  assert.equal(workflow.env.IMAGE_NAME, productRepository);
+  assert.deepEqual(
+    workflow.jobs.build.strategy.matrix.platform,
+    ["linux/amd64", "linux/arm64"],
+  );
+  assert.equal(workflow.on.workflow_dispatch.inputs.version.required, true);
+  assert.equal(workflow.on.workflow_dispatch.inputs.source_commit.required, true);
+  assert.deepEqual(Object.keys(workflow.jobs), ["validate", "build", "publish"]);
+
+  const uses = [];
+  const runSteps = [];
+  for (const job of Object.values(workflow.jobs)) {
+    for (const step of job.steps) {
+      if (typeof step.uses === "string") uses.push(step.uses);
+      if (typeof step.run === "string") runSteps.push(step.run);
+    }
+  }
+  assert.ok(uses.length >= 8);
+  const approvedActions = new Map([
+    ["actions/checkout", "11bd71901bbe5b1630ceea73d27597364c9af683"],
+    ["actions/setup-node", "49933ea5288caeca8642d1e84afbd3f7d6820020"],
+    ["docker/setup-qemu-action", "96fe6ef7f33517b61c61be40b68a1882f3264fb8"],
+    ["docker/setup-buildx-action", "bb05f3f5519dd87d3ba754cc423b652a5edd6d2c"],
+    ["docker/login-action", "dbcb813823bdd20940b903addbd779551569679f"],
+    ["docker/build-push-action", "53b7df96c91f9c12dcc8a07bcb9ccacbed38856a"],
+    ["actions/upload-artifact", "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"],
+    ["actions/download-artifact", "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"],
+  ]);
+  for (const value of uses) {
+    assert.match(value, /^[a-z0-9_.-]+\/[a-z0-9_.-]+@[a-f0-9]{40}$/iu);
+    const [action, revision] = value.split("@");
+    assert.equal(revision, approvedActions.get(action));
+  }
+  for (const run of runSteps) {
+    assert.match(run, /^set -euo pipefail\n/u);
+    assert.doesNotMatch(run, /\$\{\{\s*inputs\./u);
+  }
+
+  const publishUpload = workflow.jobs.publish.steps.find(
+    (step) => typeof step.uses === "string" && step.uses.startsWith("actions/upload-artifact@"),
+  );
+  assert.match(
+    publishUpload.with.name,
+    /^hermes-product-image-lock-/u,
+  );
+  assert.equal(publishUpload.with["if-no-files-found"], "error");
+  assert.equal(publishUpload.with["retention-days"], 7);
+
+  const buildStep = workflow.jobs.build.steps.find(
+    (step) => typeof step.uses === "string" && step.uses.startsWith("docker/build-push-action@"),
+  );
+  assert.equal(buildStep.with.provenance, false);
+  assert.equal(buildStep.with.sbom, false);
+
+  for (const step of workflow.jobs.publish.steps) {
+    if (typeof step.run === "string" && step.run.includes("$SOURCE_COMMIT")) {
+      assert.equal(step.env.SOURCE_COMMIT, "${{ inputs.source_commit }}");
+    }
+  }
+
+  assert.doesNotMatch(workflowSource, /(?:pull_request_target|repository_dispatch|:latest\b)/u);
+  assert.match(workflowSource, /push-by-digest=true/u);
+  assert.match(workflowSource, /name-canonical=true/u);
+  assert.match(workflowSource, /git merge-base --is-ancestor/u);
+  assert.match(workflowSource, /\.visibility/u);
+  assert.match(workflowSource, /test "\$PACKAGE_VISIBILITY" = private/u);
+  assert.match(workflowSource, /--existing-manifest/u);
+  assert.match(workflowSource, /--published-manifest/u);
+  assert.match(workflowSource, /sha-\$\{SHORT_COMMIT\}/u);
 });

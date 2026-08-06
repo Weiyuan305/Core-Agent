@@ -1,0 +1,295 @@
+name: Publish Hermes Runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Canonical release version such as v0.1.0
+        required: true
+        type: string
+      source_commit:
+        description: Full lowercase commit SHA reachable from main
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/weiyuan305/core-agent-hermes-runtime
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out workflow source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.13.0
+          cache: npm
+
+      - name: Install pinned dependencies
+        run: |
+          set -euo pipefail
+          npm ci
+
+      - name: Validate release identity and main ancestry
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          node scripts/generate-hermes-product-lock.mjs \
+            --validate-release \
+            --version "$RELEASE_VERSION" \
+            --source-commit "$SOURCE_COMMIT"
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          git cat-file -e "${SOURCE_COMMIT}^{commit}"
+          test "$(git rev-parse "$SOURCE_COMMIT")" = "$SOURCE_COMMIT"
+          git merge-base --is-ancestor "$SOURCE_COMMIT" origin/main
+
+  build:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm64
+    steps:
+      - name: Check out exact release source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.source_commit }}
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.13.0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to private GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve exact platform build inputs
+        id: prepare
+        env:
+          TARGET_PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          case "$TARGET_PLATFORM" in
+            linux/amd64) PLATFORM_SLUG=linux-amd64 ;;
+            linux/arm64) PLATFORM_SLUG=linux-arm64 ;;
+            *) exit 1 ;;
+          esac
+          BASE_IMAGE="$(node scripts/resolve-hermes-image.mjs --platform "$TARGET_PLATFORM")"
+          printf 'platform_slug=%s\n' "$PLATFORM_SLUG" >> "$GITHUB_OUTPUT"
+          printf 'base_image=%s\n' "$BASE_IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push platform image by digest
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: infra/hermes/Dockerfile
+          platforms: ${{ matrix.platform }}
+          build-args: HERMES_BASE_IMAGE=${{ steps.prepare.outputs.base_image }}
+          labels: |
+            org.opencontainers.image.revision=${{ inputs.source_commit }}
+            org.opencontainers.image.version=${{ inputs.version }}
+          provenance: false
+          sbom: false
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Validate and save platform digest
+        env:
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+          PLATFORM_SLUG: ${{ steps.prepare.outputs.platform_slug }}
+        run: |
+          set -euo pipefail
+          [[ "$BUILD_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          mkdir -p release-digest
+          printf '%s\n' "$BUILD_DIGEST" > "release-digest/${PLATFORM_SLUG}.txt"
+
+      - name: Upload platform digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hermes-runtime-digest-${{ steps.prepare.outputs.platform_slug }}
+          path: release-digest/*.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out exact release source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.source_commit }}
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.13.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to private GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download exact platform digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: hermes-runtime-digest-*
+          path: release-digests
+          merge-multiple: true
+
+      - name: Validate digest artifacts and create candidate lock
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          read -r AMD64_DIGEST < release-digests/linux-amd64.txt
+          read -r ARM64_DIGEST < release-digests/linux-arm64.txt
+          [[ "$AMD64_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          [[ "$ARM64_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          test "$AMD64_DIGEST" != "$ARM64_DIGEST"
+          printf 'AMD64_DIGEST=%s\n' "$AMD64_DIGEST" >> "$GITHUB_ENV"
+          printf 'ARM64_DIGEST=%s\n' "$ARM64_DIGEST" >> "$GITHUB_ENV"
+          SHORT_COMMIT="${SOURCE_COMMIT:0:12}"
+          printf 'SHORT_COMMIT=%s\n' "$SHORT_COMMIT" >> "$GITHUB_ENV"
+          node scripts/generate-hermes-product-lock.mjs \
+            --repository "$IMAGE_NAME" \
+            --version "$RELEASE_VERSION" \
+            --source-commit "$SOURCE_COMMIT" \
+            --amd64-digest "$AMD64_DIGEST" \
+            --arm64-digest "$ARM64_DIGEST" \
+            --output "$RUNNER_TEMP/candidate-product-images.lock.json"
+
+      - name: Detect and verify immutable tag state
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          TAGS_FILE="$RUNNER_TEMP/package-tags.txt"
+          PACKAGE_VISIBILITY="$(gh api \
+            --jq '.visibility' \
+            '/users/Weiyuan305/packages/container/core-agent-hermes-runtime')"
+          test "$PACKAGE_VISIBILITY" = private
+          gh api --paginate \
+            --jq '.[].metadata.container.tags[]' \
+            '/users/Weiyuan305/packages/container/core-agent-hermes-runtime/versions?per_page=100' \
+            > "$TAGS_FILE"
+          VERSION_EXISTS=0
+          SHA_EXISTS=0
+          grep -Fxq "$RELEASE_VERSION" "$TAGS_FILE" && VERSION_EXISTS=1
+          grep -Fxq "sha-${SHORT_COMMIT}" "$TAGS_FILE" && SHA_EXISTS=1
+          if [[ "$VERSION_EXISTS" -ne "$SHA_EXISTS" ]]; then
+            echo 'RELEASE_PARTIAL_TAG_SET' >&2
+            exit 1
+          fi
+          printf 'VERSION_EXISTS=%s\n' "$VERSION_EXISTS" >> "$GITHUB_ENV"
+          if [[ "$VERSION_EXISTS" -eq 1 ]]; then
+            docker buildx imagetools inspect --raw \
+              "${IMAGE_NAME}:${RELEASE_VERSION}" > "$RUNNER_TEMP/existing-version-manifest.json"
+            docker buildx imagetools inspect --raw \
+              "${IMAGE_NAME}:sha-${SHORT_COMMIT}" > "$RUNNER_TEMP/existing-sha-manifest.json"
+            node scripts/generate-hermes-product-lock.mjs \
+              --repository "$IMAGE_NAME" \
+              --version "$RELEASE_VERSION" \
+              --source-commit "$SOURCE_COMMIT" \
+              --amd64-digest "$AMD64_DIGEST" \
+              --arm64-digest "$ARM64_DIGEST" \
+              --output "$RUNNER_TEMP/existing-version.lock.json" \
+              --existing-manifest "$RUNNER_TEMP/existing-version-manifest.json"
+            node scripts/generate-hermes-product-lock.mjs \
+              --repository "$IMAGE_NAME" \
+              --version "$RELEASE_VERSION" \
+              --source-commit "$SOURCE_COMMIT" \
+              --amd64-digest "$AMD64_DIGEST" \
+              --arm64-digest "$ARM64_DIGEST" \
+              --output "$RUNNER_TEMP/existing-sha.lock.json" \
+              --existing-manifest "$RUNNER_TEMP/existing-sha-manifest.json"
+          fi
+
+      - name: Publish both immutable tags for a new release
+        if: env.VERSION_EXISTS == '0'
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            --tag "${IMAGE_NAME}:${RELEASE_VERSION}" \
+            "${IMAGE_NAME}@${AMD64_DIGEST}" \
+            "${IMAGE_NAME}@${ARM64_DIGEST}"
+          docker buildx imagetools create \
+            --tag "${IMAGE_NAME}:sha-${SHORT_COMMIT}" \
+            "${IMAGE_NAME}@${AMD64_DIGEST}" \
+            "${IMAGE_NAME}@${ARM64_DIGEST}"
+
+      - name: Re-read both published manifests and finalize lock
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect --raw \
+            "${IMAGE_NAME}:${RELEASE_VERSION}" > "$RUNNER_TEMP/published-version-manifest.json"
+          docker buildx imagetools inspect --raw \
+            "${IMAGE_NAME}:sha-${SHORT_COMMIT}" > "$RUNNER_TEMP/published-sha-manifest.json"
+          node scripts/generate-hermes-product-lock.mjs \
+            --repository "$IMAGE_NAME" \
+            --version "$RELEASE_VERSION" \
+            --source-commit "$SOURCE_COMMIT" \
+            --amd64-digest "$AMD64_DIGEST" \
+            --arm64-digest "$ARM64_DIGEST" \
+            --output product-images.lock.json \
+            --published-manifest "$RUNNER_TEMP/published-version-manifest.json"
+          node scripts/generate-hermes-product-lock.mjs \
+            --repository "$IMAGE_NAME" \
+            --version "$RELEASE_VERSION" \
+            --source-commit "$SOURCE_COMMIT" \
+            --amd64-digest "$AMD64_DIGEST" \
+            --arm64-digest "$ARM64_DIGEST" \
+            --output "$RUNNER_TEMP/published-sha.lock.json" \
+            --published-manifest "$RUNNER_TEMP/published-sha-manifest.json"
+          cmp -s product-images.lock.json "$RUNNER_TEMP/candidate-product-images.lock.json"
+          cmp -s product-images.lock.json "$RUNNER_TEMP/published-sha.lock.json"
+
+      - name: Upload reviewed lock candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hermes-product-image-lock-${{ inputs.version }}
+          path: product-images.lock.json
+          if-no-files-found: error
+          retention-days: 7
