@@ -99,6 +99,30 @@ function canonicalJson(value: unknown): string {
   return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
 }
 
+async function assertCanonicalPendingJournal(
+  journalRoot: string,
+  request: SupervisorRequestV1,
+  stage: OperationJournalStage,
+): Promise<void> {
+  const digest = createHash("sha256").update(request.operation_id).digest("hex");
+  const path = join(journalRoot, `${digest}.json`);
+  const names = await readdir(journalRoot);
+  assert.deepEqual(names.filter((name) => name.endsWith(".json")), [`${digest}.json`]);
+  assert.equal((await lstat(path)).mode & 0o777, 0o600);
+  const payload = await readFile(path, "utf8");
+  const record = JSON.parse(payload) as Record<string, unknown>;
+  assert.deepEqual(record, {
+    operation_id: request.operation_id,
+    protocol_version: 1,
+    request_hash: request.request_hash,
+    stage,
+    state: "pending",
+  });
+  assert.equal(payload, `${canonicalJson(record)}\n`);
+  assert.equal("completed_at" in record, false);
+  assert.equal("response" in record, false);
+}
+
 function manifestFor(request = signed()): unknown {
   const profiles = [...request.runtime.profiles]
     .sort((left, right) => left.profile_id.localeCompare(right.profile_id))
@@ -895,7 +919,7 @@ test("an uncertain timed-out helper cleanup never becomes a durable terminal jou
     ]);
     assert.equal(boundary, "still-pending");
     assert.equal(settled, false);
-    assert.equal((await readdir(journalDirectory)).some((name) => name.endsWith(".json")), false);
+    await assertCanonicalPendingJournal(journalDirectory, request, "reserved");
     releaseWait();
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(docker.helperLateMutations, 1);
@@ -930,7 +954,7 @@ test("an uncertain helper absence inspection cannot produce a durable terminal r
     ]);
     assert.equal(boundary, "still-pending");
     assert.equal(settled, false);
-    assert.equal((await readdir(journalDirectory)).some((name) => name.endsWith(".json")), false);
+    await assertCanonicalPendingJournal(journalDirectory, request, "reserved");
     releaseWait();
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(docker.helperLateMutations, 0);
@@ -945,15 +969,16 @@ test("uncertain gateway cleanup remains non-terminal until restart reconciliatio
   const { adapter } = buildAdapter(docker, new FakeSecretStore(), { reconciliationTimeoutMs: 10 });
   const journalDirectory = join(temporaryRoot, "journal-gateway-cleanup");
   const journal = new OperationJournal({ directory: journalDirectory });
+  const request = signed();
   let settled = false;
-  const pending = journal.run(signed(), (reserved) => adapter.execute(reserved)).finally(() => { settled = true; });
+  const pending = journal.run(request, (reserved) => adapter.execute(reserved)).finally(() => { settled = true; });
   const boundary = await Promise.race([
     pending,
     new Promise<"still-pending">((resolve) => setTimeout(() => resolve("still-pending"), 50)),
   ]);
   assert.equal(boundary, "still-pending");
   assert.equal(settled, false);
-  assert.equal((await readdir(journalDirectory)).some((name) => name.endsWith(".json")), false);
+  await assertCanonicalPendingJournal(journalDirectory, request, "reserved");
 });
 
 test("restart reconciles exact helper residues and rejects drift before removal", async () => {
@@ -1094,7 +1119,7 @@ test("an applied gateway start followed by a response-less reset stays non-termi
     new Promise<typeof stillPending>((resolve) => setTimeout(() => resolve(stillPending), 50)),
   ]), stillPending);
   assert.equal(firstSettled, false);
-  assert.equal((await readdir(journalDirectory)).some((name) => name.endsWith(".json")), false);
+  await assertCanonicalPendingJournal(journalDirectory, request, "reserved");
   const gatewayName = deriveRuntimeNames(request.runtime).container;
   assert.equal(docker.containers.get(gatewayName)?.running, true);
   assert.equal(docker.mutations.filter((mutation) => mutation === `start:${gatewayName}`).length, 1);

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmod, lstat, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
@@ -31,6 +32,46 @@ function request(operationId: string): SupervisorRequestV1 {
     generation: 1,
   };
   return { ...data, request_hash: canonicalSupervisorRequestHash(data) };
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
+}
+
+async function assertPendingJournal(journalRoot: string, value: SupervisorRequestV1): Promise<void> {
+  const digest = createHash("sha256").update(value.operation_id).digest("hex");
+  const path = join(journalRoot, `${digest}.json`);
+  assert.equal((await lstat(path)).mode & 0o777, 0o600);
+  const record = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+  assert.deepEqual(record, {
+    operation_id: value.operation_id,
+    protocol_version: 1,
+    request_hash: value.request_hash,
+    stage: "reserved",
+    state: "pending",
+  });
+  assert.equal("completed_at" in record, false);
+  assert.equal("response" in record, false);
+  assert.equal(await readFile(path, "utf8"), `${canonicalJson(record)}\n`);
+}
+
+async function assertTerminalJournal(journalRoot: string, value: SupervisorRequestV1): Promise<void> {
+  const digest = createHash("sha256").update(value.operation_id).digest("hex");
+  const path = join(journalRoot, `${digest}.json`);
+  assert.equal((await lstat(path)).mode & 0o777, 0o600);
+  const text = await readFile(path, "utf8");
+  const record = JSON.parse(text) as Record<string, unknown>;
+  assert.equal(record.operation_id, value.operation_id);
+  assert.equal(record.request_hash, value.request_hash);
+  assert.equal(record.protocol_version, 1);
+  assert.equal(typeof record.completed_at, "string");
+  assert.deepEqual(record.response, accepted(value.operation_id));
+  assert.equal("state" in record, false);
+  assert.equal("stage" in record, false);
+  assert.equal(text, `${canonicalJson(record)}\n`);
 }
 
 function accepted(operationId: string): SupervisorResponseV1 {
@@ -422,8 +463,9 @@ test("Unix service caps execution at four and waits for abort settlement before 
     assert.equal(mutations, 0);
     assert.equal(
       (await readdir(join(temporaryRoot, "journal"))).filter((name) => name.endsWith(".json")).length,
-      journalRecordsBefore,
+      journalRecordsBefore + 1,
     );
+    await assertPendingJournal(join(temporaryRoot, "journal"), request("operation_deadline"));
 
     let replaySettled = false;
     const replay = client.execute(request("operation_deadline")).finally(() => { replaySettled = true; });
@@ -440,6 +482,7 @@ test("Unix service caps execution at four and waits for abort settlement before 
       (await readdir(join(temporaryRoot, "journal"))).filter((name) => name.endsWith(".json")).length,
       journalRecordsBefore + 1,
     );
+    await assertTerminalJournal(join(temporaryRoot, "journal"), request("operation_deadline"));
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(mutations, 1);
   } finally {
@@ -478,7 +521,7 @@ test("an unsettled cancellation returns a bounded transient timeout without rele
     if (response.outcome === "failed") assert.equal(response.code, "DEPENDENCY_TIMEOUT");
     assert.equal(dispatches, 1);
     assert.equal(mutations, 0);
-    assert.equal((await readdir(join(temporaryRoot, "journal"))).some((name) => name.endsWith(".json")), false);
+    await assertPendingJournal(join(temporaryRoot, "journal"), request("operation_unsettled_deadline"));
 
     let replaySettled = false;
     const replay = client.execute(request("operation_unsettled_deadline")).finally(() => { replaySettled = true; });
@@ -490,7 +533,7 @@ test("an unsettled cancellation returns a bounded transient timeout without rele
     const replayed = await replay;
     assert.equal(replayed.outcome, "accepted");
     assert.equal(mutations, 1);
-    assert.equal((await readdir(join(temporaryRoot, "journal"))).some((name) => name.endsWith(".json")), true);
+    await assertTerminalJournal(join(temporaryRoot, "journal"), request("operation_unsettled_deadline"));
   } finally {
     release();
     await server.close();
