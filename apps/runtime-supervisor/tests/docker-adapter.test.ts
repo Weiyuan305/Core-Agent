@@ -318,7 +318,10 @@ class FakeContainer {
       throw new Error("gateway start failed with untrusted details");
     }
     if (this.options?.Labels?.["core-agent.resource"] === "runtime" && this.docker.gatewayStartError !== undefined) {
-      if (this.docker.applyGatewayStartBeforeError) this.running = true;
+      if (this.docker.applyGatewayStartBeforeError) {
+        this.running = true;
+        this.docker.markGatewayStartApplied?.();
+      }
       throw this.docker.gatewayStartError;
     }
     this.running = true;
@@ -449,6 +452,7 @@ class FakeDocker {
   public failGatewayStart = false;
   public gatewayStartError: unknown;
   public applyGatewayStartBeforeError = false;
+  public markGatewayStartApplied: (() => void) | undefined;
   public readonly responseLessMutationErrors = new Map<"start" | "stop" | "restart" | "remove", unknown>();
   public mergeImageConfiguration = true;
   public gatewayInspections = 0;
@@ -1135,6 +1139,9 @@ test("an aborted mutating Docker request remains unsettled when the daemon can s
 
 test("an applied gateway start followed by a response-less reset stays non-terminal and restart adopts it", async () => {
   const docker = new FakeDocker();
+  let markGatewayStartApplied!: () => void;
+  const gatewayStartApplied = new Promise<void>((resolve) => { markGatewayStartApplied = resolve; });
+  docker.markGatewayStartApplied = markGatewayStartApplied;
   docker.gatewayStartError = Object.assign(new Error("synthetic response-less transport reset"), {
     code: "ECONNRESET",
   });
@@ -1149,9 +1156,10 @@ test("an applied gateway start followed by a response-less reset stays non-termi
   });
   const stillPending = Symbol("still pending");
 
+  await gatewayStartApplied;
   assert.equal(await Promise.race([
     first,
-    new Promise<typeof stillPending>((resolve) => setTimeout(() => resolve(stillPending), 50)),
+    new Promise<typeof stillPending>((resolve) => setTimeout(() => resolve(stillPending), 20)),
   ]), stillPending);
   assert.equal(firstSettled, false);
   await assertCanonicalPendingJournal(journalDirectory, request, "reserved");
