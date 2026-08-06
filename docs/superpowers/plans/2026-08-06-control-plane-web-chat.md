@@ -6,7 +6,7 @@
 
 **Architecture:** Add one `@core-agent/control-plane-web` workspace containing a React/Vite client and a loopback-only Fastify Client Gateway. The Gateway enters `runManagedRuntimeSession()`, maps browser-safe Conversation identities to exact internal identities in memory, validates same-origin cookie/CSRF state, and translates the existing create-Run/read-events operations into a bounded client SSE protocol. UI components depend only on a typed `ClientGatewayPort`, so later Swift clients can implement the same product flow without reusing Web UI code.
 
-**Tech Stack:** Node.js 22.13+, TypeScript 7.0.2, React 19.2.8, React DOM 19.2.8, Vite 8.2.0, Fastify 5.11.2, Motion 13.0.0, Vitest 4.1.10, Testing Library 16.3.2, Playwright 1.62.1, CSS custom properties.
+**Tech Stack:** Node.js 22.13+, TypeScript 7.0.2, React 19.2.8, React DOM 19.2.8, Vite 8.2.0, Fastify 5.11.2, Motion 13.0.0, Vitest 4.1.10, Testing Library 16.3.2, jsdom 29.0.1, Playwright 1.62.1, CSS custom properties.
 
 ## Global Constraints
 
@@ -122,7 +122,7 @@ Expected: FAIL because the workspace/protocol module does not exist.
 Pin these package versions: React/React DOM `19.2.8`, Vite `8.2.0`, React plugin
 `6.0.5`, Fastify `5.11.2`, `@fastify/static` `10.1.2`, `@fastify/cookie`
 `11.1.2`, Motion `13.0.0`, Vitest `4.1.10`, Testing Library `16.3.2`, user-event
-`14.6.3`, jsdom `30.0.1`, Playwright `1.62.1`, axe-core `4.13.0`, React types
+`14.6.3`, jsdom `29.0.1`, Playwright `1.62.1`, axe-core `4.13.0`, React types
 `19.2.18`, and React DOM types `19.2.4`.
 
 ```ts
