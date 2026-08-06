@@ -230,5 +230,14 @@ context before any daemon-backed command, and only then pulls all three selected
 digests. The product-image inspect command uses a quoted variable so its
 illustrative digest cannot be parsed as shell redirection.
 
+The final combined check exposed a runner-only timing assumption in the
+daemon-uncertain gateway test: a fixed 50 ms wait could finish before FakeDocker
+reached its applied start under concurrent file load. The test now waits on an
+explicit applied-start barrier before proving the journal Promise remains
+pending. Because Supervisor suites exercise real Unix sockets, SQLite file
+locks, and bounded cancellation timers, their package gate also fixes
+`--test-concurrency=1`; the individual server and adapter files passed 13/13
+and 44/44 before this serialization was adopted.
+
 At `3ffdbd3`, Tasks 25-28 were ready for the required repeated whole-branch
 architecture, PostgreSQL concurrency/recovery, and release-operability reviews.
