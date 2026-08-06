@@ -31,6 +31,7 @@ test("completes the consultant flow without overflow or accessibility violations
   await expect(inspector.getByRole("button", { name: "重新启动服务" })).toBeEnabled();
   await inspector.getByRole("button", { name: "关闭学生信息" }).click();
   await expect(inspectorTrigger).toBeFocused();
+  await expect(inspector).toHaveCount(0);
 
   if (testInfo.project.name === "iphone") {
     await page.getByRole("button", { name: "返回学生与对话" }).click();
