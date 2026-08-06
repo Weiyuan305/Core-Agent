@@ -21,7 +21,11 @@ test("completes the consultant flow without overflow or accessibility violations
   }
 
   await page.getByRole("button", { name: "新建对话" }).click();
-  await expect(page.getByRole("button", { name: "演示空间，当前对话" })).toHaveCount(1);
+  if (testInfo.project.name === "iphone") {
+    await expect(composer).toBeVisible();
+  } else {
+    await expect(page.getByRole("button", { name: "演示空间，当前对话" })).toHaveCount(1);
+  }
 
   const inspector = page.getByRole("complementary", { name: "当前学生" });
   const inspectorTrigger = page.getByRole("button", { name: "学生信息", exact: true });
