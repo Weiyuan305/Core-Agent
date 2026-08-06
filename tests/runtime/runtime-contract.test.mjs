@@ -82,6 +82,40 @@ test("REAL_HERMES smoke is explicit and rejects CLI and environment extras", () 
   assert.throws(() => parseSmokeArguments(["--tenant", "anything"]), /SMOKE_ARGUMENT_INVALID/);
 });
 
+test("REAL_HERMES rejects ambient Docker endpoint overrides before any Docker call", async () => {
+  for (const dockerHost of [
+    "ssh://operator@example.invalid/var/run/docker.sock",
+    "tcp://127.0.0.1:2375",
+  ]) {
+    const calls = [];
+    await assert.rejects(
+      runControlPlaneSmoke({
+        environment: { ...smokeEnvironment, DOCKER_HOST: dockerHost },
+        argv: [],
+        dependencies: {
+          validatePrerequisites: async () => calls.push("docker-context-inspect-returned-unix"),
+        },
+      }),
+      (error) => error?.code === "SMOKE_DOCKER_HOST_UNSUPPORTED"
+        && error.message === "SMOKE_DOCKER_HOST_UNSUPPORTED"
+        && !error.message.includes(dockerHost),
+    );
+    assert.deepEqual(calls, [], "DOCKER_HOST must fail before even a Unix context inspection or any Docker call");
+  }
+});
+
+test("REAL_HERMES child environment never propagates ambient DOCKER_HOST", () => {
+  const previous = Object.getOwnPropertyDescriptor(process.env, "DOCKER_HOST");
+  process.env.DOCKER_HOST = "ssh://operator@example.invalid/var/run/docker.sock";
+  try {
+    const childEnvironment = createSmokeChildEnvironment(smokeEnvironment);
+    assert.equal(Object.hasOwn(childEnvironment, "DOCKER_HOST"), false);
+  } finally {
+    if (previous === undefined) delete process.env.DOCKER_HOST;
+    else Object.defineProperty(process.env, "DOCKER_HOST", previous);
+  }
+});
+
 test("REAL_HERMES smoke accepts only fixed synthetic identifiers", () => {
   assert.doesNotThrow(() => validateSyntheticIdentifiers({
     tenantId: "synthetic-runtime-v1-tenant",
