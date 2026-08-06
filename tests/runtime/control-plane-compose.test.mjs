@@ -551,6 +551,11 @@ test("runtime example environment contains paths and generated references only",
 });
 
 test("runtime operating evidence distinguishes socket platforms and keeps runtime acceptance pending", async () => {
+  const readme = await source("README.md");
+  assert.match(readme, /Node\.js >=22\.13\.0/u);
+  assert.match(readme, /Docker Engine\/CLI[\s\S]*Compose v2[\s\S]*Buildx/u);
+  assert.doesNotMatch(readme, /infra\/hermes\/compose\.dev\.yaml|CORE_AGENT_API_SERVER_KEY|npm run hermes:bootstrap/u);
+
   const runbook = await source("docs/operations/runtime-v1-local-smoke.md");
   assert.match(runbook, /^### Linux Docker Engine$/mu);
   assert.match(runbook, /^### Docker Desktop for macOS$/mu);
@@ -561,6 +566,17 @@ test("runtime operating evidence distinguishes socket platforms and keeps runtim
   assert.match(runbook, /Docker IPAM overlap/iu);
   assert.match(runbook, /host, VPN, and VM route/iu);
   assert.doesNotMatch(runbook, /fails closed on a host CIDR collision/iu);
+  assert.match(runbook, /docker buildx version/u);
+  assert.match(runbook, /docker pull "\$CORE_AGENT_NODE_IMAGE"/u);
+  assert.match(runbook, /docker pull "\$CORE_AGENT_POSTGRES_IMAGE"/u);
+  assert(
+    runbook.indexOf("npm run runtime:images") < runbook.indexOf("### Docker Desktop for macOS"),
+    "base-image lock resolution must precede the Docker Desktop image-backed socket probe",
+  );
+  assert(
+    runbook.indexOf('docker pull "$CORE_AGENT_NODE_IMAGE"') < runbook.indexOf('"$CORE_AGENT_NODE_IMAGE" -c'),
+    "the selected Node digest must be installed before the Docker Desktop socket probe",
+  );
 
   const boundary = await source("docs/operations/runtime-v1-production-boundary.md");
   assert.match(boundary, /development convenience, not a role-isolation security boundary/iu);
