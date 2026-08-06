@@ -189,5 +189,14 @@ production boundary still described the removed stale-token `.lock` protocol.
 The gate now requires exact `node-version: 22.13.0`; the runbook describes the
 permanent SQLite guard and the exact operation-bound pending JSON fields.
 
+The same release review found that the documented `runtime:network`
+prerequisite could create networks through an ambient `DOCKER_HOST` before the
+real-smoke preflight rejected that override. Network preparation now rejects
+any own `DOCKER_HOST` property, including an empty value or accessor, before
+its first Docker call. It then performs only a read-only context inspection and
+requires a canonical local `unix://` endpoint before any network subcommand;
+its child environment is constructed only from the validated environment. The
+local-smoke guide makes the selected-local-context boundary explicit.
+
 At `3ffdbd3`, Tasks 25-28 were ready for the required repeated whole-branch
 architecture, PostgreSQL concurrency/recovery, and release-operability reviews.

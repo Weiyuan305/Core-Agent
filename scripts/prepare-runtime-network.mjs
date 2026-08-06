@@ -4,6 +4,8 @@ import { execFile } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
+import { validateLocalDockerContextEndpoint } from "./preflight-runtime-docker-socket.mjs";
+
 const execFileAsync = promisify(execFile);
 const networkContracts = Object.freeze([
   Object.freeze({ name: "core-agent-backplane", resource: "backplane", internal: true }),
@@ -21,15 +23,40 @@ function invalidNetwork() {
   return new Error("runtime network is invalid");
 }
 
+function unsafeDockerEnvironment() {
+  return new Error("runtime network preparation failed");
+}
+
+function assertLocalDockerEnvironment(environment) {
+  if (typeof environment !== "object" || environment === null || Array.isArray(environment)) {
+    throw unsafeDockerEnvironment();
+  }
+  if (Object.getOwnPropertyDescriptor(environment, "DOCKER_HOST") !== undefined) {
+    throw unsafeDockerEnvironment();
+  }
+}
+
+async function assertSelectedLocalDockerContext(runDocker) {
+  try {
+    const raw = await runDocker([
+      "context", "inspect", "--format", "{{json .Endpoints.docker.Host}}",
+    ]);
+    validateLocalDockerContextEndpoint(JSON.parse(raw));
+  } catch {
+    throw unsafeDockerEnvironment();
+  }
+}
+
 function exactRecord(value, expected) {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     && Object.keys(value).length === Object.keys(expected).length
     && Object.entries(expected).every(([key, item]) => value[key] === item);
 }
 
-async function docker(args) {
+async function docker(args, environment) {
   const { stdout } = await execFileAsync("docker", args, {
     encoding: "utf8",
+    env: { ...environment },
     maxBuffer: 1024 * 1024,
     timeout: 15_000,
   });
@@ -70,14 +97,17 @@ function validateInspection(raw, contract) {
   )) throw invalidNetwork();
 }
 
-export async function prepareRuntimeNetwork({ runDocker = docker } = {}) {
+export async function prepareRuntimeNetwork({ environment = process.env, runDocker } = {}) {
+  assertLocalDockerEnvironment(environment);
+  const invokeDocker = runDocker ?? ((args) => docker(args, environment));
+  await assertSelectedLocalDockerContext(invokeDocker);
   for (const contract of networkContracts) {
-    const listed = (await runDocker([
+    const listed = (await invokeDocker([
       "network", "ls", "--filter", `name=^${contract.name}$`, "--format", "{{.Name}}",
     ])).trim();
     if (listed !== "" && listed !== contract.name) throw invalidNetwork();
     if (listed === "") {
-      await runDocker([
+      await invokeDocker([
         "network", "create", "--driver", "bridge",
         ...(contract.internal ? ["--internal"] : []),
         ...(contract.resource === "egress" ? [
@@ -91,7 +121,7 @@ export async function prepareRuntimeNetwork({ runDocker = docker } = {}) {
         contract.name,
       ]);
     }
-    validateInspection(await runDocker([
+    validateInspection(await invokeDocker([
       "network", "inspect", "--format", "{{json .}}", contract.name,
     ]), contract);
   }

@@ -168,6 +168,12 @@ configuration drift. It does not portably inspect every host, VPN, and VM route.
 Before creation, the operator must inspect host, VPN, and VM route tables and
 stop if `172.31.240.0/24` is present or overlaps; on Colima, include
 `colima ssh --profile <selected-profile> -- ip route` in that review.
+Run `runtime:network` only against the explicitly selected local Docker context.
+`DOCKER_HOST` must be absent, including an explicitly empty value; the command
+checks this before every Docker operation, then requires the selected context
+endpoint to be a canonical local `unix://` socket before it issues a network
+subcommand. It fails closed instead of creating or inspecting a network through
+an ambient endpoint or context override.
 `runtime:paths` enforces all five canonical path, owner, mode,
 link-count, and non-overlap rules and creates private state-root `staging` and
 `ingress` children. On macOS/Colima, keep state below a canonical Docker-shared

@@ -795,10 +795,12 @@ test("runtime network preparation owns exact private backplane and provider-capa
   const existingCalls = [];
   await network.prepareRuntimeNetwork({ runDocker: async (args) => {
     existingCalls.push(args);
+    if (args[0] === "context") return '"unix:///var/run/docker.sock"\n';
     if (args[1] === "ls") return `${args[3].includes("egress") ? "core-agent-egress" : "core-agent-backplane"}\n`;
     return `${args.at(-1) === "core-agent-egress" ? egressInspection : backplaneInspection}\n`;
   } });
   assert.deepEqual(existingCalls, [
+    ["context", "inspect", "--format", "{{json .Endpoints.docker.Host}}"],
     ["network", "ls", "--filter", "name=^core-agent-backplane$", "--format", "{{.Name}}"],
     ["network", "inspect", "--format", "{{json .}}", "core-agent-backplane"],
     ["network", "ls", "--filter", "name=^core-agent-egress$", "--format", "{{.Name}}"],
@@ -807,18 +809,19 @@ test("runtime network preparation owns exact private backplane and provider-capa
   const createCalls = [];
   await network.prepareRuntimeNetwork({ runDocker: async (args) => {
     createCalls.push(args);
+    if (args[0] === "context") return '"unix:///var/run/docker.sock"\n';
     if (args[1] === "ls") return "";
     if (args[1] === "create") return `${args.at(-1)}\n`;
     return args.at(-1) === "core-agent-egress" ? egressInspection : backplaneInspection;
   } });
-  assert.deepEqual(createCalls[1], [
+  assert.deepEqual(createCalls[2], [
     "network", "create", "--driver", "bridge", "--internal",
     "--label", "core-agent.managed=runtime-v1",
     "--label", "core-agent.resource=backplane",
     "--label", "core-agent.network=core-agent-backplane",
     "core-agent-backplane",
   ]);
-  assert.deepEqual(createCalls[4], [
+  assert.deepEqual(createCalls[5], [
     "network", "create", "--driver", "bridge",
     "--subnet", "172.31.240.0/24",
     "--gateway", "172.31.240.1",
@@ -831,6 +834,7 @@ test("runtime network preparation owns exact private backplane and provider-capa
   const drifted = JSON.stringify({ ...JSON.parse(egressInspection), Internal: true });
   await assert.rejects(
     network.prepareRuntimeNetwork({ runDocker: async (args) => {
+      if (args[0] === "context") return '"unix:///var/run/docker.sock"\n';
       if (args[1] === "ls") return `${args[3].includes("egress") ? "core-agent-egress" : "core-agent-backplane"}\n`;
       return args.at(-1) === "core-agent-egress" ? drifted : backplaneInspection;
     } }),
@@ -845,6 +849,7 @@ test("runtime network preparation owns exact private backplane and provider-capa
   ]) {
     const invalidEgress = JSON.stringify({ ...JSON.parse(egressInspection), ...changed });
     await assert.rejects(network.prepareRuntimeNetwork({ runDocker: async (args) => {
+      if (args[0] === "context") return '"unix:///var/run/docker.sock"\n';
       if (args[1] === "ls") return `${args[3].includes("egress") ? "core-agent-egress" : "core-agent-backplane"}\n`;
       return args.at(-1) === "core-agent-egress" ? invalidEgress : backplaneInspection;
     } }), /runtime network is invalid/u);
