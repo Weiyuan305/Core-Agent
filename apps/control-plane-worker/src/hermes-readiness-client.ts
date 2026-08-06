@@ -23,7 +23,10 @@ export class HttpHermesReadinessClient implements HermesReadinessClient {
     } catch {
       throw new HermesReadinessError("Hermes readiness dependency is unavailable", true);
     }
-    if (!response.ok) throw new HermesReadinessError("Hermes readiness request was rejected", response.status >= 500 || response.status === 429);
+    if (!response.ok) throw new HermesReadinessError(
+      `Hermes readiness request was rejected (HTTP ${response.status})`,
+      response.status >= 500 || response.status === 429,
+    );
     if (!(response.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) throw new HermesReadinessError("Hermes readiness response type is invalid", false);
     const text = await response.text();
     if (Buffer.byteLength(text, "utf8") > 65_536) throw new HermesReadinessError("Hermes readiness response is too large", false);

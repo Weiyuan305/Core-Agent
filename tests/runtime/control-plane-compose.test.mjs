@@ -70,16 +70,21 @@ function parseDockerfile(text) {
   return instructions;
 }
 
-test("only API publishes a loopback port and only Supervisor mounts Docker", async () => {
+test("only the fixed API ingress publishes a loopback port and only Supervisor mounts Docker", async () => {
   const config = await yaml("infra/runtime/compose.dev.yaml");
   assert.deepEqual(Object.keys(config.services).sort(), [
-    "api", "migrate", "postgres", "supervisor", "supervisor-socket-preflight", "worker",
+    "api", "api-ingress", "migrate", "postgres", "supervisor", "supervisor-socket-preflight",
+    "supervisor-socket-volume-init", "worker",
   ]);
-  assert.deepEqual(config.services.api.ports, ["127.0.0.1:8787:8787"]);
-  for (const name of ["postgres", "migrate", "worker", "supervisor", "supervisor-socket-preflight"]) {
+  assert.equal(config.services.api.ports, undefined);
+  assert.deepEqual(config.services["api-ingress"].ports, ["127.0.0.1:8787:8787"]);
+  for (const name of [
+    "postgres", "migrate", "api", "worker", "supervisor", "supervisor-socket-preflight",
+    "supervisor-socket-volume-init",
+  ]) {
     assert.equal(config.services[name].ports, undefined);
   }
-  for (const name of ["postgres", "migrate", "api", "worker"]) {
+  for (const name of ["postgres", "migrate", "api", "api-ingress", "worker"]) {
     assert(!JSON.stringify(config.services[name]).includes("docker.sock"));
   }
   for (const service of Object.values(config.services)) {
@@ -112,13 +117,16 @@ test("API and Supervisor share one caller-supplied reviewed Hermes product lock"
 test("service mounts and networks preserve each process boundary", async () => {
   const config = await yaml("infra/runtime/compose.dev.yaml");
   const { api, migrate, postgres, supervisor, worker } = config.services;
+  const ingress = config.services["api-ingress"];
 
   assert.deepEqual(networkNames(postgres), ["core-agent-control"]);
   assert.deepEqual(networkNames(migrate), ["core-agent-control"]);
   assert.deepEqual(networkNames(api), ["core-agent-control"]);
+  assert.deepEqual(networkNames(ingress), ["core-agent-control", "core-agent-host-ingress"]);
   assert.deepEqual(networkNames(worker), ["core-agent-backplane", "core-agent-control"]);
   assert.deepEqual(networkNames(supervisor), []);
   assert.deepEqual(config.networks["core-agent-control"], { driver: "bridge", internal: true });
+  assert.deepEqual(config.networks["core-agent-host-ingress"], { driver: "bridge", internal: false });
   assert.deepEqual(config.networks["core-agent-backplane"], {
     external: true,
     name: "core-agent-backplane",
@@ -133,6 +141,8 @@ test("service mounts and networks preserve each process boundary", async () => {
     "/app/infra/runtime/providers.json",
   ]);
   assert.deepEqual(secretTargets(api), ["/run/secrets/bootstrap_key"]);
+  assert.deepEqual(volumeTargets(ingress), []);
+  assert.deepEqual(secretTargets(ingress), []);
   assert.deepEqual(api.secrets, [{
     source: "bootstrap-key",
     target: "bootstrap_key",
@@ -147,6 +157,7 @@ test("service mounts and networks preserve each process boundary", async () => {
   ]);
   assert.deepEqual(secretTargets(worker), []);
   assert.deepEqual(volumeTargets(supervisor).sort(), [
+    "/app/infra/runtime/providers.json",
     "/run/core-agent/config/hermes-images.lock.json",
     "/run/core-agent/ingress",
     "/run/core-agent/secrets/ingress",
@@ -159,19 +170,22 @@ test("service mounts and networks preserve each process boundary", async () => {
   assert.deepEqual(secretTargets(supervisor), []);
   assert.equal(volumeAt(api, "/app/infra/runtime/providers.json").read_only, true);
   assert.equal(volumeAt(worker, "/app/infra/runtime/providers.json").read_only, true);
+  assert.equal(volumeAt(supervisor, "/app/infra/runtime/providers.json").read_only, true);
   assert.equal(volumeAt(worker, "/run/core-agent/ingress").read_only, true);
   assert.equal(volumeAt(worker, "/run/core-agent/supervisor").read_only, true);
   assert.equal(
     volumeAt(worker, "/run/core-agent/supervisor").source,
-    "${CORE_AGENT_SUPERVISOR_SOCKET_ROOT:?set CORE_AGENT_SUPERVISOR_SOCKET_ROOT}",
+    "supervisor-socket",
   );
+  assert.equal(volumeAt(worker, "/run/core-agent/supervisor").type, "volume");
   assert.equal(volumeAt(supervisor, "/run/core-agent/secrets/provider").read_only, true);
   assert.equal(volumeAt(supervisor, "/run/core-agent/secrets/ingress").read_only, true);
   assert.equal(volumeAt(supervisor, "/run/core-agent/supervisor").read_only, undefined);
   assert.equal(
     volumeAt(supervisor, "/run/core-agent/supervisor").source,
-    "${CORE_AGENT_SUPERVISOR_SOCKET_ROOT:?set CORE_AGENT_SUPERVISOR_SOCKET_ROOT}",
+    "supervisor-socket",
   );
+  assert.equal(volumeAt(supervisor, "/run/core-agent/supervisor").type, "volume");
   assert.equal(volumeAt(supervisor, "/var/lib/core-agent/supervisor").read_only, undefined);
   assert.equal(
     volumeAt(supervisor, "/var/lib/core-agent/supervisor").source,
@@ -186,7 +200,7 @@ test("service mounts and networks preserve each process boundary", async () => {
   assert(!volumeTargets(api).some((target) => /secrets\/provider|ingress|docker|supervisor/u.test(target)));
   assert(!volumeTargets(worker).some((target) => /secrets\/provider|docker/u.test(target)));
   assert(![...volumeTargets(supervisor), ...secretTargets(supervisor)].some((target) => /bootstrap/u.test(target)));
-  assert.deepEqual(Object.keys(config.volumes), ["postgres-data"]);
+  assert.deepEqual(Object.keys(config.volumes).sort(), ["postgres-data", "supervisor-socket"]);
   assert.deepEqual(Object.keys(config.secrets), ["bootstrap-key"]);
   assert.deepEqual(config.secrets["bootstrap-key"], {
     file: "${CORE_AGENT_BOOTSTRAP_KEY_FILE:?set CORE_AGENT_BOOTSTRAP_KEY_FILE}",
@@ -200,7 +214,7 @@ test("application services use least privilege and bounded resources", async () 
   assert.equal(config.services.migrate.read_only, true);
   assert.deepEqual(config.services.migrate.cap_drop, ["ALL"]);
   assert.deepEqual(config.services.migrate.security_opt, ["no-new-privileges:true"]);
-  for (const name of ["api", "worker", "supervisor"]) {
+  for (const name of ["api", "api-ingress", "worker", "supervisor"]) {
     const service = config.services[name];
     assert.notEqual(service.user, "0:0");
     assert.equal(service.read_only, true);
@@ -214,12 +228,46 @@ test("application services use least privilege and bounded resources", async () 
     assert(service.tmpfs !== undefined);
   }
   assert.equal(config.services.api.user, "${CORE_AGENT_RUNTIME_UID:-12000}:${CORE_AGENT_RUNTIME_GID:-12000}");
+  assert.equal(config.services["api-ingress"].user, "${CORE_AGENT_RUNTIME_UID:-12000}:${CORE_AGENT_RUNTIME_GID:-12000}");
   assert.equal(config.services.worker.user, "${CORE_AGENT_RUNTIME_UID:-12002}:${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}");
   assert.equal(config.services.supervisor.user, "${CORE_AGENT_RUNTIME_UID:-12002}:${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}");
   assert.deepEqual(config.services.api.group_add, undefined);
+  assert.deepEqual(config.services["api-ingress"].group_add, undefined);
   assert.deepEqual(config.services.worker.group_add, ["${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}"]);
   assert.deepEqual(config.services.supervisor.group_add, ["${CORE_AGENT_DOCKER_GID:?set CORE_AGENT_DOCKER_GID}"]);
   assert.equal(config.services.supervisor.tmpfs.some((entry) => entry.startsWith("/run/core-agent/staging:")), false);
+});
+
+test("Supervisor socket volume is initialized by one bounded no-network service", async () => {
+  const config = await yaml("infra/runtime/compose.dev.yaml");
+  const initializer = config.services["supervisor-socket-volume-init"];
+  assert(initializer, "Supervisor socket volume initializer must exist");
+  assert.equal(initializer.image, config.services.supervisor.image);
+  assert.deepEqual(initializer.build, config.services.supervisor.build);
+  assert.equal(initializer.user, "0:0");
+  assert.equal(initializer.network_mode, "none");
+  assert.equal(initializer.read_only, true);
+  assert.equal(initializer.privileged, false);
+  assert.deepEqual(initializer.cap_drop, ["ALL"]);
+  assert.deepEqual(initializer.cap_add.sort(), ["CHOWN", "FOWNER"]);
+  assert.deepEqual(initializer.security_opt, ["no-new-privileges:true"]);
+  assert.equal(initializer.restart, "no");
+  assert.deepEqual(initializer.entrypoint, ["node", "scripts/prepare-supervisor-socket-volume.mjs"]);
+  assert.deepEqual(volumeTargets(initializer), ["/run/core-agent/supervisor"]);
+  assert.equal(volumeAt(initializer, "/run/core-agent/supervisor").source, "supervisor-socket");
+  assert.equal(volumeAt(initializer, "/run/core-agent/supervisor").read_only, undefined);
+});
+
+test("API ingress is a fixed credential-free TCP boundary", async () => {
+  const config = await yaml("infra/runtime/compose.dev.yaml");
+  const ingress = config.services["api-ingress"];
+  assert.equal(ingress.image, config.services.api.image);
+  assert.deepEqual(ingress.build, config.services.api.build);
+  assert.deepEqual(ingress.entrypoint, ["node", "scripts/api-ingress-proxy.mjs"]);
+  assert.deepEqual(environmentMap(ingress), {});
+  assert.deepEqual(volumeTargets(ingress), []);
+  assert.deepEqual(secretTargets(ingress), []);
+  assert.deepEqual(ingress.depends_on, { api: { condition: "service_started" } });
 });
 
 test("startup order gates applications on one successful migration", async () => {
@@ -239,6 +287,7 @@ test("startup order gates applications on one successful migration", async () =>
   });
   assert.deepEqual(config.services.supervisor.depends_on, {
     "supervisor-socket-preflight": { condition: "service_completed_successfully" },
+    "supervisor-socket-volume-init": { condition: "service_completed_successfully" },
   });
   assert.equal(config.services.postgres.volumes[0].target, "/var/lib/postgresql/data");
   assert.equal(config.services.postgres.healthcheck.test[0], "CMD-SHELL");
@@ -317,6 +366,7 @@ test("Supervisor startup is gated by one fixed-image least-privilege Docker sock
   assert.equal(volumeAt(preflight, "/var/run/docker.sock").read_only, true);
   assert.deepEqual(supervisor.depends_on, {
     "supervisor-socket-preflight": { condition: "service_completed_successfully" },
+    "supervisor-socket-volume-init": { condition: "service_completed_successfully" },
   });
 });
 
@@ -881,6 +931,48 @@ test("runtime network preparation owns exact private backplane and provider-capa
       return args.at(-1) === "core-agent-egress" ? invalidEgress : backplaneInspection;
     } }), /runtime network is invalid/u);
   }
+});
+
+test("runtime network preparation accepts Docker 29 empty IPAM options encoding", async () => {
+  const moduleUrl = pathToFileURL(pathFromRoot("scripts/prepare-runtime-network.mjs")).href;
+  const network = await import(`${moduleUrl}?docker29=${Date.now()}`);
+  const backplaneInspection = JSON.stringify({
+    Name: "core-agent-backplane",
+    Driver: "bridge",
+    Internal: true,
+    Attachable: false,
+    Labels: {
+      "core-agent.managed": "runtime-v1",
+      "core-agent.resource": "backplane",
+      "core-agent.network": "core-agent-backplane",
+    },
+  });
+  const egressInspection = JSON.stringify({
+    Name: "core-agent-egress",
+    Driver: "bridge",
+    Internal: false,
+    Attachable: false,
+    Scope: "local",
+    Ingress: false,
+    EnableIPv6: false,
+    Options: { "com.docker.network.bridge.enable_ip_masquerade": "true" },
+    IPAM: {
+      Driver: "default",
+      Options: {},
+      Config: [{ Subnet: "172.31.240.0/24", Gateway: "172.31.240.1" }],
+    },
+    Labels: {
+      "core-agent.managed": "runtime-v1",
+      "core-agent.resource": "egress",
+      "core-agent.network": "core-agent-egress",
+    },
+  });
+
+  await network.prepareRuntimeNetwork({ runDocker: async (args) => {
+    if (args[0] === "context") return '"unix:///var/run/docker.sock"\n';
+    if (args[1] === "ls") return `${args[3].includes("egress") ? "core-agent-egress" : "core-agent-backplane"}\n`;
+    return args.at(-1) === "core-agent-egress" ? egressInspection : backplaneInspection;
+  } });
 });
 
 test("runtime network preparation rejects ambient Docker endpoint overrides before Docker", async () => {

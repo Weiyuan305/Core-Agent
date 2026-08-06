@@ -13,7 +13,7 @@ import re
 import stat
 import subprocess
 import sys
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 
 DEFAULT_BUNDLE = Path("/run/core-agent/bootstrap/bundle.json")
@@ -100,12 +100,22 @@ def validate_provider_url(value: object) -> str:
         or not parsed.hostname
         or parsed.username is not None
         or parsed.password is not None
+        or parsed.query
         or parsed.fragment
         or "\r" in url
         or "\n" in url
     ):
         raise InitializerError("provider_base_url is invalid")
     return url
+
+
+def hermes_provider_base_url(value: str) -> str:
+    parsed = urlsplit(value)
+    path = parsed.path.rstrip("/")
+    completion_suffix = "/chat/completions"
+    if path.endswith(completion_suffix):
+        path = path[:-len(completion_suffix)].rstrip("/")
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
 def validate_profile(value: object) -> dict[str, object]:
@@ -546,13 +556,28 @@ def configure_profile(
                 stdin=subprocess.DEVNULL,
             )
         assert_named_directory(profiles_descriptor, profile_ref, profile_descriptor, "Profile")
+        model_id = str(profile["model_id"])
+        provider_name = "core-agent-managed"
         environment = (
-            f"OPENAI_API_KEY={provider_key}\n"
-            f"OPENAI_BASE_URL={profile['provider_base_url']}\n"
-            f"LLM_MODEL={profile['model_id']}\n"
+            f"CORE_AGENT_PROVIDER_API_KEY={provider_key}\n"
             f"API_SERVER_KEY={ingress_key}\n"
         ).encode("utf-8")
+        configuration = canonical_json({
+            "model": {
+                "default": model_id,
+                "provider": provider_name,
+            },
+            "providers": {
+                provider_name: {
+                    "base_url": hermes_provider_base_url(str(profile["provider_base_url"])),
+                    "default_model": model_id,
+                    "key_env": "CORE_AGENT_PROVIDER_API_KEY",
+                    "transport": "chat_completions",
+                },
+            },
+        }) + b"\n"
         atomic_write(profile_descriptor, ".env", environment, 0o600)
+        atomic_write(profile_descriptor, "config.yaml", configuration, 0o600)
     finally:
         os.close(profile_descriptor)
 
@@ -566,14 +591,18 @@ def remove_profile_directory(profiles_descriptor: int, profile_ref: str) -> None
         raise InitializerError("Removed Profile directory cannot be opened safely") from error
     try:
         assert_named_directory(profiles_descriptor, profile_ref, descriptor, "Removed Profile")
-        try:
-            environment = os.stat(".env", dir_fd=descriptor, follow_symlinks=False)
-        except FileNotFoundError:
-            environment = None
-        if environment is not None:
-            validate_regular_file(environment, "Removed Profile environment", 0o600, MAX_SECRET_BYTES + 4_096)
-            os.unlink(".env", dir_fd=descriptor)
-            os.fsync(descriptor)
+        for filename, label in (
+            (".env", "Removed Profile environment"),
+            ("config.yaml", "Removed Profile configuration"),
+        ):
+            try:
+                metadata = os.stat(filename, dir_fd=descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                metadata = None
+            if metadata is not None:
+                validate_regular_file(metadata, label, 0o600, MAX_SECRET_BYTES + 4_096)
+                os.unlink(filename, dir_fd=descriptor)
+                os.fsync(descriptor)
         if os.listdir(descriptor):
             raise InitializerError("Removed Profile directory is not empty")
         assert_named_directory(profiles_descriptor, profile_ref, descriptor, "Removed Profile")

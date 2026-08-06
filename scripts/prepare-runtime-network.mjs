@@ -91,7 +91,7 @@ function validateInspection(raw, contract) {
     || typeof value.IPAM !== "object" || value.IPAM === null || Array.isArray(value.IPAM)
     || Object.keys(value.IPAM).length !== 3
     || value.IPAM.Driver !== "default"
-    || value.IPAM.Options !== null
+    || !(value.IPAM.Options === null || exactRecord(value.IPAM.Options, {}))
     || !Array.isArray(value.IPAM.Config) || value.IPAM.Config.length !== 1
     || !exactRecord(value.IPAM.Config[0], { Subnet: contract.subnet, Gateway: contract.gateway })
   )) throw invalidNetwork();

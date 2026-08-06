@@ -24,7 +24,7 @@ import { validateLocalDockerContextEndpoint } from "../preflight-runtime-docker-
 import { validateRetainedRuntimeReceipt } from "./retained-runtime-receipt.mjs";
 
 const execFileAsync = promisify(execFile);
-const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
+const repositoryRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const composeFile = "infra/runtime/compose.dev.yaml";
 const runtimeBaseLockFile = join(repositoryRoot, "infra/runtime/base-images.lock.json");
 const providerCatalogFile = join(repositoryRoot, "infra/runtime/providers.dev.json");
@@ -1051,6 +1051,40 @@ export async function restartApiWorkerTopology({ child, waitUntilReady }) {
   await waitUntilReady();
 }
 
+export async function waitForApiReadiness({
+  attempt,
+  pause = delay,
+  now = Date.now,
+  signal,
+  timeoutMs = 30_000,
+  pollMs = 250,
+} = {}) {
+  if (
+    typeof attempt !== "function"
+    || typeof pause !== "function"
+    || typeof now !== "function"
+    || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000
+    || !Number.isSafeInteger(pollMs) || pollMs < 1 || pollMs > 1_000
+  ) throw smokeError("SMOKE_API_REQUEST_FAILED");
+  const startedAt = now();
+  if (!Number.isFinite(startedAt)) throw smokeError("SMOKE_API_REQUEST_FAILED");
+  const deadline = startedAt + timeoutMs;
+  let cause;
+  while (true) {
+    try {
+      await attempt();
+      return;
+    } catch (error) {
+      cause = error;
+    }
+    const current = now();
+    if (!Number.isFinite(current) || current >= deadline) {
+      throw smokeError("SMOKE_API_REQUEST_FAILED", cause);
+    }
+    await pause(Math.min(pollMs, Math.max(1, deadline - current)), signal);
+  }
+}
+
 async function scanDumpForSecrets(filePath, secretValues) {
   const metadata = await stat(filePath, { bigint: true });
   if (!metadata.isFile() || (metadata.mode & 0o7777n) !== 0o600n || metadata.size > 64n * 1024n * 1024n) {
@@ -1131,11 +1165,14 @@ export function createManagedRuntimeDependencies(environment, signal) {
       await child("docker", composeArgs("config", "--quiet"));
     },
     async startTopology() {
-      await child("docker", composeArgs("up", "-d", "postgres", "migrate", "api", "worker", "supervisor"), {
+      await child("docker", composeArgs("up", "-d", "postgres", "migrate", "api", "api-ingress", "worker", "supervisor"), {
         timeoutMs: 180_000,
         maxOutputBytes: 4 * 1024 * 1024,
       });
-      await requestJson("/health/ready", { bootstrapKey: state.bootstrapKey, statuses: [200], signal });
+      await waitForApiReadiness({
+        attempt: () => requestJson("/health/ready", { bootstrapKey: state.bootstrapKey, statuses: [200], signal }),
+        signal,
+      });
     },
     prepareProvisioningContext() {
       return Object.freeze({ ...identifiers, runtimeId: deriveProvisionedRuntimeId(identifiers.tenantId) });
@@ -1201,9 +1238,12 @@ export function createManagedRuntimeDependencies(environment, signal) {
     async restartApiWorker() {
       await restartApiWorkerTopology({
         child,
-        waitUntilReady: () => requestJson("/health/ready", {
-          bootstrapKey: state.bootstrapKey,
-          statuses: [200],
+        waitUntilReady: () => waitForApiReadiness({
+          attempt: () => requestJson("/health/ready", {
+            bootstrapKey: state.bootstrapKey,
+            statuses: [200],
+            signal,
+          }),
           signal,
         }),
       });

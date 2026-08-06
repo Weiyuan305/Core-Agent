@@ -1,6 +1,7 @@
 import { constants, type BigIntStats } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { lstat, open, realpath, stat, type FileHandle } from "node:fs/promises";
+import { TextDecoder } from "node:util";
 
 import {
   assertSecretReference,
@@ -146,6 +147,17 @@ async function boundedRead(handle: FileHandle): Promise<Buffer> {
   }
 }
 
+function validateSecretContent(buffer: Buffer): void {
+  if (buffer.includes(0x00) || buffer.includes(0x0a) || buffer.includes(0x0d)) {
+    throw fixedFileError("Secret file contains invalid line data");
+  }
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+  } catch {
+    throw fixedFileError("Secret file encoding is invalid");
+  }
+}
+
 export class FileSecretStore implements SecretStore {
   readonly #configuredRoot: string;
   #trustedRoot: RootIdentity | undefined;
@@ -217,6 +229,7 @@ export class FileSecretStore implements SecretStore {
           }
           await this.#assertOpenedPathStable(path, after);
           await this.#assertRootStable(canonicalRoot, rootHandle, rootMetadata);
+          validateSecretContent(privateBuffer);
           material = new BufferedSecretMaterial(reference, privateBuffer);
           return material;
         } catch (error) {

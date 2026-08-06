@@ -211,13 +211,29 @@ test("initializer creates sorted profiles, exact env projections, and an idempot
     const environmentPath = join(paths.dataRoot, "profiles", profileRef, ".env");
     assert.equal((await stat(environmentPath)).mode & 0o777, 0o600);
     assert.equal(await readFile(environmentPath, "utf8"), [
-      `OPENAI_API_KEY=${secret}`,
-      "OPENAI_BASE_URL=https://tokenhub.infplacex.com/v1/chat/completions",
-      "LLM_MODEL=cywx/gpt-5.6-sol",
+      `CORE_AGENT_PROVIDER_API_KEY=${secret}`,
       "API_SERVER_KEY=sentinel-ingress-key-0123456789",
       ""
     ].join("\n"));
-    assert.deepEqual((await readdir(join(paths.dataRoot, "profiles", profileRef))).sort(), [".env"]);
+    const configurationPath = join(paths.dataRoot, "profiles", profileRef, "config.yaml");
+    assert.equal((await stat(configurationPath)).mode & 0o777, 0o600);
+    const configurationText = await readFile(configurationPath, "utf8");
+    assert.doesNotMatch(configurationText, /sentinel-secret|sentinel-ingress/);
+    assert.deepEqual(JSON.parse(configurationText), {
+      model: {
+        default: "cywx/gpt-5.6-sol",
+        provider: "core-agent-managed"
+      },
+      providers: {
+        "core-agent-managed": {
+          base_url: "https://tokenhub.infplacex.com/v1",
+          default_model: "cywx/gpt-5.6-sol",
+          key_env: "CORE_AGENT_PROVIDER_API_KEY",
+          transport: "chat_completions"
+        }
+      }
+    });
+    assert.deepEqual((await readdir(join(paths.dataRoot, "profiles", profileRef))).sort(), [".env", "config.yaml"]);
   }
 
   const manifestText = await readFile(paths.manifestPath, "utf8");
@@ -314,6 +330,7 @@ test("initializer rejects invalid identifiers, limits, duplicates, URLs, and mod
     bundle([{ ...validProfile, hermes_profile_ref: "../escape" }]),
     bundle([{ ...validProfile, description: "x".repeat(2_001) }]),
     bundle([{ ...validProfile, provider_base_url: "http://provider.invalid/v1" }]),
+    bundle([{ ...validProfile, provider_base_url: "https://provider.invalid/v1?route=private" }]),
     bundle([{ ...validProfile, model_id: "unapproved/model" }]),
     bundle([validProfile, { ...validProfile, hermes_profile_ref: "second" }]),
     bundle([validProfile, { ...validProfile, profile_id: "second" }]),

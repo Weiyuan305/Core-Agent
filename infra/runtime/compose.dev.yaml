@@ -107,8 +107,6 @@ services:
         read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
-    ports:
-      - "127.0.0.1:8787:8787"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -116,6 +114,30 @@ services:
         condition: service_healthy
     networks:
       - core-agent-control
+
+  api-ingress:
+    <<: *application-security
+    image: core-agent/control-plane-api:dev
+    platform: ${CORE_AGENT_PLATFORM:?set CORE_AGENT_PLATFORM}
+    build:
+      <<: *service-build
+      target: api
+    user: "${CORE_AGENT_RUNTIME_UID:-12000}:${CORE_AGENT_RUNTIME_GID:-12000}"
+    entrypoint: ["node", "scripts/api-ingress-proxy.mjs"]
+    pids_limit: 32
+    mem_limit: 64m
+    cpus: 0.25
+    stop_grace_period: 10s
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    ports:
+      - "127.0.0.1:8787:8787"
+    depends_on:
+      api:
+        condition: service_started
+    networks:
+      - core-agent-control
+      - core-agent-host-ingress
 
   worker:
     <<: *application-security
@@ -143,8 +165,8 @@ services:
         source: ${CORE_AGENT_INGRESS_SECRET_ROOT:?set CORE_AGENT_INGRESS_SECRET_ROOT}
         target: /run/core-agent/ingress
         read_only: true
-      - type: bind
-        source: ${CORE_AGENT_SUPERVISOR_SOCKET_ROOT:?set CORE_AGENT_SUPERVISOR_SOCKET_ROOT}
+      - type: volume
+        source: supervisor-socket
         target: /run/core-agent/supervisor
         read_only: true
     tmpfs:
@@ -159,6 +181,37 @@ services:
     networks:
       - core-agent-control
       - core-agent-backplane
+
+  supervisor-socket-volume-init:
+    image: core-agent/runtime-supervisor:dev
+    platform: ${CORE_AGENT_PLATFORM:?set CORE_AGENT_PLATFORM}
+    build:
+      <<: *service-build
+      target: supervisor
+    user: "0:0"
+    entrypoint: ["node", "scripts/prepare-supervisor-socket-volume.mjs"]
+    environment:
+      CORE_AGENT_RUNTIME_UID: ${CORE_AGENT_RUNTIME_UID:-12002}
+      CORE_AGENT_SUPERVISOR_SOCKET_GID: ${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}
+    volumes:
+      - type: volume
+        source: supervisor-socket
+        target: /run/core-agent/supervisor
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - FOWNER
+    security_opt:
+      - no-new-privileges:true
+    privileged: false
+    network_mode: none
+    pids_limit: 32
+    mem_limit: 64m
+    cpus: 0.25
+    restart: "no"
+    stop_grace_period: 5s
 
   supervisor-socket-preflight:
     image: core-agent/runtime-supervisor:dev
@@ -209,6 +262,8 @@ services:
     depends_on:
       supervisor-socket-preflight:
         condition: service_completed_successfully
+      supervisor-socket-volume-init:
+        condition: service_completed_successfully
     environment:
       CORE_AGENT_DOCKER_SOCKET_PATH: /var/run/docker.sock
       CORE_AGENT_IMAGE_LOCK_PATH: /run/core-agent/config/hermes-images.lock.json
@@ -229,6 +284,10 @@ services:
         target: /run/core-agent/config/hermes-images.lock.json
         read_only: true
       - type: bind
+        source: ./providers.dev.json
+        target: /app/infra/runtime/providers.json
+        read_only: true
+      - type: bind
         source: ${CORE_AGENT_PROVIDER_SECRET_ROOT:?set CORE_AGENT_PROVIDER_SECRET_ROOT}
         target: /run/core-agent/secrets/provider
         read_only: true
@@ -236,8 +295,8 @@ services:
         source: ${CORE_AGENT_INGRESS_SECRET_ROOT:?set CORE_AGENT_INGRESS_SECRET_ROOT}
         target: /run/core-agent/secrets/ingress
         read_only: true
-      - type: bind
-        source: ${CORE_AGENT_SUPERVISOR_SOCKET_ROOT:?set CORE_AGENT_SUPERVISOR_SOCKET_ROOT}
+      - type: volume
+        source: supervisor-socket
         target: /run/core-agent/supervisor
       - type: bind
         source: ${CORE_AGENT_SUPERVISOR_STATE_ROOT:?set CORE_AGENT_SUPERVISOR_STATE_ROOT}
@@ -257,6 +316,7 @@ services:
 
 volumes:
   postgres-data:
+  supervisor-socket:
 
 secrets:
   bootstrap-key:
@@ -266,6 +326,9 @@ networks:
   core-agent-control:
     driver: bridge
     internal: true
+  core-agent-host-ingress:
+    driver: bridge
+    internal: false
   core-agent-backplane:
     external: true
     name: core-agent-backplane

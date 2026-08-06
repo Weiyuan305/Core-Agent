@@ -220,6 +220,10 @@ test("REAL_HERMES child seam is argv-only, bounded, and abortable", async () => 
   assert.equal(invocation.options.shell, false);
   assert.equal(invocation.options.timeout, 1_000);
   assert.equal(invocation.options.maxBuffer, 128);
+  const nodeOutput = await runBoundedChild("node", ["scripts/prepare-runtime-network.mjs"], {
+    run: async () => ({ stdout: "node-ok\n", stderr: "" }),
+  });
+  assert.equal(nodeOutput, "node-ok\n");
   await assert.rejects(
     runBoundedChild("sh", ["-c", "docker ps"], { run: async () => assert.fail("must not run") }),
     /SMOKE_CHILD_COMMAND_INVALID/,

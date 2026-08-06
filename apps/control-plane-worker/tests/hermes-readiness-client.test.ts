@@ -16,3 +16,23 @@ test("Hermes readiness uses multiplexed Profile route and fixed bounded syntheti
   assert.equal(headers.get("x-hermes-session-id"), "readiness-runtime_a-1");
   assert.deepEqual(JSON.parse(String(captured?.init.body)), { model: "model_a", messages: [{ role: "user", content: "Reply with exactly READY." }], stream: false, max_tokens: 8 });
 });
+
+test("Hermes readiness exposes only the bounded HTTP status on rejection", async () => {
+  const client = new HttpHermesReadinessClient(async () => new Response(
+    "untrusted upstream body with synthetic-secret",
+    { status: 404 },
+  ));
+
+  await assert.rejects(
+    client.probe({
+      origin: "http://172.30.0.4:8642",
+      profileRef: "consultant",
+      sessionId: "readiness-runtime_a-1",
+      ingressKey: "synthetic-key",
+      modelId: "model_a",
+    }, new AbortController().signal),
+    (error: unknown) => error instanceof Error
+      && error.message === "Hermes readiness request was rejected (HTTP 404)"
+      && !error.message.includes("synthetic-secret"),
+  );
+});

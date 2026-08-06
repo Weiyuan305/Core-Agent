@@ -12,6 +12,7 @@ import {
   runControlPlaneSmoke,
   runManagedRuntimeSession,
   smokePublicErrorCode,
+  waitForApiReadiness,
 } from "../../scripts/lib/managed-runtime-session.mjs";
 import * as smokeWrapper from "../../scripts/smoke-control-plane.mjs";
 
@@ -414,4 +415,33 @@ test("managed API and Worker restart uses one exact Compose command then readine
     ]],
     "ready",
   ]);
+});
+
+test("managed API readiness retries bounded startup failures and stops at its deadline", async () => {
+  const calls = [];
+  let attempts = 0;
+  await waitForApiReadiness({
+    attempt: async () => {
+      attempts += 1;
+      if (attempts < 3) throw new Error("synthetic startup race");
+    },
+    pause: async (milliseconds) => calls.push(milliseconds),
+    now: () => 0,
+    timeoutMs: 1_000,
+    pollMs: 25,
+  });
+  assert.equal(attempts, 3);
+  assert.deepEqual(calls, [25, 25]);
+
+  const times = [0, 11];
+  await assert.rejects(
+    waitForApiReadiness({
+      attempt: async () => { throw new Error("synthetic unavailable"); },
+      pause: async () => assert.fail("deadline failure must not pause"),
+      now: () => times.shift() ?? 11,
+      timeoutMs: 10,
+      pollMs: 1,
+    }),
+    /SMOKE_API_REQUEST_FAILED/u,
+  );
 });

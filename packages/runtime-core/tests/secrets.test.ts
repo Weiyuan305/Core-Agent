@@ -54,6 +54,29 @@ test("file secret store accepts one owner-only file beneath its canonical root",
   assert.throws(() => material.text(), /released/);
 });
 
+test("file secret store rejects non-canonical text without reflecting secret material", async () => {
+  const store = new FileSecretStore(secretRoot);
+  const cases = [
+    { reference_id: "nul", content: Buffer.from("private\0sentinel", "utf8") },
+    { reference_id: "cr", content: Buffer.from("private\rsentinel", "utf8") },
+    { reference_id: "lf", content: Buffer.from("private\nsentinel", "utf8") },
+    { reference_id: "invalid_utf8", content: Buffer.from([0xc3, 0x28]) },
+  ] as const;
+
+  for (const entry of cases) {
+    await writeFile(join(secretRoot, `${entry.reference_id}.v1`), entry.content, { mode: 0o600 });
+    await assert.rejects(
+      store.get({ reference_id: entry.reference_id, version: 1, purpose: "model_provider" }),
+      (error: unknown) => {
+        assert(error instanceof Error);
+        assert.match(error.message, /content|encoding|line data/i);
+        assert.doesNotMatch(error.message, /private|sentinel/);
+        return true;
+      },
+    );
+  }
+});
+
 test("file secret store validates metadata before paths without reflecting input", async () => {
   const store = new FileSecretStore(secretRoot);
   const invalidReferences = [
