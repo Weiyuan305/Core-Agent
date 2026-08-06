@@ -414,7 +414,6 @@ function validChatEnvironment(stateRoot) {
     CORE_AGENT_BOOTSTRAP_KEY_FILE: "/synthetic/bootstrap-key.v1",
     CORE_AGENT_PROVIDER_SECRET_ROOT: "/synthetic/provider-secrets",
     CORE_AGENT_INGRESS_SECRET_ROOT: "/synthetic/ingress-secrets",
-    CORE_AGENT_SUPERVISOR_SOCKET_ROOT: "/synthetic/supervisor-sockets",
     CORE_AGENT_SUPERVISOR_STATE_ROOT: stateRoot,
     CORE_AGENT_RUNTIME_UID: "10001",
     CORE_AGENT_RUNTIME_GID: "10001",

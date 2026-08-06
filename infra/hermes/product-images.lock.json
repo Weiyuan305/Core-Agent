@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "repository": "ghcr.io/weiyuan305/core-agent-hermes-runtime",
-  "tag": "v0.1.2",
+  "tag": "v0.1.3",
   "platforms": {
     "linux/amd64": {
-      "reference": "ghcr.io/weiyuan305/core-agent-hermes-runtime:v0.1.2@sha256:ce5d824ca6e5f0ce6853cb2e6c1abc26b6dcca23d3044336df3a9d2aecf1fb7b"
+      "reference": "ghcr.io/weiyuan305/core-agent-hermes-runtime:v0.1.3@sha256:421f09a140d5b048586749d9f9753f3a2d3fa8571cebac462ae503c646ccb93e"
     },
     "linux/arm64": {
-      "reference": "ghcr.io/weiyuan305/core-agent-hermes-runtime:v0.1.2@sha256:189a08fad1a9dfb0f4f30e17d6783c24251a3b5bc3a37312c0ba43d26e4cc30c"
+      "reference": "ghcr.io/weiyuan305/core-agent-hermes-runtime:v0.1.3@sha256:518bc0734d94c44760a62368a2dbb633ebce511a73534ab987aa621862d2a7be"
     }
   }
 }

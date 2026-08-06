@@ -6,10 +6,11 @@ credential. The script fixes the prompt identifier to
 `synthetic-runtime-v1-smoke`, generates `synthetic-` resource identifiers, and
 refuses to run unless `CORE_AGENT_REAL_HERMES_SMOKE=1` is exact.
 
-The smoke starts PostgreSQL, migration, API, Worker, and Supervisor under the
-exact Compose project `core-agent-runtime-v1-smoke`. Before Supervisor starts,
-Compose runs one fixed Supervisor-image Docker-socket preflight. Generated
-Hermes runtime resources are owned by the Supervisor.
+The smoke starts PostgreSQL, migration, API, fixed API ingress, Worker, and
+Supervisor under the exact Compose project `core-agent-runtime-v1-smoke`.
+Before Supervisor starts, Compose runs one fixed Supervisor-image Docker-socket
+preflight and one bounded initializer for the private Supervisor UDS volume.
+Generated Hermes runtime resources are owned by the Supervisor.
 
 ## Product-image prerequisite
 
@@ -20,29 +21,29 @@ Hermes runtime resources are owned by the Supervisor.
 
 The only release path is the manual **Publish Hermes Runtime** workflow at
 `.github/workflows/publish-hermes-runtime.yml`. Merge the workflow and image
-source to `main` before dispatch. Select `v0.1.0` and one full lowercase source
+source to `main` before dispatch. Select `v0.1.3` and one full lowercase source
 commit that is already reachable from `origin/main`; the workflow independently
 checks that ancestry before authenticating to GHCR or building.
 
 The workflow publishes exactly these private tags, without `latest`:
 
 ```text
-ghcr.io/weiyuan305/core-agent-hermes-runtime:v0.1.0
+ghcr.io/weiyuan305/core-agent-hermes-runtime:v0.1.3
 ghcr.io/weiyuan305/core-agent-hermes-runtime:sha-<first-12-source-commit-characters>
 ```
 
 Review the successful Actions run and confirm its source commit, both build
 jobs, package visibility `private`, and artifact name
-`hermes-product-image-lock-v0.1.0`. Download the artifact into a fresh private
+`hermes-product-image-lock-v0.1.3`. Download the artifact into a fresh private
 temporary directory. Compare both GHCR platform digests against the candidate:
 
 ```bash
-docker buildx imagetools inspect --raw ghcr.io/weiyuan305/core-agent-hermes-runtime:v0.1.0
+docker buildx imagetools inspect --raw ghcr.io/weiyuan305/core-agent-hermes-runtime:v0.1.3
 ```
 
 The candidate must contain only the approved repository, tag, and two immutable
 references beginning with
-`ghcr.io/weiyuan305/core-agent-hermes-runtime:v0.1.0@sha256:`. Stop on any
+`ghcr.io/weiyuan305/core-agent-hermes-runtime:v0.1.3@sha256:`. Stop on any
 source, visibility, repository, tag, amd64 digest, or arm64 digest mismatch.
 After checking both GHCR platform digests, commit the candidate lock unchanged
 as `infra/hermes/product-images.lock.json`; do not regenerate or hand-edit it.
@@ -94,11 +95,13 @@ the selected product digest into that daemon.
 
 ## Create isolated local projections
 
-Use five canonical paths that do not equal, contain, or sit beneath one
-another: bootstrap file, provider root, ingress root, Supervisor socket root,
-and Supervisor state root. No configured path or protected ancestor may be a
-symlink or group/other writable. Provider and ingress roots must already exist;
-socket and state leaves may be absent and are created by the preflight.
+Use four canonical host paths that do not equal, contain, or sit beneath one
+another: bootstrap file, provider root, ingress root, and Supervisor state
+root. No configured path or protected ancestor may be a symlink or group/other
+writable. Provider and ingress roots must already exist; the state leaf may be
+absent and is created by the preflight. The Supervisor UDS is not a host path:
+Compose owns the `supervisor-socket` named volume and initializes its root to
+the final runtime UID/GID with exact mode `0700` before Supervisor starts.
 
 The required secret leaves are:
 
@@ -107,9 +110,11 @@ The required secret leaves are:
 - ingress: `hermes_ingress.v1` below the ingress root.
 
 Each secret must be a current-owner regular file, have exactly one hard link,
-and have mode `0600`. Provider/ingress roots and created socket/state roots are
-exact `0700` directories. Put secret bytes into those files using the approved
-local secret-provisioning procedure, then set metadata without printing them:
+and have mode `0600`. Its bytes must be non-empty valid UTF-8 with no NUL,
+carriage return, or line feed; in particular, do not leave a terminal newline.
+Provider/ingress roots and the state root are exact `0700` directories. Put
+secret bytes into those files using the approved local secret-provisioning
+procedure, then set metadata without printing them:
 
 ```bash
 chmod 0700 .local-secrets/provider .local-secrets/ingress
@@ -256,7 +261,7 @@ checks this before every Docker operation, then requires the selected context
 endpoint to be a canonical local `unix://` socket before it issues a network
 subcommand. It fails closed instead of creating or inspecting a network through
 an ambient endpoint or context override.
-`runtime:paths` enforces all five canonical path, owner, mode,
+`runtime:paths` enforces all four canonical host-path owner, mode,
 link-count, and non-overlap rules and creates private state-root `staging` and
 `ingress` children. On macOS/Colima, keep state below a canonical Docker-shared
 host path such as `/Users/...`; Supervisor passes those host child paths to the
@@ -273,14 +278,24 @@ CORE_AGENT_REAL_HERMES_SMOKE=1 npm run smoke:control-plane
 ```
 
 Do not manually run `compose up` first. The smoke owns its exact project and
-starts `postgres migrate api worker supervisor`; Compose first runs the
-one-shot `supervisor-socket-preflight` dependency. It validates the local Unix
-Docker context, exact mounted-socket metadata and bounded `_ping`, Compose,
+starts `postgres migrate api api-ingress worker supervisor`; Compose first runs
+the one-shot `supervisor-socket-preflight` and
+`supervisor-socket-volume-init` dependencies. The API container has no host
+port; only the credential-free fixed TCP `api-ingress` publishes
+`127.0.0.1:8787`. The smoke validates the local Unix Docker context, exact
+mounted-socket metadata and bounded `_ping`, Compose,
 locked Node/PostgreSQL/product-Hermes references, runtime paths and network, all
 three secret files, and the product image before startup. It also
 precomputes the deterministic synthetic tenant/runtime cleanup identity before
 the provisioning POST, so a committed request whose response is lost or invalid
 can still be queried and deleted without a broad Docker label deletion.
+
+The product initializer writes each Hermes Profile's private `.env` plus a
+`config.yaml` containing the named custom provider `core-agent-managed`, the
+selected model, `key_env`, and `transport: chat_completions`. A catalog endpoint
+ending in `/chat/completions` is normalized once to its Hermes OpenAI-compatible
+base (for example `/v1`); query strings are rejected. Runtime behavior does not
+depend on the legacy `LLM_MODEL` or `OPENAI_BASE_URL` environment variables.
 
 On success stdout contains exactly one JSON object with these keys and no
 others: `assistant_message_count`, `conversation_id`, `event_types`,

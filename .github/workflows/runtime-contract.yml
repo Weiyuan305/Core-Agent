@@ -177,7 +177,6 @@ jobs:
           CORE_AGENT_INGRESS_SECRET_ROOT: /tmp/core-agent-ingress-path-only
           CORE_AGENT_PLATFORM: linux/amd64
           CORE_AGENT_PROVIDER_SECRET_ROOT: /tmp/core-agent-provider-path-only
-          CORE_AGENT_SUPERVISOR_SOCKET_ROOT: /tmp/core-agent-runtime-socket-path-only
           CORE_AGENT_SUPERVISOR_STATE_ROOT: /tmp/core-agent-runtime-state-path-only
         run: docker compose -f infra/runtime/compose.dev.yaml config --quiet
 

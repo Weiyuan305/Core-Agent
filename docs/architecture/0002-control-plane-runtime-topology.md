@@ -40,6 +40,14 @@ allowlisted provisioning step, not arbitrary container `exec`. The gateway
 entrypoint reads its ingress key from a mounted secret file so the value is not
 stored in Docker configuration environment.
 
+The initializer owns the Hermes compatibility adapter. For each Profile it
+writes a private `.env` and a `config.yaml` selecting the named custom provider
+`core-agent-managed`, `key_env`, `transport: chat_completions`, and the approved
+model. Provider catalog endpoints ending in `/chat/completions` are normalized
+to the OpenAI-compatible base URL at this boundary, and URLs with query strings
+are rejected. Legacy `LLM_MODEL` and `OPENAI_BASE_URL` variables are not part of
+the managed Runtime contract.
+
 Mac + Colima development and Linux production use the same component and
 network boundaries. The topology is intentionally single-node, but the
 Supervisor protocol leaves a future path to a mutually authenticated remote
@@ -102,8 +110,10 @@ reduce Docker socket authority, which remains effectively root-equivalent.
 
 The API normally accepts only a loopback listen address. Its container image
 may bind `0.0.0.0` only when the deployment sets the exact
-`CONTROL_PLANE_API_CONTAINER_BIND=1` opt-in; the development Compose boundary
-then publishes that container port only as `127.0.0.1:8787`. This is container
+`CONTROL_PLANE_API_CONTAINER_BIND=1` opt-in. The API service itself has no host
+port. A separate fixed, credential-free TCP `api-ingress` service joins the
+internal control network and a dedicated host-ingress bridge, proxies only to
+`api:8787`, and is the sole publisher of `127.0.0.1:8787`. This is container
 wiring, not permission to expose the API on a public host interface.
 
 Provider and Hermes-ingress bytes are separate read-only projections. The
@@ -122,17 +132,25 @@ compatible with macOS/Colima file projection, while `CORE_AGENT_RUNTIME_GID`
 controls the bootstrap projection and `CORE_AGENT_SUPERVISOR_SOCKET_GID`
 controls the private runtime roots.
 
-The socket and Supervisor-state mounts are caller-named bind roots, never
-Docker named volumes. Before Compose, `npm run runtime:paths` validates all
-five caller-controlled projections as separate purposes: bootstrap file,
-provider root, ingress root, socket root, and state root. Every configured
+The Supervisor state mount is a caller-named bind root. The UDS instead uses the
+Compose-owned `supervisor-socket` named volume so Worker and Supervisor do not
+depend on a host socket path. Before Compose, `npm run runtime:paths` validates
+four caller-controlled host projections as separate purposes: bootstrap file,
+provider root, ingress root, and state root. Every configured
 existing path must already equal its canonical path. Every ancestor must be a
 non-symlink directory owned by root or the preflight caller and prohibit group
 and other writes, so an attacker cannot replace a validated leaf through a
 writable parent. Provider and ingress must be existing exact `0700`
-directories. Socket and state may be absent, but preflight creates them only
-below a canonical protected parent and then repeats canonical, opened-handle,
+directories. State may be absent, but preflight creates it only below a
+canonical protected parent and then repeats canonical, opened-handle,
 named-inode, owner, group, type, and exact `0700` checks.
+
+A one-shot `supervisor-socket-volume-init` service runs as root with no network,
+a read-only root filesystem, all capabilities dropped except `CHOWN` and
+`FOWNER`, and the exact named volume mounted at `/run/core-agent/supervisor`.
+It assigns the configured runtime UID/socket GID and mode `0700`, then
+revalidates the final metadata. Supervisor mounts the volume read/write; Worker
+mounts the same volume read-only. Neither API nor migration receives it.
 
 Preflight also creates and revalidates exact `0700` `staging` and `ingress`
 children below the state root. Initializer, manifest verifier, and gateway run
@@ -144,20 +162,22 @@ then creates tenant metadata, Profile directories, and secret-bearing leaves
 as the managed uid with `0700`/`0600`. The sticky root contains no secrets and
 does not relax its private children.
 
-The five canonical paths are pairwise rejected if they are equal or if either
+The four canonical host paths are pairwise rejected if they are equal or if either
 is an ancestor of the other. This prevents the Worker-visible ingress or
-socket mount from containing bootstrap, provider, or state bytes. With no UID
+state mount from containing bootstrap or provider bytes. With no UID
 override the runtime roots must be `12002:12002`; a caller who cannot create
 that ownership must prepare it explicitly rather than receive a silent
 chmod/chown. With a host override the same numeric value drives both the
 container user and preflight policy. Worker mounts only ingress and the socket
-root, with the socket mount read-only; migration receives no runtime root. The
+volume, with the socket mount read-only; migration receives no runtime root. The
 bootstrap source is separately rejected unless it is a regular file owned by
 the exact effective API UID/GID with mode `0600` and exactly one hard link.
 Preflight verifies link-count stability across its named/opened/named snapshots,
 opens metadata only, and never reads secret bytes. The API bootstrap loader and
 the shared provider/ingress `FileSecretStore` repeat the single-link requirement
-before and after bounded reads and during final pathname revalidation. This
+before and after bounded reads and during final pathname revalidation. Secret
+content must be non-empty valid UTF-8 with no NUL, carriage return, or line feed.
+This
 closes hard-link aliases introduced before preflight or while secret material is
 being loaded.
 

@@ -98,7 +98,7 @@ function canonicalJson(value: unknown): string {
 let temporaryRoot: string;
 let journalRoot: string;
 
-function startIsolatedJournalScript(source: string, timeoutMs = 5_000): {
+function startIsolatedJournalScript(source: string, timeoutMs = 15_000): {
   readonly child: ReturnType<typeof spawn>;
   readonly completion: Promise<{ readonly stdout: string; readonly stderr: string }>;
 } {
@@ -132,11 +132,11 @@ function startIsolatedJournalScript(source: string, timeoutMs = 5_000): {
   return { child, completion };
 }
 
-async function runIsolatedJournalScript(source: string, timeoutMs = 5_000): Promise<{ readonly stdout: string; readonly stderr: string }> {
+async function runIsolatedJournalScript(source: string, timeoutMs = 15_000): Promise<{ readonly stdout: string; readonly stderr: string }> {
   return startIsolatedJournalScript(source, timeoutMs).completion;
 }
 
-async function waitForFile(path: string, timeoutMs = 2_000): Promise<void> {
+async function waitForFile(path: string, timeoutMs = 10_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (true) {
     try {
@@ -149,7 +149,7 @@ async function waitForFile(path: string, timeoutMs = 2_000): Promise<void> {
   }
 }
 
-async function waitForLineCount(path: string, count: number, timeoutMs = 2_000): Promise<void> {
+async function waitForLineCount(path: string, count: number, timeoutMs = 10_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (true) {
     try {

@@ -403,7 +403,7 @@ test("Hermes private release operations are explicit and keep credentials out of
     "infra/hermes/product-images.lock.json",
     "read:packages",
     "docker login ghcr.io",
-    "v0.1.0@sha256:",
+    "v0.1.3@sha256:",
   ]) {
     assert.ok(combined.includes(marker), marker);
   }

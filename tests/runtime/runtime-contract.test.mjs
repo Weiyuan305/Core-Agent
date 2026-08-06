@@ -48,7 +48,6 @@ const smokeEnvironment = Object.freeze({
   CORE_AGENT_BOOTSTRAP_KEY_FILE: "/safe/bootstrap/key",
   CORE_AGENT_PROVIDER_SECRET_ROOT: "/safe/provider",
   CORE_AGENT_INGRESS_SECRET_ROOT: "/safe/ingress",
-  CORE_AGENT_SUPERVISOR_SOCKET_ROOT: "/safe/socket",
   CORE_AGENT_SUPERVISOR_STATE_ROOT: "/safe/state",
   CORE_AGENT_RUNTIME_UID: "501",
   CORE_AGENT_RUNTIME_GID: "20",

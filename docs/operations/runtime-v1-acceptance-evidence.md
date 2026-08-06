@@ -1,35 +1,84 @@
 # Runtime v1 acceptance evidence
 
-This release commit records deterministic specification evidence only. No local
-PostgreSQL suite, Docker/Colima topology, Linux startup, or real Hermes/provider
-smoke was run while producing this file. The current repository Hermes lock is
-the official base-image build input, not a reviewed Core-Agent product-image
-lock, and no target-platform product RepoDigest or provider execution was
-authorized. Runtime-dependent criteria remain Pending until their required
-systems actually run. This file contains no real resource ID, response,
-credential, customer name, or student data.
+Evidence date: 2026-08-06
 
-Committed automated tests are specifications, not proof that an unrun dependency
-worked. “Pass” below is reserved for a criterion whose required gate actually
-ran for this evidence revision. A manual column marked “Not run” is not a claim
-that an operator performed the real smoke.
+This record contains only synthetic identifiers, immutable image identities,
+final states, event types/counts, and behavioral assertions. It contains no
+prompt or assistant text, credential, authorization value, secret path,
+customer name, student data, raw Docker inspection, or database row.
 
-| Criterion | Automated evidence | Manual evidence | Result |
+## Reviewed Hermes product release
+
+- Source commit: `16de0df8bd8024958b1e12d2c802f21e1c5512d7`
+- Release: private GHCR `v0.1.3`
+- Publish workflow: [GitHub Actions run 31089294718](https://github.com/Weiyuan305/Core-Agent/actions/runs/31089294718)
+- Multi-platform index: `sha256:3f20fc2a6500f529a912d991134e3a55e9878678d833f25ccb008549c67f89bf`
+- `linux/amd64`: `sha256:421f09a140d5b048586749d9f9753f3a2d3fa8571cebac462ae503c646ccb93e`
+- `linux/arm64`: `sha256:518bc0734d94c44760a62368a2dbb633ebce511a73534ab987aa621862d2a7be`
+- The release workflow's lock artifact was copied unchanged to
+  `infra/hermes/product-images.lock.json`; a byte comparison passed, package
+  visibility was confirmed `private`, and the locked arm64 digest pulled into
+  the selected daemon.
+
+## Target-platform strict smoke
+
+- Host/runtime: macOS, Colima, `linux/arm64`
+- Provider transport: managed custom provider using `chat_completions`
+- Tenant: `synthetic-runtime-v1-f893baa74c06db30`
+- Profile: `synthetic-runtime-v1-profile-f893baa74c06db30`
+- Runtime: `runtime_b258256e2f2eeb26ba2997ba25b7c7c3`
+- Conversation: `conversation_bbad3e918b294c23dd5871c427029a83`
+- Run: `run_8ccdd7c55c15f89354e20ce65e6d0bf3`
+- Final Runtime state: `ready`
+- Final Run status: `succeeded`
+- Assistant message count: `1`
+- Terminal event ordering: `message.completed`, then `run.completed`
+- Ordered stages completed: `PREFLIGHT`, `TOPOLOGY`, `PROVISION`, `RUN`,
+  `CLEANUP`
+
+The strict smoke exercised real PostgreSQL migration/readiness, API, Worker,
+Supervisor, private Hermes Runtime provisioning, the selected HTTPS provider,
+durable SSE, exact managed-container inspection, database/container no-secret
+scans, and ordered default cleanup.
+
+## Interactive lifecycle acceptance
+
+The anonymous synthetic interactive client completed all of these assertions
+without persisting a transcript:
+
+- a first prompt produced a successful assistant result;
+- a follow-up in the same Conversation recalled the synthetic context;
+- `/new` created a distinct Conversation that did not inherit that context;
+- `/restart` recreated API and Worker, reached readiness, and a subsequent Run
+  succeeded while PostgreSQL, Supervisor, Hermes Runtime, and Conversation were
+  preserved;
+- `/exit` entered the normal bounded cleanup path and the client exited with
+  status `0`.
+
+After cleanup, the exact Compose project had no running services and no managed
+Runtime container remained. Tenant data volumes, the PostgreSQL volume, the
+Supervisor socket volume, and permanent journal guards were retained by their
+documented durability contracts; no broad or recursive deletion was used.
+
+## Acceptance matrix
+
+“Pass” means the required automated or target-platform gate actually ran for
+this evidence revision. A pending result is not inferred from specification
+tests alone.
+
+| Criterion | Automated evidence | Target-platform evidence | Result |
 | --- | --- | --- | --- |
-| AC1 migrations/readiness | `packages/runtime-core/tests/migrations.test.ts`; `apps/control-plane-api/tests/health.test.ts` | Not run; PostgreSQL/readiness evidence absent | **Pending runtime evidence** |
-| AC2 idempotent provisioning | `tests/integration/provisioning.test.ts` duplicate request/resource assertions | Not run; PostgreSQL and real Docker resource evidence absent | **Pending runtime evidence** |
-| AC3 isolated healthy runtime | Supervisor Docker adapter/policy tests and `tests/runtime/control-plane-compose.test.mjs` | Not run; no Linux/Colima preflight or managed-container inspection | **Pending runtime evidence** |
-| AC4 accepted Profile Run | API Conversation/Run admission tests and `tests/integration/agent-run.test.ts` | Not run; no real Hermes/provider Run | **Pending runtime evidence** |
-| AC5 ordered durable SSE | API SSE tests and the ordered event assertion in `tests/integration/agent-run.test.ts` | Not run; no PostgreSQL-backed real event stream | **Pending runtime evidence** |
-| AC6 restart recovery | `tests/integration/recovery.test.ts` API/Worker restart, lease reclaim, and cursor resume | Not run; no PostgreSQL/Docker restart exercise | **Pending runtime evidence** |
-| AC7 fail-closed boundaries | `tests/integration/security.test.ts`, Supervisor policy tests, auth tests, and Compose static security matrix | Not run; no target rejected-command exercise | **Pending runtime evidence** |
-| AC8 no secret leakage | synthetic sentinel assertions, `scripts/scan-runtime-database.mjs`, and smoke structure/sentinel tests | Not run; no target Docker/database dump scan | **Pending runtime evidence** |
-| AC9 CI quality gates | `.github/workflows/runtime-contract.yml` split contract/unit/PostgreSQL/integration/Compose jobs and static pin checks | Compose config is validated deterministically; no Compose service was started for this evidence | Pass |
-| AC10 real Hermes response | `tests/runtime/runtime-contract.test.mjs` opt-in, output allowlist, secure file, product-lock, inspection, child-process, and cleanup structure tests | Not run; requires a reviewed product RepoDigest, target platform, and provider execution | **Pending real smoke** |
+| AC1 migrations/readiness | PostgreSQL migration and API health suites | Real migration completed; API, Worker, and dependencies reached readiness | **Pass** |
+| AC2 idempotent provisioning | `tests/integration/provisioning.test.ts` contains duplicate request/resource assertions | One real deterministic provisioning completed; clean-CI duplicate replay is pending | **Pending final CI** |
+| AC3 isolated healthy runtime | Supervisor adapter/policy and Compose topology suites | Managed arm64 container passed exact labels, digest, private-network, command, and readiness inspection | **Pass** |
+| AC4 accepted Profile Run | Conversation/Run admission and full-slice suites | Real Profile Run reached `succeeded` with one assistant message | **Pass** |
+| AC5 ordered durable SSE | API SSE and ProductEvent scope/bounds suites | PostgreSQL-backed event stream ended with `message.completed`, `run.completed` | **Pass** |
+| AC6 restart recovery | Recovery, lease, cursor, and restart unit/integration coverage | `/restart` preserved state and the next real Run succeeded | **Pass** |
+| AC7 fail-closed boundaries | Supervisor unsafe-operation matrix, auth tests, static security topology, and bounded-error tests ran locally | Exact image, container, context, socket, path, secret, and network inspections passed before mutation | **Pass** |
+| AC8 no secret leakage | Synthetic sentinel, tracked-evidence, database-surface, and output-allowlist scanners | Real smoke scanned database and container surfaces and emitted only allowlisted metadata | **Pass** |
+| AC9 CI quality gates | Split contract/unit/PostgreSQL/integration/Compose workflow exists with pinned actions and images | Final clean-checkout workflow rerun is pending | **Pending final CI** |
+| AC10 real Hermes response | Opt-in smoke structure, product-lock, inspection, SSE, child-process, and cleanup suites | Reviewed arm64 product digest returned a non-empty assistant result and cleanup completed | **Pass** |
 
-When AC10 is eventually executed, append a separate allowlisted record with
-only platform, locked digests, timestamp, tenant/profile/runtime/conversation/
-Run IDs, final runtime and Run states, event types, and assistant message count.
-Do not add prompt/response content, keys, authorization, raw dependency output,
-Docker JSON, database rows, or secret paths. Mark AC10 Pass only after that
-record shows a non-empty assistant result and all cleanup assertions pass.
+When the clean-checkout Runtime Contract workflow passes, update only AC2 and
+AC9 with its commit and workflow link. Do not add logs, prompts, responses,
+keys, raw dependency output, Docker JSON, database rows, or secret paths.

@@ -25,7 +25,7 @@ the alternatives considered, and the consequences accepted at the time.
 The current Runtime design is
 [Control Plane Runtime v1](../superpowers/specs/2026-08-03-control-plane-runtime-v1-design.md).
 Its API, Worker, PostgreSQL repositories, Supervisor, Compose topology, and
-opt-in acceptance-smoke tooling are implemented. AC10 is still pending a real
-target-platform run with a reviewed product-image digest; see the
+opt-in acceptance-smoke tooling are implemented. The real target-platform AC10
+run with a reviewed product-image digest passed on 2026-08-06; see the
 [acceptance evidence](../operations/runtime-v1-acceptance-evidence.md) and
 [operating guide](../operations/runtime-v1-local-smoke.md).

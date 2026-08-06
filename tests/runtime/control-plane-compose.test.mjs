@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { chmod, link, mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
@@ -575,7 +574,7 @@ test("CI preserves contracts and separates deterministic runtime gates", async (
   assert.match(workflowSource, /verify-no-secret\.mjs/u);
   assert.match(workflowSource, /scan-runtime-database\.mjs synthetic-ci-sentinel-runtime-v1/u);
   assert.match(workflowSource, /postgresql:\/\/core_agent_ci@127\.0\.0\.1:5432\/core_agent_control/u);
-  assert.equal(workflow.jobs.compose.steps.find((step) => step.name === "Validate Compose configuration").env.CORE_AGENT_SUPERVISOR_SOCKET_ROOT, "/tmp/core-agent-runtime-socket-path-only");
+  assert.equal(Object.hasOwn(workflow.jobs.compose.steps.find((step) => step.name === "Validate Compose configuration").env, "CORE_AGENT_SUPERVISOR_SOCKET_ROOT"), false);
   assert.equal(workflow.jobs.compose.steps.find((step) => step.name === "Validate Compose configuration").env.CORE_AGENT_SUPERVISOR_STATE_ROOT, "/tmp/core-agent-runtime-state-path-only");
   assert.equal(workflow.jobs.compose.steps.find((step) => step.name === "Validate Compose configuration").env.CORE_AGENT_HERMES_IMAGE_LOCK_FILE, "/tmp/core-agent-product-image-lock-path-only");
   assert.equal(workflow.jobs.compose.steps.find((step) => step.name === "Validate Compose configuration").env.CORE_AGENT_DOCKER_SOCKET_SOURCE, "/var/run/docker.sock");
@@ -590,7 +589,7 @@ test("runtime example environment contains paths and generated references only",
   assert.match(text, /CORE_AGENT_BOOTSTRAP_KEY_FILE=\/absolute\/path\/to\/bootstrap-key/u);
   assert.match(text, /CORE_AGENT_PROVIDER_SECRET_ROOT=\/absolute\/path\/to\/provider-secret-directory/u);
   assert.match(text, /CORE_AGENT_INGRESS_SECRET_ROOT=\/absolute\/path\/to\/ingress-secret-directory/u);
-  assert.match(text, /CORE_AGENT_SUPERVISOR_SOCKET_ROOT=\/absolute\/path\/to\/runtime-socket-directory/u);
+  assert.doesNotMatch(text, /CORE_AGENT_SUPERVISOR_SOCKET_ROOT/u);
   assert.match(text, /CORE_AGENT_SUPERVISOR_STATE_ROOT=\/absolute\/path\/to\/runtime-state-directory/u);
   assert.match(text, /CORE_AGENT_RUNTIME_UID=<numeric-output-of-id-u>/u);
   assert.match(text, /CORE_AGENT_RUNTIME_GID=<numeric-output-of-id-g>/u);
@@ -601,7 +600,7 @@ test("runtime example environment contains paths and generated references only",
   assert(!/sk-[A-Za-z0-9]|bearer\s+/iu.test(text));
 });
 
-test("runtime operating evidence distinguishes socket platforms and keeps runtime acceptance pending", async () => {
+test("runtime operating evidence distinguishes socket platforms and records only executed acceptance", async () => {
   const readme = await source("README.md");
   assert.match(readme, /Node\.js >=22\.13\.0/u);
   assert.match(readme, /Docker Engine\/CLI[\s\S]*Compose v2[\s\S]*Buildx/u);
@@ -642,9 +641,14 @@ test("runtime operating evidence distinguishes socket platforms and keeps runtim
   const boundary = await source("docs/operations/runtime-v1-production-boundary.md");
   assert.match(boundary, /development convenience, not a role-isolation security boundary/iu);
   const evidence = await source("docs/operations/runtime-v1-acceptance-evidence.md");
-  for (const criterion of ["AC1", "AC2", "AC3", "AC4", "AC5", "AC6", "AC7", "AC8", "AC10"]) {
-    assert.match(evidence, new RegExp(`\\| ${criterion} [^\\n]+\\| \\*\\*Pending`, "u"), criterion);
+  for (const criterion of ["AC1", "AC3", "AC4", "AC5", "AC6", "AC7", "AC8", "AC10"]) {
+    assert.match(evidence, new RegExp(`\\| ${criterion} [^\\n]+\\| \\*\\*Pass\\*\\* \\|`, "u"), criterion);
   }
+  for (const criterion of ["AC2", "AC9"]) {
+    assert.match(evidence, new RegExp(`\\| ${criterion} [^\\n]+\\| \\*\\*Pending final CI\\*\\* \\|`, "u"), criterion);
+  }
+  assert.match(evidence, /GitHub Actions run 31089294718/u);
+  assert.doesNotMatch(evidence, /prompt or assistant text:[^\n]+/iu);
 });
 
 test("runtime PostgreSQL initialization separates bootstrap migrator and application roles", async () => {
@@ -662,10 +666,9 @@ test("runtime PostgreSQL initialization separates bootstrap migrator and applica
 test("runtime path preflight creates final-uid 0700 roots and validates bootstrap metadata without reading it", async (t) => {
   const moduleUrl = pathToFileURL(pathFromRoot("scripts/prepare-runtime-paths.mjs")).href;
   const preflight = await import(`${moduleUrl}?red=${Date.now()}`);
-  const root = await realpath(await mkdtemp(join(tmpdir(), "core-agent-runtime-paths-")));
+  const root = await realpath(await mkdtemp(join(repositoryRoot, ".core-agent-runtime-paths-")));
   t.after(() => rm(root, { recursive: true, force: true }));
   const bootstrap = join(root, "bootstrap-key");
-  const socketRoot = join(root, "socket");
   const stateRoot = join(root, "state");
   const providerRoot = join(root, "provider");
   const ingressRoot = join(root, "ingress");
@@ -675,13 +678,11 @@ test("runtime path preflight creates final-uid 0700 roots and validates bootstra
     CORE_AGENT_BOOTSTRAP_KEY_FILE: bootstrap,
     CORE_AGENT_PROVIDER_SECRET_ROOT: providerRoot,
     CORE_AGENT_INGRESS_SECRET_ROOT: ingressRoot,
-    CORE_AGENT_SUPERVISOR_SOCKET_ROOT: socketRoot,
     CORE_AGENT_SUPERVISOR_STATE_ROOT: stateRoot,
   }), {
     bootstrapPath: bootstrap,
     providerRoot,
     ingressRoot,
-    socketRoot,
     stateRoot,
     bootstrapUid: 12000,
     bootstrapGid: 12000,
@@ -698,16 +699,13 @@ test("runtime path preflight creates final-uid 0700 roots and validates bootstra
     CORE_AGENT_RUNTIME_UID: String(uid),
     CORE_AGENT_RUNTIME_GID: String(gid),
     CORE_AGENT_SUPERVISOR_SOCKET_GID: String(gid),
-    CORE_AGENT_SUPERVISOR_SOCKET_ROOT: socketRoot,
     CORE_AGENT_SUPERVISOR_STATE_ROOT: stateRoot,
   };
   await preflight.prepareRuntimePaths({ environment });
-  for (const path of [socketRoot, stateRoot]) {
-    const metadata = await stat(path);
-    assert.equal(metadata.mode & 0o777, 0o700);
-    assert.equal(metadata.uid, uid);
-    assert.equal(metadata.gid, gid);
-  }
+  const stateMetadata = await stat(stateRoot);
+  assert.equal(stateMetadata.mode & 0o777, 0o700);
+  assert.equal(stateMetadata.uid, uid);
+  assert.equal(stateMetadata.gid, gid);
   for (const child of ["staging", "ingress"]) {
     const metadata = await stat(join(stateRoot, child));
     assert.equal(metadata.mode & 0o777, 0o700);
@@ -726,14 +724,14 @@ test("runtime path preflight creates final-uid 0700 roots and validates bootstra
   await mkdir(directoryBootstrap, { mode: 0o700 });
   await assert.rejects(preflight.prepareRuntimePaths({ environment: { ...environment, CORE_AGENT_BOOTSTRAP_KEY_FILE: directoryBootstrap } }), /runtime path preparation failed/u);
   await assert.rejects(preflight.prepareRuntimePaths({ environment: { ...environment, CORE_AGENT_RUNTIME_UID: String(uid + 1) } }), /runtime path preparation failed/u);
-  await chmod(socketRoot, 0o755);
+  await chmod(stateRoot, 0o755);
   await assert.rejects(preflight.prepareRuntimePaths({ environment }), /runtime path preparation failed/u);
 });
 
 test("runtime path preflight rejects symlink ancestors and every canonical cross-purpose overlap", async (t) => {
   const moduleUrl = pathToFileURL(pathFromRoot("scripts/prepare-runtime-paths.mjs")).href;
   const preflight = await import(`${moduleUrl}?separation=${Date.now()}`);
-  const root = await realpath(await mkdtemp(join(tmpdir(), "core-agent-runtime-separation-")));
+  const root = await realpath(await mkdtemp(join(repositoryRoot, ".core-agent-runtime-separation-")));
   t.after(() => rm(root, { recursive: true, force: true }));
   const uid = process.getuid?.() ?? 0;
   const gid = process.getgid?.() ?? 0;
@@ -753,7 +751,6 @@ test("runtime path preflight rejects symlink ancestors and every canonical cross
     CORE_AGENT_BOOTSTRAP_KEY_FILE: await makeBootstrap(join(root, "bootstrap")),
     CORE_AGENT_PROVIDER_SECRET_ROOT: await makeDirectory("provider"),
     CORE_AGENT_INGRESS_SECRET_ROOT: await makeDirectory("ingress"),
-    CORE_AGENT_SUPERVISOR_SOCKET_ROOT: join(root, "socket"),
     CORE_AGENT_SUPERVISOR_STATE_ROOT: join(root, "state"),
   };
   await preflight.prepareRuntimePaths({ environment: base });
@@ -768,12 +765,12 @@ test("runtime path preflight rejects symlink ancestors and every canonical cross
   } }), /runtime path preparation failed/u);
   assert.equal(await realpath(join(linkedParent, "bootstrap")), linkedBootstrap);
 
-  const sharedSocket = await makeDirectory("shared-socket");
-  const nestedBootstrap = await makeBootstrap(join(sharedSocket, "bootstrap"));
+  const sharedState = await makeDirectory("shared-state");
+  const nestedBootstrap = await makeBootstrap(join(sharedState, "bootstrap"));
   await assert.rejects(preflight.prepareRuntimePaths({ environment: {
     ...base,
     CORE_AGENT_BOOTSTRAP_KEY_FILE: nestedBootstrap,
-    CORE_AGENT_SUPERVISOR_SOCKET_ROOT: sharedSocket,
+    CORE_AGENT_SUPERVISOR_STATE_ROOT: sharedState,
   } }), /runtime path preparation failed/u);
 
   const ingressWithProvider = await makeDirectory("ingress-with-provider");
@@ -785,13 +782,12 @@ test("runtime path preflight rejects symlink ancestors and every canonical cross
     CORE_AGENT_PROVIDER_SECRET_ROOT: nestedProvider,
   } }), /runtime path preparation failed/u);
 
-  const socketForAlias = await makeDirectory("socket-for-alias");
-  const socketAlias = join(root, "socket-alias");
-  await symlink(socketForAlias, socketAlias);
+  const stateForAlias = await makeDirectory("state-for-alias");
+  const stateAlias = join(root, "state-alias");
+  await symlink(stateForAlias, stateAlias);
   await assert.rejects(preflight.prepareRuntimePaths({ environment: {
     ...base,
-    CORE_AGENT_SUPERVISOR_SOCKET_ROOT: socketForAlias,
-    CORE_AGENT_SUPERVISOR_STATE_ROOT: join(socketAlias, "state"),
+    CORE_AGENT_SUPERVISOR_STATE_ROOT: join(stateAlias, "nested"),
   } }), /runtime path preparation failed/u);
 
   const unsafeParent = await makeDirectory("unsafe-parent");
@@ -807,7 +803,7 @@ test("runtime path preflight rejects symlink ancestors and every canonical cross
 test("runtime path preflight rejects a hard-linked bootstrap purpose alias", async (t) => {
   const moduleUrl = pathToFileURL(pathFromRoot("scripts/prepare-runtime-paths.mjs")).href;
   const preflight = await import(`${moduleUrl}?hardlink=${Date.now()}`);
-  const root = await realpath(await mkdtemp(join(tmpdir(), "core-agent-runtime-hardlink-")));
+  const root = await realpath(await mkdtemp(join(repositoryRoot, ".core-agent-runtime-hardlink-")));
   t.after(() => rm(root, { recursive: true, force: true }));
   const uid = process.getuid?.() ?? 0;
   const gid = process.getgid?.() ?? 0;
@@ -826,7 +822,6 @@ test("runtime path preflight rejects a hard-linked bootstrap purpose alias", asy
     CORE_AGENT_BOOTSTRAP_KEY_FILE: bootstrap,
     CORE_AGENT_PROVIDER_SECRET_ROOT: providerRoot,
     CORE_AGENT_INGRESS_SECRET_ROOT: ingressRoot,
-    CORE_AGENT_SUPERVISOR_SOCKET_ROOT: join(root, "socket"),
     CORE_AGENT_SUPERVISOR_STATE_ROOT: join(root, "state"),
   } }), (error) => {
     assert.equal(error?.message, "runtime path preparation failed");

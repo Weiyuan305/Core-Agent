@@ -108,7 +108,6 @@ export function resolveRuntimePathPolicy(environment = process.env) {
       bootstrapPath: absolutePath(environment, "CORE_AGENT_BOOTSTRAP_KEY_FILE"),
       providerRoot: absolutePath(environment, "CORE_AGENT_PROVIDER_SECRET_ROOT"),
       ingressRoot: absolutePath(environment, "CORE_AGENT_INGRESS_SECRET_ROOT"),
-      socketRoot: absolutePath(environment, "CORE_AGENT_SUPERVISOR_SOCKET_ROOT"),
       stateRoot: absolutePath(environment, "CORE_AGENT_SUPERVISOR_STATE_ROOT"),
       bootstrapUid: runtimeUid ?? 12000,
       bootstrapGid: identity(environment, "CORE_AGENT_RUNTIME_GID", 12000),
@@ -129,7 +128,6 @@ export async function prepareRuntimePaths({ environment = process.env } = {}) {
       { purpose: "ingress", path: policy.ingressRoot, kind: "directory", uid: policy.supervisorUid, gid: policy.supervisorGid, mode: 0o700 },
     ];
     const creatable = [
-      { purpose: "socket", path: policy.socketRoot, kind: "directory", uid: policy.supervisorUid, gid: policy.supervisorGid, mode: 0o700 },
       { purpose: "state", path: policy.stateRoot, kind: "directory", uid: policy.supervisorUid, gid: policy.supervisorGid, mode: 0o700 },
     ];
 
