@@ -245,5 +245,14 @@ fresh applied-start barrier and waits for that exact mutation before asserting
 that the adapter Promise remains unsettled. No timeout was enlarged and the
 daemon-uncertain classifier or production deadline behavior did not change.
 
+Independent full-package reruns then exposed a test-runner lifecycle gap in the
+two Server cancellation tests: both awaited a signal emitted only by an
+intentionally `unref` production deadline timer. As the last isolated worker,
+Node could cancel the test when no test-owned referenced deadline remained.
+Those waits now race the expected signal against a referenced two-second test
+deadline that fails with a fixed synthetic label. This keeps the harness alive;
+it does not change the production 50 ms effect, 30 ms settlement, or response
+windows.
+
 At `3ffdbd3`, Tasks 25-28 were ready for the required repeated whole-branch
 architecture, PostgreSQL concurrency/recovery, and release-operability reviews.

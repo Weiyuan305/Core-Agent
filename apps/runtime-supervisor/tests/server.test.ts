@@ -120,6 +120,18 @@ function accepted(operationId: string): SupervisorResponseV1 {
   };
 }
 
+async function waitForTestSignal(signal: Promise<void>, label: string): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`test signal deadline exceeded: ${label}`)), 2_000);
+  });
+  try {
+    await Promise.race([signal, deadline]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 let temporaryRoot: string;
 let socketPath: string;
 
@@ -521,7 +533,7 @@ test("Unix service caps execution at four and waits for abort settlement before 
     const client = new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 });
     let firstSettled = false;
     const first = client.execute(request("operation_deadline")).finally(() => { firstSettled = true; });
-    await abortObserved;
+    await waitForTestSignal(abortObserved, "effect deadline abort");
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(aborted, true);
     assert.equal(firstSettled, false);
@@ -581,7 +593,7 @@ test("an unsettled cancellation returns a bounded transient timeout without rele
   try {
     const client = new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 });
     const first = client.execute(request("operation_unsettled_deadline"));
-    await abortObserved;
+    await waitForTestSignal(abortObserved, "unsettled cancellation abort");
     const response = await first;
     assert.equal(response.outcome, "failed");
     if (response.outcome === "failed") assert.equal(response.code, "DEPENDENCY_TIMEOUT");
