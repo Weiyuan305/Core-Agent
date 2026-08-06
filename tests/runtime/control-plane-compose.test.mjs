@@ -851,6 +851,37 @@ test("runtime network preparation owns exact private backplane and provider-capa
   }
 });
 
+test("runtime network preparation rejects ambient Docker endpoint overrides before Docker", async () => {
+  const moduleUrl = pathToFileURL(pathFromRoot("scripts/prepare-runtime-network.mjs")).href;
+  const network = await import(`${moduleUrl}?docker-host=${Date.now()}`);
+  const environments = [
+    { DOCKER_HOST: "ssh://operator@example.invalid/var/run/docker.sock" },
+    { DOCKER_HOST: "" },
+    Object.defineProperty({}, "DOCKER_HOST", {
+      enumerable: true,
+      get() {
+        throw new Error("DOCKER_HOST accessor must not be evaluated");
+      },
+    }),
+  ];
+
+  for (const environment of environments) {
+    const calls = [];
+    await assert.rejects(
+      network.prepareRuntimeNetwork({
+        environment,
+        runDocker: async (args) => {
+          calls.push(args);
+          return "";
+        },
+      }),
+      (error) => error?.message === "runtime network preparation failed"
+        && !error.message.includes("example.invalid"),
+    );
+    assert.deepEqual(calls, [], "DOCKER_HOST must fail before any Docker invocation");
+  }
+});
+
 test("database sentinel scanner inspects every public text surface without returning values", async () => {
   const moduleUrl = pathToFileURL(pathFromRoot("scripts/scan-runtime-database.mjs")).href;
   const scanner = await import(`${moduleUrl}?red=${Date.now()}`);
