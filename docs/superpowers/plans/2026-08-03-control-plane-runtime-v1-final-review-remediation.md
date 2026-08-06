@@ -145,3 +145,43 @@ The first remediation wave closed FR-01 through FR-08, but the next complete-bra
 - Required gates: runtime topology tests, read-only Compose config, socket-preflight unit tests, docs/static gates, scanner, and full deterministic checks. Actual Linux/Colima startup remains an explicit release gate.
 
 After Task 28, repeat all three complete-branch reviews. Runtime v1 remains unmergeable until they approve with no Critical or Important findings.
+
+## Execution and review trace
+
+This section is the tracked audit trail for the decisions made while executing
+Tasks 25-28. The local subagent ledger contains the longer per-round reports.
+
+- **Task 25 — complete at `bc2d65f`.** RED coverage was added in
+  `187b397..0573da6`, the first implementation landed in `31f8d49`, and review
+  gaps were closed by `37bee56..bc2d65f`. Successful terminalization now binds
+  persisted job kind, attempt, command version, target, and observed container
+  identity before shared-state or history mutation.
+- **Task 26 — complete at `546cf5c`.** `3c17768` defined the global transaction
+  lock-order regressions and `546cf5c` enforced them. PostgreSQL `40P01` and
+  `40001` retry only database commit work and never replay Docker, Hermes, or
+  another external effect.
+- **Task 27 — independently approved at `3ffdbd3`.** The initial transport and
+  lifecycle work spanned `fc9df32..1ba253e`. Review then found a pathname
+  `lstat`/`unlink` TOCTOU capable of dispatching two callbacks. RED commit
+  `3fc3fd8` and GREEN commit `812afca` replaced stale pathname reservations
+  with a permanent per-operation mode-`0600` SQLite guard plus canonical
+  pending JSON. `9a66a89` and `3ffdbd3` migrated all uncertainty, recovery, and
+  busy-admission evidence to pending-versus-terminal semantics. Cross-process
+  contention, SIGKILL recovery, unsafe FIFO/symlink/permission handling,
+  unrelated-operation concurrency, and the complete Supervisor suite passed;
+  the final Supervisor count was 83/83.
+- **Task 28 — independently approved at `8a70e6e`.** Socket preflight and
+  clean-host documentation landed in `6768fdf..aae284c`. Review found an
+  ambient `DOCKER_HOST` bypass; `6b8e0d7..8a70e6e` now rejects every present
+  value before dependency creation or Docker invocation and never propagates
+  or echoes it. The remediation tests passed 2/2 and Compose/static tests
+  passed 19/19. No Docker daemon or real Hermes/provider smoke was started.
+
+The architecture decision produced during Task 27 requires Node.js 22.13.0 or
+newer because the Supervisor uses `node:sqlite`. The module remains
+experimental on the supported Node 22 line; warnings stay visible. The
+per-operation guard is permanent, while pending and terminal JSON records carry
+the recoverable protocol state. Legacy digest `.lock` files fail closed.
+
+At `3ffdbd3`, Tasks 25-28 were ready for the required repeated whole-branch
+architecture, PostgreSQL concurrency/recovery, and release-operability reviews.
