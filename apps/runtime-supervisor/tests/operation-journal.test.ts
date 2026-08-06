@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -98,20 +98,30 @@ function canonicalJson(value: unknown): string {
 let temporaryRoot: string;
 let journalRoot: string;
 
-async function runIsolatedJournalScript(source: string): Promise<{ readonly stdout: string; readonly stderr: string }> {
-  return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", source], {
+function startIsolatedJournalScript(source: string, timeoutMs = 5_000): {
+  readonly child: ReturnType<typeof spawn>;
+  readonly completion: Promise<{ readonly stdout: string; readonly stderr: string }>;
+} {
+  let child!: ReturnType<typeof spawn>;
+  const completion = new Promise<{ readonly stdout: string; readonly stderr: string }>((resolvePromise, rejectPromise) => {
+    child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", source], {
       cwd: repositoryRoot,
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
     let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => { stdout += chunk; });
-    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      rejectPromise(new Error("isolated journal child timed out"));
+    }, timeoutMs);
+    timeout.unref?.();
+    child.stdout!.setEncoding("utf8");
+    child.stderr!.setEncoding("utf8");
+    child.stdout!.on("data", (chunk: string) => { stdout += chunk; });
+    child.stderr!.on("data", (chunk: string) => { stderr += chunk; });
     child.once("error", rejectPromise);
     child.once("exit", (code, signal) => {
+      clearTimeout(timeout);
       if (code === 0 && signal === null) {
         resolvePromise({ stdout, stderr });
       } else {
@@ -119,6 +129,37 @@ async function runIsolatedJournalScript(source: string): Promise<{ readonly stdo
       }
     });
   });
+  return { child, completion };
+}
+
+async function runIsolatedJournalScript(source: string, timeoutMs = 5_000): Promise<{ readonly stdout: string; readonly stderr: string }> {
+  return startIsolatedJournalScript(source, timeoutMs).completion;
+}
+
+async function waitForFile(path: string, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    try {
+      await lstat(path);
+      return;
+    } catch (error) {
+      if (Date.now() >= deadline) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+}
+
+async function waitForLineCount(path: string, count: number, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    try {
+      if ((await readFile(path, "utf8")).trim().split("\n").filter(Boolean).length >= count) return;
+    } catch {
+      // The writer has not published its marker yet.
+    }
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${count} child markers`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 test.beforeEach(async () => {
@@ -191,114 +232,111 @@ test("two journal instances reserve one digest before either dispatches", async 
   assert.equal(executions, 1);
 });
 
-test("a stale path-unlink takeover never permits a second callback", async () => {
+test("a busy per-operation guard observes an abort signal within its bounded wait", async () => {
+  const firstJournal = new OperationJournal({ directory: journalRoot, guardPollMs: 1, guardWaitMs: 100 });
+  let entered!: () => void;
+  const firstEntered = new Promise<void>((resolve) => { entered = resolve; });
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const first = firstJournal.run(request(), async () => {
+    entered();
+    await blocked;
+    return response();
+  });
+  await firstEntered;
+  const controller = new AbortController();
+  let secondCallbacks = 0;
+  const second = new OperationJournal({ directory: journalRoot, guardPollMs: 1, guardWaitMs: 100 }).run(
+    request(),
+    async () => { secondCallbacks += 1; return response(); },
+    { signal: controller.signal },
+  );
+  controller.abort();
+  await assert.rejects(second, /SUPERVISOR_REJECTED: Operation journal record is unsafe/u);
+  assert.equal(secondCallbacks, 0);
+  release();
+  assert.equal((await first).outcome, "accepted");
+});
+
+test("two independent processes run one callback and replay one terminal record", async () => {
   const moduleUrl = new URL("../src/operation-journal.ts", import.meta.url).href;
-  const result = await runIsolatedJournalScript(`
-    import { createRequire, syncBuiltinESMExports } from "node:module";
-    import { createHash } from "node:crypto";
-    import { mkdir, writeFile, utimes } from "node:fs/promises";
+  const enteredPath = join(temporaryRoot, "process-entered");
+  const startedPath = join(temporaryRoot, "process-started");
+  const goPath = join(temporaryRoot, "process-go");
+  const attemptedPath = join(temporaryRoot, "process-attempted");
+  const releasePath = join(temporaryRoot, "process-release");
+  const source = `
     import { canonicalSupervisorRequestHash } from "@core-agent/runtime-core";
-
-    const journalRoot = ${JSON.stringify(journalRoot)};
-    const requestData = {
-      protocol_version: 1,
-      operation_id: "operation_journal_private",
-      kind: "inspect",
-      tenant_id: "tenant_a",
-      runtime_id: "runtime_a",
-      generation: 1,
-    };
-    const request = { ...requestData, request_hash: canonicalSupervisorRequestHash(requestData) };
-    const digest = createHash("sha256").update(request.operation_id).digest("hex");
-    const lockPath = journalRoot + "/" + digest + ".lock";
-    await mkdir(journalRoot, { recursive: true, mode: 0o700 });
-    await writeFile(lockPath, JSON.stringify({
-      owner_token: "a".repeat(64),
-      protocol_version: 1,
-      request_hash: request.request_hash,
-      stage: "reserved",
-    }) + "\\n", { mode: 0o600 });
-    const stale = new Date(Date.now() - 151_000);
-    await utimes(lockPath, stale, stale);
-
-    const require = createRequire(import.meta.url);
-    const fsPromises = require("node:fs/promises");
-    const originalUnlink = fsPromises.unlink;
-    let lockUnlinks = 0;
-    let markFirstUnlink;
-    const firstUnlinkEntered = new Promise((resolve) => { markFirstUnlink = resolve; });
-    let releaseFirstUnlink;
-    const firstUnlinkMayProceed = new Promise((resolve) => { releaseFirstUnlink = resolve; });
-    fsPromises.unlink = async (path, ...arguments_) => {
-      if (String(path) === lockPath && ++lockUnlinks === 1) {
-        markFirstUnlink();
-        await firstUnlinkMayProceed;
-      }
-      return originalUnlink(path, ...arguments_);
-    };
-    syncBuiltinESMExports();
+    import { appendFile, writeFile, lstat } from "node:fs/promises";
     const { OperationJournal } = await import(${JSON.stringify(moduleUrl)});
-    let callbacks = 0;
-    let releaseCallbacks;
-    const callbacksReleased = new Promise((resolve) => { releaseCallbacks = resolve; });
-    let secondCallback;
-    const bothCallbacks = new Promise((resolve) => { secondCallback = resolve; });
-    const execute = async () => {
-      callbacks += 1;
-      if (callbacks === 2) secondCallback();
-      await callbacksReleased;
-      return {
-        protocol_version: 1,
-        operation_id: request.operation_id,
-        outcome: "accepted",
-        observation: {
-          tenant_id: "tenant_a",
-          runtime_id: "runtime_a",
-          generation: 1,
-          exists: true,
-          lifecycle: "running",
-          health: "healthy",
-          image_ref: "managed/runtime@sha256:${"a".repeat(64)}",
-          private_origin: "http://172.30.0.7:8642",
-        },
-      };
-    };
-    const first = new OperationJournal({ directory: journalRoot }).run(request, execute);
-    void first.catch(() => undefined);
-    const attempt = await Promise.race([
-      firstUnlinkEntered.then(() => "legacy-unlink"),
-      new Promise((resolve) => setTimeout(() => resolve("no-legacy-unlink"), 200)),
-    ]);
-    if (attempt === "legacy-unlink") {
-      const second = new OperationJournal({ directory: journalRoot }).run(request, execute);
-      void second.catch(() => undefined);
-      const secondStarted = await Promise.race([
-        new Promise((resolve) => {
-          const timer = setInterval(() => {
-            if (callbacks >= 1) {
-              clearInterval(timer);
-              resolve(true);
-            }
-          }, 1);
-        }),
-        new Promise((resolve) => setTimeout(() => resolve(false), 200)),
-      ]);
-      if (secondStarted) {
-        releaseFirstUnlink();
-        await Promise.race([
-          bothCallbacks,
-          new Promise((resolve) => setTimeout(resolve, 200)),
-        ]);
-      }
-      releaseCallbacks();
-      await Promise.allSettled([first, second]);
-    } else {
-      await Promise.allSettled([first]);
+    const data = { protocol_version: 1, operation_id: "operation_journal_process", kind: "inspect", tenant_id: "tenant_a", runtime_id: "runtime_a", generation: 1 };
+    const request = { ...data, request_hash: canonicalSupervisorRequestHash(data) };
+    await appendFile(${JSON.stringify(startedPath)}, process.pid + "\\n", { mode: 0o600 });
+    while (true) {
+      try { await lstat(${JSON.stringify(goPath)}); break; } catch { await new Promise((resolve) => setTimeout(resolve, 5)); }
     }
-    console.log(JSON.stringify({ callbacks }));
+    let callbacks = 0;
+    const pending = new OperationJournal({ directory: ${JSON.stringify(journalRoot)}, guardPollMs: 1, guardWaitMs: 2_000 }).run(request, async () => {
+      callbacks += 1;
+      await writeFile(${JSON.stringify(enteredPath)}, "entered", { flag: "wx", mode: 0o600 });
+      while (true) {
+        try { await lstat(${JSON.stringify(releasePath)}); break; } catch { await new Promise((resolve) => setTimeout(resolve, 5)); }
+      }
+      return { protocol_version: 1, operation_id: request.operation_id, outcome: "accepted", observation: { tenant_id: "tenant_a", runtime_id: "runtime_a", generation: 1, exists: true, lifecycle: "running", health: "healthy", image_ref: "managed/runtime@sha256:${"a".repeat(64)}", private_origin: "http://172.30.0.7:8642" } };
+    });
+    await appendFile(${JSON.stringify(attemptedPath)}, process.pid + "\\n", { mode: 0o600 });
+    const result = await pending;
+    console.log(JSON.stringify({ callbacks, outcome: result.outcome }));
+  `;
+  const left = runIsolatedJournalScript(source);
+  const right = runIsolatedJournalScript(source);
+  await waitForLineCount(startedPath, 2);
+  await writeFile(goPath, "go", { mode: 0o600 });
+  await waitForLineCount(attemptedPath, 2);
+  await waitForFile(enteredPath);
+  await writeFile(releasePath, "release", { mode: 0o600 });
+  const [leftResult, rightResult] = await Promise.all([left, right]);
+  const reports = [leftResult, rightResult].map(({ stdout }) => JSON.parse(stdout) as { readonly callbacks: number; readonly outcome: string });
+  assert.equal(reports[0]!.callbacks + reports[1]!.callbacks, 1);
+  assert.deepEqual(reports.map((report) => report.outcome).sort(), ["accepted", "accepted"]);
+});
+
+test("SIGKILL releases a pending guard and one successor recovers its stage", async () => {
+  const moduleUrl = new URL("../src/operation-journal.ts", import.meta.url).href;
+  const enteredPath = join(temporaryRoot, "killed-child-entered");
+  const staged = startRequest();
+  const child = startIsolatedJournalScript(`
+    import { canonicalSupervisorRequestHash } from "@core-agent/runtime-core";
+    import { writeFile } from "node:fs/promises";
+    const { OperationJournal } = await import(${JSON.stringify(moduleUrl)});
+    const data = { protocol_version: 1, operation_id: ${JSON.stringify(staged.operation_id)}, kind: "start", tenant_id: "tenant_a", runtime_id: "runtime_a", generation: 1 };
+    const request = { ...data, request_hash: canonicalSupervisorRequestHash(data) };
+    await new OperationJournal({ directory: ${JSON.stringify(journalRoot)}, guardPollMs: 1, guardWaitMs: 2_000 }).run(request, async (_request, context) => {
+      await context.advance("start_pending");
+      await writeFile(${JSON.stringify(enteredPath)}, "entered", { flag: "wx", mode: 0o600 });
+      await new Promise(() => setInterval(() => undefined, 1_000));
+      throw new Error("unreachable");
+    });
   `);
-  const report = JSON.parse(result.stdout) as { readonly callbacks: number };
-  assert.ok(report.callbacks <= 1, `stale takeover dispatched ${report.callbacks} callbacks`);
+  void child.completion.catch(() => undefined);
+  await waitForFile(enteredPath);
+  child.child.kill("SIGKILL");
+  await assert.rejects(child.completion, /signal=SIGKILL/u);
+  let recoveries = 0;
+  const terminal = await new OperationJournal({ directory: journalRoot, guardPollMs: 1, guardWaitMs: 2_000 }).run(staged, async (_request, context) => {
+    recoveries += 1;
+    assert.equal(context.recovered, true);
+    assert.equal(context.stage, "start_pending");
+    return response(staged.operation_id);
+  });
+  assert.equal(recoveries, 1);
+  assert.equal(terminal.outcome, "accepted");
+  const replay = await new OperationJournal({ directory: journalRoot }).run(staged, async () => {
+    recoveries += 1;
+    return response(staged.operation_id);
+  });
+  assert.equal(replay.outcome, "accepted");
+  assert.equal(recoveries, 1);
 });
 
 test("per-operation guards do not serialize unrelated operation IDs", async () => {
@@ -331,25 +369,22 @@ test("per-operation guards do not serialize unrelated operation IDs", async () =
   assert.equal((await lstat(guardPathFor(secondRequest.operation_id))).mode & 0o777, 0o600);
 });
 
-test("an unsafe FIFO reservation cannot be masked by a valid concurrent completion", async () => {
+test("an unsafe FIFO guard cannot be masked by a valid concurrent completion", async () => {
   const digest = createHash("sha256").update(request().operation_id).digest("hex");
   const sourceRoot = join(temporaryRoot, "completed-source");
   await new OperationJournal({ directory: sourceRoot }).run(request(), async () => response());
   const completedBytes = await readFile(join(sourceRoot, `${digest}.json`));
 
   await mkdir(journalRoot, { mode: 0o700 });
-  const reservationPath = join(journalRoot, `${digest}.lock`);
-  execFileSync("mkfifo", [reservationPath]);
-  await chmod(reservationPath, 0o600);
+  const guardPath = join(journalRoot, `${digest}.guard.sqlite`);
+  execFileSync("mkfifo", [guardPath]);
+  await chmod(guardPath, 0o600);
   let executions = 0;
   const pending = new OperationJournal({ directory: journalRoot }).run(request(), async () => {
     executions += 1;
     return response();
   });
-  await new Promise((resolve) => setTimeout(resolve, 50));
   await writeFile(join(journalRoot, `${digest}.json`), completedBytes, { mode: 0o600 });
-  const writer = await open(reservationPath, "w");
-  await writer.close();
   await assert.rejects(pending, /SUPERVISOR_REJECTED: Operation journal record is unsafe/u);
   assert.equal(executions, 0);
 });

@@ -168,6 +168,16 @@ state, and UDS projections instead of converging services onto a host user.
 
 ### Supervisor deadline and journal ownership
 
+The Supervisor journal requires Node.js 22.13.0 or newer. Each operation owns a
+permanent digest-named, mode-`0600` SQLite guard file. `BEGIN IMMEDIATE` holds
+that guard from journal read, through durable pending-stage transitions and the
+Supervisor callback, to terminal record fsync. The guard is never renamed or
+unlinked: process death releases SQLite's OS lock and a successor reads the
+canonical pending record before recovery. A legacy `.lock` reservation is an
+unsafe mixed-protocol artifact and fails closed. `node:sqlite` remains
+experimental on the supported Node 22 line; the runtime deliberately does not
+suppress that warning or any other process warning.
+
 Runtime v1 has one exported production deadline budget. Initializer and
 manifest-verifier execution receive 25 seconds each. Five independent
 reconciliation windows of 10 seconds cover two prior helper residues, the new
@@ -190,11 +200,12 @@ consuming more capacity. If a new operation cannot acquire a slot before its
 receipt-relative admission deadline, it receives a retryable, non-durable busy
 response. A still-`reserved` journal reservation is released, no effect may
 start after that deadline, and a later retry may reserve and dispatch normally.
-If stale recovery already acquired a non-`reserved` lifecycle stage, an
-admission or closing transient instead stops its heartbeat, preserves the same
-canonical mode-`0600` stage record, and marks it immediately stale. A new
-Supervisor process can therefore reclaim that exact stage without waiting for
-the normal stale interval or losing prior daemon-uncertain progress.
+If a non-`reserved` lifecycle stage reaches an admission or closing transient,
+the journal commits and retains its canonical mode-`0600` pending JSON record,
+then releases its SQLite transaction. The permanent guard remains in place but
+is not a claim; a successor acquires the OS-released per-operation transaction
+and recovers that exact stage without a stale interval. A `reserved` transient
+removes only its pending JSON record, never the guard.
 
 The separate 120-second effect deadline aborts every supported Dockerode
 inspect, create, wait, log, start, stop, restart, and remove request. Reaching
@@ -213,7 +224,7 @@ retryable timeout but that response is deliberately not a durable journal
 record. The same operation ID remains reserved, its execution slot remains
 owned, and retries attach to the single in-flight promise. A later settled
 result becomes the only durable record. Process shutdown remains bounded; after
-a crash, normal stale-reservation recovery and strict Docker adoption inspect
+a crash, SQLite guard recovery and strict Docker adoption inspect
 the stable derived resource names before any new effect. The Supervisor never
 starts a second in-process effect merely because the transport wait expired.
 In particular, a mutating Dockerode request that rejects locally after abort is

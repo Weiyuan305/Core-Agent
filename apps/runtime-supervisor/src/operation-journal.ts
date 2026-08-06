@@ -1,14 +1,13 @@
 import { createHash, randomBytes } from "node:crypto";
 import { constants, type BigIntStats } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import {
   lstat,
-  link,
   mkdir,
   open,
   realpath,
   rename,
   rm,
-  unlink,
   type FileHandle,
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -21,15 +20,10 @@ import {
 } from "@core-agent/runtime-core";
 
 const maximumRecordBytes = 64 * 1024;
-const maximumReservationBytes = 1024;
-const defaultReservationStaleMs = 150_000;
-const defaultReservationHeartbeatMs = 30_000;
-const defaultReservationPollMs = 25;
-const defaultReservationWaitMs = 330_000;
+const defaultGuardPollMs = 25;
+const defaultGuardWaitMs = 330_000;
 const completedAtPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const hashPattern = /^sha256:[a-f0-9]{64}$/;
-const tokenPattern = /^[a-f0-9]{64}$/;
-const reservationReleasedAfterValidation = Symbol("reservationReleasedAfterValidation");
 
 interface JournalRecordV1 {
   readonly protocol_version: 1;
@@ -39,24 +33,17 @@ interface JournalRecordV1 {
   readonly response: SupervisorResponseV1;
 }
 
-interface ReservationRecordV1 {
+interface PendingJournalRecordV1 {
   readonly protocol_version: 1;
+  readonly operation_id: string;
   readonly request_hash: string;
-  readonly owner_token: string;
   readonly stage: OperationJournalStage;
+  readonly state: "pending";
 }
 
 interface InFlightEntry {
   readonly requestHash: string;
   readonly response: Promise<SupervisorResponseV1>;
-}
-
-interface HeldReservation {
-  handle: FileHandle;
-  readonly filename: string;
-  identity: BigIntStats;
-  record: ReservationRecordV1;
-  readonly heartbeat: NodeJS.Timeout;
 }
 
 export type OperationJournalStage = "reserved" | "start_pending" | "stop_pending" | "delete_pending";
@@ -77,6 +64,7 @@ export interface TransientOperationJournalResponse {
 export interface OperationJournalRunOptions {
   readonly admissionDeadlineMs?: number;
   readonly admissionExpiredResponse?: SupervisorResponseV1;
+  readonly signal?: AbortSignal;
 }
 
 export function transientOperationJournalResponse(
@@ -93,9 +81,11 @@ function isTransientOperationJournalResponse(
 
 export interface OperationJournalOptions {
   readonly directory: string;
-  readonly reservationStaleMs?: number;
-  readonly reservationHeartbeatMs?: number;
+  readonly guardPollMs?: number;
+  readonly guardWaitMs?: number;
+  /** @deprecated Use guardPollMs. */
   readonly reservationPollMs?: number;
+  /** @deprecated Use guardWaitMs. */
   readonly reservationWaitMs?: number;
 }
 
@@ -151,7 +141,28 @@ function canonicalJson(value: unknown): string {
   return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
 }
 
-function parseRecord(value: unknown): JournalRecordV1 {
+function parseRecord(value: unknown): JournalRecordV1 | PendingJournalRecordV1 {
+  if (typeof value === "object" && value !== null && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype) {
+    const keys = Reflect.ownKeys(value);
+    if (keys.length === 5 && keys.every((key) => typeof key === "string" && ["protocol_version", "operation_id", "request_hash", "stage", "state"].includes(key))) {
+      exactDataRecord(value, ["protocol_version", "operation_id", "request_hash", "stage", "state"]);
+      if (
+        value.protocol_version !== 1
+        || typeof value.operation_id !== "string"
+        || typeof value.request_hash !== "string" || !hashPattern.test(value.request_hash)
+        || value.state !== "pending"
+        || (value.stage !== "reserved" && value.stage !== "start_pending"
+          && value.stage !== "stop_pending" && value.stage !== "delete_pending")
+      ) throw journalError();
+      return {
+        protocol_version: 1,
+        operation_id: value.operation_id,
+        request_hash: value.request_hash,
+        stage: value.stage,
+        state: "pending",
+      };
+    }
+  }
   exactDataRecord(value, ["protocol_version", "operation_id", "request_hash", "completed_at", "response"]);
   if (
     value.protocol_version !== 1
@@ -178,23 +189,6 @@ function parseRecord(value: unknown): JournalRecordV1 {
   };
 }
 
-function parseReservation(value: unknown): ReservationRecordV1 {
-  exactDataRecord(value, ["protocol_version", "request_hash", "owner_token", "stage"]);
-  if (
-    value.protocol_version !== 1
-    || typeof value.request_hash !== "string" || !hashPattern.test(value.request_hash)
-    || typeof value.owner_token !== "string" || !tokenPattern.test(value.owner_token)
-    || (value.stage !== "reserved" && value.stage !== "start_pending"
-      && value.stage !== "stop_pending" && value.stage !== "delete_pending")
-  ) throw journalError();
-  return {
-    protocol_version: 1,
-    request_hash: value.request_hash,
-    owner_token: value.owner_token,
-    stage: value.stage,
-  };
-}
-
 function stageIsCompatible(request: SupervisorRequestV1, stage: OperationJournalStage): boolean {
   if (stage === "reserved") return true;
   if (request.kind === "start") return stage === "start_pending";
@@ -216,6 +210,10 @@ function canAdvanceStage(
       || (request.kind === "restart" && next === "stop_pending");
   }
   return request.kind === "restart" && current === "stop_pending" && next === "start_pending";
+}
+
+function isCompletedRecord(record: JournalRecordV1 | PendingJournalRecordV1): record is JournalRecordV1 {
+  return "completed_at" in record;
 }
 
 function sameIdentity(left: BigIntStats, right: BigIntStats): boolean {
@@ -276,22 +274,30 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
 }
 
+function ownErrorValue(error: unknown, key: string): unknown {
+  if (typeof error !== "object" || error === null) return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(error, key);
+  return descriptor !== undefined && "value" in descriptor ? descriptor.value : undefined;
+}
+
+function isSqliteBusy(error: unknown): boolean {
+  const code = ownErrorValue(error, "code");
+  const errcode = ownErrorValue(error, "errcode");
+  return code === "ERR_SQLITE_ERROR" && typeof errcode === "number" && Number.isSafeInteger(errcode) && (errcode & 0xff) === 5;
+}
+
 export class OperationJournal {
   readonly #directory: string;
-  readonly #reservationStaleMs: number;
-  readonly #reservationHeartbeatMs: number;
-  readonly #reservationPollMs: number;
-  readonly #reservationWaitMs: number;
+  readonly #guardPollMs: number;
+  readonly #guardWaitMs: number;
   readonly #inFlight = new Map<string, InFlightEntry>();
   readonly #complete = new Map<string, { readonly requestHash: string; readonly response: SupervisorResponseV1 }>();
 
   public constructor(options: OperationJournalOptions) {
     this.#directory = resolve(options.directory);
-    this.#reservationStaleMs = boundedOption(options.reservationStaleMs, defaultReservationStaleMs, 125_000, 600_000);
-    this.#reservationHeartbeatMs = boundedOption(options.reservationHeartbeatMs, defaultReservationHeartbeatMs, 1_000, 60_000);
-    this.#reservationPollMs = boundedOption(options.reservationPollMs, defaultReservationPollMs, 5, 1_000);
-    this.#reservationWaitMs = boundedOption(options.reservationWaitMs, defaultReservationWaitMs, 130_000, 900_000);
-    if (this.#reservationHeartbeatMs * 2 >= this.#reservationStaleMs || this.#reservationWaitMs <= this.#reservationStaleMs) {
+    this.#guardPollMs = boundedOption(options.guardPollMs ?? options.reservationPollMs, defaultGuardPollMs, 1, 1_000);
+    this.#guardWaitMs = boundedOption(options.guardWaitMs ?? options.reservationWaitMs, defaultGuardWaitMs, 10, 900_000);
+    if (this.#guardWaitMs <= this.#guardPollMs) {
       throw journalError();
     }
   }
@@ -337,89 +343,82 @@ export class OperationJournal {
   ): Promise<SupervisorResponseV1> {
     const directory = await this.#openDirectory();
     try {
-      const deadline = Date.now() + this.#reservationWaitMs;
-      let recovered = false;
-      let recoveredStage: OperationJournalStage = "reserved";
-      while (true) {
+      const deadline = Date.now() + this.#guardWaitMs;
+      const guard = await this.#acquireGuard(directory, request.operation_id, deadline, options.signal);
+      let committed = false;
+      try {
         const stored = await this.#read(directory, request.operation_id);
-        if (stored !== undefined) return this.#replay(request, stored);
-
+        if (stored !== undefined && isCompletedRecord(stored)) {
+          const replay = this.#replay(request, stored);
+          guard.exec("COMMIT");
+          committed = true;
+          return replay;
+        }
         if (
           options.admissionDeadlineMs !== undefined
           && options.admissionExpiredResponse !== undefined
           && Date.now() >= options.admissionDeadlineMs
+          && stored === undefined
         ) {
           const expired = validateSupervisorResponse(options.admissionExpiredResponse);
           if (expired.operation_id !== request.operation_id) throw journalError();
+          guard.exec("COMMIT");
+          committed = true;
           return expired;
         }
-
-        const acquired = await this.#tryAcquire(directory, request, recoveredStage);
-        if (acquired !== undefined) {
-          let retainStagedReservation = false;
-          try {
-            const raced = await this.#read(directory, request.operation_id);
-            if (raced !== undefined) return this.#replay(request, raced);
-            const result = await operation(request, this.#context(directory, request, acquired, recovered));
-            if (isTransientOperationJournalResponse(result)) {
-              const transient = validateSupervisorResponse(result.response);
-              if (transient.operation_id !== request.operation_id) throw journalError();
-              retainStagedReservation = acquired.record.stage !== "reserved";
-              return transient;
-            }
-            const response = validateSupervisorResponse(result);
-            if (response.operation_id !== request.operation_id) throw journalError();
-            const record: JournalRecordV1 = {
-              protocol_version: 1,
-              operation_id: request.operation_id,
-              request_hash: request.request_hash,
-              completed_at: new Date().toISOString(),
-              response,
-            };
-            await this.#write(directory, record);
-            this.#complete.set(request.operation_id, { requestHash: request.request_hash, response });
-            return response;
-          } finally {
-            await this.#release(directory, acquired, retainStagedReservation);
-          }
+        if (stored !== undefined && stored.request_hash !== request.request_hash) return conflict(request.operation_id);
+        const recovered = stored !== undefined;
+        const state: { stage: OperationJournalStage } = { stage: stored?.stage ?? "reserved" };
+        if (!stageIsCompatible(request, state.stage)) throw journalError();
+        if (stored === undefined) await this.#writePending(directory, request.operation_id, request.request_hash, state.stage);
+        const result = await operation(request, this.#pendingContext(directory, request, state, recovered));
+        if (isTransientOperationJournalResponse(result)) {
+          const transient = validateSupervisorResponse(result.response);
+          if (transient.operation_id !== request.operation_id) throw journalError();
+          if (state.stage === "reserved") await this.#removePending(directory, request.operation_id);
+          guard.exec("COMMIT");
+          committed = true;
+          return transient;
         }
-
-        const active = await this.#readReservation(directory, request.operation_id);
-        if (active === reservationReleasedAfterValidation) {
-          const completedDuringRelease = await this.#read(directory, request.operation_id);
-          if (completedDuringRelease !== undefined) return this.#replay(request, completedDuringRelease);
-          throw journalError();
+        const response = validateSupervisorResponse(result);
+        if (response.operation_id !== request.operation_id) throw journalError();
+        const record: JournalRecordV1 = {
+          protocol_version: 1,
+          operation_id: request.operation_id,
+          request_hash: request.request_hash,
+          completed_at: new Date().toISOString(),
+          response,
+        };
+        await this.#write(directory, record);
+        this.#complete.set(request.operation_id, { requestHash: request.request_hash, response });
+        guard.exec("COMMIT");
+        committed = true;
+        return response;
+      } finally {
+        if (!committed) {
+          try { guard.exec("ROLLBACK"); } catch { /* safe rollback only */ }
         }
-        if (active !== undefined && active.record.request_hash !== request.request_hash) return conflict(request.operation_id);
-        if (active !== undefined && !stageIsCompatible(request, active.record.stage)) throw journalError();
-        if (active !== undefined && Date.now() - Number(active.metadata.mtimeMs) > this.#reservationStaleMs) {
-          if (await this.#removeStaleReservation(directory, request.operation_id, active.metadata)) {
-            recovered = true;
-            recoveredStage = active.record.stage;
-          }
-          continue;
-        }
-        if (Date.now() >= deadline) throw journalError();
-        await delay(this.#reservationPollMs);
+        guard.close();
       }
     } finally {
       await directory.close().catch(() => undefined);
     }
   }
 
-  #context(
+  #pendingContext(
     directory: FileHandle,
     request: SupervisorRequestV1,
-    reservation: HeldReservation,
+    state: { stage: OperationJournalStage },
     recovered: boolean,
   ): OperationJournalContext {
     const journal = this;
     return Object.freeze({
-      get stage() { return reservation.record.stage; },
+      get stage() { return state.stage; },
       recovered,
       async advance(stage: OperationJournalStage): Promise<void> {
-        if (!canAdvanceStage(request, reservation.record.stage, stage)) throw journalError();
-        await journal.#advanceReservation(directory, reservation, stage);
+        if (!canAdvanceStage(request, state.stage, stage)) throw journalError();
+        await journal.#writePending(directory, request.operation_id, request.request_hash, stage);
+        state.stage = stage;
       },
     });
   }
@@ -477,14 +476,86 @@ export class OperationJournal {
   async #openChild(directory: FileHandle, filename: string): Promise<FileHandle | undefined> {
     await this.#assertDirectory(directory);
     try {
-      return await open(this.#childPath(directory, filename), constants.O_RDONLY | constants.O_NOFOLLOW);
+      return await open(this.#childPath(directory, filename), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     } catch (error) {
       if (errorCode(error) === "ENOENT") return undefined;
       throw journalError();
     }
   }
 
-  async #read(operationIdDirectory: FileHandle, operationId: string): Promise<JournalRecordV1 | undefined> {
+  async #acquireGuard(
+    directory: FileHandle,
+    operationId: string,
+    deadline: number,
+    signal: AbortSignal | undefined,
+  ): Promise<DatabaseSync> {
+    const legacyName = `${this.#digest(operationId)}.lock`;
+    const legacy = await lstat(this.#childPath(directory, legacyName), { bigint: true }).catch((error) => {
+      if (errorCode(error) === "ENOENT") return undefined;
+      throw journalError();
+    });
+    if (legacy !== undefined) throw journalError();
+    const filename = `${this.#digest(operationId)}.guard.sqlite`;
+    await this.#ensureGuard(directory, filename);
+    while (true) {
+      if (signal?.aborted || Date.now() >= deadline) throw journalError();
+      let guard: DatabaseSync | undefined;
+      try {
+        guard = new DatabaseSync(this.#childPath(directory, filename), { allowExtension: false });
+        guard.exec("PRAGMA busy_timeout = 0");
+        guard.exec("BEGIN IMMEDIATE");
+        return guard;
+      } catch (error) {
+        try { guard?.close(); } catch { /* close a failed connection */ }
+        if (!isSqliteBusy(error)) throw journalError();
+      }
+      await delay(this.#guardPollMs);
+    }
+  }
+
+  async #ensureGuard(directory: FileHandle, filename: string): Promise<void> {
+    let handle: FileHandle | undefined;
+    try {
+      await this.#assertDirectory(directory);
+      handle = await open(
+        this.#childPath(directory, filename),
+        constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+        0o600,
+      );
+      await handle.chmod(0o600);
+      await handle.sync();
+      const metadata = await handle.stat({ bigint: true });
+      const uid = process.getuid?.();
+      if (uid === undefined || !metadata.isFile() || metadata.uid !== BigInt(uid) || (metadata.mode & 0o7777n) !== 0o600n) {
+        throw journalError();
+      }
+      await handle.close();
+      handle = undefined;
+      await this.#assertDirectory(directory);
+      await directory.sync();
+      return;
+    } catch (error) {
+      if (handle !== undefined) await handle.close().catch(() => undefined);
+      if (errorCode(error) !== "EEXIST") throw journalError();
+    }
+    const existing = await this.#openChild(directory, filename);
+    if (existing === undefined) throw journalError();
+    try {
+      const metadata = await existing.stat({ bigint: true });
+      const uid = process.getuid?.();
+      if (uid === undefined || !metadata.isFile() || metadata.uid !== BigInt(uid) || (metadata.mode & 0o7777n) !== 0o600n) {
+        throw journalError();
+      }
+      const named = await lstat(this.#childPath(directory, filename), { bigint: true }).catch(() => { throw journalError(); });
+      if (!sameIdentity(metadata, named) || !named.isFile() || named.uid !== BigInt(uid) || (named.mode & 0o7777n) !== 0o600n) {
+        throw journalError();
+      }
+    } finally {
+      await existing.close().catch(() => undefined);
+    }
+  }
+
+  async #read(operationIdDirectory: FileHandle, operationId: string): Promise<JournalRecordV1 | PendingJournalRecordV1 | undefined> {
     const filename = `${this.#digest(operationId)}.json`;
     const handle = await this.#openChild(operationIdDirectory, filename);
     if (handle === undefined) return undefined;
@@ -525,205 +596,6 @@ export class OperationJournal {
     return payload;
   }
 
-  async #tryAcquire(
-    directory: FileHandle,
-    request: SupervisorRequestV1,
-    stage: OperationJournalStage,
-  ): Promise<HeldReservation | undefined> {
-    const filename = `${this.#digest(request.operation_id)}.lock`;
-    const temporaryName = `.reservation-${randomBytes(16).toString("hex")}`;
-    if (!stageIsCompatible(request, stage)) throw journalError();
-    const record: ReservationRecordV1 = {
-      protocol_version: 1,
-      request_hash: request.request_hash,
-      owner_token: randomBytes(32).toString("hex"),
-      stage,
-    };
-    const payload = Buffer.from(`${canonicalJson(record)}\n`, "utf8");
-    let handle: FileHandle;
-    try {
-      await this.#assertDirectory(directory);
-      handle = await open(
-        this.#childPath(directory, temporaryName),
-        constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-        0o600,
-      );
-    } catch (error) {
-      payload.fill(0);
-      throw journalError();
-    }
-    try {
-      await handle.chmod(0o600);
-      await handle.writeFile(payload);
-      await handle.sync();
-      const identity = await handle.stat({ bigint: true });
-      try {
-        await link(this.#childPath(directory, temporaryName), this.#childPath(directory, filename));
-      } catch (error) {
-        if (errorCode(error) === "EEXIST") {
-          await handle.close().catch(() => undefined);
-          await unlink(this.#childPath(directory, temporaryName)).catch(() => undefined);
-          return undefined;
-        }
-        throw error;
-      }
-      await unlink(this.#childPath(directory, temporaryName));
-      const reservation = {
-        handle,
-        filename,
-        identity,
-        record,
-        heartbeat: undefined as unknown as NodeJS.Timeout,
-      };
-      reservation.heartbeat = setInterval(() => {
-        const now = new Date();
-        void reservation.handle.utimes(now, now).catch(() => undefined);
-      }, this.#reservationHeartbeatMs);
-      reservation.heartbeat.unref?.();
-      return reservation;
-    } catch (error) {
-      await handle.close().catch(() => undefined);
-      await unlink(this.#childPath(directory, temporaryName)).catch(() => undefined);
-      await unlink(this.#childPath(directory, filename)).catch(() => undefined);
-      throw journalError();
-    } finally {
-      payload.fill(0);
-    }
-  }
-
-  async #advanceReservation(
-    directory: FileHandle,
-    reservation: HeldReservation,
-    stage: OperationJournalStage,
-  ): Promise<void> {
-    const record: ReservationRecordV1 = { ...reservation.record, stage };
-    const payload = Buffer.from(`${canonicalJson(record)}\n`, "utf8");
-    if (payload.length < 1 || payload.length > maximumReservationBytes) throw journalError();
-    const temporaryName = `.reservation-stage-${randomBytes(16).toString("hex")}`;
-    let replacement: FileHandle | undefined;
-    let renamed = false;
-    try {
-      await this.#assertDirectory(directory);
-      const named = await lstat(this.#childPath(directory, reservation.filename), { bigint: true });
-      const held = await reservation.handle.stat({ bigint: true });
-      if (!sameIdentity(named, reservation.identity) || !sameIdentity(held, reservation.identity)) throw journalError();
-      replacement = await open(
-        this.#childPath(directory, temporaryName),
-        constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-        0o600,
-      );
-      await replacement.chmod(0o600);
-      await replacement.writeFile(payload);
-      await replacement.sync();
-      const identity = await replacement.stat({ bigint: true });
-      await rename(this.#childPath(directory, temporaryName), this.#childPath(directory, reservation.filename));
-      renamed = true;
-      const prior = reservation.handle;
-      reservation.handle = replacement;
-      reservation.identity = identity;
-      reservation.record = record;
-      replacement = undefined;
-      await prior.close().catch(() => undefined);
-      await this.#assertDirectory(directory);
-      await directory.sync();
-    } catch {
-      throw journalError();
-    } finally {
-      payload.fill(0);
-      if (replacement !== undefined) await replacement.close().catch(() => undefined);
-      if (!renamed) await rm(this.#childPath(directory, temporaryName), { force: true }).catch(() => undefined);
-    }
-  }
-
-  async #readReservation(
-    directory: FileHandle,
-    operationId: string,
-  ): Promise<
-    { readonly record: ReservationRecordV1; readonly metadata: BigIntStats }
-    | typeof reservationReleasedAfterValidation
-    | undefined
-  > {
-    const filename = `${this.#digest(operationId)}.lock`;
-    const handle = await this.#openChild(directory, filename);
-    if (handle === undefined) return undefined;
-    try {
-      const before = await handle.stat({ bigint: true });
-      const uid = process.getuid?.();
-      if (
-        uid === undefined || !before.isFile() || before.uid !== BigInt(uid)
-        || (before.mode & 0o7777n) !== 0o600n || before.size < 1n
-        || before.size > BigInt(maximumReservationBytes)
-      ) throw journalError();
-      const payload = await boundedRead(handle, maximumReservationBytes);
-      try {
-        const record = parseReservation(safeJsonParse(payload));
-        const expected = Buffer.from(`${canonicalJson(record)}\n`, "utf8");
-        try {
-          if (!payload.equals(expected)) throw journalError();
-        } finally {
-          expected.fill(0);
-        }
-        const after = await handle.stat({ bigint: true });
-        if (!sameSnapshot(before, after)) throw journalError();
-        let named: BigIntStats;
-        try {
-          named = await lstat(this.#childPath(directory, filename), { bigint: true });
-        } catch (error) {
-          if (errorCode(error) === "ENOENT") return reservationReleasedAfterValidation;
-          throw journalError();
-        }
-        if (!sameSnapshot(after, named)) throw journalError();
-        return { record, metadata: after };
-      } finally {
-        payload.fill(0);
-      }
-    } finally {
-      await handle.close().catch(() => undefined);
-    }
-  }
-
-  async #removeStaleReservation(directory: FileHandle, operationId: string, expected: BigIntStats): Promise<boolean> {
-    const filename = `${this.#digest(operationId)}.lock`;
-    await this.#assertDirectory(directory);
-    const current = await lstat(this.#childPath(directory, filename), { bigint: true }).catch((error) => {
-      if (errorCode(error) === "ENOENT") return undefined;
-      throw journalError();
-    });
-    if (current === undefined || !sameSnapshot(expected, current)) return false;
-    await unlink(this.#childPath(directory, filename)).catch((error) => {
-      if (errorCode(error) !== "ENOENT") throw journalError();
-    });
-    return true;
-  }
-
-  async #release(
-    directory: FileHandle,
-    reservation: HeldReservation,
-    retainStagedReservation = false,
-  ): Promise<void> {
-    clearInterval(reservation.heartbeat);
-    try {
-      const held = await reservation.handle.stat({ bigint: true });
-      const named = await lstat(this.#childPath(directory, reservation.filename), { bigint: true }).catch(() => undefined);
-      if (named !== undefined && sameIdentity(held, reservation.identity) && sameIdentity(held, named)) {
-        if (retainStagedReservation) {
-          const relinquished = new Date(0);
-          await reservation.handle.utimes(relinquished, relinquished);
-          await reservation.handle.sync();
-          const retained = await lstat(this.#childPath(directory, reservation.filename), { bigint: true })
-            .catch(() => undefined);
-          if (retained === undefined || !sameIdentity(retained, reservation.identity)) throw journalError();
-          await this.#assertDirectory(directory);
-          await directory.sync();
-        } else {
-          await unlink(this.#childPath(directory, reservation.filename)).catch(() => undefined);
-        }
-      }
-    } finally {
-      await reservation.handle.close().catch(() => undefined);
-    }
-  }
-
   async #write(directory: FileHandle, record: JournalRecordV1): Promise<void> {
     const payload = Buffer.from(`${canonicalJson(record)}\n`, "utf8");
     if (payload.length === 0 || payload.length > maximumRecordBytes) throw journalError();
@@ -752,5 +624,54 @@ export class OperationJournal {
       if (handle !== undefined) await handle.close().catch(() => undefined);
       await rm(this.#childPath(directory, temporaryName), { force: true }).catch(() => undefined);
     }
+  }
+
+  async #writePending(
+    directory: FileHandle,
+    operationId: string,
+    requestHash: string,
+    stage: OperationJournalStage,
+  ): Promise<void> {
+    const record: PendingJournalRecordV1 = {
+      protocol_version: 1,
+      operation_id: operationId,
+      request_hash: requestHash,
+      stage,
+      state: "pending",
+    };
+    const payload = Buffer.from(`${canonicalJson(record)}\n`, "utf8");
+    if (payload.length === 0 || payload.length > maximumRecordBytes) throw journalError();
+    const temporaryName = `.pending-${randomBytes(16).toString("hex")}`;
+    const finalName = `${this.#digest(operationId)}.json`;
+    let handle: FileHandle | undefined;
+    try {
+      await this.#assertDirectory(directory);
+      handle = await open(
+        this.#childPath(directory, temporaryName),
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+        0o600,
+      );
+      await handle.chmod(0o600);
+      await handle.writeFile(payload);
+      await handle.sync();
+      await handle.close();
+      handle = undefined;
+      await rename(this.#childPath(directory, temporaryName), this.#childPath(directory, finalName));
+      await this.#assertDirectory(directory);
+      await directory.sync();
+    } catch {
+      throw journalError();
+    } finally {
+      payload.fill(0);
+      if (handle !== undefined) await handle.close().catch(() => undefined);
+      await rm(this.#childPath(directory, temporaryName), { force: true }).catch(() => undefined);
+    }
+  }
+
+  async #removePending(directory: FileHandle, operationId: string): Promise<void> {
+    await this.#assertDirectory(directory);
+    await rm(this.#childPath(directory, `${this.#digest(operationId)}.json`), { force: true });
+    await this.#assertDirectory(directory);
+    await directory.sync();
   }
 }

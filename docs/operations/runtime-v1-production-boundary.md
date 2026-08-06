@@ -162,10 +162,12 @@ operation that remains busy through the one-second admission window receives a
 retryable non-durable unavailable response; the Supervisor releases that
 operation's still-`reserved` reservation and never starts its effect after the
 deadline. If the request recovered a non-`reserved` lifecycle stage before
-admission became busy or the Supervisor began closing, the journal instead
-stops the heartbeat, retains the same canonical `0600` stage, and makes it
-immediately stale for bounded takeover by a new Supervisor. Retry that
-operation with the same ID and hash; never delete or rewrite the retained lock.
+admission became busy or the Supervisor began closing, the journal commits and
+retains the same canonical `0600` pending JSON stage, then releases its SQLite
+transaction. Retry the same ID and hash; do not delete or rewrite either its
+`.json` state or permanent `.guard.sqlite` guard. A live process must not be
+bypassed; after a crash the OS releases SQLite's lock and the next Supervisor
+recovers the pending stage.
 
 A timeout response before cancellation settlement is transient and is not
 proof of a durable timeout journal entry. Retry only with the exact same stable
@@ -174,7 +176,7 @@ reservation. Do not generate a replacement operation ID, manually repeat a
 Docker lifecycle action, remove a reservation file, or free a held execution
 slot. If the effect remains unsettled, preserve the managed resources and
 journal directory, collect only redacted service evidence, and restart the
-Supervisor through the approved service procedure so stale-reservation
+Supervisor through the approved service procedure so SQLite-guard
 recovery and strict resource adoption can reconcile the derived names.
 This includes a Dockerode mutation that rejects on local request abort and the
 narrow response-less codes `ECONNRESET`, `EPIPE`, `ECONNABORTED`, and

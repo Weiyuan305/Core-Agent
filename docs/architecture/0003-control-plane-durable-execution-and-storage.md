@@ -19,6 +19,15 @@ managed service.
 
 ## Decision
 
+The local Supervisor journal is not business truth, but it is a crash-safe
+per-operation execution guard. It uses Node.js 22.13.0+ `node:sqlite` with one
+permanent `0600` digest-named guard per operation and an immediate transaction
+held across pending-stage persistence, the callback, and terminal persistence.
+The database lock is released by SQLite/the operating system if the Supervisor
+dies; the durable JSON pending stage determines recovery. Node 22 exposes this
+module as experimental, so deployment and runtime images must meet that version
+floor and warnings are not globally suppressed.
+
 Use PostgreSQL as the only authority for Control Plane resources, desired and
 observed runtime state, internal jobs, idempotency, ProductEvents, AuditEvents,
 and Transactional Outbox rows.
