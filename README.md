@@ -62,6 +62,28 @@ as `infra/hermes/product-images.lock.json`. See the
 [local smoke guide](docs/operations/runtime-v1-local-smoke.md#publish-and-review-the-private-hermes-runtime)
 for the exact private pull and review procedure.
 
+## Strict smoke and interactive chat
+
+Both real-runtime commands require the reviewed product-image lock and the
+private local environment described by the local smoke guide. The strict smoke
+uses one fixed prompt and emits only allowlisted acceptance evidence:
+
+```bash
+CORE_AGENT_REAL_HERMES_SMOKE=1 npm run smoke:control-plane
+```
+
+The interactive client sends anonymous synthetic prompts through the Control
+Plane and streams assistant text only to the current terminal:
+
+```bash
+CORE_AGENT_REAL_HERMES_SMOKE=1 npm run chat:control-plane
+```
+
+Use `--keep-runtime` only when the running synthetic topology must remain for
+inspection. An interactive kept session writes a private exact-target receipt;
+clean it with `npm run chat:cleanup`. The interactive client is a developer
+acceptance surface, not the future Web, Apple, or customer-data interface.
+
 ## Prerequisites
 
 - Node.js >=22.13.0
@@ -77,6 +99,7 @@ npm run test:runtime
 
 PostgreSQL and real integration gates require the dedicated test database
 described by the Runtime v1 operations documents. The only supported real
-acceptance path for this milestone is the exact, opt-in Control Plane workflow
-in the [local smoke guide](docs/operations/runtime-v1-local-smoke.md); do not
-assemble a legacy Hermes-only Compose/bootstrap sequence from old commands.
+acceptance paths for this milestone are the exact, opt-in Control Plane smoke
+and interactive workflows in the
+[local smoke guide](docs/operations/runtime-v1-local-smoke.md); do not assemble
+a legacy Hermes-only Compose/bootstrap sequence from old commands.

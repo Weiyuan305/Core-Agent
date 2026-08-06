@@ -40,6 +40,11 @@ const rootPackage = JSON.parse(await readFile(
   new URL("../../package.json", import.meta.url),
   "utf8",
 ));
+const readmeSource = await readFile(new URL("../../README.md", import.meta.url), "utf8");
+const localSmokeGuideSource = await readFile(
+  new URL("../../docs/operations/runtime-v1-local-smoke.md", import.meta.url),
+  "utf8",
+);
 
 test("chat arguments allow only the optional retained-runtime flag", () => {
   const defaults = parseChatArguments([]);
@@ -717,4 +722,18 @@ test("retained cleanup dependencies use exact bounded targets and zero bootstrap
   } finally {
     await rm(stateRoot, { recursive: true, force: true });
   }
+});
+
+test("operations docs distinguish strict smoke from interactive synthetic chat", () => {
+  for (const source of [readmeSource, localSmokeGuideSource]) {
+    assert.match(source, /CORE_AGENT_REAL_HERMES_SMOKE=1 npm run smoke:control-plane/u);
+    assert.match(source, /CORE_AGENT_REAL_HERMES_SMOKE=1 npm run chat:control-plane/u);
+    assert.match(source, /npm run chat:cleanup/u);
+  }
+  for (const command of ["/new", "/restart", "/exit", "--keep-runtime"]) {
+    assert.ok(localSmokeGuideSource.includes(`\`${command}\``));
+  }
+  assert.match(localSmokeGuideSource, /anonymous synthetic/iu);
+  assert.match(localSmokeGuideSource, /API and Worker only/iu);
+  assert.match(localSmokeGuideSource, /does not write.*transcript/isu);
 });

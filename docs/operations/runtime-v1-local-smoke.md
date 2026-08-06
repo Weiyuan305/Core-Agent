@@ -236,6 +236,8 @@ platform entries generated in `infra/runtime/base-images.lock.json`.
 
 ## Validate and run
 
+### Strict acceptance smoke
+
 Load the completed non-secret environment, then execute the remaining Task17
 prerequisites in this order. The earlier `runtime:images` step resolved and
 reviewed the Node/PostgreSQL lock, and the exact selected references are already
@@ -302,6 +304,64 @@ secret buffers, and does not add output fields:
 ```bash
 CORE_AGENT_REAL_HERMES_SMOKE=1 npm run smoke:control-plane -- --keep-runtime
 ```
+
+### Interactive anonymous synthetic chat
+
+The interactive command uses the same validated topology, provisioning path,
+Control Plane API, Worker, Supervisor, private Hermes Runtime, and default
+cleanup as the strict smoke. It differs only at the terminal boundary: it
+accepts multiple anonymous synthetic prompt lines and displays assistant deltas
+on stdout. It does not write a user or assistant transcript to files, logs,
+evidence, environment variables, or command arguments. Do not paste customer,
+student, application, housing, teaching, or other personal data.
+
+After completing the same environment, network, path, context, and immutable
+image prerequisites above, start the client with:
+
+```bash
+CORE_AGENT_REAL_HERMES_SMOKE=1 npm run chat:control-plane
+```
+
+The client waits for each Run to terminate before accepting the next line. Its
+exact terminal commands are:
+
+- `/new` creates a new Conversation and therefore a distinct Hermes session;
+- `/restart` recreates the API and Worker only, waits for API readiness, and
+  preserves PostgreSQL, Supervisor, the managed Hermes Runtime, and the current
+  Conversation;
+- `/exit` ends input and enters cleanup; EOF has the same effect.
+
+Default exit requests deletion of the exact managed Runtime, proves its exact
+container is absent while its tenant data volume remains, stops the fixed
+Compose project without `--volumes`, removes the staged product-lock snapshot,
+and zeroizes secret buffers. A Run, input, output, transport, `SIGINT`, or
+`SIGTERM` failure enters that same bounded cleanup path.
+
+To retain a successfully established synthetic topology for inspection, use:
+
+```bash
+CORE_AGENT_REAL_HERMES_SMOKE=1 npm run chat:control-plane -- --keep-runtime
+```
+
+This mode first creates one exclusive current-owner `0600` receipt below
+`CORE_AGENT_SUPERVISOR_STATE_ROOT`. The receipt contains only the fixed Compose
+project and exact synthetic Tenant, Profile, Runtime, and product-lock snapshot
+identities. It contains no prompt, response, credential, or caller-supplied
+path. If receipt creation fails or a receipt already exists, the client falls
+back to default cleanup and does not retain a new unmanageable Runtime.
+
+Clean a successfully retained interactive session only with:
+
+```bash
+CORE_AGENT_REAL_HERMES_SMOKE=1 npm run chat:cleanup
+```
+
+`chat:cleanup` accepts no tenant, Runtime, Compose project, receipt, or path
+argument. It securely reopens the fixed receipt, validates exact ownership and
+metadata before and after the bounded read, performs the exact cleanup sequence,
+and removes the receipt only after every operation succeeds. If cleanup fails,
+the fixed receipt remains for an exact retry. Do not use the later manual
+strict-smoke shutdown instructions for a retained interactive chat.
 
 ## Inspect, resume SSE, and stop
 
