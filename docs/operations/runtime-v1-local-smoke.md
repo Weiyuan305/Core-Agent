@@ -46,6 +46,7 @@ The release flow is therefore:
 npm run hermes:build
 # Publish both platform product images through the approved registry workflow.
 # Record their registry RepoDigests in a reviewed product-image lock.
+docker pull 'registry.example/core-agent/hermes-runtime:v2026.8.5@sha256:<platform-digest>'
 docker image inspect registry.example/core-agent/hermes-runtime:v2026.8.5@sha256:<platform-digest>
 ```
 
@@ -88,6 +89,30 @@ The smoke reads the active context with `docker context inspect` and fails
 before Compose if it is not a local Unix endpoint. Select exactly one of the
 following platform procedures; the daemon-side bind source is not always the
 same path as the Docker CLI endpoint.
+
+### Resolve and install locked base images
+
+After selecting the local context, verify Buildx, resolve the current registry
+indexes, and review the exact lock-file change before copying either selected
+platform reference into the shell. `runtime:images` writes
+`infra/runtime/base-images.lock.json`; it does not install an image in the
+selected daemon. Replace both illustrative assignments below with the exact
+Node and PostgreSQL references for one selected platform from the reviewed
+lock, then pull those immutable references before any image-backed socket probe.
+
+```bash
+docker buildx version
+npm run runtime:images
+git diff -- infra/runtime/base-images.lock.json
+CORE_AGENT_NODE_IMAGE='node:22-bookworm-slim@sha256:<selected-platform-digest>'
+CORE_AGENT_POSTGRES_IMAGE='postgres:17-bookworm@sha256:<selected-platform-digest>'
+docker pull "$CORE_AGENT_NODE_IMAGE"
+docker pull "$CORE_AGENT_POSTGRES_IMAGE"
+```
+
+Do not continue if the registry result or lock diff is unexpected. Keep these
+two non-secret shell values and copy them byte-for-byte into `.env.runtime`
+after the platform-specific socket metadata below is known.
 
 ### Linux Docker Engine
 
@@ -157,10 +182,11 @@ platform entries generated in `infra/runtime/base-images.lock.json`.
 
 ## Validate and run
 
-Load the non-secret environment, then execute the Task17 prerequisites in this
-order. `runtime:images` performs registry access and writes the Node/PostgreSQL
-lock only when the resolved indexes are valid. `runtime:network` creates or
-validates the labeled internal backplane and dedicated non-internal egress
+Load the completed non-secret environment, then execute the remaining Task17
+prerequisites in this order. The earlier `runtime:images` step resolved and
+reviewed the Node/PostgreSQL lock, and the exact selected references are already
+installed in the local daemon. `runtime:network` creates or validates the
+labeled internal backplane and dedicated non-internal egress
 bridge. The egress bridge is fixed to `172.31.240.0/24` with gateway
 `172.31.240.1`, default IPAM, IPv4 masquerading enabled, and IPv6 disabled;
 the command detects Docker IPAM overlap and fails closed on Docker-network
@@ -184,7 +210,6 @@ daemon rather than a private `/run` path.
 set -a
 source .env.runtime
 set +a
-npm run runtime:images
 npm run runtime:network
 npm run runtime:paths
 docker compose --project-name core-agent-runtime-v1-smoke -f infra/runtime/compose.dev.yaml config --quiet

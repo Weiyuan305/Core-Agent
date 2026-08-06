@@ -49,37 +49,19 @@ release work.
 
 ## Prerequisites
 
-- Node.js 22+
-- Docker with Docker Compose v2
+- Node.js >=22.13.0
+- Docker Engine/CLI with Docker Compose v2 and Docker Buildx
 
-## Runtime commands
+## Deterministic verification
 
 ```bash
 npm test
-npm run hermes:image-ref
-npm run hermes:build
-cp .env.runtime.example .env.runtime
-# Set CORE_AGENT_API_SERVER_KEY to: openssl rand -hex 32
-docker compose --env-file .env.runtime -f infra/hermes/compose.dev.yaml up -d
-npm run hermes:bootstrap
-set -a; source .env.runtime; set +a; npm run hermes:smoke
+npm run check
+npm run test:runtime
 ```
 
-The legacy loopback demo above is separate from Control Plane Runtime v1. The
-Runtime v1 deterministic gate is `npm run test:runtime`; its explicit real
-acceptance command is `CORE_AGENT_REAL_HERMES_SMOKE=1 npm run
-smoke:control-plane` after every prerequisite in the local smoke guide is met.
-
-The development API binds only to `127.0.0.1:18642`.
-The demo bootstrap copies that loopback container ingress key into each named
-Profile secret scope. It is transport authentication, not a consultant
-identity or authorization boundary.
-
-## Stop the development runtime
-
-```bash
-docker compose --env-file .env.runtime -f infra/hermes/compose.dev.yaml down
-```
-
-This preserves the named volume. Add `--volumes` only when intentionally
-destroying all demo-company runtime data.
+PostgreSQL and real integration gates require the dedicated test database
+described by the Runtime v1 operations documents. The only supported real
+acceptance path for this milestone is the exact, opt-in Control Plane workflow
+in the [local smoke guide](docs/operations/runtime-v1-local-smoke.md); do not
+assemble a legacy Hermes-only Compose/bootstrap sequence from old commands.

@@ -215,5 +215,16 @@ through strict adoption; lifecycle stages, non-retryable results, accepted
 results, caller timeouts, and daemon-uncertain mutations keep their existing
 durable or pending semantics.
 
+Release-operability review found that README still advertised an invalid
+legacy Hermes-only startup, understated the Node floor, and omitted Buildx.
+It also found a clean-host ordering loop: base-image resolution happened after
+the Docker Desktop probe that already required the locked Node image, while
+resolution itself never pulled Node or PostgreSQL into the daemon. README now
+points only to Runtime v1 verification and the authoritative smoke guide. The
+guide selects a local context first, verifies Buildx, resolves and reviews the
+lock, installs the exact selected product/Node/PostgreSQL digests, performs the
+platform socket probe, and only then loads the completed environment and runs
+the remaining prerequisites.
+
 At `3ffdbd3`, Tasks 25-28 were ready for the required repeated whole-branch
 architecture, PostgreSQL concurrency/recovery, and release-operability reviews.
