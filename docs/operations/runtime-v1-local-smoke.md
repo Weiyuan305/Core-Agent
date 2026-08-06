@@ -40,19 +40,11 @@ closed. Default and pre-topology failure paths unlink the staged file; a
 `--keep-runtime` invocation that owns a partial or started topology retains it
 until the exact manual shutdown procedure below.
 
-The release flow is therefore:
-
-```bash
-npm run hermes:build
-# Publish both platform product images through the approved registry workflow.
-# Record their registry RepoDigests in a reviewed product-image lock.
-docker pull 'registry.example/core-agent/hermes-runtime:v2026.8.5@sha256:<platform-digest>'
-docker image inspect registry.example/core-agent/hermes-runtime:v2026.8.5@sha256:<platform-digest>
-```
-
-The illustrative registry name and digest above are not accepted values. Do
-not proceed until the reviewed lock exists and its selected platform reference
-is installed locally.
+Build and publish the product images through the approved registry workflow,
+outside this host-acceptance procedure, and record their RepoDigests in the
+reviewed product-image lock. Do not run a local product build or pull yet: this
+guide first selects and validates the exact local Docker context, then installs
+the selected product digest into that daemon.
 
 ## Create isolated local projections
 
@@ -83,8 +75,18 @@ chmod 0600 .local-secrets/bootstrap/key .local-secrets/provider/provider_tokenhu
 Runtime v1 accepts only a local Docker context whose endpoint is `unix://`.
 TCP, SSH, named-pipe, and remote contexts are outside the v1 trust boundary.
 Unset `DOCKER_HOST`; the smoke rejects the variable whenever it is present so
-it cannot override the inspected context. Select the endpoint with
-`docker context use <name>` instead.
+it cannot override the inspected context. Choose the exact local context for
+this run and select it before any Buildx, pull, run, or network command:
+
+```bash
+unset DOCKER_HOST
+CORE_AGENT_DOCKER_CONTEXT='desktop-linux' # or the exact local Linux/Colima context
+docker context use "$CORE_AGENT_DOCKER_CONTEXT"
+docker context inspect --format '{{json .Endpoints.docker.Host}}'
+```
+
+The inspected value must be one canonical absolute `unix://` endpoint. Stop on
+any TCP, SSH, named-pipe, empty, malformed, or unexpected value.
 The smoke reads the active context with `docker context inspect` and fails
 before Compose if it is not a local Unix endpoint. Select exactly one of the
 following platform procedures; the daemon-side bind source is not always the
@@ -92,27 +94,35 @@ same path as the Docker CLI endpoint.
 
 ### Resolve and install locked base images
 
-After selecting the local context, verify Buildx, resolve the current registry
-indexes, and review the exact lock-file change before copying either selected
-platform reference into the shell. `runtime:images` writes
+After selecting and inspecting the local context, verify Buildx, resolve the
+current registry indexes, and review the exact lock-file change before copying
+any selected platform reference into the shell. `runtime:images` writes
 `infra/runtime/base-images.lock.json`; it does not install an image in the
-selected daemon. Replace both illustrative assignments below with the exact
-Node and PostgreSQL references for one selected platform from the reviewed
-lock, then pull those immutable references before any image-backed socket probe.
+selected daemon. Replace all illustrative assignments below with the exact
+product reference from the reviewed product lock and the exact Node/PostgreSQL
+references for one selected platform from the reviewed base lock. Pull all
+three immutable references into the already-selected daemon before any
+image-backed socket probe.
 
 ```bash
 docker buildx version
 npm run runtime:images
 git diff -- infra/runtime/base-images.lock.json
+CORE_AGENT_HERMES_IMAGE='registry.example/core-agent/hermes-runtime:v2026.8.5@sha256:<selected-platform-digest>'
 CORE_AGENT_NODE_IMAGE='node:22-bookworm-slim@sha256:<selected-platform-digest>'
 CORE_AGENT_POSTGRES_IMAGE='postgres:17-bookworm@sha256:<selected-platform-digest>'
+docker pull "$CORE_AGENT_HERMES_IMAGE"
 docker pull "$CORE_AGENT_NODE_IMAGE"
 docker pull "$CORE_AGENT_POSTGRES_IMAGE"
+docker image inspect "$CORE_AGENT_HERMES_IMAGE"
 ```
 
-Do not continue if the registry result or lock diff is unexpected. Keep these
-two non-secret shell values and copy them byte-for-byte into `.env.runtime`
-after the platform-specific socket metadata below is known.
+Do not continue if the registry result, lock diff, pull digest, or product image
+inspection is unexpected. Keep the two base-image shell values and copy them
+byte-for-byte into `.env.runtime` after the platform-specific socket metadata
+below is known. `CORE_AGENT_HERMES_IMAGE` must equal the selected entry in the
+reviewed product lock; the smoke reads that lock rather than accepting this
+shell variable as authority.
 
 ### Linux Docker Engine
 
@@ -139,7 +149,6 @@ For a container running inside Docker Desktop's Linux VM, mount the VM-side raw
 socket rather than the optional macOS `/var/run/docker.sock` symlink:
 
 ```bash
-docker context use desktop-linux
 docker context inspect --format '{{json .Endpoints.docker.Host}}'
 id -u
 id -g
@@ -160,7 +169,6 @@ Select the intended Colima profile and its Docker context explicitly. Derive
 the daemon-side source and metadata inside that selected VM:
 
 ```bash
-docker context use colima
 docker context inspect --format '{{json .Endpoints.docker.Host}}'
 colima ssh --profile default -- stat -c '%g %a %F' /var/run/docker.sock
 id -u

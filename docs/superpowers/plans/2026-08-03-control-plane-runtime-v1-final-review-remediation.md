@@ -224,7 +224,11 @@ points only to Runtime v1 verification and the authoritative smoke guide. The
 guide selects a local context first, verifies Buildx, resolves and reviews the
 lock, installs the exact selected product/Node/PostgreSQL digests, performs the
 platform socket probe, and only then loads the completed environment and runs
-the remaining prerequisites.
+the remaining prerequisites. A repeated review made that ordering executable:
+the operator now unsets `DOCKER_HOST`, selects and inspects one explicit local
+context before any daemon-backed command, and only then pulls all three selected
+digests. The product-image inspect command uses a quoted variable so its
+illustrative digest cannot be parsed as shell redirection.
 
 At `3ffdbd3`, Tasks 25-28 were ready for the required repeated whole-branch
 architecture, PostgreSQL concurrency/recovery, and release-operability reviews.
