@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -26,6 +26,36 @@ function request(generation = 1) {
     generation,
   };
   return { ...data, request_hash: canonicalSupervisorRequestHash(data) };
+}
+
+function requestFor(operationId: string, generation = 1) {
+  const data = {
+    protocol_version: 1 as const,
+    operation_id: operationId,
+    kind: "inspect" as const,
+    tenant_id: "tenant_a",
+    runtime_id: "runtime_a",
+    generation,
+  };
+  return { ...data, request_hash: canonicalSupervisorRequestHash(data) };
+}
+
+function digestFor(operationId: string): string {
+  return createHash("sha256").update(operationId).digest("hex");
+}
+
+function guardPathFor(operationId: string): string {
+  return join(journalRoot, `${digestFor(operationId)}.guard.sqlite`);
+}
+
+function stagedRecord(requestValue: ReturnType<typeof startRequest>, stage: string): string {
+  return `${canonicalJson({
+    operation_id: requestValue.operation_id,
+    protocol_version: 1,
+    request_hash: requestValue.request_hash,
+    stage,
+    state: "pending",
+  })}\n`;
 }
 
 function startRequest() {
@@ -67,6 +97,29 @@ function canonicalJson(value: unknown): string {
 
 let temporaryRoot: string;
 let journalRoot: string;
+
+async function runIsolatedJournalScript(source: string): Promise<{ readonly stdout: string; readonly stderr: string }> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", source], {
+      cwd: repositoryRoot,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => { stdout += chunk; });
+    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    child.once("error", rejectPromise);
+    child.once("exit", (code, signal) => {
+      if (code === 0 && signal === null) {
+        resolvePromise({ stdout, stderr });
+      } else {
+        rejectPromise(new Error(`isolated journal child failed: code=${code ?? "null"} signal=${signal ?? "null"} stderr=${stderr}`));
+      }
+    });
+  });
+}
 
 test.beforeEach(async () => {
   temporaryRoot = await mkdtemp(join(repositoryRoot, ".supervisor-journal-test-"));
@@ -138,6 +191,146 @@ test("two journal instances reserve one digest before either dispatches", async 
   assert.equal(executions, 1);
 });
 
+test("a stale path-unlink takeover never permits a second callback", async () => {
+  const moduleUrl = new URL("../src/operation-journal.ts", import.meta.url).href;
+  const result = await runIsolatedJournalScript(`
+    import { createRequire, syncBuiltinESMExports } from "node:module";
+    import { createHash } from "node:crypto";
+    import { mkdir, writeFile, utimes } from "node:fs/promises";
+    import { canonicalSupervisorRequestHash } from "@core-agent/runtime-core";
+
+    const journalRoot = ${JSON.stringify(journalRoot)};
+    const requestData = {
+      protocol_version: 1,
+      operation_id: "operation_journal_private",
+      kind: "inspect",
+      tenant_id: "tenant_a",
+      runtime_id: "runtime_a",
+      generation: 1,
+    };
+    const request = { ...requestData, request_hash: canonicalSupervisorRequestHash(requestData) };
+    const digest = createHash("sha256").update(request.operation_id).digest("hex");
+    const lockPath = journalRoot + "/" + digest + ".lock";
+    await mkdir(journalRoot, { recursive: true, mode: 0o700 });
+    await writeFile(lockPath, JSON.stringify({
+      owner_token: "a".repeat(64),
+      protocol_version: 1,
+      request_hash: request.request_hash,
+      stage: "reserved",
+    }) + "\\n", { mode: 0o600 });
+    const stale = new Date(Date.now() - 151_000);
+    await utimes(lockPath, stale, stale);
+
+    const require = createRequire(import.meta.url);
+    const fsPromises = require("node:fs/promises");
+    const originalUnlink = fsPromises.unlink;
+    let lockUnlinks = 0;
+    let markFirstUnlink;
+    const firstUnlinkEntered = new Promise((resolve) => { markFirstUnlink = resolve; });
+    let releaseFirstUnlink;
+    const firstUnlinkMayProceed = new Promise((resolve) => { releaseFirstUnlink = resolve; });
+    fsPromises.unlink = async (path, ...arguments_) => {
+      if (String(path) === lockPath && ++lockUnlinks === 1) {
+        markFirstUnlink();
+        await firstUnlinkMayProceed;
+      }
+      return originalUnlink(path, ...arguments_);
+    };
+    syncBuiltinESMExports();
+    const { OperationJournal } = await import(${JSON.stringify(moduleUrl)});
+    let callbacks = 0;
+    let releaseCallbacks;
+    const callbacksReleased = new Promise((resolve) => { releaseCallbacks = resolve; });
+    let secondCallback;
+    const bothCallbacks = new Promise((resolve) => { secondCallback = resolve; });
+    const execute = async () => {
+      callbacks += 1;
+      if (callbacks === 2) secondCallback();
+      await callbacksReleased;
+      return {
+        protocol_version: 1,
+        operation_id: request.operation_id,
+        outcome: "accepted",
+        observation: {
+          tenant_id: "tenant_a",
+          runtime_id: "runtime_a",
+          generation: 1,
+          exists: true,
+          lifecycle: "running",
+          health: "healthy",
+          image_ref: "managed/runtime@sha256:${"a".repeat(64)}",
+          private_origin: "http://172.30.0.7:8642",
+        },
+      };
+    };
+    const first = new OperationJournal({ directory: journalRoot }).run(request, execute);
+    void first.catch(() => undefined);
+    const attempt = await Promise.race([
+      firstUnlinkEntered.then(() => "legacy-unlink"),
+      new Promise((resolve) => setTimeout(() => resolve("no-legacy-unlink"), 200)),
+    ]);
+    if (attempt === "legacy-unlink") {
+      const second = new OperationJournal({ directory: journalRoot }).run(request, execute);
+      void second.catch(() => undefined);
+      const secondStarted = await Promise.race([
+        new Promise((resolve) => {
+          const timer = setInterval(() => {
+            if (callbacks >= 1) {
+              clearInterval(timer);
+              resolve(true);
+            }
+          }, 1);
+        }),
+        new Promise((resolve) => setTimeout(() => resolve(false), 200)),
+      ]);
+      if (secondStarted) {
+        releaseFirstUnlink();
+        await Promise.race([
+          bothCallbacks,
+          new Promise((resolve) => setTimeout(resolve, 200)),
+        ]);
+      }
+      releaseCallbacks();
+      await Promise.allSettled([first, second]);
+    } else {
+      await Promise.allSettled([first]);
+    }
+    console.log(JSON.stringify({ callbacks }));
+  `);
+  const report = JSON.parse(result.stdout) as { readonly callbacks: number };
+  assert.ok(report.callbacks <= 1, `stale takeover dispatched ${report.callbacks} callbacks`);
+});
+
+test("per-operation guards do not serialize unrelated operation IDs", async () => {
+  const firstRequest = requestFor("operation_journal_parallel_a");
+  const secondRequest = requestFor("operation_journal_parallel_b");
+  const firstJournal = new OperationJournal({ directory: journalRoot });
+  const secondJournal = new OperationJournal({ directory: journalRoot });
+  let entered = 0;
+  let markBothEntered!: () => void;
+  const bothEntered = new Promise<void>((resolve) => { markBothEntered = resolve; });
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const execute = async (requestValue: ReturnType<typeof requestFor>) => {
+    entered += 1;
+    if (entered === 2) markBothEntered();
+    await blocked;
+    return response(requestValue.operation_id);
+  };
+
+  const first = firstJournal.run(firstRequest, () => execute(firstRequest));
+  const second = secondJournal.run(secondRequest, () => execute(secondRequest));
+  await Promise.race([
+    bothEntered,
+    new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("unrelated operation was serialized")), 500)),
+  ]);
+  release();
+  assert.equal((await first).operation_id, firstRequest.operation_id);
+  assert.equal((await second).operation_id, secondRequest.operation_id);
+  assert.equal((await lstat(guardPathFor(firstRequest.operation_id))).mode & 0o777, 0o600);
+  assert.equal((await lstat(guardPathFor(secondRequest.operation_id))).mode & 0o777, 0o600);
+});
+
 test("an unsafe FIFO reservation cannot be masked by a valid concurrent completion", async () => {
   const digest = createHash("sha256").update(request().operation_id).digest("hex");
   const sourceRoot = join(temporaryRoot, "completed-source");
@@ -161,7 +354,7 @@ test("an unsafe FIFO reservation cannot be masked by a valid concurrent completi
   assert.equal(executions, 0);
 });
 
-test("journal atomically persists a bounded digest-named 0600 record and replays after restart", async () => {
+test("journal permanently retains a bounded digest-named 0600 SQLite guard and replays after restart", async () => {
   const original = new OperationJournal({ directory: journalRoot });
   let executions = 0;
   const first = await original.run(request(), async () => {
@@ -171,12 +364,17 @@ test("journal atomically persists a bounded digest-named 0600 record and replays
   assert.equal(first.outcome, "accepted");
 
   const names = await readdir(journalRoot);
-  const expectedName = `${createHash("sha256").update(request().operation_id).digest("hex")}.json`;
-  assert.deepEqual(names, [expectedName]);
-  assert.equal(names[0]?.includes(request().operation_id), false);
+  const digest = digestFor(request().operation_id);
+  const expectedName = `${digest}.json`;
+  const expectedGuardName = `${digest}.guard.sqlite`;
+  assert.deepEqual(names.sort(), [expectedGuardName, expectedName]);
+  assert.equal(names.some((name) => name.includes(request().operation_id)), false);
   assert.equal((await lstat(journalRoot)).mode & 0o777, 0o700);
   const recordPath = join(journalRoot, expectedName);
   assert.equal((await lstat(recordPath)).mode & 0o777, 0o600);
+  const guardMetadata = await lstat(join(journalRoot, expectedGuardName));
+  assert.equal(guardMetadata.isFile(), true);
+  assert.equal(guardMetadata.mode & 0o777, 0o600);
   const recordText = await readFile(recordPath, "utf8");
   const record = JSON.parse(recordText);
   assert.deepEqual(Object.keys(record).sort(), [
@@ -197,14 +395,14 @@ test("journal atomically persists a bounded digest-named 0600 record and replays
   assert.equal(executions, 1);
 });
 
-test("journal atomically advances only request-compatible canonical reservation stages", async () => {
+test("journal atomically advances only request-compatible canonical durable stages inside its permanent guard", async () => {
   const stagedRequest = startRequest();
   const digest = createHash("sha256").update(stagedRequest.operation_id).digest("hex");
   let release!: () => void;
   const blocked = new Promise<void>((resolve) => { release = resolve; });
   let markAdvanced!: () => void;
   const advanced = new Promise<void>((resolve) => { markAdvanced = resolve; });
-  const pending = new OperationJournal({ directory: journalRoot }).run(stagedRequest, async (...args: unknown[]) => {
+  const pendingRun = new OperationJournal({ directory: journalRoot }).run(stagedRequest, async (...args: unknown[]) => {
     const context = args[1] as {
       readonly stage: string;
       readonly recovered: boolean;
@@ -220,43 +418,40 @@ test("journal atomically advances only request-compatible canonical reservation 
     await blocked;
     return response(stagedRequest.operation_id);
   });
-  await Promise.race([advanced, pending]);
+  await Promise.race([advanced, pendingRun]);
 
-  const reservationPath = join(journalRoot, `${digest}.lock`);
-  assert.equal((await lstat(reservationPath)).mode & 0o777, 0o600);
-  const reservationText = await readFile(reservationPath, "utf8");
-  const reservation = JSON.parse(reservationText) as Record<string, unknown>;
-  assert.deepEqual(Object.keys(reservation), ["owner_token", "protocol_version", "request_hash", "stage"]);
-  assert.equal(reservation.protocol_version, 1);
-  assert.equal(reservation.request_hash, stagedRequest.request_hash);
-  assert.equal(reservation.stage, "start_pending");
-  assert.doesNotMatch(reservationText, /operation_journal_stage|tenant_a|runtime_a|secret/u);
-
-  release();
-  assert.equal((await pending).outcome, "accepted");
+  try {
+    const recordPath = join(journalRoot, `${digest}.json`);
+    assert.equal((await lstat(recordPath)).mode & 0o777, 0o600);
+    assert.equal((await lstat(guardPathFor(stagedRequest.operation_id))).mode & 0o777, 0o600);
+    const pendingText = await readFile(recordPath, "utf8");
+    const pending = JSON.parse(pendingText) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(pending).sort(), ["operation_id", "protocol_version", "request_hash", "stage", "state"]);
+    assert.equal(pending.protocol_version, 1);
+    assert.equal(pending.request_hash, stagedRequest.request_hash);
+    assert.equal(pending.stage, "start_pending");
+    assert.equal(pending.state, "pending");
+    assert.doesNotMatch(pendingText, /tenant_a|runtime_a|secret/u);
+  } finally {
+    release();
+    await pendingRun;
+  }
 });
 
-test("journal rejects every semantically valid noncanonical reservation encoding", async () => {
+test("journal rejects every semantically valid noncanonical pending-stage encoding", async () => {
   const stagedRequest = startRequest();
   const digest = createHash("sha256").update(stagedRequest.operation_id).digest("hex");
-  const reservationPath = join(journalRoot, `${digest}.lock`);
-  const ownerToken = "a".repeat(64);
   const encodings = [
-    `${JSON.stringify({
-      protocol_version: 1,
-      request_hash: stagedRequest.request_hash,
-      owner_token: ownerToken,
-      stage: "start_pending",
-    })}\n`,
-    `{ "owner_token":"${ownerToken}","protocol_version":1,"request_hash":"${stagedRequest.request_hash}","stage":"start_pending"}\n`,
-    `{"owner_token":"${ownerToken}","protocol_version":1,"protocol_version":1,"request_hash":"${stagedRequest.request_hash}","stage":"start_pending"}\n`,
-    `{"owner_token":"${ownerToken}","protocol_version":1.0,"request_hash":"${stagedRequest.request_hash}","stage":"start_pending"}\n`,
+    `${JSON.stringify(JSON.parse(stagedRecord(stagedRequest, "start_pending")), null, 2)}\n`,
+    `{ "operation_id":"${stagedRequest.operation_id}","protocol_version":1,"request_hash":"${stagedRequest.request_hash}","stage":"start_pending","state":"pending"}\n`,
+    `{"operation_id":"${stagedRequest.operation_id}","protocol_version":1,"protocol_version":1,"request_hash":"${stagedRequest.request_hash}","stage":"start_pending","state":"pending"}\n`,
+    `{"operation_id":"${stagedRequest.operation_id}","protocol_version":1.0,"request_hash":"${stagedRequest.request_hash}","stage":"start_pending","state":"pending"}\n`,
   ];
 
   for (const [index, encoding] of encodings.entries()) {
     const caseRoot = join(temporaryRoot, `noncanonical-reservation-${index}`);
     await mkdir(caseRoot, { mode: 0o700 });
-    const casePath = join(caseRoot, `${digest}.lock`);
+    const casePath = join(caseRoot, `${digest}.json`);
     await writeFile(casePath, encoding, { mode: 0o600 });
     const stale = new Date(Date.now() - 151_000);
     await utimes(casePath, stale, stale);
@@ -270,8 +465,6 @@ test("journal rejects every semantically valid noncanonical reservation encoding
     );
     assert.equal(dispatched, false, `encoding ${index} must fail before dispatch`);
   }
-
-  await assert.rejects(lstat(reservationPath), { code: "ENOENT" });
 });
 
 test("journal refuses symlinked or permissive records before dispatch", async () => {
@@ -297,6 +490,56 @@ test("journal refuses symlinked or permissive records before dispatch", async ()
     new OperationJournal({ directory: journalRoot }).run(request(), async () => response()),
     /SUPERVISOR_REJECTED/,
   );
+});
+
+test("journal fails closed before dispatch for a symlinked, nonregular, or permissive permanent guard", async () => {
+  const operationId = request().operation_id;
+  const guardPath = guardPathFor(operationId);
+  const unsafeCases: Array<{
+    readonly name: string;
+    prepare(path: string, root: string): Promise<void>;
+  }> = [
+    {
+      name: "symlink",
+      async prepare(path, root) {
+        const outside = join(root, "outside.guard.sqlite");
+        await writeFile(outside, "SQLite format 3\0", { mode: 0o600 });
+        await symlink(outside, path);
+      },
+    },
+    {
+      name: "fifo",
+      async prepare(path) {
+        execFileSync("mkfifo", [path]);
+        await chmod(path, 0o600);
+      },
+    },
+    {
+      name: "permissive",
+      async prepare(path) {
+        await writeFile(path, "SQLite format 3\0", { mode: 0o644 });
+      },
+    },
+  ];
+
+  for (const unsafeCase of unsafeCases) {
+    const caseRoot = join(temporaryRoot, `unsafe-guard-${unsafeCase.name}`);
+    const caseJournalRoot = join(caseRoot, "journal");
+    await mkdir(caseJournalRoot, { recursive: true, mode: 0o700 });
+    const caseGuardPath = join(caseJournalRoot, `${digestFor(operationId)}.guard.sqlite`);
+    await unsafeCase.prepare(caseGuardPath, caseRoot);
+    let dispatched = false;
+    await assert.rejects(
+      new OperationJournal({ directory: caseJournalRoot }).run(request(), async () => {
+        dispatched = true;
+        return response();
+      }),
+      /SUPERVISOR_REJECTED: Operation journal record is unsafe/u,
+    );
+    assert.equal(dispatched, false, `${unsafeCase.name} guard must fail before dispatch`);
+  }
+
+  await assert.rejects(lstat(guardPath), { code: "ENOENT" });
 });
 
 test("journal rejects duplicate reordered or whitespace-varied record bytes before dispatch", async () => {
@@ -346,11 +589,7 @@ test("journal rejects a writable ancestor before dispatch", async () => {
   assert.equal(dispatched, false);
 });
 
-test("journal recovers a digest-scoped stale reservation and bounds staleness beyond operations", async () => {
-  assert.throws(
-    () => new OperationJournal({ directory: journalRoot, reservationStaleMs: 120_000 }),
-    /SUPERVISOR_REJECTED/,
-  );
+test("journal fails closed when a legacy digest-scoped reservation is present", async () => {
   const digest = createHash("sha256").update(request().operation_id).digest("hex");
   await new OperationJournal({ directory: journalRoot }).run(
     { ...request(), operation_id: "prepare_journal", request_hash: canonicalSupervisorRequestHash({
@@ -374,11 +613,13 @@ test("journal recovers a digest-scoped stale reservation and bounds staleness be
   await utimes(lockPath, stale, stale);
 
   let executions = 0;
-  const result = await new OperationJournal({ directory: journalRoot }).run(request(), async () => {
-    executions += 1;
-    return response();
-  });
-  assert.equal(result.outcome, "accepted");
-  assert.equal(executions, 1);
-  await assert.rejects(lstat(lockPath), { code: "ENOENT" });
+  await assert.rejects(
+    new OperationJournal({ directory: journalRoot }).run(request(), async () => {
+      executions += 1;
+      return response();
+    }),
+    /SUPERVISOR_REJECTED: Operation journal record is unsafe/u,
+  );
+  assert.equal(executions, 0);
+  assert.equal((await lstat(lockPath)).isFile(), true);
 });
