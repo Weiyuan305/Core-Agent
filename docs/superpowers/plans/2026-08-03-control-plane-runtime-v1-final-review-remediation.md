@@ -183,5 +183,11 @@ experimental on the supported Node 22 line; warnings stay visible. The
 per-operation guard is permanent, while pending and terminal JSON records carry
 the recoverable protocol state. Legacy digest `.lock` files fail closed.
 
+The repeated release review then found two evidence-only drifts: the runtime
+contract test still expected the former generic Node 22 CI selector, and the
+production boundary still described the removed stale-token `.lock` protocol.
+The gate now requires exact `node-version: 22.13.0`; the runbook describes the
+permanent SQLite guard and the exact operation-bound pending JSON fields.
+
 At `3ffdbd3`, Tasks 25-28 were ready for the required repeated whole-branch
 architecture, PostgreSQL concurrency/recovery, and release-operability reviews.

@@ -882,7 +882,7 @@ test("CI validates runtime contracts without building or publishing images", asy
   );
 
   assert.match(workflow, /^permissions:\n  contents: read$/m);
-  assert.match(workflow, /^\s+node-version: 22$/m);
+  assert.match(workflow, /^\s+node-version: 22\.13\.0$/m);
   assert.match(workflow, /^\s+fetch-depth: 0$/m);
   assert.match(workflow, /^\s+run: npm run contracts:check$/m);
   assert.match(workflow, /^\s+run: npm run check$/m);

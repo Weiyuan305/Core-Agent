@@ -186,18 +186,23 @@ An HTTP/status-bearing error, accessor-backed or malformed error, policy or
 validation failure, not-found response, or any other transport code is not in
 this class and must follow its normal bounded terminal path.
 
-For a stale lifecycle reservation, the replacement Supervisor must recover its
-durable stage rather than replay the Docker call blindly. The only permitted
-stages are `reserved`, `start_pending`, `stop_pending`, and `delete_pending`.
+For a retained lifecycle pending journal after a crash or daemon-uncertain
+handoff, the replacement Supervisor must acquire the permanent SQLite guard and
+recover the durable stage rather than replay the Docker call blindly. The only
+permitted stages are `reserved`, `start_pending`, `stop_pending`, and
+`delete_pending`.
 Start, stop, and delete write their matching pending stage before mutation;
 restart writes `stop_pending`, proves the exact gateway stopped, advances to
 `start_pending`, and then starts it. Generic Docker restart is forbidden.
 Strict inspection turns an already-running start, already-stopped stop,
 already-running restart start-half, or already-absent delete into the accepted
 terminal observation without a duplicate mutation. Any incompatible or
-out-of-order stage fails closed. Never edit a stage or lock by hand: journal
-updates are canonical, atomic, directory-synced `0600` records containing only
-protocol version, request hash, random ownership token, and the closed stage.
+out-of-order stage fails closed. Never edit or delete either journal artifact
+by hand. The digest-named `.guard.sqlite` file is permanent and mode `0600`;
+its SQLite transaction, not a JSON ownership token or stale timestamp, provides
+per-operation exclusion. Pending JSON updates are canonical, atomic,
+directory-synced mode-`0600` records containing exactly `protocol_version`,
+`operation_id`, `request_hash`, the closed `stage`, and `state: "pending"`.
 The reader requires an exact byte-for-byte canonical encoding: reordered or
 whitespace-varied JSON, duplicate keys, alternate numeric encodings, and other
 semantically equivalent bytes are unsafe and fail closed before dispatch.
