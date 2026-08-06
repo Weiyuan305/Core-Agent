@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { validateLocalDockerContextEndpoint } from "../preflight-runtime-docker-socket.mjs";
+import { validateRetainedRuntimeReceipt } from "./retained-runtime-receipt.mjs";
 
 const execFileAsync = promisify(execFile);
 const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
@@ -1096,7 +1097,7 @@ export function createManagedRuntimeDependencies(environment, signal) {
       await child("docker", ["version", "--format", "{{json .Server.Version}}"]);
       await child("docker", ["compose", "version", "--short"]);
       const contextEndpoint = parseJson(
-        (await child("docker", ["context", "inspect", "--format", "{{json .Endpoints.docker.Host}}"]))?.stdout,
+        await child("docker", ["context", "inspect", "--format", "{{json .Endpoints.docker.Host}}"]),
         "SMOKE_DOCKER_CONTEXT_INVALID",
       );
       try { validateLocalDockerContextEndpoint(contextEndpoint); }
@@ -1332,6 +1333,270 @@ export function createManagedRuntimeDependencies(environment, signal) {
   };
 }
 
+function retainedSnapshotPaths(environment, receipt) {
+  const directory = join(environment.CORE_AGENT_SUPERVISOR_STATE_ROOT, receipt.lockSnapshotName);
+  return Object.freeze({ directory, path: join(directory, "reviewed-product-images.lock.json") });
+}
+
+function validateRetainedDirectoryMetadata(metadata) {
+  const uid = process.getuid?.();
+  if (
+    !Number.isSafeInteger(uid)
+    || !metadata.isDirectory()
+    || metadata.uid !== BigInt(uid)
+    || (metadata.mode & 0o7777n) !== 0o700n
+  ) {
+    throw smokeError("SMOKE_CLEANUP_FAILED");
+  }
+}
+
+function validateRetainedSnapshotMetadata(metadata) {
+  const uid = process.getuid?.();
+  if (
+    !Number.isSafeInteger(uid)
+    || !metadata.isFile()
+    || metadata.uid !== BigInt(uid)
+    || metadata.nlink !== 1n
+    || (metadata.mode & 0o7777n) !== 0o444n
+    || metadata.size < 1n
+    || metadata.size > BigInt(maximumApiBodyBytes)
+  ) {
+    throw smokeError("SMOKE_CLEANUP_FAILED");
+  }
+}
+
+async function loadRetainedSnapshot(environment, receipt) {
+  const paths = retainedSnapshotPaths(environment, receipt);
+  let directoryMetadata;
+  try {
+    directoryMetadata = await lstat(paths.directory, { bigint: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") return Object.freeze({ paths, metadata: undefined });
+    throw smokeError("SMOKE_CLEANUP_FAILED");
+  }
+  validateRetainedDirectoryMetadata(directoryMetadata);
+  let handle;
+  let bytes;
+  try {
+    const namedBefore = await lstat(paths.path, { bigint: true });
+    validateRetainedSnapshotMetadata(namedBefore);
+    handle = await open(paths.path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const openedBefore = await handle.stat({ bigint: true });
+    validateRetainedSnapshotMetadata(openedBefore);
+    if (!sameFileSnapshot(namedBefore, openedBefore)) throw smokeError("SMOKE_CLEANUP_FAILED");
+    bytes = await handle.readFile();
+    if (!Buffer.isBuffer(bytes) || bytes.length !== Number(openedBefore.size)) {
+      throw smokeError("SMOKE_CLEANUP_FAILED");
+    }
+    const openedAfter = await handle.stat({ bigint: true });
+    const namedAfter = await lstat(paths.path, { bigint: true });
+    validateRetainedSnapshotMetadata(openedAfter);
+    validateRetainedSnapshotMetadata(namedAfter);
+    if (!sameFileSnapshot(openedBefore, openedAfter) || !sameFileSnapshot(openedAfter, namedAfter)) {
+      throw smokeError("SMOKE_CLEANUP_FAILED");
+    }
+    const productLock = parseJson(
+      new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+      "SMOKE_CLEANUP_FAILED",
+    );
+    validateProductImageLock(productLock, environment.CORE_AGENT_PLATFORM);
+    return Object.freeze({ paths, metadata: namedAfter, directoryMetadata });
+  } catch (error) {
+    if (error instanceof SmokeError) throw error;
+    throw smokeError("SMOKE_CLEANUP_FAILED");
+  } finally {
+    bytes?.fill(0);
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function releaseRetainedSnapshot(snapshot) {
+  if (snapshot.metadata === undefined) {
+    try {
+      await lstat(snapshot.paths.directory, { bigint: true });
+      throw smokeError("SMOKE_CLEANUP_FAILED");
+    } catch (error) {
+      if (error?.code === "ENOENT") return;
+      if (error instanceof SmokeError) throw error;
+      throw smokeError("SMOKE_CLEANUP_FAILED");
+    }
+  }
+  try {
+    const directoryMetadata = await lstat(snapshot.paths.directory, { bigint: true });
+    const fileMetadata = await lstat(snapshot.paths.path, { bigint: true });
+    validateRetainedDirectoryMetadata(directoryMetadata);
+    validateRetainedSnapshotMetadata(fileMetadata);
+    if (
+      !sameFileSnapshot(snapshot.directoryMetadata, directoryMetadata)
+      || !sameFileSnapshot(snapshot.metadata, fileMetadata)
+    ) {
+      throw smokeError("SMOKE_CLEANUP_FAILED");
+    }
+    await unlink(snapshot.paths.path);
+    await rmdir(snapshot.paths.directory);
+  } catch (error) {
+    if (error instanceof SmokeError) throw error;
+    throw smokeError("SMOKE_CLEANUP_FAILED");
+  }
+}
+
+export function createRetainedRuntimeCleanupDependencies(environment, receiptValue, signal, dependencies = {}) {
+  validateSmokeEnvironment(environment);
+  let receipt;
+  try {
+    receipt = validateRetainedRuntimeReceipt(receiptValue);
+  } catch {
+    throw smokeError("SMOKE_CLEANUP_FAILED");
+  }
+  const expectedContext = Object.freeze({
+    tenantId: receipt.tenantId,
+    profileId: receipt.profileId,
+    runtimeId: receipt.runtimeId,
+  });
+  const snapshotPath = retainedSnapshotPaths(environment, receipt).path;
+  const childEnvironment = () => createSmokeChildEnvironment(environment, snapshotPath);
+  const child = (command, args, options = {}) => {
+    const boundedOptions = {
+      ...options,
+      environment: childEnvironment(),
+      signal: options.cleanup === true ? undefined : signal,
+    };
+    return dependencies.child === undefined
+      ? runBoundedChild(command, args, boundedOptions)
+      : dependencies.child(command, args, boundedOptions);
+  };
+  const request = dependencies.requestJson ?? requestJson;
+  const readSecret = dependencies.readProtectedSecret ?? readProtectedSecret;
+  const loadSnapshot = dependencies.loadRetainedSnapshot ?? loadRetainedSnapshot;
+  const releaseSnapshot = dependencies.releaseRetainedSnapshot ?? releaseRetainedSnapshot;
+  let bootstrapKey;
+  let snapshot;
+
+  function validateContext(context) {
+    if (
+      context?.tenantId !== expectedContext.tenantId
+      || context?.profileId !== expectedContext.profileId
+      || context?.runtimeId !== expectedContext.runtimeId
+    ) {
+      throw smokeError("SMOKE_CLEANUP_FAILED");
+    }
+  }
+
+  return {
+    async validatePrerequisites(candidate) {
+      let validated;
+      try {
+        validated = validateRetainedRuntimeReceipt(candidate);
+      } catch {
+        throw smokeError("SMOKE_CLEANUP_FAILED");
+      }
+      if (JSON.stringify(validated) !== JSON.stringify(receipt)) throw smokeError("SMOKE_CLEANUP_FAILED");
+      await child("docker", ["version", "--format", "{{json .Server.Version}}"], { cleanup: true });
+      await child("docker", ["compose", "version", "--short"], { cleanup: true });
+      const contextEndpoint = parseJson(
+        await child("docker", ["context", "inspect", "--format", "{{json .Endpoints.docker.Host}}"], { cleanup: true }),
+        "SMOKE_DOCKER_CONTEXT_INVALID",
+      );
+      try {
+        validateLocalDockerContextEndpoint(contextEndpoint);
+      } catch {
+        throw smokeError("SMOKE_DOCKER_CONTEXT_INVALID");
+      }
+      snapshot = await loadSnapshot(environment, receipt);
+      bootstrapKey = await readSecret(environment.CORE_AGENT_BOOTSTRAP_KEY_FILE);
+      if (snapshot.metadata !== undefined) {
+        await child("docker", composeArgs("config", "--quiet"), { cleanup: true });
+      }
+    },
+    async deleteRuntime(context) {
+      validateContext(context);
+      if (!Buffer.isBuffer(bootstrapKey)) throw smokeError("SMOKE_CLEANUP_FAILED");
+      const runtime = await request(`/internal/v1/tenants/${encodeURIComponent(context.tenantId)}/runtime`, {
+        bootstrapKey,
+        tenantId: context.tenantId,
+        statuses: [200],
+        timeoutMs: 15_000,
+      });
+      if (dataProperty(runtime, "container_id", "SMOKE_CLEANUP_FAILED") !== context.runtimeId) {
+        throw smokeError("SMOKE_CLEANUP_FAILED");
+      }
+      const desiredState = dataProperty(runtime, "desired_state", "SMOKE_CLEANUP_FAILED");
+      const observedState = dataProperty(runtime, "observed_state", "SMOKE_CLEANUP_FAILED");
+      if (desiredState === "deleted" || observedState === "deleted") return;
+      const version = dataProperty(runtime, "resource_version", "SMOKE_CLEANUP_FAILED");
+      if (!Number.isSafeInteger(version) || version < 1) throw smokeError("SMOKE_CLEANUP_FAILED");
+      await request(`/internal/v1/tenants/${encodeURIComponent(context.tenantId)}/runtime-commands`, {
+        method: "POST",
+        body: runtimeCommand({ tenantId: receipt.tenantId }, "delete", version),
+        bootstrapKey,
+        tenantId: context.tenantId,
+        statuses: [202],
+        timeoutMs: 15_000,
+      });
+    },
+    async waitForContainerRemoval(context) {
+      validateContext(context);
+      const deadline = Date.now() + maximumPollMs;
+      let removed = false;
+      while (Date.now() < deadline) {
+        const raw = await child("docker", [
+          "ps", "--all", "--quiet",
+          "--filter", "label=core-agent.managed=runtime-v1",
+          "--filter", "label=core-agent.resource=runtime",
+          "--filter", `label=core-agent.tenant-id=${context.tenantId}`,
+          "--filter", `label=core-agent.runtime-id=${context.runtimeId}`,
+        ], { cleanup: true });
+        if (raw.trim() === "") {
+          removed = true;
+          break;
+        }
+        await delay(1_000);
+      }
+      if (!removed) throw smokeError("SMOKE_CLEANUP_FAILED");
+      const names = deriveManagedNames(context.tenantId, context.runtimeId, 1);
+      const volumeRaw = await child("docker", ["volume", "inspect", names.volume], {
+        cleanup: true,
+        maxOutputBytes: 1024 * 1024,
+      });
+      const volumes = parseJson(volumeRaw, "SMOKE_CLEANUP_FAILED");
+      if (!Array.isArray(volumes) || volumes.length !== 1) throw smokeError("SMOKE_CLEANUP_FAILED");
+      const labels = dataProperty(volumes[0], "Labels", "SMOKE_CLEANUP_FAILED");
+      if (
+        dataProperty(labels, "core-agent.managed", "SMOKE_CLEANUP_FAILED") !== "runtime-v1"
+        || dataProperty(labels, "core-agent.resource", "SMOKE_CLEANUP_FAILED") !== "runtime-volume"
+        || dataProperty(labels, "core-agent.tenant-id", "SMOKE_CLEANUP_FAILED") !== context.tenantId
+        || dataProperty(labels, "core-agent.runtime-id", "SMOKE_CLEANUP_FAILED") !== context.runtimeId
+      ) {
+        throw smokeError("SMOKE_CLEANUP_FAILED");
+      }
+    },
+    async stopTopology({ projectName, removeVolumes }) {
+      if (projectName !== composeProject || removeVolumes !== false) throw smokeError("SMOKE_CLEANUP_FAILED");
+      await child("docker", composeArgs("down", "--remove-orphans", "--timeout", "30"), {
+        cleanup: true,
+        timeoutMs: 120_000,
+        maxOutputBytes: 4 * 1024 * 1024,
+      });
+    },
+    async releaseProductImageLockSnapshot(candidate) {
+      let validated;
+      try {
+        validated = validateRetainedRuntimeReceipt(candidate);
+      } catch {
+        throw smokeError("SMOKE_CLEANUP_FAILED");
+      }
+      if (JSON.stringify(validated) !== JSON.stringify(receipt) || snapshot === undefined) {
+        throw smokeError("SMOKE_CLEANUP_FAILED");
+      }
+      await releaseSnapshot(snapshot);
+    },
+    async releaseSecrets() {
+      bootstrapKey?.fill(0);
+      bootstrapKey = undefined;
+    },
+  };
+}
+
 function validateOutput(value) {
   exactRecord(value, SMOKE_OUTPUT_KEYS, "SMOKE_OUTPUT_INVALID");
   for (const key of ["conversation_id", "profile_id", "run_id", "runtime_id", "tenant_id"]) {
@@ -1347,10 +1612,15 @@ export async function runManagedRuntimeSession({
   environment = process.env,
   keepRuntime = false,
   dependencies,
+  prepareRetention,
   signal,
   use,
 } = {}) {
-  if (typeof keepRuntime !== "boolean" || typeof use !== "function") {
+  if (
+    typeof keepRuntime !== "boolean"
+    || typeof use !== "function"
+    || (prepareRetention !== undefined && (keepRuntime !== true || typeof prepareRetention !== "function"))
+  ) {
     throw smokeError("SMOKE_STAGE_FAILED");
   }
   const ownedAbort = signal === undefined ? new AbortController() : undefined;
@@ -1360,6 +1630,7 @@ export async function runManagedRuntimeSession({
   let context;
   let result;
   let primaryError;
+  let runtimeRetained = keepRuntime && prepareRetention === undefined;
 
   try {
     deps.stage?.("preflight");
@@ -1372,7 +1643,12 @@ export async function runManagedRuntimeSession({
     const provisionedContext = await deps.provision(context);
     if (context === undefined) context = provisionedContext;
     const runtime = await deps.pollRuntime(context);
-    result = await use(Object.freeze({ context, runtime, operations: deps }));
+    const session = Object.freeze({ context, runtime, operations: deps });
+    result = await use(session);
+    if (keepRuntime && prepareRetention !== undefined) {
+      await prepareRetention(session);
+      runtimeRetained = true;
+    }
   } catch (error) {
     primaryError = error;
   } finally {
@@ -1381,7 +1657,7 @@ export async function runManagedRuntimeSession({
       if (cleanupError === undefined) cleanupError = error;
     };
 
-    if (!keepRuntime) {
+    if (!runtimeRetained) {
       try {
         deps.stage?.("cleanup");
       } catch (error) {
@@ -1407,7 +1683,7 @@ export async function runManagedRuntimeSession({
         }
       }
     }
-    if (!(keepRuntime && topologyOwned)) {
+    if (!(runtimeRetained && topologyOwned)) {
       try {
         await deps.releaseProductImageLockSnapshot?.();
       } catch (error) {

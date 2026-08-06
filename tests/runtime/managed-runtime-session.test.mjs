@@ -193,6 +193,62 @@ test("managed Runtime kept success preserves topology and snapshot but zeroizes 
   ]);
 });
 
+test("managed Runtime retention is committed only after its retention hook succeeds", async () => {
+  const successful = lifecycleFixture();
+  await runManagedRuntimeSession({
+    environment: {},
+    keepRuntime: true,
+    dependencies: successful.dependencies,
+    prepareRetention: async ({ context, runtime, operations }) => {
+      assert.equal(context, managedContext);
+      assert.equal(runtime, managedRuntime);
+      assert.equal(operations, successful.dependencies);
+      successful.calls.push("prepareRetention");
+    },
+    use: async () => successful.calls.push("use"),
+  });
+  assert.deepEqual(successful.calls, [
+    "validatePrerequisites",
+    "startTopology",
+    "prepareProvisioningContext",
+    "provision",
+    "pollRuntime",
+    "use",
+    "prepareRetention",
+    "releaseSecrets",
+  ]);
+
+  const failed = lifecycleFixture();
+  const retentionFailure = new Error("private receipt failure");
+  await assert.rejects(
+    runManagedRuntimeSession({
+      environment: {},
+      keepRuntime: true,
+      dependencies: failed.dependencies,
+      prepareRetention: async () => {
+        failed.calls.push("prepareRetention");
+        throw retentionFailure;
+      },
+      use: async () => failed.calls.push("use"),
+    }),
+    (error) => error?.code === "SMOKE_STAGE_FAILED" && error.cause === retentionFailure,
+  );
+  assert.deepEqual(failed.calls, [
+    "validatePrerequisites",
+    "startTopology",
+    "prepareProvisioningContext",
+    "provision",
+    "pollRuntime",
+    "use",
+    "prepareRetention",
+    "deleteRuntime",
+    "waitForContainerRemoval",
+    "stopTopology",
+    "releaseProductImageLockSnapshot",
+    "releaseSecrets",
+  ]);
+});
+
 test("managed Run requests hash the caller's bounded synthetic content", () => {
   const request = createSyntheticRunRequest(
     { tenantId: "synthetic-runtime-v1-0123456789abcdef" },
