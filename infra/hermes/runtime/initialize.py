@@ -31,7 +31,12 @@ MANIFEST_NAME = "manifest.json"
 LOCK_NAME = "initialize.lock"
 OPAQUE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 PROFILE_REF = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
-IMAGE_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*@sha256:[a-f0-9]{64}$")
+IMAGE_REF = re.compile(
+    r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]{1,5})?"
+    r"(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*"
+    r"(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?"
+    r"@sha256:[a-f0-9]{64}$"
+)
 BUNDLE_HASH = re.compile(r"^sha256:[a-f0-9]{64}$")
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 

@@ -158,6 +158,20 @@ async function isolatedDataPaths(paths, label) {
   };
 }
 
+test("initializer accepts the release lock's tagged immutable image reference", async (t) => {
+  const paths = await harness(t);
+  const secret = join(paths.secretRoot, "profile_provider");
+  await writeSecret(secret, "sentinel-secret-provider-0123456789");
+  await writeFile(paths.bundlePath, JSON.stringify(bundle([
+    profile({ provider_secret_file: secret })
+  ], {
+    image_ref: `ghcr.io/weiyuan305/core-agent-hermes-runtime:v0.1.0@sha256:${"a".repeat(64)}`
+  })));
+
+  const result = runInitializer(paths);
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test("initializer creates sorted profiles, exact env projections, and an idempotent nonsecret manifest", async (t) => {
   const paths = await harness(t);
   const sentinelA = "sentinel-secret-provider-a-0123456789";
