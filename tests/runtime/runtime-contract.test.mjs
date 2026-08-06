@@ -387,7 +387,7 @@ test("REAL_HERMES full workflow emits exact output after ordered default cleanup
   assert.deepEqual(fixture.calls, [
     "validate", "start:core-agent-runtime-v1-smoke", "prepare-context", "provision", "poll",
     "conversation", "run", "events", "query-run", "count-messages", "inspect", "scan-database",
-    "delete", "wait-delete", "stop:core-agent-runtime-v1-smoke:false", "zeroize-secrets", "release-snapshot", "emit",
+    "delete", "wait-delete", "stop:core-agent-runtime-v1-smoke:false", "release-snapshot", "zeroize-secrets", "emit",
   ]);
 });
 
@@ -426,7 +426,7 @@ test("REAL_HERMES cleanup preserves its first error while continuing exact later
     (error) => error?.code === "SMOKE_STAGE_FAILED" && error.cause === deleteFailure,
   );
   assert.deepEqual(fixture.calls.slice(-5), [
-    "delete", "wait-delete", "stop:core-agent-runtime-v1-smoke:false", "zeroize-secrets", "release-snapshot",
+    "delete", "wait-delete", "stop:core-agent-runtime-v1-smoke:false", "release-snapshot", "zeroize-secrets",
   ]);
   assert.equal(fixture.emitted(), undefined);
 });
@@ -446,7 +446,7 @@ test("REAL_HERMES recovers a response-loss orphan through its precomputed cleanu
   );
   assert.deepEqual(fixture.calls, [
     "validate", "start:core-agent-runtime-v1-smoke", "prepare-context", "provision-response-lost",
-    "delete", "wait-delete", "stop:core-agent-runtime-v1-smoke:false", "zeroize-secrets", "release-snapshot",
+    "delete", "wait-delete", "stop:core-agent-runtime-v1-smoke:false", "release-snapshot", "zeroize-secrets",
   ]);
 });
 
@@ -466,7 +466,7 @@ test("REAL_HERMES --keep-runtime releases a preflight snapshot before topology o
     }),
     (error) => error?.code === "SMOKE_STAGE_FAILED" && error.cause === preflightFailure,
   );
-  assert.deepEqual(fixture.calls, ["preflight-snapshot-staged", "zeroize-secrets", "release-snapshot"]);
+  assert.deepEqual(fixture.calls, ["preflight-snapshot-staged", "release-snapshot", "zeroize-secrets"]);
 });
 
 test("REAL_HERMES --keep-runtime preserves a snapshot after partial topology ownership", async () => {

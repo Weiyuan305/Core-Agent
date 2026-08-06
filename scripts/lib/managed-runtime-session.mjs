@@ -1240,21 +1240,24 @@ function validateOutput(value) {
   return value;
 }
 
-export async function runControlPlaneSmoke({
+export async function runManagedRuntimeSession({
   environment = process.env,
-  argv = process.argv.slice(2),
+  keepRuntime = false,
   dependencies,
   signal,
+  use,
 } = {}) {
-  validateSmokeEnvironment(environment);
-  const { keepRuntime } = parseSmokeArguments(argv);
+  if (typeof keepRuntime !== "boolean" || typeof use !== "function") {
+    throw smokeError("SMOKE_STAGE_FAILED");
+  }
   const ownedAbort = signal === undefined ? new AbortController() : undefined;
   const activeSignal = signal ?? ownedAbort.signal;
   const deps = dependencies ?? createManagedRuntimeDependencies(environment, activeSignal);
   let topologyOwned = false;
   let context;
-  let output;
+  let result;
   let primaryError;
+
   try {
     deps.stage?.("preflight");
     await deps.validatePrerequisites();
@@ -1266,27 +1269,7 @@ export async function runControlPlaneSmoke({
     const provisionedContext = await deps.provision(context);
     if (context === undefined) context = provisionedContext;
     const runtime = await deps.pollRuntime(context);
-    deps.stage?.("run");
-    const conversationId = await deps.createConversation(context);
-    const runId = await deps.createRun(context, conversationId);
-    const eventTypes = await deps.readEvents(context, conversationId, runId);
-    const run = await deps.queryRun(context, runId);
-    const runStatus = dataProperty(run, "status", "SMOKE_RUN_RESPONSE_INVALID");
-    if (eventTypes.at(-1) !== "run.completed" || runStatus !== "succeeded") throw smokeError("SMOKE_RUN_FAILED");
-    const assistantMessageCount = await deps.countAssistantMessages(context, runId);
-    await deps.inspectRuntime(context, runtime);
-    await deps.scanDatabase(context);
-    output = validateOutput({
-      assistant_message_count: assistantMessageCount,
-      conversation_id: conversationId,
-      event_types: [...eventTypes],
-      profile_id: context.profileId,
-      run_id: runId,
-      run_status: runStatus,
-      runtime_id: context.runtimeId,
-      runtime_state: runtime.observed_state,
-      tenant_id: context.tenantId,
-    });
+    result = await use(Object.freeze({ context, runtime, operations: deps }));
   } catch (error) {
     primaryError = error;
   } finally {
@@ -1294,6 +1277,7 @@ export async function runControlPlaneSmoke({
     const rememberCleanupError = (error) => {
       if (cleanupError === undefined) cleanupError = error;
     };
+
     if (!keepRuntime) {
       try {
         deps.stage?.("cleanup");
@@ -1320,11 +1304,6 @@ export async function runControlPlaneSmoke({
         }
       }
     }
-    try {
-      await deps.releaseSecrets?.();
-    } catch (error) {
-      rememberCleanupError(error);
-    }
     if (!(keepRuntime && topologyOwned)) {
       try {
         await deps.releaseProductImageLockSnapshot?.();
@@ -1332,9 +1311,58 @@ export async function runControlPlaneSmoke({
         rememberCleanupError(error);
       }
     }
+    try {
+      await deps.releaseSecrets?.();
+    } catch (error) {
+      rememberCleanupError(error);
+    }
     if (primaryError === undefined && cleanupError !== undefined) primaryError = cleanupError;
   }
+
   if (primaryError !== undefined) throw smokeError("SMOKE_STAGE_FAILED", primaryError);
+  return result;
+}
+
+export async function runControlPlaneSmoke({
+  environment = process.env,
+  argv = process.argv.slice(2),
+  dependencies,
+  signal,
+} = {}) {
+  validateSmokeEnvironment(environment);
+  const { keepRuntime } = parseSmokeArguments(argv);
+  const ownedAbort = signal === undefined ? new AbortController() : undefined;
+  const activeSignal = signal ?? ownedAbort.signal;
+  const deps = dependencies ?? createManagedRuntimeDependencies(environment, activeSignal);
+  const output = await runManagedRuntimeSession({
+    environment,
+    keepRuntime,
+    signal: activeSignal,
+    dependencies: deps,
+    use: async ({ context, runtime, operations }) => {
+      operations.stage?.("run");
+      const conversationId = await operations.createConversation(context);
+      const runId = await operations.createRun(context, conversationId);
+      const eventTypes = await operations.readEvents(context, conversationId, runId);
+      const run = await operations.queryRun(context, runId);
+      const runStatus = dataProperty(run, "status", "SMOKE_RUN_RESPONSE_INVALID");
+      if (eventTypes.at(-1) !== "run.completed" || runStatus !== "succeeded") throw smokeError("SMOKE_RUN_FAILED");
+      const assistantMessageCount = await operations.countAssistantMessages(context, runId);
+      await operations.inspectRuntime(context, runtime);
+      await operations.scanDatabase(context);
+      return validateOutput({
+        assistant_message_count: assistantMessageCount,
+        conversation_id: conversationId,
+        event_types: [...eventTypes],
+        profile_id: context.profileId,
+        run_id: runId,
+        run_status: runStatus,
+        runtime_id: context.runtimeId,
+        runtime_state: runtime.observed_state,
+        tenant_id: context.tenantId,
+      });
+    },
+  });
   deps.emit(output);
   return output;
 }
