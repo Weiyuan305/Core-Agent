@@ -567,8 +567,18 @@ test("runtime operating evidence distinguishes socket platforms and keeps runtim
   assert.match(runbook, /host, VPN, and VM route/iu);
   assert.doesNotMatch(runbook, /fails closed on a host CIDR collision/iu);
   assert.match(runbook, /docker buildx version/u);
+  assert.match(runbook, /docker pull "\$CORE_AGENT_HERMES_IMAGE"/u);
   assert.match(runbook, /docker pull "\$CORE_AGENT_NODE_IMAGE"/u);
   assert.match(runbook, /docker pull "\$CORE_AGENT_POSTGRES_IMAGE"/u);
+  assert.match(runbook, /docker image inspect "\$CORE_AGENT_HERMES_IMAGE"/u);
+  const contextSelection = runbook.indexOf('docker context use "$CORE_AGENT_DOCKER_CONTEXT"');
+  const contextInspection = runbook.indexOf("docker context inspect --format");
+  const buildxCheck = runbook.indexOf("docker buildx version");
+  const productPull = runbook.indexOf('docker pull "$CORE_AGENT_HERMES_IMAGE"');
+  const nodePull = runbook.indexOf('docker pull "$CORE_AGENT_NODE_IMAGE"');
+  const postgresPull = runbook.indexOf('docker pull "$CORE_AGENT_POSTGRES_IMAGE"');
+  assert(contextSelection >= 0 && contextSelection < contextInspection && contextInspection < buildxCheck);
+  assert(buildxCheck < productPull && productPull < nodePull && nodePull < postgresPull);
   assert(
     runbook.indexOf("npm run runtime:images") < runbook.indexOf("### Docker Desktop for macOS"),
     "base-image lock resolution must precede the Docker Desktop image-backed socket probe",
