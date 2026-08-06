@@ -385,15 +385,21 @@ test("busy admission is bounded and non-durable so a later retry can dispatch", 
       assert.equal(busy.retryable, true);
     }
     assert.equal(dispatches, 1);
-    const journalNames = await readdir(join(temporaryRoot, "journal"));
-    assert.equal(journalNames.some((name) => name.endsWith(".json")), false);
-    assert.equal(journalNames.filter((name) => name.endsWith(".lock")).length, 1);
+    const journalRoot = join(temporaryRoot, "journal");
+    await assertPendingJournal(journalRoot, request("operation_busy_owner"));
+    const ownerDigest = createHash("sha256").update("operation_busy_owner").digest("hex");
+    const retryDigest = createHash("sha256").update("operation_busy_retry").digest("hex");
+    assert.equal((await lstat(join(journalRoot, `${ownerDigest}.guard.sqlite`))).mode & 0o777, 0o600);
+    assert.equal((await lstat(join(journalRoot, `${retryDigest}.guard.sqlite`))).mode & 0o777, 0o600);
+    await assert.rejects(lstat(join(journalRoot, `${retryDigest}.json`)), { code: "ENOENT" });
 
     release();
     assert("value" in await owner);
     const retried = await client.execute(request("operation_busy_retry"));
     assert.equal(retried.outcome, "accepted");
     assert.equal(dispatches, 2);
+    await assertTerminalJournal(journalRoot, request("operation_busy_owner"));
+    await assertTerminalJournal(journalRoot, request("operation_busy_retry"));
   } finally {
     release();
     await server.close();

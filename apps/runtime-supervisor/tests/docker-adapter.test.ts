@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, readdir, rm, rmdir, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, rmdir, stat, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -103,11 +103,15 @@ async function assertCanonicalPendingJournal(
   journalRoot: string,
   request: SupervisorRequestV1,
   stage: OperationJournalStage,
+  allowedOtherOperationIds: readonly string[] = [],
 ): Promise<void> {
   const digest = createHash("sha256").update(request.operation_id).digest("hex");
   const path = join(journalRoot, `${digest}.json`);
   const names = await readdir(journalRoot);
-  assert.deepEqual(names.filter((name) => name.endsWith(".json")), [`${digest}.json`]);
+  const expectedJsonNames = [request.operation_id, ...allowedOtherOperationIds]
+    .map((operationId) => `${createHash("sha256").update(operationId).digest("hex")}.json`)
+    .sort();
+  assert.deepEqual(names.filter((name) => name.endsWith(".json")).sort(), expectedJsonNames);
   assert.equal((await lstat(path)).mode & 0o777, 0o600);
   const payload = await readFile(path, "utf8");
   const record = JSON.parse(payload) as Record<string, unknown>;
@@ -121,6 +125,20 @@ async function assertCanonicalPendingJournal(
   assert.equal(payload, `${canonicalJson(record)}\n`);
   assert.equal("completed_at" in record, false);
   assert.equal("response" in record, false);
+}
+
+async function waitForPendingStage(path: string, expected: OperationJournalStage): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline) {
+    try {
+      const record = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+      if (record.state === "pending" && record.stage === expected) return;
+    } catch {
+      // The journal write can still be in flight.
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  assert.fail(`timed out waiting for pending journal stage ${expected}`);
 }
 
 function manifestFor(request = signed()): unknown {
@@ -646,27 +664,44 @@ function recoveryInspect(request: ReturnType<typeof recoveryProvision>, operatio
   return { ...data, request_hash: canonicalSupervisorRequestHash(data) };
 }
 
-function reservationPath(journalRoot: string, request: SupervisorRequestV1): string {
+function pendingPath(journalRoot: string, request: SupervisorRequestV1): string {
   const digest = createHash("sha256").update(request.operation_id).digest("hex");
-  return join(journalRoot, `${digest}.lock`);
+  return join(journalRoot, `${digest}.json`);
 }
 
-async function writeStaleReservation(
+async function writePendingJournal(
   journalRoot: string,
   request: SupervisorRequestV1,
   stage: OperationJournalStage,
 ): Promise<string> {
   await mkdir(journalRoot, { recursive: true, mode: 0o700 });
-  const path = reservationPath(journalRoot, request);
+  const path = pendingPath(journalRoot, request);
   await writeFile(path, `${canonicalJson({
+    operation_id: request.operation_id,
     protocol_version: 1,
     request_hash: request.request_hash,
-    owner_token: "a".repeat(64),
     stage,
+    state: "pending",
   })}\n`, { mode: 0o600 });
-  const stale = new Date(Date.now() - 151_000);
-  await utimes(path, stale, stale);
   return path;
+}
+
+function pendingContext(
+  journalRoot: string,
+  request: SupervisorRequestV1,
+): { readonly context: OperationJournalContext; readonly stage: () => OperationJournalStage } {
+  let stage: OperationJournalStage = "reserved";
+  return {
+    context: Object.freeze({
+      get stage() { return stage; },
+      recovered: false,
+      async advance(next: OperationJournalStage): Promise<void> {
+        await writePendingJournal(journalRoot, request, next);
+        stage = next;
+      },
+    }),
+    stage: () => stage,
+  };
 }
 
 function recoveryProvision(index: number) {
@@ -1142,7 +1177,7 @@ test("an applied gateway start followed by a response-less reset stays non-termi
   assert.equal(docker.mutations.filter((mutation) => mutation === `start:${gatewayName}`).length, 1);
 });
 
-test("stale lifecycle reservations recover applied response-less mutations without replay", async () => {
+test("pending lifecycle stages recover applied response-less mutations without replay", async () => {
   const cases = ["start", "stop", "restart", "delete"] as const;
   for (const [index, kind] of cases.entries()) {
     const caseRoot = join(temporaryRoot, `lifecycle-recovery-${kind}`);
@@ -1169,24 +1204,30 @@ test("stale lifecycle reservations recover applied response-less mutations witho
       docker.responseLessMutationErrors.set(kind === "delete" ? "remove" : kind, reset);
     }
 
-    const firstJournal = new OperationJournal({ directory: journalRoot });
-    const firstServer = buildRecoveryServer(socketPath, firstJournal, first.adapter);
-    await firstServer.start();
-    const firstResponse = await new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 })
-      .execute(lifecycleRequest);
-    assert.equal(firstResponse.outcome, "failed");
-    if (firstResponse.outcome === "failed") assert.equal(firstResponse.code, "DEPENDENCY_TIMEOUT");
-    await firstServer.close();
+    const initial = pendingContext(journalRoot, lifecycleRequest);
+    let initialSettled = false;
+    void first.adapter.execute(lifecycleRequest, undefined, initial.context).then(
+      () => { initialSettled = true; },
+      () => { initialSettled = true; },
+    );
+    const expectedStage: OperationJournalStage = kind === "restart" ? "start_pending" : `${kind}_pending`;
+    await waitForPendingStage(pendingPath(journalRoot, lifecycleRequest), expectedStage);
+    assert.equal(initialSettled, false);
 
-    const digest = createHash("sha256").update(lifecycleRequest.operation_id).digest("hex");
-    const reservationPath = join(journalRoot, `${digest}.lock`);
-    const reservationText = await readFile(reservationPath, "utf8");
-    const reservation = JSON.parse(reservationText) as Record<string, unknown>;
-    assert.equal(reservation.stage, kind === "restart" ? "start_pending" : `${kind}_pending`);
-    assert.equal((await lstat(reservationPath)).mode & 0o777, 0o600);
-    assert.doesNotMatch(reservationText, new RegExp(`${provisionRequest.runtime.tenant_id}|${provisionRequest.runtime.runtime_id}`));
-    const stale = new Date(Date.now() - 151_000);
-    await utimes(reservationPath, stale, stale);
+    await assertCanonicalPendingJournal(
+      journalRoot,
+      lifecycleRequest,
+      expectedStage,
+    );
+    assert.equal(initial.stage(), expectedStage);
+    const initialMutations = docker.mutations.slice(baseline);
+    if (kind === "restart") {
+      assert.equal(initialMutations.filter((item) => item === `stop:${gatewayName}`).length, 1);
+      assert.equal(initialMutations.filter((item) => item === `start:${gatewayName}`).length, 1);
+    } else {
+      const mutation = kind === "delete" ? `remove:${gatewayName}` : `${kind}:${gatewayName}`;
+      assert.equal(initialMutations.filter((item) => item === mutation).length, 1);
+    }
     docker.responseLessMutationErrors.clear();
 
     const recoveredAdapter = buildAdapter(docker, new FakeSecretStore()).adapter;
@@ -1223,11 +1264,11 @@ test("stale lifecycle reservations recover applied response-less mutations witho
     }
     const journalNames = await readdir(journalRoot);
     assert.equal(journalNames.filter((name) => name.endsWith(".json")).length, 1);
-    assert.equal(journalNames.some((name) => name.endsWith(".lock")), false);
+    assert.equal(journalNames.some((name) => name.endsWith(".guard.sqlite")), true);
   }
 });
 
-test("an admission transient retains an aged non-reserved stage for bounded cross-process recovery", async () => {
+test("an admission transient retains a pending non-reserved stage for recovery", async () => {
   const caseRoot = join(temporaryRoot, "staged-admission-recovery");
   const journalRoot = join(caseRoot, "journal");
   const firstSocket = join(temporaryRoot, "sa1.sock");
@@ -1240,7 +1281,7 @@ test("an admission transient retains an aged non-reserved stage for bounded cros
   await first.adapter.provision(provisionRequest);
   const target = recoveryLifecycle(provisionRequest, "start");
   const owner = recoveryInspect(provisionRequest, "operation_recovery_admission_owner");
-  const stagedPath = await writeStaleReservation(journalRoot, target, "start_pending");
+  await writePendingJournal(journalRoot, target, "start_pending");
   const gatewayName = deriveRuntimeNames(provisionRequest.runtime).container;
   const mutationBaseline = docker.mutations.length;
   let markOwnerEntered!: () => void;
@@ -1272,8 +1313,7 @@ test("an admission transient retains an aged non-reserved stage for bounded cros
     const transient = await firstClient.execute(target);
     assert.equal(transient.outcome, "failed");
     if (transient.outcome === "failed") assert.equal(transient.code, "DEPENDENCY_UNAVAILABLE");
-    const retained = JSON.parse(await readFile(stagedPath, "utf8")) as Record<string, unknown>;
-    assert.equal(retained.stage, "start_pending");
+    await assertCanonicalPendingJournal(journalRoot, target, "start_pending", [owner.operation_id]);
   } finally {
     releaseOwner();
     await ownerResponse.catch(() => undefined);
@@ -1360,14 +1400,17 @@ test("restart recovers response-less stop from stop_pending without a duplicate 
   const gatewayName = deriveRuntimeNames(provisionRequest.runtime).container;
   const baseline = docker.mutations.length;
   docker.responseLessMutationErrors.set("stop", Object.assign(new Error("synthetic stop reset"), { code: "ECONNRESET" }));
-  const firstServer = buildRecoveryServer(socketPath, new OperationJournal({ directory: journalRoot }), first.adapter);
-  await firstServer.start();
-  const firstResponse = await new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 }).execute(request);
-  assert.equal(firstResponse.outcome, "failed");
-  await firstServer.close();
-  const stagedPath = reservationPath(journalRoot, request);
-  assert.equal((JSON.parse(await readFile(stagedPath, "utf8")) as Record<string, unknown>).stage, "stop_pending");
-  await utimes(stagedPath, new Date(Date.now() - 151_000), new Date(Date.now() - 151_000));
+  const initial = pendingContext(journalRoot, request);
+  let initialSettled = false;
+  void first.adapter.execute(request, undefined, initial.context).then(
+    () => { initialSettled = true; },
+    () => { initialSettled = true; },
+  );
+  await waitForPendingStage(pendingPath(journalRoot, request), "stop_pending");
+  assert.equal(initialSettled, false);
+  assert.equal(initial.stage(), "stop_pending");
+  await assertCanonicalPendingJournal(journalRoot, request, "stop_pending");
+  assert.equal(docker.mutations.slice(baseline).filter((item) => item === `stop:${gatewayName}`).length, 1);
   docker.responseLessMutationErrors.clear();
 
   const recovered = buildAdapter(docker, new FakeSecretStore()).adapter;
@@ -1400,8 +1443,8 @@ test("restart recovers start_pending after a durable transition and crash before
   const gatewayName = deriveRuntimeNames(provisionRequest.runtime).container;
   docker.containers.get(gatewayName)!.running = false;
   const baseline = docker.mutations.length;
-  const stagedPath = await writeStaleReservation(journalRoot, request, "start_pending");
-  assert.equal((JSON.parse(await readFile(stagedPath, "utf8")) as Record<string, unknown>).stage, "start_pending");
+  await writePendingJournal(journalRoot, request, "start_pending");
+  await assertCanonicalPendingJournal(journalRoot, request, "start_pending");
   assert.equal(docker.mutations.slice(baseline).filter((item) => item === `start:${gatewayName}`).length, 0);
 
   const recovered = buildAdapter(docker, new FakeSecretStore()).adapter;
@@ -1434,14 +1477,17 @@ test("restart recovers an applied response-less start from start_pending without
   const gatewayName = deriveRuntimeNames(provisionRequest.runtime).container;
   const baseline = docker.mutations.length;
   docker.responseLessMutationErrors.set("start", Object.assign(new Error("synthetic start reset"), { code: "ECONNRESET" }));
-  const firstServer = buildRecoveryServer(socketPath, new OperationJournal({ directory: journalRoot }), first.adapter);
-  await firstServer.start();
-  const firstResponse = await new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 }).execute(request);
-  assert.equal(firstResponse.outcome, "failed");
-  await firstServer.close();
-  const stagedPath = reservationPath(journalRoot, request);
-  assert.equal((JSON.parse(await readFile(stagedPath, "utf8")) as Record<string, unknown>).stage, "start_pending");
-  await utimes(stagedPath, new Date(Date.now() - 151_000), new Date(Date.now() - 151_000));
+  const initial = pendingContext(journalRoot, request);
+  let initialSettled = false;
+  void first.adapter.execute(request, undefined, initial.context).then(
+    () => { initialSettled = true; },
+    () => { initialSettled = true; },
+  );
+  await waitForPendingStage(pendingPath(journalRoot, request), "start_pending");
+  assert.equal(initialSettled, false);
+  assert.equal(initial.stage(), "start_pending");
+  await assertCanonicalPendingJournal(journalRoot, request, "start_pending");
+  assert.equal(docker.mutations.slice(baseline).filter((item) => item === `start:${gatewayName}`).length, 1);
   docker.responseLessMutationErrors.clear();
 
   const recovered = buildAdapter(docker, new FakeSecretStore()).adapter;
