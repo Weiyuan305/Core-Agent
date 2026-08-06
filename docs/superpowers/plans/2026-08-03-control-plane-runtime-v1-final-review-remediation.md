@@ -239,5 +239,11 @@ locks, and bounded cancellation timers, their package gate also fixes
 `--test-concurrency=1`; the individual server and adapter files passed 13/13
 and 44/44 before this serialization was adopted.
 
+The next root check found the same pre-event timer assumption in the loop over
+the four allowlisted response-less transport codes. Each case now installs a
+fresh applied-start barrier and waits for that exact mutation before asserting
+that the adapter Promise remains unsettled. No timeout was enlarged and the
+daemon-uncertain classifier or production deadline behavior did not change.
+
 At `3ffdbd3`, Tasks 25-28 were ready for the required repeated whole-branch
 architecture, PostgreSQL concurrency/recovery, and release-operability reviews.

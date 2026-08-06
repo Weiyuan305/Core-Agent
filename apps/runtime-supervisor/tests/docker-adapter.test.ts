@@ -1526,9 +1526,13 @@ test("every allowlisted response-less transport code stays daemon-uncertain", as
 
   for (const [index, code] of ["ECONNRESET", "EPIPE", "ECONNABORTED", "ERR_STREAM_PREMATURE_CLOSE"].entries()) {
     gateway.running = false;
+    let markGatewayStartApplied!: () => void;
+    const gatewayStartApplied = new Promise<void>((resolve) => { markGatewayStartApplied = resolve; });
+    docker.markGatewayStartApplied = markGatewayStartApplied;
     docker.gatewayStartError = Object.assign(new Error("synthetic response-less transport failure"), { code });
     const restarted = buildAdapter(docker, new FakeSecretStore());
     const pending = restarted.adapter.execute(lifecycle("start", `operation_allowlisted_transport_${index}`));
+    await gatewayStartApplied;
     assert.equal(await Promise.race([
       pending,
       new Promise<typeof stillPending>((resolve) => setTimeout(() => resolve(stillPending), 20)),
