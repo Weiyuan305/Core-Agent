@@ -188,8 +188,13 @@ acquisition. Only the first dispatch for an operation can own one of the four
 execution slots; any number of identical in-process retries attach without
 consuming more capacity. If a new operation cannot acquire a slot before its
 receipt-relative admission deadline, it receives a retryable, non-durable busy
-response. Its journal reservation is released, no effect may start after that
-deadline, and a later retry may reserve and dispatch normally.
+response. A still-`reserved` journal reservation is released, no effect may
+start after that deadline, and a later retry may reserve and dispatch normally.
+If stale recovery already acquired a non-`reserved` lifecycle stage, an
+admission or closing transient instead stops its heartbeat, preserves the same
+canonical mode-`0600` stage record, and marks it immediately stale. A new
+Supervisor process can therefore reclaim that exact stage without waiting for
+the normal stale interval or losing prior daemon-uncertain progress.
 
 The separate 120-second effect deadline aborts every supported Dockerode
 inspect, create, wait, log, start, stop, restart, and remove request. Reaching
@@ -237,7 +242,15 @@ running. The allowlist and transition graph are enforced by both the journal
 and adapter, and every stage replacement is canonical JSON, atomically renamed,
 directory-synced, and mode `0600`. The reservation contains only protocol
 version, request hash, random owner token, and stage; operation IDs, tenant or
-runtime identifiers, provider data, and secrets are excluded.
+runtime identifiers, provider data, and secrets are excluded. Reservation
+input is accepted only when its bytes exactly match that canonical encoding;
+reordered keys, additional whitespace, duplicate keys, alternate numeric
+spellings, and every other noncanonical representation fail closed before
+dispatch. After every awaited stage advance and immediately before every
+lifecycle mutation, including both restart halves, the adapter rechecks the
+operation abort signal. Cancellation while a stage write is blocked can leave
+the durable stage recoverable but cannot dispatch the subsequent Docker
+mutation.
 
 Provision intentionally remains at `reserved`. Provisioning is a multi-resource
 reconciliation rather than one reversible lifecycle mutation: deterministic

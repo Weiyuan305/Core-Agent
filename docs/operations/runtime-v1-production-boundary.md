@@ -160,8 +160,12 @@ Journal deduplication precedes capacity admission. Identical retries attach to
 the first dispatch and consume no additional execution slots. A distinct
 operation that remains busy through the one-second admission window receives a
 retryable non-durable unavailable response; the Supervisor releases that
-operation's reservation and never starts its effect after the deadline. Retry
-that operation later with the same ID and hash.
+operation's still-`reserved` reservation and never starts its effect after the
+deadline. If the request recovered a non-`reserved` lifecycle stage before
+admission became busy or the Supervisor began closing, the journal instead
+stops the heartbeat, retains the same canonical `0600` stage, and makes it
+immediately stale for bounded takeover by a new Supervisor. Retry that
+operation with the same ID and hash; never delete or rewrite the retained lock.
 
 A timeout response before cancellation settlement is transient and is not
 proof of a durable timeout journal entry. Retry only with the exact same stable
@@ -192,6 +196,14 @@ terminal observation without a duplicate mutation. Any incompatible or
 out-of-order stage fails closed. Never edit a stage or lock by hand: journal
 updates are canonical, atomic, directory-synced `0600` records containing only
 protocol version, request hash, random ownership token, and the closed stage.
+The reader requires an exact byte-for-byte canonical encoding: reordered or
+whitespace-varied JSON, duplicate keys, alternate numeric encodings, and other
+semantically equivalent bytes are unsafe and fail closed before dispatch.
+After every durable stage advance and immediately before start, stop, delete,
+or either restart-half mutation, the adapter checks cancellation again. If
+cancellation arrives while stage persistence is blocked, releasing that write
+must not dispatch Docker work; the retained stage remains available to strict
+inspection and recovery.
 
 Provision reservations remain `reserved` by design. Recovery relies on stable
 derived names and strict validation/adoption of each volume, network, helper,
