@@ -394,11 +394,14 @@ test("managed SSE rejects mismatched scope before emitting a delta", async () =>
   assert.deepEqual(deltas, []);
 });
 
-test("managed API and Worker restart uses one exact Compose command then readiness", async () => {
+test("managed API and Worker restart uses one exact Compose command, readiness, then a bounded stability window", async () => {
   const calls = [];
+  const signal = new AbortController().signal;
   await restartApiWorkerTopology({
     child: async (command, args) => calls.push([command, args]),
     waitUntilReady: async () => calls.push("ready"),
+    stabilize: async (milliseconds, receivedSignal) => calls.push(["stable", milliseconds, receivedSignal]),
+    signal,
   });
   assert.deepEqual(calls, [
     ["docker", [
@@ -414,6 +417,7 @@ test("managed API and Worker restart uses one exact Compose command then readine
       "worker",
     ]],
     "ready",
+    ["stable", 2_000, signal],
   ]);
 });
 

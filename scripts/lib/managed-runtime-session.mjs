@@ -1038,8 +1038,21 @@ function deriveProvisionedRuntimeId(tenantId) {
   return `runtime_${createHash("sha256").update(tenantId, "utf8").digest("hex").slice(0, 32)}`;
 }
 
-export async function restartApiWorkerTopology({ child, waitUntilReady }) {
-  if (typeof child !== "function" || typeof waitUntilReady !== "function") {
+export async function restartApiWorkerTopology({
+  child,
+  waitUntilReady,
+  stabilize = delay,
+  signal,
+  stabilityMs = 2_000,
+}) {
+  if (
+    typeof child !== "function"
+    || typeof waitUntilReady !== "function"
+    || typeof stabilize !== "function"
+    || !Number.isSafeInteger(stabilityMs)
+    || stabilityMs < 1
+    || stabilityMs > 5_000
+  ) {
     throw smokeError("SMOKE_RESTART_FAILED");
   }
   await child(
@@ -1048,6 +1061,7 @@ export async function restartApiWorkerTopology({ child, waitUntilReady }) {
     { timeoutMs: 180_000, maxOutputBytes: 4 * 1024 * 1024 },
   );
   await waitUntilReady();
+  await stabilize(stabilityMs, signal);
 }
 
 export async function waitForApiReadiness({
@@ -1237,6 +1251,7 @@ export function createManagedRuntimeDependencies(environment, signal) {
     async restartApiWorker() {
       await restartApiWorkerTopology({
         child,
+        signal,
         waitUntilReady: () => waitForApiReadiness({
           attempt: () => requestJson("/health/ready", {
             bootstrapKey: state.bootstrapKey,
