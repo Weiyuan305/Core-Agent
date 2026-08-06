@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { REMOVED_RUNTIME_IMAGE_REF } from "@core-agent/runtime-core";
+import { DatabaseTransactionRetryExhaustedError, REMOVED_RUNTIME_IMAGE_REF } from "@core-agent/runtime-core";
 
 import { handleReconcileRuntime } from "../src/handlers/reconcile-runtime.js";
 
@@ -63,6 +63,25 @@ test("external Runtime effects are durably marked before dispatch and complete w
   }, { tenantId: "tenant_a", jobId: "job_effect_proof", attemptCount: 1, maxAttempts: 5, targetCommandVersion: 1, command: "start", effectState: "pre_effect", recoveryOnly: false }, new AbortController().signal);
   assert.deepEqual(result, { kind: "succeeded" });
   assert.deepEqual(order, ["supervisor:inspect", "mark", "supervisor:start", "complete:effect_dispatched"]);
+});
+
+test("database retry exhaustion after an accepted Runtime effect stays recoverable", async () => {
+  const calls: string[] = [];
+  await assert.rejects(handleReconcileRuntime({
+    loadFacts: async () => ({ tenantId: "tenant_a", runtimeId: "runtime_a", generation: 1, imageRef, commandVersion: 1, observedState: "stopped", desiredState: "running" }),
+    supervisor: async (request) => {
+      calls.push(`supervisor:${request.kind}`);
+      if (request.kind === "inspect") return { protocol_version: 1, operation_id: request.operation_id, outcome: "accepted", observation: { tenant_id: "tenant_a", runtime_id: "runtime_a", generation: 1, exists: true, lifecycle: "stopped", health: "unknown", image_ref: imageRef } };
+      return { protocol_version: 1, operation_id: request.operation_id, outcome: "accepted", observation: { tenant_id: "tenant_a", runtime_id: "runtime_a", generation: 1, exists: true, lifecycle: "running", health: "healthy", image_ref: imageRef, private_origin: "http://172.30.0.4:8642" } };
+    },
+    reprovision: async () => { throw new Error("not expected"); },
+    isCurrent: async () => true,
+    markEffectDispatched: async () => { calls.push("mark"); return true; },
+    succeed: async () => { calls.push("succeed:db-exhausted"); throw new DatabaseTransactionRetryExhaustedError(); },
+    retry: async () => { calls.push("retry"); return true; },
+    fail: async () => { calls.push("fail"); return true; },
+  }, { tenantId: "tenant_a", jobId: "job_db_retry_exhausted", attemptCount: 1, maxAttempts: 5, targetCommandVersion: 1, command: "start", effectState: "pre_effect", recoveryOnly: false }, new AbortController().signal), DatabaseTransactionRetryExhaustedError);
+  assert.deepEqual(calls, ["supervisor:inspect", "mark", "supervisor:start", "succeed:db-exhausted"]);
 });
 
 test("pre-effect inspection success carries an explicit inspect proof", async () => {
