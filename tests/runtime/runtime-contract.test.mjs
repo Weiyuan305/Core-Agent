@@ -29,10 +29,15 @@ const {
   stageProductImageLockSnapshot,
 } = smokeModule;
 
-const smokeSource = await readFile(
+const smokeWrapperSource = await readFile(
   new URL("../../scripts/smoke-control-plane.mjs", import.meta.url),
   "utf8"
 );
+const managedRuntimeSessionSource = await readFile(
+  new URL("../../scripts/lib/managed-runtime-session.mjs", import.meta.url),
+  "utf8",
+);
+const smokeSource = `${smokeWrapperSource}\n${managedRuntimeSessionSource}`;
 
 const smokeEnvironment = Object.freeze({
   CORE_AGENT_REAL_HERMES_SMOKE: "1",
