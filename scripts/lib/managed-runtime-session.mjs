@@ -24,7 +24,7 @@ import { validateLocalDockerContextEndpoint } from "../preflight-runtime-docker-
 
 const execFileAsync = promisify(execFile);
 const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
-const composeFile = join(repositoryRoot, "infra/runtime/compose.dev.yaml");
+const composeFile = "infra/runtime/compose.dev.yaml";
 const runtimeBaseLockFile = join(repositoryRoot, "infra/runtime/base-images.lock.json");
 const providerCatalogFile = join(repositoryRoot, "infra/runtime/providers.dev.json");
 const composeProject = "core-agent-runtime-v1-smoke";
@@ -764,24 +764,71 @@ function provisioningRequest(identifiers, imageRef, platform, provider) {
   });
 }
 
-function conversationRequest(identifiers) {
+export function createSyntheticConversationRequest(
+  identifiers,
+  nonce = randomBytes(8).toString("hex"),
+) {
+  const tenantId = dataProperty(identifiers, "tenantId", "SMOKE_SYNTHETIC_INPUT_REQUIRED");
+  const profileId = dataProperty(identifiers, "profileId", "SMOKE_SYNTHETIC_INPUT_REQUIRED");
+  if (
+    typeof tenantId !== "string"
+    || !syntheticPattern.test(tenantId)
+    || typeof profileId !== "string"
+    || !syntheticPattern.test(profileId)
+    || !/^[a-f0-9]{16}$/u.test(nonce)
+  ) {
+    throw smokeError("SMOKE_SYNTHETIC_INPUT_REQUIRED");
+  }
   return withPayloadHash({
     schema_version: 1,
-    idempotency_key: `synthetic-conversation-${identifiers.tenantId}`,
-    tenant_id: identifiers.tenantId,
-    profile_id: identifiers.profileId,
+    idempotency_key: `synthetic-conversation-${tenantId}-${nonce}`,
+    tenant_id: tenantId,
+    profile_id: profileId,
   });
 }
 
-function runRequest(identifiers) {
+function isWellFormedText(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function validateSyntheticMessageContent(value) {
+  if (
+    typeof value !== "string"
+    || value.length < 1
+    || value.length > 4_000
+    || value.trim().length === 0
+    || /[\u0000-\u001f\u007f]/u.test(value)
+    || !isWellFormedText(value)
+  ) {
+    throw smokeError("SMOKE_MESSAGE_CONTENT_INVALID");
+  }
+  return value;
+}
+
+export function createSyntheticRunRequest(identifiers, content, nonce = randomBytes(8).toString("hex")) {
+  const tenantId = dataProperty(identifiers, "tenantId", "SMOKE_SYNTHETIC_INPUT_REQUIRED");
+  if (typeof tenantId !== "string" || !syntheticPattern.test(tenantId) || !/^[a-f0-9]{16}$/u.test(nonce)) {
+    throw smokeError("SMOKE_SYNTHETIC_INPUT_REQUIRED");
+  }
+  const validatedContent = validateSyntheticMessageContent(content);
   return withPayloadHash({
     schema_version: 1,
-    idempotency_key: `synthetic-run-${identifiers.tenantId}`,
-    client_request_id: `synthetic-run-${identifiers.tenantId}`,
-    input_message: {
-      client_message_id: `synthetic-message-${identifiers.tenantId}`,
-      content: identifiers.promptIdentifier,
-    },
+    idempotency_key: `synthetic-run-${tenantId}-${nonce}`,
+    client_request_id: `synthetic-run-${tenantId}-${nonce}`,
+    input_message: Object.freeze({
+      client_message_id: `synthetic-message-${tenantId}-${nonce}`,
+      content: validatedContent,
+    }),
   });
 }
 
@@ -873,9 +920,24 @@ function validateProductEventEnvelope(event, expected) {
     const payloadKeys = Object.keys(event.payload);
     if (payloadKeys.some((key) => !["run_id", "status", "summary"].includes(key))
       || !Object.hasOwn(event.payload, "run_id") || !Object.hasOwn(event.payload, "status")
-      || event.run_id !== expected.runId || event.payload.run_id !== expected.runId
+      || typeof event.run_id !== "string" || event.payload.run_id !== event.run_id
       || event.payload.status !== expectedStatus
       || (Object.hasOwn(event.payload, "summary") && (typeof event.payload.summary !== "string" || event.payload.summary.length > 4_000))) {
+      throw smokeError(code);
+    }
+  }
+  if (event.event_type === "message.delta") {
+    exactRecord(event.payload, ["message_id", "delta"], code);
+    if (
+      event.conversation_id !== expected.conversationId
+      || typeof event.run_id !== "string"
+      || typeof event.payload.message_id !== "string"
+      || event.payload.message_id.length < 1
+      || event.payload.message_id.length > 255
+      || typeof event.payload.delta !== "string"
+      || event.payload.delta.length < 1
+      || event.payload.delta.length > 16_000
+    ) {
       throw smokeError(code);
     }
   }
@@ -889,12 +951,14 @@ export async function readSmokeEvents({
   bootstrapKey,
   signal,
   fetchImpl = fetch,
+  onDelta,
   limits = {},
 }) {
   const maximumEvents = limits.maximumEvents ?? 1_000;
   const maximumRetainedBytes = limits.maximumRetainedBytes ?? maximumApiBodyBytes;
   if (typeof conversationId !== "string" || typeof tenantId !== "string" || typeof runId !== "string"
     || !Buffer.isBuffer(bootstrapKey)
+    || (onDelta !== undefined && typeof onDelta !== "function")
     || !Number.isSafeInteger(maximumEvents) || maximumEvents < 1 || maximumEvents > 10_000
     || !Number.isSafeInteger(maximumRetainedBytes) || maximumRetainedBytes < 1 || maximumRetainedBytes > 16 * maximumApiBodyBytes) {
     throw smokeError("SMOKE_SSE_FAILED");
@@ -918,6 +982,7 @@ export async function readSmokeEvents({
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   const eventTypes = [];
+  let eventCount = 0;
   let pending = "";
   let retainedBytes = 0;
   try {
@@ -933,9 +998,18 @@ export async function readSmokeEvents({
         const data = frame.split("\n").find((line) => line.startsWith("data: "))?.slice(6);
         if (data !== undefined) {
           retainedBytes += Buffer.byteLength(data, "utf8");
-          if (eventTypes.length >= maximumEvents || retainedBytes > maximumRetainedBytes) throw smokeError("SMOKE_SSE_FAILED");
+          if (eventCount >= maximumEvents || retainedBytes > maximumRetainedBytes) throw smokeError("SMOKE_SSE_FAILED");
+          eventCount += 1;
           const event = parseJson(data, "SMOKE_SSE_FAILED");
           const eventType = validateProductEventEnvelope(event, { conversationId, tenantId, runId });
+          const eventRunId = optionalDataProperty(event, "run_id", "SMOKE_SSE_FAILED");
+          if (eventRunId !== undefined && eventRunId !== runId) {
+            separator = pending.indexOf("\n\n");
+            continue;
+          }
+          if (eventType === "message.delta" && onDelta !== undefined) {
+            await onDelta(event.payload.delta);
+          }
           eventTypes.push(eventType);
           if (eventType === "run.completed" || eventType === "run.failed") {
             await reader.cancel().catch(() => undefined);
@@ -962,6 +1036,18 @@ function deriveManagedNames(tenantId, runtimeId, generation) {
 
 function deriveProvisionedRuntimeId(tenantId) {
   return `runtime_${createHash("sha256").update(tenantId, "utf8").digest("hex").slice(0, 32)}`;
+}
+
+export async function restartApiWorkerTopology({ child, waitUntilReady }) {
+  if (typeof child !== "function" || typeof waitUntilReady !== "function") {
+    throw smokeError("SMOKE_RESTART_FAILED");
+  }
+  await child(
+    "docker",
+    composeArgs("up", "-d", "--force-recreate", "api", "worker"),
+    { timeoutMs: 180_000, maxOutputBytes: 4 * 1024 * 1024 },
+  );
+  await waitUntilReady();
 }
 
 async function scanDumpForSecrets(filePath, secretValues) {
@@ -1085,24 +1171,41 @@ export function createManagedRuntimeDependencies(environment, signal) {
     },
     async createConversation(context) {
       const response = await requestJson("/internal/v1/conversations", {
-        method: "POST", body: conversationRequest(identifiers), bootstrapKey: state.bootstrapKey,
+        method: "POST", body: createSyntheticConversationRequest(identifiers), bootstrapKey: state.bootstrapKey,
         tenantId: context.tenantId, statuses: [201], signal,
       });
       const conversationId = dataProperty(response, "conversation_id", "SMOKE_CONVERSATION_RESPONSE_INVALID");
       if (typeof conversationId !== "string") throw smokeError("SMOKE_CONVERSATION_RESPONSE_INVALID");
       return conversationId;
     },
-    async createRun(context, conversationId) {
+    async createRun(context, conversationId, content) {
       const response = await requestJson(`/internal/v1/conversations/${encodeURIComponent(conversationId)}/runs`, {
-        method: "POST", body: runRequest(identifiers), bootstrapKey: state.bootstrapKey,
+        method: "POST", body: createSyntheticRunRequest(identifiers, content), bootstrapKey: state.bootstrapKey,
         tenantId: context.tenantId, statuses: [202], signal,
       });
       const runId = dataProperty(response, "run_id", "SMOKE_RUN_RESPONSE_INVALID");
       if (typeof runId !== "string") throw smokeError("SMOKE_RUN_RESPONSE_INVALID");
       return runId;
     },
-    async readEvents(context, conversationId, runId) {
-      return readSmokeEvents({ conversationId, tenantId: context.tenantId, runId, bootstrapKey: state.bootstrapKey, signal });
+    async readEvents(context, conversationId, runId, onDelta) {
+      return readSmokeEvents({
+        conversationId,
+        tenantId: context.tenantId,
+        runId,
+        bootstrapKey: state.bootstrapKey,
+        signal,
+        onDelta,
+      });
+    },
+    async restartApiWorker() {
+      await restartApiWorkerTopology({
+        child,
+        waitUntilReady: () => requestJson("/health/ready", {
+          bootstrapKey: state.bootstrapKey,
+          statuses: [200],
+          signal,
+        }),
+      });
     },
     async queryRun(context, runId) {
       return requestJson(`/internal/v1/runs/${encodeURIComponent(runId)}`, {
@@ -1342,7 +1445,7 @@ export async function runControlPlaneSmoke({
     use: async ({ context, runtime, operations }) => {
       operations.stage?.("run");
       const conversationId = await operations.createConversation(context);
-      const runId = await operations.createRun(context, conversationId);
+      const runId = await operations.createRun(context, conversationId, fixedIdentifiers.promptIdentifier);
       const eventTypes = await operations.readEvents(context, conversationId, runId);
       const run = await operations.queryRun(context, runId);
       const runStatus = dataProperty(run, "status", "SMOKE_RUN_RESPONSE_INVALID");

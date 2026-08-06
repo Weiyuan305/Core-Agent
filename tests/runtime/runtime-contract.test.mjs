@@ -329,7 +329,8 @@ function successfulSmokeDependencies(overrides = {}) {
       calls.push("conversation");
       return "synthetic-conversation-success";
     },
-    createRun: async () => {
+    createRun: async (_context, _conversationId, content) => {
+      assert.equal(content, "synthetic-runtime-v1-smoke");
       calls.push("run");
       return "synthetic-run-success";
     },

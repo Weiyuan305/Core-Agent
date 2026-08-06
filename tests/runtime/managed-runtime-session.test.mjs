@@ -3,7 +3,12 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
+  canonicalPayloadHash,
+  createSyntheticConversationRequest,
+  createSyntheticRunRequest,
   createManagedRuntimeDependencies,
+  readSmokeEvents,
+  restartApiWorkerTopology,
   runControlPlaneSmoke,
   runManagedRuntimeSession,
   smokePublicErrorCode,
@@ -185,5 +190,172 @@ test("managed Runtime kept success preserves topology and snapshot but zeroizes 
     "pollRuntime",
     "use",
     "releaseSecrets",
+  ]);
+});
+
+test("managed Run requests hash the caller's bounded synthetic content", () => {
+  const request = createSyntheticRunRequest(
+    { tenantId: "synthetic-runtime-v1-0123456789abcdef" },
+    "caller supplied synthetic follow-up",
+    "0123456789abcdef",
+  );
+  assert.equal(request.input_message.content, "caller supplied synthetic follow-up");
+  assert.equal(
+    request.payload_hash,
+    canonicalPayloadHash({
+      schema_version: request.schema_version,
+      idempotency_key: request.idempotency_key,
+      client_request_id: request.client_request_id,
+      input_message: request.input_message,
+    }),
+  );
+  assert.match(request.idempotency_key, /^synthetic-run-.+-0123456789abcdef$/u);
+  assert.match(request.input_message.client_message_id, /^synthetic-message-.+-0123456789abcdef$/u);
+
+  for (const content of ["", "   ", "x".repeat(4_001), "unsafe\u0000control"]) {
+    assert.throws(
+      () => createSyntheticRunRequest(
+        { tenantId: "synthetic-runtime-v1-0123456789abcdef" },
+        content,
+        "0123456789abcdef",
+      ),
+      /SMOKE_MESSAGE_CONTENT_INVALID/,
+    );
+  }
+});
+
+test("managed Conversation requests use a fresh idempotency identity for /new", () => {
+  const identifiers = {
+    tenantId: "synthetic-runtime-v1-0123456789abcdef",
+    profileId: "synthetic-runtime-v1-profile-0123456789abcdef",
+  };
+  const first = createSyntheticConversationRequest(identifiers, "0123456789abcdef");
+  const second = createSyntheticConversationRequest(identifiers, "fedcba9876543210");
+  assert.notEqual(first.idempotency_key, second.idempotency_key);
+  assert.notEqual(first.payload_hash, second.payload_hash);
+  assert.equal(first.tenant_id, identifiers.tenantId);
+  assert.equal(first.profile_id, identifiers.profileId);
+});
+
+function sessionProductEvent({
+  eventType,
+  sequence,
+  runId,
+  tenantId = "synthetic-managed-tenant",
+  conversationId = "synthetic-managed-conversation",
+  payload,
+}) {
+  return {
+    schema_version: 1,
+    event_id: `synthetic-managed-event-${sequence}`,
+    occurred_at: "2026-08-06T12:00:00.000Z",
+    sequence,
+    tenant_id: tenantId,
+    request_id: "synthetic-managed-request",
+    trace_id: "synthetic-managed-trace",
+    correlation_id: "synthetic-managed-correlation",
+    causation_id: "synthetic-managed-causation",
+    conversation_id: conversationId,
+    run_id: runId,
+    event_type: eventType,
+    payload,
+  };
+}
+
+function sessionEventStream(events) {
+  const bytes = new TextEncoder().encode(
+    events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""),
+  );
+  return new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  }), { status: 200, headers: { "content-type": "text/event-stream" } });
+}
+
+test("managed SSE emits deltas only for the active Run in one Conversation", async () => {
+  const deltas = [];
+  const eventTypes = await readSmokeEvents({
+    conversationId: "synthetic-managed-conversation",
+    tenantId: "synthetic-managed-tenant",
+    runId: "synthetic-managed-run-b",
+    bootstrapKey: Buffer.from("synthetic-managed-key"),
+    onDelta: async (delta) => deltas.push(delta),
+    fetchImpl: async () => sessionEventStream([
+      sessionProductEvent({
+        eventType: "message.delta",
+        sequence: 1,
+        runId: "synthetic-managed-run-a",
+        payload: { message_id: "synthetic-message-a", delta: "hidden old delta" },
+      }),
+      sessionProductEvent({
+        eventType: "run.completed",
+        sequence: 2,
+        runId: "synthetic-managed-run-a",
+        payload: { run_id: "synthetic-managed-run-a", status: "succeeded" },
+      }),
+      sessionProductEvent({
+        eventType: "message.delta",
+        sequence: 3,
+        runId: "synthetic-managed-run-b",
+        payload: { message_id: "synthetic-message-b", delta: "visible current delta" },
+      }),
+      sessionProductEvent({
+        eventType: "run.completed",
+        sequence: 4,
+        runId: "synthetic-managed-run-b",
+        payload: { run_id: "synthetic-managed-run-b", status: "succeeded" },
+      }),
+    ]),
+  });
+  assert.deepEqual(deltas, ["visible current delta"]);
+  assert.deepEqual(eventTypes, ["message.delta", "run.completed"]);
+});
+
+test("managed SSE rejects mismatched scope before emitting a delta", async () => {
+  const deltas = [];
+  await assert.rejects(
+    readSmokeEvents({
+      conversationId: "synthetic-managed-conversation",
+      tenantId: "synthetic-managed-tenant",
+      runId: "synthetic-managed-run-b",
+      bootstrapKey: Buffer.from("synthetic-managed-key"),
+      onDelta: (delta) => deltas.push(delta),
+      fetchImpl: async () => sessionEventStream([
+        sessionProductEvent({
+          eventType: "message.delta",
+          sequence: 1,
+          tenantId: "synthetic-other-tenant",
+          runId: "synthetic-managed-run-b",
+          payload: { message_id: "synthetic-message-b", delta: "must not emit" },
+        }),
+      ]),
+    }),
+    /SMOKE_SSE_FAILED/,
+  );
+  assert.deepEqual(deltas, []);
+});
+
+test("managed API and Worker restart uses one exact Compose command then readiness", async () => {
+  const calls = [];
+  await restartApiWorkerTopology({
+    child: async (command, args) => calls.push([command, args]),
+    waitUntilReady: async () => calls.push("ready"),
+  });
+  assert.deepEqual(calls, [
+    ["docker", [
+      "compose",
+      "--project-name",
+      "core-agent-runtime-v1-smoke",
+      "-f",
+      "infra/runtime/compose.dev.yaml",
+      "up",
+      "-d",
+      "--force-recreate",
+      "api",
+      "worker",
+    ]],
+    "ready",
   ]);
 });
