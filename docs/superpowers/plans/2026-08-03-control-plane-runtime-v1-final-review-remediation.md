@@ -206,5 +206,14 @@ rethrows that typed exhaustion so dispatch leaves the unsafe-to-replay leased
 job for expiry and observe-only recovery. Regression evidence requires no
 retry or failure callback after the accepted effect.
 
+Architecture review also found that a settled retryable Provision failure was
+written as a terminal journal response while Worker retries reuse the stable
+Provision operation ID, making the first dependency failure permanently
+sticky. Supervisor now brands only `provision + failed + retryable + reserved`
+as transient. The pending JSON is released so the same ID can dispatch again
+through strict adoption; lifecycle stages, non-retryable results, accepted
+results, caller timeouts, and daemon-uncertain mutations keep their existing
+durable or pending semantics.
+
 At `3ffdbd3`, Tasks 25-28 were ready for the required repeated whole-branch
 architecture, PostgreSQL concurrency/recovery, and release-operability reviews.

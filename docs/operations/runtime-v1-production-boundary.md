@@ -169,6 +169,13 @@ transaction. Retry the same ID and hash; do not delete or rewrite either its
 bypassed; after a crash the OS releases SQLite's lock and the next Supervisor
 recovers the pending stage.
 
+For Provision only, a settled retryable dependency failure at the still
+`reserved` stage is non-durable: retry the exact same operation ID and hash so
+strict adoption can inspect the same derived resources. Accepted and
+non-retryable results remain durable. This exception never releases a lifecycle
+pending stage and never applies to an unsettled timeout or daemon-uncertain
+mutation.
+
 A timeout response before cancellation settlement is transient and is not
 proof of a durable timeout journal entry. Retry only with the exact same stable
 operation ID and request hash; the Supervisor will attach it to the existing

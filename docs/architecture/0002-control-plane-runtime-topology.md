@@ -207,6 +207,14 @@ is not a claim; a successor acquires the OS-released per-operation transaction
 and recovers that exact stage without a stale interval. A `reserved` transient
 removes only its pending JSON record, never the guard.
 
+A settled, retryable Provision dependency failure is also transient only while
+its journal stage remains `reserved`. The stable Provision operation ID may
+then dispatch again and strictly adopt the same derived resources. Accepted or
+non-retryable responses remain terminal. Lifecycle retryable failures are not
+generalized into this rule: once their stage is non-`reserved`, the pending
+record remains recoverable and the Worker stays observe-only. A caller timeout
+or daemon-uncertain mutation remains unsettled and retains its reservation.
+
 The separate 120-second effect deadline aborts every supported Dockerode
 inspect, create, wait, log, start, stop, restart, and remove request. Reaching
 that deadline does not

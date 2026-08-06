@@ -527,7 +527,14 @@ export class RuntimeSupervisorServer {
       return transientOperationJournalResponse(unavailableResponse(request.operation_id));
     }
     try {
-      return await this.#executeWithDeadline(request, context);
+      const response = await this.#executeWithDeadline(request, context);
+      if (
+        request.kind === "provision"
+        && context.stage === "reserved"
+        && response.outcome === "failed"
+        && response.retryable
+      ) return transientOperationJournalResponse(response);
+      return response;
     } finally {
       release();
     }
