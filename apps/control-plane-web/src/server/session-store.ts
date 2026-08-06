@@ -60,7 +60,7 @@ export function createClientConversationStore(options: ConversationStoreOptions 
       if (publicId === undefined) throw invalidConversation();
       const conversation = Object.freeze({
         id: publicId,
-        title: `对话 ${publicToInternal.size + 1}`,
+        title: "演示空间",
       });
       publicToInternal.set(publicId, internalConversationId);
       internalToPublic.set(internalConversationId, conversation);

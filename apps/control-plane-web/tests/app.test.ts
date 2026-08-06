@@ -65,7 +65,7 @@ describe("Client Gateway", () => {
     expect(session.body).toMatchObject({
       runtimeState: "ready",
       student: { id: "demo_student", name: "演示学生" },
-      conversations: [{ id: session.conversationId, title: "对话 1" }],
+      conversations: [{ id: session.conversationId, title: "演示空间" }],
     });
     expect(session.conversationId).toMatch(/^chat_[a-f0-9]{32}$/u);
     expect(JSON.stringify(session.body)).not.toContain("conversation_internal_1");
