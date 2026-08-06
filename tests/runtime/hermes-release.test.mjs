@@ -42,6 +42,14 @@ const workflowUrl = new URL(
   "../../.github/workflows/publish-hermes-runtime.yml",
   import.meta.url,
 );
+const repositoryRootUrl = new URL("../../", import.meta.url);
+const resolverPath = fileURLToPath(
+  new URL("../../scripts/resolve-hermes-image.mjs", import.meta.url),
+);
+
+async function repositorySource(relativePath) {
+  return readFile(new URL(relativePath, repositoryRootUrl), "utf8");
+}
 
 function manifestFixture() {
   return {
@@ -381,4 +389,76 @@ test("Hermes runtime publishing is manual, private, pinned, and multi-platform",
   assert.match(workflowSource, /--existing-manifest/u);
   assert.match(workflowSource, /--published-manifest/u);
   assert.match(workflowSource, /sha-\$\{SHORT_COMMIT\}/u);
+});
+
+test("Hermes private release operations are explicit and keep credentials out of files", async () => {
+  const readme = await repositorySource("README.md");
+  const runbook = await repositorySource("docs/operations/runtime-v1-local-smoke.md");
+  const environmentExample = await repositorySource(".env.runtime.example");
+  const combined = `${readme}\n${runbook}\n${environmentExample}`;
+
+  for (const marker of [
+    "Publish Hermes Runtime",
+    productRepository,
+    "infra/hermes/product-images.lock.json",
+    "read:packages",
+    "docker login ghcr.io",
+    "v0.1.0@sha256:",
+  ]) {
+    assert.ok(combined.includes(marker), marker);
+  }
+  assert.match(runbook, /private shell/iu);
+  assert.match(runbook, /unset GHCR_READ_TOKEN/u);
+  assert.match(runbook, /source commit/iu);
+  assert.match(runbook, /both GHCR platform digests/iu);
+  assert.match(runbook, /commit the candidate lock unchanged/iu);
+  assert.match(runbook, /core-agent\/hermes-runtime:dev[^\n]+not AC10 evidence/iu);
+  assert.match(
+    environmentExample,
+    /CORE_AGENT_HERMES_IMAGE_LOCK_FILE=\/absolute\/path\/to\/Core-Agent\/infra\/hermes\/product-images\.lock\.json/u,
+  );
+  assert.doesNotMatch(environmentExample, /(?:ghp_|github_pat_|Bearer\s+)/iu);
+});
+
+test("Hermes image resolver accepts one explicit reviewed product lock", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "core-agent-hermes-lock-resolver-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const lockPath = join(root, "product-images.lock.json");
+  const lock = createProductImageLock({
+    repository: productRepository,
+    version: "v0.1.0",
+    sourceCommit: "c".repeat(40),
+    platformDigests: {
+      "linux/amd64": amd64Digest,
+      "linux/arm64": arm64Digest,
+    },
+  });
+  await writeFile(lockPath, serializeProductImageLock(lock), { mode: 0o600 });
+
+  const resolved = spawnSync(process.execPath, [
+    resolverPath,
+    "--lock",
+    lockPath,
+    "--platform",
+    "linux/arm64",
+  ], {
+    encoding: "utf8",
+    env: { PATH: process.env.PATH },
+    timeout: 10_000,
+  });
+  assert.equal(resolved.status, 0, resolved.stderr);
+  assert.equal(
+    resolved.stdout,
+    `${productRepository}:v0.1.0@${arm64Digest}\n`,
+  );
+
+  const duplicate = spawnSync(process.execPath, [
+    resolverPath,
+    "--lock",
+    lockPath,
+    "--lock",
+    lockPath,
+  ], { encoding: "utf8", env: { PATH: process.env.PATH }, timeout: 10_000 });
+  assert.equal(duplicate.status, 1);
+  assert.equal(duplicate.stderr, "Hermes image resolver arguments are invalid\n");
 });

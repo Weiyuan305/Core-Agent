@@ -682,7 +682,7 @@ test("control-plane API and Supervisor load one caller-supplied product image lo
     new URL("../../.env.runtime.example", import.meta.url),
     "utf8",
   );
-  assert.match(runtimeEnvironmentExample, /^CORE_AGENT_HERMES_IMAGE_LOCK_FILE=\/absolute\/path\/to\/reviewed-product-images\.lock\.json$/m);
+  assert.match(runtimeEnvironmentExample, /^CORE_AGENT_HERMES_IMAGE_LOCK_FILE=\/absolute\/path\/to\/Core-Agent\/infra\/hermes\/product-images\.lock\.json$/m);
   assert.equal(
     controlPlaneCompose.match(/source: \$\{CORE_AGENT_HERMES_IMAGE_LOCK_FILE:\?set CORE_AGENT_HERMES_IMAGE_LOCK_FILE\}/g)?.length,
     2,

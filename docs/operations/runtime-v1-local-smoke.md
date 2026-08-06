@@ -14,8 +14,54 @@ Hermes runtime resources are owned by the Supervisor.
 ## Product-image prerequisite
 
 `npm run hermes:build` checks the product Dockerfile and creates the local tag
-`core-agent/hermes-runtime:dev`. That tag is mutable and has no accepted
-RepoDigest, so it does **not** satisfy AC10 by itself.
+`core-agent/hermes-runtime:dev`. That mutable local tag is not AC10 evidence.
+
+### Publish and review the private Hermes Runtime
+
+The only release path is the manual **Publish Hermes Runtime** workflow at
+`.github/workflows/publish-hermes-runtime.yml`. Merge the workflow and image
+source to `main` before dispatch. Select `v0.1.0` and one full lowercase source
+commit that is already reachable from `origin/main`; the workflow independently
+checks that ancestry before authenticating to GHCR or building.
+
+The workflow publishes exactly these private tags, without `latest`:
+
+```text
+ghcr.io/weiyuan305/core-agent-hermes-runtime:v0.1.0
+ghcr.io/weiyuan305/core-agent-hermes-runtime:sha-<first-12-source-commit-characters>
+```
+
+Review the successful Actions run and confirm its source commit, both build
+jobs, package visibility `private`, and artifact name
+`hermes-product-image-lock-v0.1.0`. Download the artifact into a fresh private
+temporary directory. Compare both GHCR platform digests against the candidate:
+
+```bash
+docker buildx imagetools inspect --raw ghcr.io/weiyuan305/core-agent-hermes-runtime:v0.1.0
+```
+
+The candidate must contain only the approved repository, tag, and two immutable
+references beginning with
+`ghcr.io/weiyuan305/core-agent-hermes-runtime:v0.1.0@sha256:`. Stop on any
+source, visibility, repository, tag, amd64 digest, or arm64 digest mismatch.
+After checking both GHCR platform digests, commit the candidate lock unchanged
+as `infra/hermes/product-images.lock.json`; do not regenerate or hand-edit it.
+
+For a local pull, create a classic token limited to `read:packages`. Enter it
+only in a private shell, never in this repository, `.env.runtime`, a command
+argument, a transcript, or a shared terminal. Docker stores the credential in
+the selected local credential store:
+
+```bash
+printf '%s' "$GHCR_READ_TOKEN" | docker login ghcr.io --username Weiyuan305 --password-stdin
+unset GHCR_READ_TOKEN
+docker pull "$(node scripts/resolve-hermes-image.mjs --lock infra/hermes/product-images.lock.json --platform linux/arm64)"
+```
+
+Use `linux/amd64` instead on an amd64 daemon. Confirm `unset GHCR_READ_TOKEN`
+ran immediately even when login or pull failed. Do not continue unless the
+resolved reference equals the corresponding reviewed lock entry and the pull
+reports that immutable digest.
 
 A release operator must publish both supported platform images, obtain the
 registry RepoDigests, review them, and create a ManagedImageLock-shaped JSON

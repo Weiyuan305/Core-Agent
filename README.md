@@ -47,6 +47,21 @@ Use the [local smoke guide](docs/operations/runtime-v1-local-smoke.md),
 [acceptance evidence](docs/operations/runtime-v1-acceptance-evidence.md) for
 release work.
 
+## Publish Hermes Runtime
+
+The Core-Agent Hermes product image is published manually to the private
+`ghcr.io/weiyuan305/core-agent-hermes-runtime` package by
+`.github/workflows/publish-hermes-runtime.yml`. The workflow accepts only a
+canonical release version and a full source commit already reachable from
+`main`; it publishes immutable amd64/arm64 manifests and never creates a
+`latest` tag.
+
+The workflow uploads, but never commits, a candidate lock. An operator must
+compare its two platform digests with GHCR and then commit the bytes unchanged
+as `infra/hermes/product-images.lock.json`. See the
+[local smoke guide](docs/operations/runtime-v1-local-smoke.md#publish-and-review-the-private-hermes-runtime)
+for the exact private pull and review procedure.
+
 ## Prerequisites
 
 - Node.js >=22.13.0

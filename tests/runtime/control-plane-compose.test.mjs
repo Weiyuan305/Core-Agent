@@ -536,6 +536,7 @@ test("runtime example environment contains paths and generated references only",
   assert.match(text, /CORE_AGENT_PLATFORM=linux\/\$\{ARCHITECTURE\}/u);
   assert.match(text, /CORE_AGENT_NODE_IMAGE=node:22-bookworm-slim@sha256:<resolve-with-npm-run-runtime-images>/u);
   assert.match(text, /CORE_AGENT_POSTGRES_IMAGE=postgres:17-bookworm@sha256:<resolve-with-npm-run-runtime-images>/u);
+  assert.match(text, /CORE_AGENT_HERMES_IMAGE_LOCK_FILE=\/absolute\/path\/to\/Core-Agent\/infra\/hermes\/product-images\.lock\.json/u);
   assert.match(text, /CORE_AGENT_BOOTSTRAP_KEY_FILE=\/absolute\/path\/to\/bootstrap-key/u);
   assert.match(text, /CORE_AGENT_PROVIDER_SECRET_ROOT=\/absolute\/path\/to\/provider-secret-directory/u);
   assert.match(text, /CORE_AGENT_INGRESS_SECRET_ROOT=\/absolute\/path\/to\/ingress-secret-directory/u);

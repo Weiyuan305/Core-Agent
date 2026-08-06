@@ -41,17 +41,37 @@ export function resolveHermesImage(lock, platform) {
   return reference;
 }
 
-async function main() {
-  const lockUrl = new URL("../infra/hermes/base-images.lock.json", import.meta.url);
-  const lock = JSON.parse(await readFile(lockUrl, "utf8"));
-  const platformIndex = process.argv.indexOf("--platform");
-  const platform = platformIndex === -1
-    ? hostToImagePlatform(process.platform, process.arch)
-    : process.argv[platformIndex + 1];
-
-  if (!platform) {
-    throw new Error("--platform requires a value");
+function parseArguments(argv) {
+  const options = Object.create(null);
+  for (let index = 0; index < argv.length; index += 2) {
+    const name = argv[index];
+    const value = argv[index + 1];
+    if (
+      (name !== "--platform" && name !== "--lock")
+      || options[name] !== undefined
+      || typeof value !== "string"
+      || value.length === 0
+      || value.startsWith("--")
+    ) {
+      throw new Error("Hermes image resolver arguments are invalid");
+    }
+    options[name] = value;
   }
+  return options;
+}
+
+async function main(argv = process.argv.slice(2)) {
+  const options = parseArguments(argv);
+  const lockLocation = options["--lock"]
+    ?? new URL("../infra/hermes/base-images.lock.json", import.meta.url);
+  let lock;
+  try {
+    lock = JSON.parse(await readFile(lockLocation, "utf8"));
+  } catch {
+    throw new Error("Hermes image lock could not be loaded");
+  }
+  const platform = options["--platform"]
+    ?? hostToImagePlatform(process.platform, process.arch);
 
   process.stdout.write(`${resolveHermesImage(lock, platform)}\n`);
 }
