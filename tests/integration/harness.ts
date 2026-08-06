@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { createConnection } from "node:net";
 
@@ -1012,10 +1013,8 @@ export class IntegrationHarness {
       ));
       fakeHermes = new FakeHermes({ ingressKey: SYNTHETIC_INGRESS_KEY });
       await boundedExternal("Hermes start", () => fakeHermes!.start());
-      const socketPath = join(
-        "/private/tmp",
-        `ca-t16-${randomBytes(6).toString("hex")}.sock`,
-      );
+      const socketRoot = process.platform === "darwin" ? "/private/tmp" : tmpdir();
+      const socketPath = join(socketRoot, `ca-t16-${randomBytes(6).toString("hex")}.sock`);
       const supervisorState = createFakeSupervisorState();
       supervisor = new FakeSupervisor({
         socketPath,

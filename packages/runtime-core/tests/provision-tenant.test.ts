@@ -1109,6 +1109,7 @@ test("same-owner runtime reclaim fences effect and every terminal ownership muta
     const context = { tenantId, requestId: `request_${operation}`, traceId: `trace_${operation}`, actorId: "core_agent_provisioner" as const, membershipId: "core_agent_provisioner_admin" as const, effectiveRole: "admin" as const };
     const accepted = await provisionTenant({ db, providerCatalog, imageLock }, context, provisioning);
     await db.updateTable("worker_jobs").set({ status: "succeeded" }).where("tenant_id", "=", tenantId).where("job_kind", "=", "provision_runtime").execute();
+    await db.updateTable("runtime_containers").set({ observed_state: "stopped" }).where("tenant_id", "=", tenantId).execute();
     await commandRuntime({ db }, context, withHash({ schema_version: 1 as const, idempotency_key: `idem_${operation}`, expected_resource_version: 1, command: "start" as const }));
     const [staleJob] = await claimJobs(db, { tenantId, workerId: "worker_same", limit: 1, leaseMs: 30_000 });
     assert.equal(staleJob?.jobKind, "reconcile_runtime");

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 
 import {
   claimJobs,
@@ -88,6 +88,22 @@ async function waitForLockWaiters(minimum: number): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   assert.fail(`expected at least ${minimum} PostgreSQL lock waiters`);
+}
+
+async function holdUntilDatabaseLeaseExpires(
+  blocker: PoolClient,
+  tenantId: string,
+  jobId: string,
+): Promise<void> {
+  await blocker.query(
+    "select pg_sleep(greatest(extract(epoch from (lease_expires_at - clock_timestamp())) + 0.05, 0)::double precision) from worker_jobs where tenant_id = $1 and job_id = $2",
+    [tenantId, jobId],
+  );
+  const barrier = await blocker.query<{ expired: boolean }>(
+    "select clock_timestamp() > lease_expires_at as expired from worker_jobs where tenant_id = $1 and job_id = $2",
+    [tenantId, jobId],
+  );
+  assert.equal(barrier.rows[0]?.expired, true, "blocked mutation must wait until PostgreSQL observes lease expiry");
 }
 
 test.beforeEach(async () => resetAdmissionDatabase(pool));
@@ -251,7 +267,8 @@ test("dispatch mark loses authority when a worker-job row wait crosses the datab
     await blocker.query("begin");
     await blocker.query("select job_id from worker_jobs where tenant_id = $1 and job_id = $2 for update", [setup.tenantId, setup.job.jobId]);
     const pending = setup.repository.markDispatched(ref);
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await waitForLockWaiters(1);
+    await holdUntilDatabaseLeaseExpires(blocker, setup.tenantId, setup.job.jobId);
     await blocker.query("commit");
     assert.deepEqual(await pending, { kind: "lease_lost" });
   } finally {
@@ -342,7 +359,8 @@ test("lease expiry while waiting on the Run row rolls back delta, completion, an
         : phase === "complete"
           ? setup.repository.complete(ref, begun.facts, "durable")
           : setup.repository.fail(ref, "stale failure");
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      await waitForLockWaiters(1);
+      await holdUntilDatabaseLeaseExpires(blocker, setup.tenantId, setup.job.jobId);
       await blocker.query("commit");
       assert.deepEqual(await pending, { kind: "lease_lost" });
     } finally {
@@ -372,7 +390,8 @@ test("lease expiry while message.delta waits on the stream sequence rolls back e
     await blocker.query("begin");
     await blocker.query("select stream_id from stream_sequences where tenant_id = $1 and stream_id = $2 for update", [setup.tenantId, `conversation_${setup.conversation.conversation_id}`]);
     const pending = setup.repository.persistDelta(ref, begun.facts.assistantMessageId, "must roll back");
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await waitForLockWaiters(1);
+    await holdUntilDatabaseLeaseExpires(blocker, setup.tenantId, setup.job.jobId);
     await blocker.query("commit");
     assert.deepEqual(await pending, { kind: "lease_lost" });
   } finally {
