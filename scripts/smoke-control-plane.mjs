@@ -143,6 +143,7 @@ export function validateSmokeEnvironment(environment) {
   if (typeof environment !== "object" || environment === null || Array.isArray(environment)) {
     throw smokeError("SMOKE_ENVIRONMENT_INVALID");
   }
+  if (Object.hasOwn(environment, "DOCKER_HOST")) throw smokeError("SMOKE_DOCKER_HOST_UNSUPPORTED");
   if (environment.CORE_AGENT_REAL_HERMES_SMOKE !== "1") throw smokeError("SMOKE_OPT_IN_REQUIRED");
   for (const key of Object.keys(environment)) {
     if (key.startsWith("CORE_AGENT_") && !requiredEnvironmentNames.includes(key)) {
@@ -632,7 +633,7 @@ function composeArgs(...args) {
 
 export function createSmokeChildEnvironment(environment, productImageLockSnapshotPath) {
   const safe = {};
-  for (const name of ["PATH", "HOME", "DOCKER_HOST", "DOCKER_CONTEXT", "XDG_CONFIG_HOME"]) {
+  for (const name of ["PATH", "HOME", "DOCKER_CONTEXT", "XDG_CONFIG_HOME"]) {
     if (typeof process.env[name] === "string") safe[name] = process.env[name];
   }
   for (const name of requiredEnvironmentNames) {

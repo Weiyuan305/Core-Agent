@@ -81,6 +81,9 @@ chmod 0600 .local-secrets/bootstrap/key .local-secrets/provider/provider_tokenhu
 
 Runtime v1 accepts only a local Docker context whose endpoint is `unix://`.
 TCP, SSH, named-pipe, and remote contexts are outside the v1 trust boundary.
+Unset `DOCKER_HOST`; the smoke rejects the variable whenever it is present so
+it cannot override the inspected context. Select the endpoint with
+`docker context use <name>` instead.
 The smoke reads the active context with `docker context inspect` and fails
 before Compose if it is not a local Unix endpoint. Select exactly one of the
 following platform procedures; the daemon-side bind source is not always the
