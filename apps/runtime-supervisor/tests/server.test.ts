@@ -11,6 +11,7 @@ import {
   SUPERVISOR_DEADLINE_BUDGET,
   canonicalSupervisorRequestHash,
   validateSupervisorRequest,
+  type ProvisionRuntimeCommandDataV1,
   type SupervisorRequestV1,
   type SupervisorResponseV1,
 } from "@core-agent/runtime-core";
@@ -30,6 +31,33 @@ function request(operationId: string): SupervisorRequestV1 {
     tenant_id: "tenant_a",
     runtime_id: "runtime_a",
     generation: 1,
+  };
+  return { ...data, request_hash: canonicalSupervisorRequestHash(data) };
+}
+
+function provisionRequest(operationId: string): SupervisorRequestV1 {
+  const data: ProvisionRuntimeCommandDataV1 = {
+    protocol_version: 1,
+    operation_id: operationId,
+    kind: "provision",
+    runtime: {
+      tenant_id: "tenant_a",
+      runtime_id: "runtime_a",
+      generation: 1,
+      image_ref: imageRef,
+      platform: "linux/amd64",
+      volume_ref: "volume_a",
+      ingress_secret_ref: { reference_id: "ingress_a", version: 1, purpose: "hermes_ingress" },
+      profiles: [{
+        profile_id: "profile_a",
+        hermes_profile_ref: "profile_a",
+        description: "Synthetic profile",
+        provider_config_id: "provider_a",
+        provider_base_url: "https://provider.example/v1",
+        model_id: "model_a",
+        provider_secret_ref: { reference_id: "provider_a", version: 1, purpose: "model_provider" },
+      }],
+    },
   };
   return { ...data, request_hash: canonicalSupervisorRequestHash(data) };
 }
@@ -138,6 +166,38 @@ test("Unix service validates, journals, frames one response, and creates a 0660 
     const replay = await client.execute(request("operation_server_replay"));
     assert.deepEqual(replay, first);
     assert.equal(dispatches, 1);
+  } finally {
+    await server.close();
+  }
+});
+
+test("a settled retryable provision failure releases its reserved journal for exact retry", async () => {
+  let dispatches = 0;
+  const target = provisionRequest("operation_provision_retryable");
+  const server = buildServer(async (value) => {
+    dispatches += 1;
+    if (dispatches === 1) return {
+      protocol_version: 1,
+      operation_id: value.operation_id,
+      outcome: "failed",
+      code: "DEPENDENCY_UNAVAILABLE",
+      retryable: true,
+      summary: "synthetic settled dependency failure",
+    };
+    return accepted(value.operation_id);
+  });
+  await server.start();
+  try {
+    const client = new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 });
+    const first = await client.execute(target);
+    assert.equal(first.outcome, "failed");
+    const digest = createHash("sha256").update(target.operation_id).digest("hex");
+    await assert.rejects(lstat(join(temporaryRoot, "journal", `${digest}.json`)), { code: "ENOENT" });
+
+    const second = await client.execute(target);
+    assert.equal(second.outcome, "accepted");
+    assert.equal(dispatches, 2);
+    await assertTerminalJournal(join(temporaryRoot, "journal"), target);
   } finally {
     await server.close();
   }
