@@ -6,9 +6,10 @@ credential. The script fixes the prompt identifier to
 `synthetic-runtime-v1-smoke`, generates `synthetic-` resource identifiers, and
 refuses to run unless `CORE_AGENT_REAL_HERMES_SMOKE=1` is exact.
 
-The smoke starts only PostgreSQL, migration, API, Worker, and Supervisor under
-the exact Compose project `core-agent-runtime-v1-smoke`. Generated Hermes
-runtime resources are owned by the Supervisor.
+The smoke starts PostgreSQL, migration, API, Worker, and Supervisor under the
+exact Compose project `core-agent-runtime-v1-smoke`. Before Supervisor starts,
+Compose runs one fixed Supervisor-image Docker-socket preflight. Generated
+Hermes runtime resources are owned by the Supervisor.
 
 ## Product-image prerequisite
 
@@ -76,22 +77,75 @@ chmod 0700 .local-secrets/provider .local-secrets/ingress
 chmod 0600 .local-secrets/bootstrap/key .local-secrets/provider/provider_tokenhub_main.v1 .local-secrets/ingress/hermes_ingress.v1
 ```
 
-For macOS with Colima or Docker Desktop, use the numeric host identity for the
-development UID/GID projections and inspect the Docker socket group:
+## Select a local Unix Docker context
+
+Runtime v1 accepts only a local Docker context whose endpoint is `unix://`.
+TCP, SSH, named-pipe, and remote contexts are outside the v1 trust boundary.
+The smoke reads the active context with `docker context inspect` and fails
+before Compose if it is not a local Unix endpoint. Select exactly one of the
+following platform procedures; the daemon-side bind source is not always the
+same path as the Docker CLI endpoint.
+
+### Linux Docker Engine
+
+Confirm the active context reports a local Unix endpoint. On a native Linux
+Engine, its absolute endpoint path is also the daemon-side bind source. Inspect
+that exact socket and copy the path/GID into the private environment file:
 
 ```bash
+docker context inspect --format '{{json .Endpoints.docker.Host}}'
 id -u
 id -g
-stat -f '%g' /var/run/docker.sock
+stat -c '%g %a %F' /var/run/docker.sock
 ```
 
-For a Linux development host:
+For the standard Engine socket, set
+`CORE_AGENT_DOCKER_SOCKET_SOURCE=/var/run/docker.sock`. If the Unix endpoint is
+different, use its canonical absolute path instead. It must be a socket with
+exact mode `660`; `CORE_AGENT_DOCKER_GID` is the reported group.
+
+### Docker Desktop for macOS
+
+Select the `desktop-linux` context and confirm that it reports a Unix endpoint.
+For a container running inside Docker Desktop's Linux VM, mount the VM-side raw
+socket rather than the optional macOS `/var/run/docker.sock` symlink:
 
 ```bash
+docker context use desktop-linux
+docker context inspect --format '{{json .Endpoints.docker.Host}}'
 id -u
 id -g
-stat -c '%g' /var/run/docker.sock
+docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --entrypoint stat \
+  --mount type=bind,source=/var/run/docker.sock.raw,target=/var/run/docker.sock,readonly \
+  "$CORE_AGENT_NODE_IMAGE" -c '%g %a %F' /var/run/docker.sock
 ```
+
+Set `CORE_AGENT_DOCKER_SOCKET_SOURCE=/var/run/docker.sock.raw` and take
+`CORE_AGENT_DOCKER_GID` from that bounded metadata probe. This v1 Docker Desktop
+procedure uses the raw VM socket for the container backend; the host symlink is only a client
+convenience.
+
+### Colima
+
+Select the intended Colima profile and its Docker context explicitly. Derive
+the daemon-side source and metadata inside that selected VM:
+
+```bash
+docker context use colima
+docker context inspect --format '{{json .Endpoints.docker.Host}}'
+colima ssh --profile default -- stat -c '%g %a %F' /var/run/docker.sock
+id -u
+id -g
+```
+
+Set `CORE_AGENT_DOCKER_SOCKET_SOURCE=/var/run/docker.sock` and use the GID
+reported inside the selected Colima VM. For a non-default profile, replace both
+the Docker context and `--profile` value consistently. Do not derive the
+daemon-side source or GID from the macOS `/var/run/docker.sock` symlink or from
+`$HOME/.colima/<profile>/docker.sock`; those are client-side paths. The
+Supervisor-image preflight remains authoritative and startup stops if the exact
+final UID/GID cannot inspect and ping the mounted socket.
 
 Copy `.env.runtime.example` to a private local file and fill every path,
 identity, platform, and immutable reference. Do not put secret bytes in it.
@@ -106,7 +160,11 @@ lock only when the resolved indexes are valid. `runtime:network` creates or
 validates the labeled internal backplane and dedicated non-internal egress
 bridge. The egress bridge is fixed to `172.31.240.0/24` with gateway
 `172.31.240.1`, default IPAM, IPv4 masquerading enabled, and IPv6 disabled;
-the command fails closed on a host CIDR collision or configuration drift.
+the command detects Docker IPAM overlap and fails closed on Docker-network
+configuration drift. It does not portably inspect every host, VPN, and VM route.
+Before creation, the operator must inspect host, VPN, and VM route tables and
+stop if `172.31.240.0/24` is present or overlaps; on Colima, include
+`colima ssh --profile <selected-profile> -- ip route` in that review.
 `runtime:paths` enforces all five canonical path, owner, mode,
 link-count, and non-overlap rules and creates private state-root `staging` and
 `ingress` children. On macOS/Colima, keep state below a canonical Docker-shared
@@ -125,9 +183,11 @@ CORE_AGENT_REAL_HERMES_SMOKE=1 npm run smoke:control-plane
 ```
 
 Do not manually run `compose up` first. The smoke owns its exact project and
-starts only `postgres migrate api worker supervisor`. It validates Docker and
-Compose, locked Node/PostgreSQL/product-Hermes references, runtime paths and
-network, all three secret files, and the product image before startup. It also
+starts `postgres migrate api worker supervisor`; Compose first runs the
+one-shot `supervisor-socket-preflight` dependency. It validates the local Unix
+Docker context, exact mounted-socket metadata and bounded `_ping`, Compose,
+locked Node/PostgreSQL/product-Hermes references, runtime paths and network, all
+three secret files, and the product image before startup. It also
 precomputes the deterministic synthetic tenant/runtime cleanup identity before
 the provisioning POST, so a committed request whose response is lost or invalid
 can still be queried and deleted without a broad Docker label deletion.

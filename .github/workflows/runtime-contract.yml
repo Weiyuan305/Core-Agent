@@ -172,6 +172,7 @@ jobs:
         env:
           CORE_AGENT_BOOTSTRAP_KEY_FILE: /tmp/core-agent-bootstrap-path-only
           CORE_AGENT_DOCKER_GID: "999"
+          CORE_AGENT_DOCKER_SOCKET_SOURCE: /var/run/docker.sock
           CORE_AGENT_HERMES_IMAGE_LOCK_FILE: /tmp/core-agent-product-image-lock-path-only
           CORE_AGENT_INGRESS_SECRET_ROOT: /tmp/core-agent-ingress-path-only
           CORE_AGENT_PLATFORM: linux/amd64

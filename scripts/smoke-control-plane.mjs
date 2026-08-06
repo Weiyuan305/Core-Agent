@@ -20,6 +20,8 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
+import { validateLocalDockerContextEndpoint } from "./preflight-runtime-docker-socket.mjs";
+
 const execFileAsync = promisify(execFile);
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
 const composeFile = join(repositoryRoot, "infra/runtime/compose.dev.yaml");
@@ -62,6 +64,7 @@ const requiredEnvironmentNames = Object.freeze([
   "CORE_AGENT_RUNTIME_GID",
   "CORE_AGENT_SUPERVISOR_SOCKET_GID",
   "CORE_AGENT_DOCKER_GID",
+  "CORE_AGENT_DOCKER_SOCKET_SOURCE",
 ]);
 
 const fixedIdentifiers = Object.freeze({
@@ -159,6 +162,7 @@ export function validateSmokeEnvironment(environment) {
   for (const name of requiredEnvironmentNames.filter((name) => name.endsWith("_FILE") || name.endsWith("_ROOT"))) {
     requiredAbsolutePath(environment, name);
   }
+  requiredAbsolutePath(environment, "CORE_AGENT_DOCKER_SOCKET_SOURCE");
   for (const name of requiredEnvironmentNames.filter((name) => name.endsWith("_UID") || name.endsWith("_GID"))) {
     requiredNumericIdentity(environment, name);
   }
@@ -1000,6 +1004,12 @@ function createDefaultDependencies(environment, signal) {
     async validatePrerequisites() {
       await child("docker", ["version", "--format", "{{json .Server.Version}}"]);
       await child("docker", ["compose", "version", "--short"]);
+      const contextEndpoint = parseJson(
+        (await child("docker", ["context", "inspect", "--format", "{{json .Endpoints.docker.Host}}"]))?.stdout,
+        "SMOKE_DOCKER_CONTEXT_INVALID",
+      );
+      try { validateLocalDockerContextEndpoint(contextEndpoint); }
+      catch { throw smokeError("SMOKE_DOCKER_CONTEXT_INVALID"); }
       const [baseLockRaw, providerRaw] = await Promise.all([
         readFile(runtimeBaseLockFile, "utf8"),
         readFile(providerCatalogFile, "utf8"),

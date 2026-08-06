@@ -25,6 +25,7 @@ async function listen(server, socketPath) {
 }
 
 async function close(server) {
+  server.closeAllConnections?.();
   await new Promise((resolve) => server.close(resolve));
 }
 

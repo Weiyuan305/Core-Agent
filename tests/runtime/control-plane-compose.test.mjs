@@ -177,7 +177,7 @@ test("service mounts and networks preserve each process boundary", async () => {
     volumeAt(supervisor, "/var/lib/core-agent/supervisor").source,
     "${CORE_AGENT_SUPERVISOR_STATE_ROOT:?set CORE_AGENT_SUPERVISOR_STATE_ROOT}",
   );
-  assert.equal(volumeAt(supervisor, "/var/run/docker.sock").read_only, undefined);
+  assert.equal(volumeAt(supervisor, "/var/run/docker.sock").read_only, true);
   assert.equal(volumeAt(supervisor, "/run/core-agent/staging").source, "${CORE_AGENT_SUPERVISOR_STATE_ROOT:?set CORE_AGENT_SUPERVISOR_STATE_ROOT}/staging");
   assert.equal(volumeAt(supervisor, "/run/core-agent/staging").read_only, undefined);
   assert.equal(volumeAt(supervisor, "/run/core-agent/ingress").source, "${CORE_AGENT_SUPERVISOR_STATE_ROOT:?set CORE_AGENT_SUPERVISOR_STATE_ROOT}/ingress");
@@ -501,7 +501,7 @@ test("CI preserves contracts and separates deterministic runtime gates", async (
   assert.match(workflowSource, /actions\/checkout@[a-f0-9]{40}\s+# v4\.2\.2/u);
   assert.match(workflowSource, /actions\/setup-node@[a-f0-9]{40}\s+# v4\.4\.0/u);
   assert(!/secrets\./u.test(workflowSource));
-  assert(!/hermes:build|REAL_HERMES|docker\.sock|docker compose up/u.test(workflowSource));
+  assert(!/hermes:build|REAL_HERMES|docker compose up/u.test(workflowSource));
   const lock = JSON.parse(await source("infra/runtime/base-images.lock.json"));
   for (const jobName of ["postgres", "integration"]) {
     const service = workflow.jobs[jobName].services.postgres;
@@ -528,6 +528,7 @@ test("CI preserves contracts and separates deterministic runtime gates", async (
   assert.equal(workflow.jobs.compose.steps.find((step) => step.name === "Validate Compose configuration").env.CORE_AGENT_SUPERVISOR_SOCKET_ROOT, "/tmp/core-agent-runtime-socket-path-only");
   assert.equal(workflow.jobs.compose.steps.find((step) => step.name === "Validate Compose configuration").env.CORE_AGENT_SUPERVISOR_STATE_ROOT, "/tmp/core-agent-runtime-state-path-only");
   assert.equal(workflow.jobs.compose.steps.find((step) => step.name === "Validate Compose configuration").env.CORE_AGENT_HERMES_IMAGE_LOCK_FILE, "/tmp/core-agent-product-image-lock-path-only");
+  assert.equal(workflow.jobs.compose.steps.find((step) => step.name === "Validate Compose configuration").env.CORE_AGENT_DOCKER_SOCKET_SOURCE, "/var/run/docker.sock");
 });
 
 test("runtime example environment contains paths and generated references only", async () => {

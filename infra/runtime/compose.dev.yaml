@@ -160,6 +160,40 @@ services:
       - core-agent-control
       - core-agent-backplane
 
+  supervisor-socket-preflight:
+    image: core-agent/runtime-supervisor:dev
+    platform: ${CORE_AGENT_PLATFORM:?set CORE_AGENT_PLATFORM}
+    build:
+      <<: *service-build
+      target: supervisor
+    user: "${CORE_AGENT_RUNTIME_UID:-12002}:${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}"
+    group_add:
+      - "${CORE_AGENT_DOCKER_GID:?set CORE_AGENT_DOCKER_GID}"
+    entrypoint: ["node", "scripts/preflight-runtime-docker-socket.mjs"]
+    environment:
+      CORE_AGENT_DOCKER_GID: ${CORE_AGENT_DOCKER_GID:?set CORE_AGENT_DOCKER_GID}
+      CORE_AGENT_DOCKER_SOCKET_PATH: /var/run/docker.sock
+      CORE_AGENT_DOCKER_SOCKET_SOURCE: ${CORE_AGENT_DOCKER_SOCKET_SOURCE:?set CORE_AGENT_DOCKER_SOCKET_SOURCE}
+      CORE_AGENT_RUNTIME_UID: ${CORE_AGENT_RUNTIME_UID:-12002}
+      CORE_AGENT_SUPERVISOR_SOCKET_GID: ${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}
+    volumes:
+      - type: bind
+        source: ${CORE_AGENT_DOCKER_SOCKET_SOURCE:?set CORE_AGENT_DOCKER_SOCKET_SOURCE}
+        target: /var/run/docker.sock
+        read_only: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    privileged: false
+    network_mode: none
+    pids_limit: 32
+    mem_limit: 64m
+    cpus: 0.25
+    restart: "no"
+    stop_grace_period: 5s
+
   supervisor:
     <<: *application-security
     image: core-agent/runtime-supervisor:dev
@@ -172,6 +206,9 @@ services:
       - "${CORE_AGENT_DOCKER_GID:?set CORE_AGENT_DOCKER_GID}"
     privileged: false
     network_mode: none
+    depends_on:
+      supervisor-socket-preflight:
+        condition: service_completed_successfully
     environment:
       CORE_AGENT_DOCKER_SOCKET_PATH: /var/run/docker.sock
       CORE_AGENT_IMAGE_LOCK_PATH: /run/core-agent/config/hermes-images.lock.json
@@ -212,8 +249,9 @@ services:
         source: ${CORE_AGENT_SUPERVISOR_STATE_ROOT:?set CORE_AGENT_SUPERVISOR_STATE_ROOT}/ingress
         target: /run/core-agent/ingress
       - type: bind
-        source: /var/run/docker.sock
+        source: ${CORE_AGENT_DOCKER_SOCKET_SOURCE:?set CORE_AGENT_DOCKER_SOCKET_SOURCE}
         target: /var/run/docker.sock
+        read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
 

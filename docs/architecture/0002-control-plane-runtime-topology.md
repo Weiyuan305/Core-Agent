@@ -60,7 +60,9 @@ Hermes can reach the selected HTTPS model provider. The egress bridge has the
 closed single-host contract `172.31.240.0/24`, gateway `172.31.240.1`, local
 scope, IPv6 and swarm ingress disabled, default IPAM, and IP masquerading
 enabled. Preparation fails closed if that CIDR is unavailable or any of those
-settings drift. Neither network is attachable.
+settings drift in Docker IPAM. This is not a portable host-route detector:
+operators separately inspect host, VPN, and VM routes before deployment and
+must reject any overlap. Neither network is attachable.
 Compose teardown therefore cannot claim a network containing
 Supervisor-managed Hermes containers.
 
@@ -84,6 +86,19 @@ not private tmpfs, because sibling containers are created by the host daemon.
 On Linux the Docker-host value is the canonical host path. On macOS/Colima it
 must be a canonical shared host path, normally below `/Users`; a path that
 exists only inside Supervisor is invalid.
+
+Docker access is accepted only through a documented local Unix context. Compose
+parameterizes the daemon-side socket bind source and mounts it at the fixed
+Supervisor path. A one-shot service built from the exact Supervisor image runs
+with the final Supervisor uid/gid and socket supplementary group, the identical
+read-only socket mount, `network_mode: none`, all capabilities dropped,
+`no-new-privileges`, and no privileged mode. It validates exact socket metadata
+and performs only a three-second `GET /_ping`; Supervisor depends on successful
+completion. Linux uses its canonical Engine socket. Docker Desktop for macOS
+uses the VM-side `/var/run/docker.sock.raw`. Colima uses socket path and group
+metadata obtained inside the explicitly selected VM, never inferred from a
+macOS compatibility symlink. A successful preflight proves access but does not
+reduce Docker socket authority, which remains effectively root-equivalent.
 
 The API normally accepts only a loopback listen address. Its container image
 may bind `0.0.0.0` only when the deployment sets the exact
@@ -246,7 +261,8 @@ deleted only after every matching helper is absent; sibling stages are never
 touched. Any drift is rejected without mutation and must be quarantined
 for operator investigation.
 
-Development PostgreSQL trust authentication is permitted only on the isolated
+Development PostgreSQL `trust` authentication is a development convenience,
+not a role-isolation security boundary, and is permitted only on the isolated
 internal control bridge. The official-image bootstrap superuser is not given
 to an application process: a non-superuser migrator owns the database/schema
 and grants default table/sequence privileges to a distinct non-superuser

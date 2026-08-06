@@ -21,9 +21,12 @@ accepted and implemented.
   dedicated non-internal egress bridge, with no host port bindings. Worker
   reaches only the backplane address. Provision egress as the exact local
   `172.31.240.0/24` bridge with gateway `172.31.240.1`, default IPAM, IPv4
-  masquerading enabled, and IPv6 and swarm ingress disabled; a collision or
-  drift is a deployment failure. Treat egress as a trusted single-host boundary,
-  restrict host forwarding/firewall policy, and attach no unrelated container.
+  masquerading enabled, and IPv6 and swarm ingress disabled. Automated
+  preparation detects Docker IPAM overlap and configuration drift; it does not
+  prove absence from host, VPN, or VM routes. Operators must inspect every such
+  route table and treat overlap as a deployment failure. Treat egress as a
+  trusted single-host boundary, restrict host forwarding/firewall policy, and
+  attach no unrelated container.
   Supervisor adoption must validate the complete prior label set,
   request hash, tenant/runtime identity, generation, volume, network, and image
   digest before it acts.
@@ -94,6 +97,12 @@ notification whose delivered acknowledgement lost its lease may still be
 terminalized as failed, but the durable ProductEvent remains available.
 
 ## PostgreSQL and release roles
+
+Compose trust authentication is a development convenience, not a role-isolation security boundary.
+Its separate migrator/application roles help
+exercise privilege shape but provide no authentication boundary while `trust`
+is enabled. Keep that Compose database on its isolated development network and
+never treat it as production or shared-host authorization evidence.
 
 Use Supabase PostgreSQL over TLS with certificate and hostname verification.
 Create dedicated least-privilege credentials for migration and application

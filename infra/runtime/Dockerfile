@@ -57,6 +57,7 @@ COPY --from=build /app/packages/runtime-core/package.json ./packages/runtime-cor
 COPY --from=build /app/packages/runtime-core/dist ./packages/runtime-core/dist
 COPY packages/runtime-core/migrations ./packages/runtime-core/migrations
 COPY scripts/migrate-runtime.mjs ./scripts/migrate-runtime.mjs
+COPY scripts/preflight-runtime-docker-socket.mjs ./scripts/preflight-runtime-docker-socket.mjs
 COPY infra/hermes/base-images.lock.json ./infra/hermes/base-images.lock.json
 COPY infra/runtime/providers.dev.json ./infra/runtime/providers.dev.json
 
