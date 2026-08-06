@@ -1,6 +1,13 @@
 import { createHash } from "node:crypto";
 
-import { canonicalSupervisorRequestHash, REMOVED_RUNTIME_IMAGE_REF, type LifecycleRuntimeCommandDataV1, type SupervisorRequestV1, type SupervisorResponseV1 } from "@core-agent/runtime-core";
+import {
+  canonicalSupervisorRequestHash,
+  isDatabaseTransactionRetryExhaustedError,
+  REMOVED_RUNTIME_IMAGE_REF,
+  type LifecycleRuntimeCommandDataV1,
+  type SupervisorRequestV1,
+  type SupervisorResponseV1,
+} from "@core-agent/runtime-core";
 
 import type { HandlerResult } from "../dispatch-job.js";
 import { validatePrivateHermesOrigin } from "./provision-runtime.js";
@@ -178,6 +185,7 @@ export async function handleReconcileRuntime(port: ReconcileRuntimePort, job: Re
     if (!await port.succeed(job, { kind: "effect_dispatched", command: job.command, observation: effected.observation })) return { kind: "failed", summary: "Worker job lease lost" };
     return { kind: "succeeded" };
   } catch (error) {
+    if (isDatabaseTransactionRetryExhaustedError(error)) throw error;
     const text = summary(error);
     if (signal.aborted) return { kind: "failed", summary: "Worker job lease lost" };
     if (!job.recoveryOnly && job.attemptCount < job.maxAttempts && retryable(error)) {
