@@ -882,6 +882,27 @@ test("runtime network preparation rejects ambient Docker endpoint overrides befo
   }
 });
 
+test("runtime network preparation validates the selected local Docker context before mutation", async () => {
+  const moduleUrl = pathToFileURL(pathFromRoot("scripts/prepare-runtime-network.mjs")).href;
+  const network = await import(`${moduleUrl}?docker-context=${Date.now()}`);
+  const calls = [];
+
+  await assert.rejects(
+    network.prepareRuntimeNetwork({
+      environment: {},
+      runDocker: async (args) => {
+        calls.push(args);
+        return '"ssh://operator@example.invalid/var/run/docker.sock"\n';
+      },
+    }),
+    (error) => error?.message === "runtime network preparation failed"
+      && !error.message.includes("example.invalid"),
+  );
+  assert.deepEqual(calls, [[
+    "context", "inspect", "--format", "{{json .Endpoints.docker.Host}}",
+  ]]);
+});
+
 test("database sentinel scanner inspects every public text surface without returning values", async () => {
   const moduleUrl = pathToFileURL(pathFromRoot("scripts/scan-runtime-database.mjs")).href;
   const scanner = await import(`${moduleUrl}?red=${Date.now()}`);
