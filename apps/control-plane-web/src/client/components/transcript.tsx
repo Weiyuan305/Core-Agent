@@ -9,6 +9,10 @@ export function Transcript({ conversation, onRetry }: TranscriptProps) {
   if (conversation.turns.length === 0) {
     return (
       <div className="transcript transcript--empty">
+        <div className="transcript__mobile-agent">
+          <span aria-hidden="true">C</span>
+          <h2>Core Agent</h2>
+        </div>
         <div className="empty-agent-identity">
           <span aria-hidden="true">C</span>
           <h2>Core Agent</h2>
@@ -18,6 +22,10 @@ export function Transcript({ conversation, onRetry }: TranscriptProps) {
   }
   return (
     <div aria-live="polite" className="transcript" role="log">
+      <div className="transcript__mobile-agent">
+        <span aria-hidden="true">C</span>
+        <h2>Core Agent</h2>
+      </div>
       <div className="transcript__content">
         {conversation.turns.map((turn) => (
           <article

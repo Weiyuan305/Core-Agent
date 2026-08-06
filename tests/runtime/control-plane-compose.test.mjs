@@ -542,7 +542,7 @@ test("runtime Dockerfile has locked bases and exact non-root service targets", a
 
 test("CI preserves contracts and separates deterministic runtime gates", async () => {
   const workflow = await yaml(".github/workflows/runtime-contract.yml");
-  assert.deepEqual(Object.keys(workflow.jobs).sort(), ["compose", "contract", "integration", "postgres", "unit"]);
+  assert.deepEqual(Object.keys(workflow.jobs).sort(), ["compose", "contract", "integration", "postgres", "unit", "web-browser"]);
   const workflowSource = await source(".github/workflows/runtime-contract.yml");
   for (const uses of workflowSource.matchAll(/^\s*uses:\s*([^\s#]+).*$/gmu)) {
     assert.match(uses[1], /@[a-f0-9]{40}$/u);
@@ -570,6 +570,7 @@ test("CI preserves contracts and separates deterministic runtime gates", async (
   assert.match(workflowSource, /npm run test:postgres/u);
   assert.match(workflowSource, /npm run test:integration/u);
   assert.match(workflowSource, /npm run test:runtime/u);
+  assert.match(workflowSource, /npm run test:browser -w @core-agent\/control-plane-web/u);
   assert.match(workflowSource, /docker compose -f infra\/runtime\/compose\.dev\.yaml config --quiet/u);
   assert.match(workflowSource, /verify-no-secret\.mjs/u);
   assert.match(workflowSource, /scan-runtime-database\.mjs synthetic-ci-sentinel-runtime-v1/u);
@@ -1081,5 +1082,33 @@ test("database sentinel scanner inspects every public text surface without retur
       sentinel: "synthetic-ci-sentinel-runtime-v1",
       createClient: () => assert.fail("must reject before client construction"),
     }), (error) => error?.message === "database sentinel scan failed");
+  }
+});
+
+test("Web consultant demo stays loopback-only, synthetic-only, and CI-gated", async () => {
+  const [readme, runbook, workflow, main, gateway, client] = await Promise.all([
+    source("README.md"),
+    source("docs/operations/runtime-v1-local-smoke.md"),
+    source(".github/workflows/runtime-contract.yml"),
+    source("apps/control-plane-web/src/server/main.ts"),
+    source("apps/control-plane-web/src/server/app.ts"),
+    source("apps/control-plane-web/src/client/api/client-gateway.ts"),
+  ]);
+
+  assert.match(readme, /npm run web:control-plane/u);
+  assert.match(readme, /loopback-only/u);
+  assert.match(readme, /anonymous synthetic/u);
+  assert.match(runbook, /Local consultant Web demo/u);
+  assert.match(runbook, /127\.0\.0\.1/u);
+  assert.match(runbook, /New Conversation/u);
+  assert.match(runbook, /API\/Worker restart/u);
+  assert.match(workflow, /web-browser:/u);
+  assert.match(workflow, /npx playwright install --with-deps chromium/u);
+  assert.match(workflow, /npm run test:browser -w @core-agent\/control-plane-web/u);
+  assert.match(main, /host: "127\.0\.0\.1"/u);
+  assert.match(gateway, /\/client\/v1\/conversations/u);
+  assert.doesNotMatch(client, /localStorage|sessionStorage/u);
+  for (const text of [readme, runbook, workflow]) {
+    assert.doesNotMatch(text, /provider_tokenhub_main\.v1\s*=|x-core-agent-bootstrap\s*:/iu);
   }
 });

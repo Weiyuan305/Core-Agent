@@ -104,11 +104,12 @@ describe("managed Web host lifecycle", () => {
     controller.abort();
     const runManagedSession = vi.fn(async (options) => {
       expect(options.environment).not.toHaveProperty("CORE_AGENT_WEB_PORT");
+      expect(options.environment.CORE_AGENT_REAL_HERMES_SMOKE).toBe("1");
       await options.use({ context: {}, operations: {} });
     });
     await runControlPlaneWeb({
       controller,
-      environment: { CORE_AGENT_WEB_PORT: "4173", CORE_AGENT_REAL_HERMES_SMOKE: "1" },
+      environment: { CORE_AGENT_WEB_PORT: "4173" },
       output: () => undefined,
       dependencies: {
         runManagedSession,

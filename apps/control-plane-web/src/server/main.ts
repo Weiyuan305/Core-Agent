@@ -54,6 +54,7 @@ function managedEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   for (const [key, value] of Object.entries(environment)) {
     if (key !== WEB_PORT_ENVIRONMENT_NAME) result[key] = value;
   }
+  result.CORE_AGENT_REAL_HERMES_SMOKE = "1";
   return result;
 }
 

@@ -17,10 +17,11 @@ domain services and connect through versioned MCP interfaces.
 
 Runtime v1 now implements the internal single-node Control Plane: PostgreSQL
 migrations and repositories, the private Fastify API, durable Worker jobs and
-SSE, and the Docker-owning Runtime Supervisor. Deterministic unit, PostgreSQL,
-fake-integration, Compose, and security gates are implemented. The opt-in real
-Hermes acceptance smoke is available but AC10 remains pending until it runs on
-a target platform with a reviewed Core-Agent product-image digest.
+SSE, the Docker-owning Runtime Supervisor, and a loopback consultant Web client.
+Deterministic unit, browser, PostgreSQL, fake-integration, Compose, and security
+gates are implemented. The opt-in real Hermes acceptance smoke is available but
+AC10 remains pending until it runs on a target platform with a reviewed
+Core-Agent product-image digest.
 
 ## Control Plane Contracts
 
@@ -34,8 +35,9 @@ npm run contracts:check
 
 See the [contract consumption guide](packages/contracts/README.md) and the
 [Control Plane Contracts v1 design specification](docs/superpowers/specs/2026-08-03-control-plane-contracts-v1-design.md).
-The public Web client, Apple client, MCP Server, business Tools, and real-user
-Identity/Consent/Retention/Data Governance remain outside this milestone.
+Production Web authentication, Apple clients, MCP Server, business Tools, and
+real-user Identity/Consent/Retention/Data Governance remain outside this
+milestone.
 
 ## Runtime v1 design and operations
 
@@ -62,7 +64,7 @@ as `infra/hermes/product-images.lock.json`. See the
 [local smoke guide](docs/operations/runtime-v1-local-smoke.md#publish-and-review-the-private-hermes-runtime)
 for the exact private pull and review procedure.
 
-## Strict smoke and interactive chat
+## Strict smoke, terminal chat, and consultant Web
 
 Both real-runtime commands require the reviewed product-image lock and the
 private local environment described by the local smoke guide. The strict smoke
@@ -82,7 +84,25 @@ CORE_AGENT_REAL_HERMES_SMOKE=1 npm run chat:control-plane
 Use `--keep-runtime` only when the running synthetic topology must remain for
 inspection. An interactive kept session writes a private exact-target receipt;
 clean it with `npm run chat:cleanup`. The interactive client is a developer
-acceptance surface, not the future Web, Apple, or customer-data interface.
+acceptance surface, not a customer-data interface.
+
+The consultant Web demo uses the same managed Runtime lifecycle behind a narrow
+same-origin Gateway. It is loopback-only, exposes one synthetic demo student,
+accepts anonymous synthetic messages only, and keeps privileged Control Plane
+and provider authority out of the browser. After completing the local smoke
+prerequisites, start it from the repository root:
+
+```bash
+set -a
+source .env.runtime
+set +a
+npm run web:control-plane
+```
+
+Open only the fixed `WEB_READY` URL printed by the process. Stop with `Ctrl-C` so
+the Web server closes before the managed Runtime enters ordered cleanup. See the
+[local smoke guide](docs/operations/runtime-v1-local-smoke.md#local-consultant-web-demo)
+for the complete acceptance sequence.
 
 ## Prerequisites
 
@@ -99,7 +119,7 @@ npm run test:runtime
 
 PostgreSQL and real integration gates require the dedicated test database
 described by the Runtime v1 operations documents. The only supported real
-acceptance paths for this milestone are the exact, opt-in Control Plane smoke
-and interactive workflows in the
+acceptance paths for this milestone are the exact Control Plane smoke,
+interactive terminal, and local consultant Web workflows in the
 [local smoke guide](docs/operations/runtime-v1-local-smoke.md); do not assemble
 a legacy Hermes-only Compose/bootstrap sequence from old commands.

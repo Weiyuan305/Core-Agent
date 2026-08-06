@@ -26,6 +26,7 @@ export function ConversationWorkspace(props: ConversationWorkspaceProps) {
       <header className="conversation-header">
         <button aria-label="返回学生与对话" className="icon-button conversation-header__back" onClick={props.onBack} type="button">
           <BackIcon />
+          <span>学生</span>
         </button>
         <div className="conversation-header__identity">
           <h1>演示学生</h1>

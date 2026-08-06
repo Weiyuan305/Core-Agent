@@ -81,7 +81,7 @@ describe("public conversation mapping", () => {
       randomBytes: (size) => Buffer.alloc(size, byte += 1),
     });
     const publicConversation = store.add("conversation_internal_secret");
-    expect(publicConversation).toEqual({ id: `chat_${"01".repeat(16)}`, title: "对话 1" });
+    expect(publicConversation).toEqual({ id: `chat_${"01".repeat(16)}`, title: "演示空间" });
     expect(store.resolve(publicConversation.id)).toBe("conversation_internal_secret");
     expect(store.resolve("conversation_internal_secret")).toBeUndefined();
     expect(JSON.stringify(store.list())).not.toContain("internal_secret");

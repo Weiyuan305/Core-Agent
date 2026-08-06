@@ -378,6 +378,49 @@ and removes the receipt only after every operation succeeds. If cleanup fails,
 the fixed receipt remains for an exact retry. Do not use the later manual
 strict-smoke shutdown instructions for a retained interactive chat.
 
+### Local consultant Web demo
+
+The consultant Web command uses the same validated managed Runtime session and
+ordered cleanup as the terminal client. It adds a loopback-only Client Gateway
+and a browser interface for one synthetic demo student. It is not production
+authentication and must never receive a customer name, student record,
+application detail, housing detail, teaching record, reusable credential, or
+copied conversation.
+
+Complete the same environment, local Docker context, immutable-image, network,
+and path prerequisites above. Then start the Web host from the repository root:
+
+```bash
+set -a
+source .env.runtime
+set +a
+npm run web:control-plane
+```
+
+The command itself is the explicit real-Runtime opt-in. It waits for the managed
+Runtime to become ready before binding, then prints only
+`WEB_READY http://127.0.0.1:<port>`. Open that exact loopback URL. Do not expose
+the port through a reverse proxy, tunnel, LAN bind, or public deployment.
+
+Use only fixed anonymous synthetic text and verify these actions without saving
+the prompt or response:
+
+1. A first Run streams one non-empty completion.
+2. A follow-up succeeds in the same Conversation.
+3. **New Conversation** selects a distinct Conversation and leaves the earlier
+   browser-memory transcript intact.
+4. **API/Worker restart** completes, preserves the selected Conversation, and a
+   post-restart Run succeeds.
+5. A 390-by-844 viewport keeps navigation, transcript, and composer usable with
+   no horizontal overflow.
+
+Record only status, event-type, and count evidence. Do not capture browser
+storage, network bodies, transcripts, raw errors, container output, secret
+paths, internal identities, or provider data. End with `Ctrl-C`; normal shutdown
+closes the Client Gateway first and then performs exact Runtime deletion,
+container-removal verification, Compose shutdown without volumes, snapshot
+release, and secret zeroization. This Web command has no retained-runtime mode.
+
 ## Inspect, resume SSE, and stop
 
 Safe progress is the script's fixed stderr stage codes. Component logs are
