@@ -255,9 +255,19 @@ into `--keep-runtime`.
 
 When `--keep-runtime` succeeds after topology ownership, the client retains services,
 the managed Runtime, and its product-lock snapshot but zeroes its in-process secret
-buffers. The operations guide provides one exact cleanup command that revalidates the
-synthetic identities before deletion and shutdown. It never offers wildcard deletion or
-`docker system prune`.
+buffers. Before releasing those buffers it atomically writes one owner-only `0600`
+retained-runtime receipt beneath the configured Supervisor state root. The receipt has a
+closed schema containing only the exact Compose project and synthetic Tenant, Profile,
+Runtime, and lock-snapshot identifiers; it contains no credential, path supplied by a
+model, prompt, response, or provider content. Receipt creation uses `O_EXCL`, and failure
+to create a uniquely owned receipt falls back to default cleanup rather than leaving an
+unmanageable Runtime.
+
+The operations guide provides `npm run chat:cleanup` as the only retained-runtime
+cleanup command. It accepts no identifiers or paths from argv, securely reads and
+revalidates the receipt and configured environment, performs exact deletion and
+shutdown, removes the snapshot and receipt, and zeroes its bootstrap material. It never
+offers wildcard deletion or `docker system prune`.
 
 ## 7. Test Strategy
 
