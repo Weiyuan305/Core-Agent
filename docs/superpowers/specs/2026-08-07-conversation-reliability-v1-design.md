@@ -1,6 +1,6 @@
 # Conversation Reliability v1 Design
 
-**Status:** Design approved; written specification awaiting review  
+**Status:** Design approved; implementation authorized
 **Date:** 2026-08-07  
 **Primary surface:** B2B consultant Web workspace  
 **Future surfaces:** student Web, iPhone, and macOS clients
