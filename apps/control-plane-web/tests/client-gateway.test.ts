@@ -121,6 +121,32 @@ describe("client Gateway port", () => {
     expect(await collect(port.runConversation(`chat_${"b".repeat(32)}`, "匿名测试"))).toEqual(frames);
   });
 
+  it("requests an explicit retry without a body or internal Run identity", async () => {
+    const frames: ClientFrame[] = [
+      { type: "run.started" },
+      { type: "run.failed", reason: "TOOK_TOO_LONG" },
+    ];
+    const fetchImpl = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        csrf: "a".repeat(64), runtimeState: "ready",
+        student: { id: "demo_student", name: "演示学生" },
+        conversations: [{ id: `chat_${"b".repeat(32)}`, title: "演示空间" }],
+        selectedConversationId: `chat_${"b".repeat(32)}`,
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(encodedStream(frames), {
+        status: 200,
+        headers: { "content-type": "text/event-stream; charset=utf-8" },
+      }));
+    const port = createClientGatewayPort(fetchImpl);
+    await port.bootstrap();
+    expect(await collect(port.retryConversation(`chat_${"b".repeat(32)}`))).toEqual(frames);
+    const retry = fetchImpl.mock.calls[1];
+    expect(retry?.[0]).toBe(`/client/v1/conversations/chat_${"b".repeat(32)}/retries`);
+    expect(retry?.[1]?.body).toBeUndefined();
+    expect(new Headers(retry?.[1]?.headers).get("content-type")).toBeNull();
+    expect(JSON.stringify(retry)).not.toContain("run_internal");
+  });
+
   it("maps raw transport failures to a stable public error", async () => {
     const port = createClientGatewayPort(vi.fn<typeof fetch>().mockRejectedValue(new Error("secret upstream")));
     await expect(port.bootstrap()).rejects.toThrowError("CLIENT_CONFIGURATION_INVALID");

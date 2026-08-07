@@ -94,7 +94,7 @@ export function ConsultantWorkspaceApp({ port = defaultPort }: ConsultantWorkspa
         if (frame.type === "run.completed" || frame.type === "run.failed") terminal = true;
       }
     } catch {
-      if (!terminal) dispatch({ type: "run.frame", conversationId, frame: { type: "run.failed", code: "CLIENT_RUN_FAILED" } });
+      if (!terminal) dispatch({ type: "run.frame", conversationId, frame: { type: "run.failed", reason: "UNKNOWN" } });
       setComposerError("Core Agent 暂时无法完成回复。");
     }
   };

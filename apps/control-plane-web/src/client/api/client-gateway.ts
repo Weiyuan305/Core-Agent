@@ -20,6 +20,7 @@ const publicCodes = new Set<ClientPublicErrorCode>([
   "CLIENT_INPUT_INVALID",
   "CLIENT_ORIGIN_INVALID",
   "CLIENT_RESTART_FAILED",
+  "CLIENT_RETRY_UNAVAILABLE",
   "CLIENT_RUN_BUSY",
   "CLIENT_RUN_FAILED",
   "CLIENT_SESSION_INVALID",
@@ -29,6 +30,7 @@ export interface ClientGatewayPort {
   readonly bootstrap: () => Promise<ClientBootstrap>;
   readonly createConversation: () => Promise<ClientConversation>;
   readonly runConversation: (conversationId: string, message: string) => AsyncIterable<ClientFrame>;
+  readonly retryConversation: (conversationId: string) => AsyncIterable<ClientFrame>;
   readonly restartApiWorker: () => Promise<void>;
   readonly health: () => Promise<{ readonly state: "ready" }>;
 }
@@ -205,9 +207,23 @@ export function createClientGatewayPort(fetchImpl: typeof fetch = fetch): Client
     }
   }
 
-  function mutationHeaders(): Headers {
+  function mutationHeaders(contentType = true): Headers {
     if (csrf === undefined) throw publicError("CLIENT_SESSION_INVALID");
-    return new Headers({ "content-type": "application/json", [csrfHeaderName]: csrf });
+    return new Headers({
+      ...(contentType ? { "content-type": "application/json" } : {}),
+      [csrfHeaderName]: csrf,
+    });
+  }
+
+  async function streamRequest(
+    path: string,
+    init: RequestInit,
+  ): Promise<Response & { readonly body: ReadableStream<Uint8Array> }> {
+    const response = await request(path, init, "CLIENT_RUN_FAILED");
+    if (!response.headers.get("content-type")?.toLowerCase().startsWith("text/event-stream") || response.body === null) {
+      throw publicError("CLIENT_RUN_FAILED");
+    }
+    return response as Response & { readonly body: ReadableStream<Uint8Array> };
   }
 
   return Object.freeze({
@@ -227,14 +243,19 @@ export function createClientGatewayPort(fetchImpl: typeof fetch = fetch): Client
     },
     async *runConversation(conversationId: string, message: string): AsyncGenerator<ClientFrame, void, undefined> {
       if (!conversationIdPattern.test(conversationId)) throw publicError("CLIENT_CONVERSATION_FAILED");
-      const response = await request(`/client/v1/conversations/${conversationId}/runs`, {
+      const response = await streamRequest(`/client/v1/conversations/${conversationId}/runs`, {
         method: "POST",
         headers: mutationHeaders(),
         body: JSON.stringify({ message }),
-      }, "CLIENT_RUN_FAILED");
-      if (!response.headers.get("content-type")?.toLowerCase().startsWith("text/event-stream") || response.body === null) {
-        throw publicError("CLIENT_RUN_FAILED");
-      }
+      });
+      for await (const frame of parseClientEventStream(response.body)) yield frame;
+    },
+    async *retryConversation(conversationId: string): AsyncGenerator<ClientFrame, void, undefined> {
+      if (!conversationIdPattern.test(conversationId)) throw publicError("CLIENT_CONVERSATION_FAILED");
+      const response = await streamRequest(`/client/v1/conversations/${conversationId}/retries`, {
+        method: "POST",
+        headers: mutationHeaders(false),
+      });
       for await (const frame of parseClientEventStream(response.body)) yield frame;
     },
     async restartApiWorker(): Promise<void> {

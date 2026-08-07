@@ -254,7 +254,7 @@ test("managed Run requests hash the caller's bounded synthetic content", () => {
   const request = createSyntheticRunRequest(
     { tenantId: "synthetic-runtime-v1-0123456789abcdef" },
     "caller supplied synthetic follow-up",
-    "0123456789abcdef",
+    { nonce: "0123456789abcdef" },
   );
   assert.equal(request.input_message.content, "caller supplied synthetic follow-up");
   assert.equal(
@@ -274,11 +274,40 @@ test("managed Run requests hash the caller's bounded synthetic content", () => {
       () => createSyntheticRunRequest(
         { tenantId: "synthetic-runtime-v1-0123456789abcdef" },
         content,
-        "0123456789abcdef",
+        { nonce: "0123456789abcdef" },
       ),
       /SMOKE_MESSAGE_CONTENT_INVALID/,
     );
   }
+});
+
+test("managed explicit retry requests bind one stable child to the failed parent", () => {
+  const identifiers = { tenantId: "synthetic-runtime-v1-0123456789abcdef" };
+  const options = {
+    nonce: "fedcba9876543210",
+    parentRunId: "synthetic-failed-parent",
+  };
+  const first = createSyntheticRunRequest(identifiers, "server held message", options);
+  const replay = createSyntheticRunRequest(identifiers, "server held message", options);
+  assert.deepEqual(replay, first);
+  assert.equal(first.parent_run_id, "synthetic-failed-parent");
+  assert.equal(first.idempotency_key, "synthetic-run-synthetic-runtime-v1-0123456789abcdef-fedcba9876543210");
+  assert.equal(
+    first.payload_hash,
+    canonicalPayloadHash({
+      schema_version: first.schema_version,
+      idempotency_key: first.idempotency_key,
+      client_request_id: first.client_request_id,
+      input_message: first.input_message,
+      parent_run_id: first.parent_run_id,
+    }),
+  );
+  assert.throws(
+    () => createSyntheticRunRequest(identifiers, "server held message", {
+      parentRunId: "synthetic-failed-parent",
+    }),
+    /SMOKE_SYNTHETIC_INPUT_REQUIRED/,
+  );
 });
 
 test("managed Conversation requests use a fresh idempotency identity for /new", () => {
@@ -333,7 +362,7 @@ function sessionEventStream(events) {
 
 test("managed SSE emits deltas only for the active Run in one Conversation", async () => {
   const deltas = [];
-  const eventTypes = await readSmokeEvents({
+  const events = await readSmokeEvents({
     conversationId: "synthetic-managed-conversation",
     tenantId: "synthetic-managed-tenant",
     runId: "synthetic-managed-run-b",
@@ -367,7 +396,73 @@ test("managed SSE emits deltas only for the active Run in one Conversation", asy
     ]),
   });
   assert.deepEqual(deltas, ["visible current delta"]);
-  assert.deepEqual(eventTypes, ["message.delta", "run.completed"]);
+  assert.deepEqual(events, {
+    eventTypes: ["message.delta", "run.completed"],
+    terminal: { status: "succeeded" },
+  });
+});
+
+test("managed SSE returns an allowlisted failed terminal and maps legacy absence", async () => {
+  const common = {
+    conversationId: "synthetic-managed-conversation",
+    tenantId: "synthetic-managed-tenant",
+    runId: "synthetic-managed-run-b",
+    bootstrapKey: Buffer.from("synthetic-managed-key"),
+  };
+  const failed = await readSmokeEvents({
+    ...common,
+    fetchImpl: async () => sessionEventStream([
+      sessionProductEvent({
+        eventType: "run.failed",
+        sequence: 1,
+        runId: common.runId,
+        payload: {
+          run_id: common.runId,
+          status: "failed",
+          failure_code: "MODEL_BUSY",
+        },
+      }),
+    ]),
+  });
+  assert.deepEqual(failed, {
+    eventTypes: ["run.failed"],
+    terminal: { status: "failed", failureCode: "MODEL_BUSY" },
+  });
+
+  const legacy = await readSmokeEvents({
+    ...common,
+    fetchImpl: async () => sessionEventStream([
+      sessionProductEvent({
+        eventType: "run.failed",
+        sequence: 1,
+        runId: common.runId,
+        payload: { run_id: common.runId, status: "failed" },
+      }),
+    ]),
+  });
+  assert.deepEqual(legacy.terminal, {
+    status: "failed",
+    failureCode: "RUN_FAILURE_UNKNOWN",
+  });
+
+  await assert.rejects(
+    readSmokeEvents({
+      ...common,
+      fetchImpl: async () => sessionEventStream([
+        sessionProductEvent({
+          eventType: "run.failed",
+          sequence: 1,
+          runId: common.runId,
+          payload: {
+            run_id: common.runId,
+            status: "failed",
+            failure_code: "raw-provider-body",
+          },
+        }),
+      ]),
+    }),
+    /SMOKE_SSE_FAILED/,
+  );
 });
 
 test("managed SSE rejects mismatched scope before emitting a delta", async () => {

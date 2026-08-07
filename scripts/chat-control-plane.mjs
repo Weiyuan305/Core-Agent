@@ -93,8 +93,11 @@ export async function runChatControlPlane({
           createConversation: () => operations.createConversation(context),
           async runPrompt(conversationId, content, onDelta) {
             const runId = await operations.createRun(context, conversationId, content);
-            const eventTypes = await operations.readEvents(context, conversationId, runId, onDelta);
-            if (eventTypes.at(-1) !== "run.completed") throw new Error("CHAT_RUN_FAILED");
+            const events = await operations.readEvents(context, conversationId, runId, onDelta);
+            if (
+              events.eventTypes.at(-1) !== "run.completed"
+              || events.terminal.status !== "succeeded"
+            ) throw new Error("CHAT_RUN_FAILED");
           },
           restartApiWorker: () => operations.restartApiWorker(),
         },

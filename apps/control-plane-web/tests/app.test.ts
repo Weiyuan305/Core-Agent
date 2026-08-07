@@ -27,6 +27,7 @@ function fakePort(overrides: Partial<ManagedChatPort> = {}): ManagedChatPort {
       sink.onStarted();
       sink.onDelta("Hello ");
       sink.onDelta("consultant");
+      return { status: "succeeded", runId: "run_internal_success" } as const;
     }),
     restartApiWorker: vi.fn(async () => undefined),
     ...overrides,
@@ -176,6 +177,209 @@ describe("Client Gateway", () => {
     expect(response.statusCode).toBe(502);
     expect(response.json()).toMatchObject({ error: { code: "CLIENT_RUN_FAILED" } });
     expect(response.body).not.toContain("provider secret body");
+    await app.close();
+  });
+
+  it("emits only a public failure reason and retries from server-held Run state", async () => {
+    let callCount = 0;
+    const runPrompt = vi.fn(async (_id, content, sink, retry) => {
+      callCount += 1;
+      sink.onStarted();
+      expect(content).toBe("server held message");
+      if (callCount === 1) {
+        expect(retry).toBeUndefined();
+        return { status: "failed" as const, runId: "run_internal_parent", failureCode: "MODEL_BUSY" as const };
+      }
+      expect(retry).toEqual({ parentRunId: "run_internal_parent" });
+      sink.onDelta("retry succeeded");
+      return { status: "succeeded" as const, runId: "run_internal_child" };
+    });
+    const app = await buildClientGatewayApp({
+      port: fakePort({ runPrompt }),
+      staticRoot: await staticRoot(),
+    });
+    const session = await bootstrapBrowser(app);
+    const failed = await app.inject({
+      method: "POST",
+      url: `/client/v1/conversations/${session.conversationId}/runs`,
+      headers: session.mutationHeaders,
+      payload: { message: "server held message" },
+    });
+    expect(failed.statusCode).toBe(200);
+    expect(failed.body).toContain('data: {"type":"run.failed","reason":"BUSY"}');
+    for (const forbidden of ["MODEL_BUSY", "run_internal_parent", "server held message"]) {
+      expect(failed.body).not.toContain(forbidden);
+    }
+
+    const retried = await app.inject({
+      method: "POST",
+      url: `/client/v1/conversations/${session.conversationId}/retries`,
+      headers: session.mutationHeaders,
+    });
+    expect(retried.statusCode).toBe(200);
+    expect(retried.body).toContain('data: {"type":"message.delta","delta":"retry succeeded"}');
+    expect(retried.body).toContain('data: {"type":"run.completed"}');
+    expect(runPrompt).toHaveBeenCalledTimes(2);
+    await app.close();
+  });
+
+  it("coalesces concurrent retry clicks and replays one successful child", async () => {
+    let callCount = 0;
+    let childStarted!: () => void;
+    let releaseChild!: () => void;
+    const childIsStarted = new Promise<void>((resolve) => { childStarted = resolve; });
+    const holdChild = new Promise<void>((resolve) => { releaseChild = resolve; });
+    const runPrompt = vi.fn(async (_id, _content, sink, retry) => {
+      callCount += 1;
+      sink.onStarted();
+      if (callCount === 1) {
+        return { status: "failed" as const, runId: "run_failed_parent", failureCode: "MODEL_RESPONSE_TIMEOUT" as const };
+      }
+      expect(retry).toEqual({ parentRunId: "run_failed_parent" });
+      childStarted();
+      await holdChild;
+      sink.onDelta("one child");
+      return { status: "succeeded" as const, runId: "run_child_once" };
+    });
+    const app = await buildClientGatewayApp({ port: fakePort({ runPrompt }), staticRoot: await staticRoot() });
+    const session = await bootstrapBrowser(app);
+    await app.inject({
+      method: "POST",
+      url: `/client/v1/conversations/${session.conversationId}/runs`,
+      headers: session.mutationHeaders,
+      payload: { message: "original message" },
+    });
+    const retryRequest = {
+      method: "POST" as const,
+      url: `/client/v1/conversations/${session.conversationId}/retries`,
+      headers: session.mutationHeaders,
+    };
+    const first = app.inject(retryRequest);
+    await childIsStarted;
+    const second = app.inject(retryRequest);
+    releaseChild();
+    const [firstResponse, secondResponse] = await Promise.all([first, second]);
+    expect(firstResponse.statusCode).toBe(200);
+    expect(secondResponse.statusCode).toBe(200);
+    expect(firstResponse.body).toContain("one child");
+    expect(secondResponse.body).toContain("one child");
+    expect(runPrompt).toHaveBeenCalledTimes(2);
+
+    const replay = await app.inject(retryRequest);
+    expect(replay.statusCode).toBe(200);
+    expect(replay.body).toContain("one child");
+    expect(runPrompt).toHaveBeenCalledTimes(2);
+    await app.close();
+  });
+
+  it.each([
+    ["MODEL_ACCESS_DENIED", "SERVICE_UNAVAILABLE"],
+    ["MODEL_NOT_AVAILABLE", "SERVICE_UNAVAILABLE"],
+  ] as const)("does not offer child Run admission for %s", async (failureCode, reason) => {
+    const port = fakePort({
+      runPrompt: vi.fn(async (_id, _content, sink) => {
+        sink.onStarted();
+        return { status: "failed" as const, runId: "run_not_retryable", failureCode };
+      }),
+    });
+    const app = await buildClientGatewayApp({ port, staticRoot: await staticRoot() });
+    const session = await bootstrapBrowser(app);
+    const failed = await app.inject({
+      method: "POST",
+      url: `/client/v1/conversations/${session.conversationId}/runs`,
+      headers: session.mutationHeaders,
+      payload: { message: "synthetic" },
+    });
+    expect(failed.body).toContain(`\"reason\":\"${reason}\"`);
+    const retry = await app.inject({
+      method: "POST",
+      url: `/client/v1/conversations/${session.conversationId}/retries`,
+      headers: session.mutationHeaders,
+    });
+    expect(retry.statusCode).toBe(409);
+    expect(retry.json()).toMatchObject({ error: { code: "CLIENT_RETRY_UNAVAILABLE" } });
+    expect(retry.body).not.toContain("run_not_retryable");
+    expect(port.runPrompt).toHaveBeenCalledOnce();
+    await app.close();
+  });
+
+  it("requires no retry body and rejects unknown or successful Conversations", async () => {
+    const port = fakePort();
+    const app = await buildClientGatewayApp({ port, staticRoot: await staticRoot() });
+    const session = await bootstrapBrowser(app);
+    const successful = await app.inject({
+      method: "POST",
+      url: `/client/v1/conversations/${session.conversationId}/runs`,
+      headers: session.mutationHeaders,
+      payload: { message: "synthetic" },
+    });
+    expect(successful.statusCode).toBe(200);
+
+    const bodyRejected = await app.inject({
+      method: "POST",
+      url: `/client/v1/conversations/${session.conversationId}/retries`,
+      headers: session.mutationHeaders,
+      payload: {},
+    });
+    expect(bodyRejected.statusCode).toBe(400);
+    expect(bodyRejected.json()).toMatchObject({ error: { code: "CLIENT_INPUT_INVALID" } });
+
+    const unavailable = await app.inject({
+      method: "POST",
+      url: `/client/v1/conversations/${session.conversationId}/retries`,
+      headers: session.mutationHeaders,
+    });
+    expect(unavailable.statusCode).toBe(409);
+    expect(unavailable.json()).toMatchObject({ error: { code: "CLIENT_RETRY_UNAVAILABLE" } });
+
+    const unknown = await app.inject({
+      method: "POST",
+      url: "/client/v1/conversations/chat_00000000000000000000000000000000/retries",
+      headers: session.mutationHeaders,
+    });
+    expect(unknown.statusCode).toBe(404);
+    expect(unknown.body).not.toContain("conversation_internal");
+    expect(port.runPrompt).toHaveBeenCalledOnce();
+    await app.close();
+  });
+
+  it("rejects retry while a newer Run is active", async () => {
+    let callCount = 0;
+    let newerStarted!: () => void;
+    let releaseNewer!: () => void;
+    const newerIsStarted = new Promise<void>((resolve) => { newerStarted = resolve; });
+    const holdNewer = new Promise<void>((resolve) => { releaseNewer = resolve; });
+    const runPrompt = vi.fn(async (_id, _content, sink) => {
+      callCount += 1;
+      sink.onStarted();
+      if (callCount === 1) {
+        return { status: "failed" as const, runId: "run_old_failed", failureCode: "MODEL_BUSY" as const };
+      }
+      newerStarted();
+      await holdNewer;
+      return { status: "succeeded" as const, runId: "run_new_success" };
+    });
+    const app = await buildClientGatewayApp({ port: fakePort({ runPrompt }), staticRoot: await staticRoot() });
+    const session = await bootstrapBrowser(app);
+    const runRequest = {
+      method: "POST" as const,
+      url: `/client/v1/conversations/${session.conversationId}/runs`,
+      headers: session.mutationHeaders,
+      payload: { message: "newer turn" },
+    };
+    await app.inject(runRequest);
+    const newer = app.inject(runRequest);
+    await newerIsStarted;
+    const retry = await app.inject({
+      method: "POST",
+      url: `/client/v1/conversations/${session.conversationId}/retries`,
+      headers: session.mutationHeaders,
+    });
+    expect(retry.statusCode).toBe(409);
+    expect(retry.json()).toMatchObject({ error: { code: "CLIENT_RUN_BUSY" } });
+    expect(runPrompt).toHaveBeenCalledTimes(2);
+    releaseNewer();
+    await newer;
     await app.close();
   });
 

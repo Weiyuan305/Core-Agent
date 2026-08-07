@@ -447,7 +447,10 @@ function chatLifecycleFixture() {
     readEvents: async (_context, conversationId, runId, onDelta) => {
       calls.push(["readEvents", conversationId, runId]);
       onDelta("synthetic assistant answer");
-      return ["message.delta", "run.completed"];
+      return {
+        eventTypes: ["message.delta", "run.completed"],
+        terminal: { status: "succeeded" },
+      };
     },
     restartApiWorker: async () => calls.push("restartApiWorker"),
     deleteRuntime: async () => calls.push("deleteRuntime"),

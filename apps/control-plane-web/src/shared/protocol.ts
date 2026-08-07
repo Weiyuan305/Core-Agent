@@ -26,6 +26,7 @@ export type ClientPublicErrorCode =
   | "CLIENT_INPUT_INVALID"
   | "CLIENT_ORIGIN_INVALID"
   | "CLIENT_RESTART_FAILED"
+  | "CLIENT_RETRY_UNAVAILABLE"
   | "CLIENT_RUN_BUSY"
   | "CLIENT_RUN_FAILED"
   | "CLIENT_SESSION_INVALID";
@@ -37,14 +38,34 @@ export interface ClientErrorEnvelope {
   };
 }
 
+export type ClientRunFailureReason =
+  | "BUSY"
+  | "TEMPORARILY_UNAVAILABLE"
+  | "TOOK_TOO_LONG"
+  | "SERVICE_UNAVAILABLE"
+  | "REPLY_INTERRUPTED"
+  | "NO_REPLY"
+  | "ASSISTANT_PREPARING"
+  | "UNKNOWN";
+
 export type ClientFrame =
   | { readonly type: "run.started" }
   | { readonly type: "message.delta"; readonly delta: string }
   | { readonly type: "message.completed" }
   | { readonly type: "run.completed" }
-  | { readonly type: "run.failed"; readonly code: "CLIENT_RUN_FAILED" };
+  | { readonly type: "run.failed"; readonly reason: ClientRunFailureReason };
 
 const terminalTypes = new Set(["message.completed", "run.completed"]);
+const failureReasons = new Set<ClientRunFailureReason>([
+  "BUSY",
+  "TEMPORARILY_UNAVAILABLE",
+  "TOOK_TOO_LONG",
+  "SERVICE_UNAVAILABLE",
+  "REPLY_INTERRUPTED",
+  "NO_REPLY",
+  "ASSISTANT_PREPARING",
+  "UNKNOWN",
+]);
 const commandPrefixes = Object.freeze(["/new", "/restart", "/exit"]);
 const utf8Encoder = new TextEncoder();
 
@@ -99,8 +120,15 @@ function validateFrame(value: unknown): ClientFrame {
     return Object.freeze({ type: "message.delta", delta: record.delta });
   }
   if (record.type === "run.failed") {
-    if (!hasExactKeys(record, ["code", "type"]) || record.code !== "CLIENT_RUN_FAILED") invalidFrame();
-    return Object.freeze({ type: "run.failed", code: "CLIENT_RUN_FAILED" });
+    if (
+      !hasExactKeys(record, ["reason", "type"])
+      || typeof record.reason !== "string"
+      || !failureReasons.has(record.reason as ClientRunFailureReason)
+    ) invalidFrame();
+    return Object.freeze({
+      type: "run.failed",
+      reason: record.reason as ClientRunFailureReason,
+    });
   }
   if (record.type === "run.started" || terminalTypes.has(record.type)) {
     if (!hasExactKeys(record, ["type"])) invalidFrame();

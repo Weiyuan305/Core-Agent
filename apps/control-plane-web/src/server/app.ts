@@ -20,6 +20,11 @@ import {
   validateBrowserRequest,
   verifyMutationSession,
 } from "./security.js";
+import {
+  isExplicitRetryReason,
+  mapAgentRunFailureCode,
+} from "./failure-reasons.js";
+import { createRetryStore } from "./retry-store.js";
 import type { ManagedChatPort } from "./runtime-chat-port.js";
 import { createClientConversationStore } from "./session-store.js";
 
@@ -34,6 +39,7 @@ const publicMessages: Readonly<Record<ClientPublicErrorCode, string>> = Object.f
   CLIENT_INPUT_INVALID: "Message input is invalid.",
   CLIENT_ORIGIN_INVALID: "Web client origin is invalid.",
   CLIENT_RESTART_FAILED: "Services could not be restarted.",
+  CLIENT_RETRY_UNAVAILABLE: "This reply cannot be retried.",
   CLIENT_RUN_BUSY: "This conversation already has an active run.",
   CLIENT_RUN_FAILED: "Agent run failed.",
   CLIENT_SESSION_INVALID: "Web client session is invalid.",
@@ -114,6 +120,48 @@ function streamHeaders(reply: FastifyReply): void {
   });
 }
 
+interface ClientStreamWriter {
+  readonly begin: () => void;
+  readonly end: () => void;
+  readonly isStarted: () => boolean;
+  readonly write: (frame: ClientFrame) => void;
+}
+
+function createStreamWriter(reply: FastifyReply): ClientStreamWriter {
+  let started = false;
+  let frameCount = 0;
+  let aggregateBytes = 0;
+  return Object.freeze({
+    begin(): void {
+      if (started) throw new ClientGatewayError("CLIENT_FRAME_INVALID", 502);
+      reply.hijack();
+      streamHeaders(reply);
+      started = true;
+    },
+    isStarted(): boolean {
+      return started;
+    },
+    write(frame: ClientFrame): void {
+      if (!started) throw new ClientGatewayError("CLIENT_FRAME_INVALID", 502);
+      const serialized = encodeClientFrame(frame);
+      decodeClientFrame(serialized);
+      const chunk = `data: ${serialized}\n\n`;
+      const bytes = Buffer.byteLength(chunk, "utf8");
+      frameCount += 1;
+      aggregateBytes += bytes;
+      if (
+        bytes > CLIENT_FRAME_MAX_BYTES + 8
+        || frameCount > MAX_STREAM_FRAMES
+        || aggregateBytes > MAX_STREAM_BYTES
+      ) throw new ClientGatewayError("CLIENT_FRAME_INVALID", 502);
+      if (!reply.raw.destroyed && !reply.raw.writableEnded) reply.raw.write(chunk);
+    },
+    end(): void {
+      if (started && !reply.raw.writableEnded) reply.raw.end();
+    },
+  });
+}
+
 export async function buildClientGatewayApp(options: BuildClientGatewayAppOptions): Promise<FastifyInstance> {
   if (
     typeof options?.port?.createConversation !== "function"
@@ -135,6 +183,7 @@ export async function buildClientGatewayApp(options: BuildClientGatewayAppOption
   await app.register(cookie);
   const sessionStore = createBrowserSessionStore();
   const conversationStore = createClientConversationStore();
+  const retryStore = createRetryStore();
   const activeRuns = new Set<string>();
   let restarting = false;
 
@@ -200,52 +249,135 @@ export async function buildClientGatewayApp(options: BuildClientGatewayAppOption
       const message = messageBody(request.body);
       if (activeRuns.has(publicConversationId)) throw new ClientGatewayError("CLIENT_RUN_BUSY", 409);
       activeRuns.add(publicConversationId);
-      let started = false;
-      let frameCount = 0;
-      let aggregateBytes = 0;
-      const write = (frame: ClientFrame): void => {
-        const serialized = encodeClientFrame(frame);
-        decodeClientFrame(serialized);
-        const chunk = `data: ${serialized}\n\n`;
-        const bytes = Buffer.byteLength(chunk, "utf8");
-        frameCount += 1;
-        aggregateBytes += bytes;
-        if (
-          bytes > CLIENT_FRAME_MAX_BYTES + 8
-          || frameCount > MAX_STREAM_FRAMES
-          || aggregateBytes > MAX_STREAM_BYTES
-        ) throw new ClientGatewayError("CLIENT_FRAME_INVALID", 502);
-        if (!reply.raw.destroyed && !reply.raw.writableEnded) reply.raw.write(chunk);
-      };
+      retryStore.clear(publicConversationId);
+      const stream = createStreamWriter(reply);
 
       try {
-        await options.port.runPrompt(internalConversationId, message, {
+        const result = await options.port.runPrompt(internalConversationId, message, {
           onStarted() {
-            if (started) throw new ClientGatewayError("CLIENT_FRAME_INVALID", 502);
-            reply.hijack();
-            streamHeaders(reply);
-            started = true;
-            write({ type: "run.started" });
+            stream.begin();
+            stream.write({ type: "run.started" });
           },
           onDelta(delta) {
-            if (!started) throw new ClientGatewayError("CLIENT_FRAME_INVALID", 502);
-            write({ type: "message.delta", delta });
+            stream.write({ type: "message.delta", delta });
           },
         });
-        if (!started) throw new ClientGatewayError("CLIENT_RUN_FAILED", 502);
-        write({ type: "message.completed" });
-        write({ type: "run.completed" });
-        reply.raw.end();
+        if (!stream.isStarted()) throw new ClientGatewayError("CLIENT_RUN_FAILED", 502);
+        if (result.status === "succeeded") {
+          stream.write({ type: "message.completed" });
+          stream.write({ type: "run.completed" });
+        } else {
+          const reason = mapAgentRunFailureCode(result.failureCode);
+          retryStore.recordFailure({
+            conversationId: publicConversationId,
+            failedRunId: result.runId,
+            originalMessage: message,
+            publicReason: reason,
+          });
+          stream.write({ type: "run.failed", reason });
+        }
+        stream.end();
         return reply;
       } catch {
-        if (started) {
-          try { write({ type: "run.failed", code: "CLIENT_RUN_FAILED" }); }
-          finally { if (!reply.raw.writableEnded) reply.raw.end(); }
+        if (stream.isStarted()) {
+          try { stream.write({ type: "run.failed", reason: "UNKNOWN" }); }
+          finally { stream.end(); }
           return reply;
         }
         throw new ClientGatewayError("CLIENT_RUN_FAILED", 502);
       } finally {
         activeRuns.delete(publicConversationId);
+      }
+    },
+  );
+
+  app.post<{ Params: { conversationId: string } }>(
+    "/client/v1/conversations/:conversationId/retries",
+    async (request, reply) => {
+      assertMutationSession(request, sessionStore);
+      if (request.body !== undefined) throw new ClientGatewayError("CLIENT_INPUT_INVALID", 400);
+      const publicConversationId = request.params.conversationId;
+      const internalConversationId = conversationStore.resolve(publicConversationId);
+      if (internalConversationId === undefined) {
+        throw new ClientGatewayError("CLIENT_CONVERSATION_FAILED", 404);
+      }
+      const existingAdmission = retryStore.hasAdmission(publicConversationId);
+      if (activeRuns.has(publicConversationId) && !existingAdmission) {
+        throw new ClientGatewayError("CLIENT_RUN_BUSY", 409);
+      }
+      const failure = retryStore.failure(publicConversationId);
+      if (failure === undefined || !isExplicitRetryReason(failure.publicReason)) {
+        throw new ClientGatewayError("CLIENT_RETRY_UNAVAILABLE", 409);
+      }
+
+      const stream = createStreamWriter(reply);
+      let admission;
+      try {
+        admission = retryStore.admit(publicConversationId, async (parent) => {
+          activeRuns.add(publicConversationId);
+          const frames: ClientFrame[] = [];
+          const emit = (frame: ClientFrame): void => {
+            frames.push(frame);
+            stream.write(frame);
+          };
+          try {
+            const result = await options.port.runPrompt(
+              internalConversationId,
+              parent.originalMessage,
+              {
+                onStarted() {
+                  stream.begin();
+                  emit({ type: "run.started" });
+                },
+                onDelta(delta) {
+                  emit({ type: "message.delta", delta });
+                },
+              },
+              { parentRunId: parent.failedRunId },
+            );
+            if (!stream.isStarted()) throw new ClientGatewayError("CLIENT_RUN_FAILED", 502);
+            if (result.status === "succeeded") {
+              emit({ type: "message.completed" });
+              emit({ type: "run.completed" });
+            } else {
+              const reason = mapAgentRunFailureCode(result.failureCode);
+              emit({ type: "run.failed", reason });
+              retryStore.advanceFailure(
+                publicConversationId,
+                parent.failedRunId,
+                {
+                  conversationId: publicConversationId,
+                  failedRunId: result.runId,
+                  originalMessage: parent.originalMessage,
+                  publicReason: reason,
+                },
+              );
+            }
+            stream.end();
+            return Object.freeze({ result, frames: Object.freeze([...frames]) });
+          } finally {
+            activeRuns.delete(publicConversationId);
+          }
+        });
+      } catch {
+        throw new ClientGatewayError("CLIENT_RETRY_UNAVAILABLE", 409);
+      }
+
+      try {
+        const execution = await admission.promise;
+        if (!admission.owner) {
+          stream.begin();
+          for (const frame of execution.frames) stream.write(frame);
+          stream.end();
+        }
+        return reply;
+      } catch {
+        if (stream.isStarted()) {
+          try { stream.write({ type: "run.failed", reason: "UNKNOWN" }); }
+          finally { stream.end(); }
+          return reply;
+        }
+        throw new ClientGatewayError("CLIENT_RUN_FAILED", 502);
       }
     },
   );

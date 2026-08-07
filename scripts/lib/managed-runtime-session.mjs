@@ -20,6 +20,8 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
+import { AGENT_RUN_FAILURE_CODES } from "@core-agent/contracts";
+
 import { validateLocalDockerContextEndpoint } from "../preflight-runtime-docker-socket.mjs";
 import { validateRetainedRuntimeReceipt } from "./retained-runtime-receipt.mjs";
 
@@ -37,6 +39,7 @@ const immutableReferencePattern = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]{1,5})?
 const safeArgumentPattern = /^[^\u0000\r\n]{1,4096}$/u;
 const syntheticPattern = /^synthetic-[a-z0-9][a-z0-9-]{0,94}$/u;
 const allowedCommands = new Set(["docker", "node"]);
+const agentRunFailureCodes = new Set(AGENT_RUN_FAILURE_CODES);
 
 export const SMOKE_OUTPUT_KEYS = Object.freeze([
   "assistant_message_count",
@@ -815,9 +818,34 @@ export function validateSyntheticMessageContent(value) {
   return value;
 }
 
-export function createSyntheticRunRequest(identifiers, content, nonce = randomBytes(8).toString("hex")) {
+export function createSyntheticRunRequest(identifiers, content, options = undefined) {
   const tenantId = dataProperty(identifiers, "tenantId", "SMOKE_SYNTHETIC_INPUT_REQUIRED");
-  if (typeof tenantId !== "string" || !syntheticPattern.test(tenantId) || !/^[a-f0-9]{16}$/u.test(nonce)) {
+  let nonce = randomBytes(8).toString("hex");
+  let parentRunId;
+  if (options !== undefined) {
+    if (typeof options !== "object" || options === null || Array.isArray(options)) {
+      throw smokeError("SMOKE_RUN_OPTIONS_INVALID");
+    }
+    const keys = Reflect.ownKeys(options);
+    if (keys.some((key) => typeof key !== "string" || !["nonce", "parentRunId"].includes(key))) {
+      throw smokeError("SMOKE_RUN_OPTIONS_INVALID");
+    }
+    exactRecord(options, keys, "SMOKE_RUN_OPTIONS_INVALID");
+    for (const key of keys) dataProperty(options, key, "SMOKE_RUN_OPTIONS_INVALID");
+    if (Object.hasOwn(options, "nonce")) nonce = options.nonce;
+    if (Object.hasOwn(options, "parentRunId")) parentRunId = options.parentRunId;
+  }
+  if (
+    typeof tenantId !== "string"
+    || !syntheticPattern.test(tenantId)
+    || !/^[a-f0-9]{16}$/u.test(nonce)
+    || (parentRunId !== undefined
+      && (typeof parentRunId !== "string"
+        || parentRunId.length < 1
+        || parentRunId.length > 255
+        || /[\u0000-\u001f\u007f]/u.test(parentRunId)
+        || options?.nonce === undefined))
+  ) {
     throw smokeError("SMOKE_SYNTHETIC_INPUT_REQUIRED");
   }
   const validatedContent = validateSyntheticMessageContent(content);
@@ -829,6 +857,7 @@ export function createSyntheticRunRequest(identifiers, content, nonce = randomBy
       client_message_id: `synthetic-message-${tenantId}-${nonce}`,
       content: validatedContent,
     }),
+    ...(parentRunId === undefined ? {} : { parent_run_id: parentRunId }),
   });
 }
 
@@ -918,10 +947,14 @@ function validateProductEventEnvelope(event, expected) {
   if (event.event_type === "run.completed" || event.event_type === "run.failed") {
     const expectedStatus = event.event_type === "run.completed" ? "succeeded" : "failed";
     const payloadKeys = Object.keys(event.payload);
-    if (payloadKeys.some((key) => !["run_id", "status", "summary"].includes(key))
+    if (payloadKeys.some((key) => !["run_id", "status", "summary", "failure_code"].includes(key))
       || !Object.hasOwn(event.payload, "run_id") || !Object.hasOwn(event.payload, "status")
       || typeof event.run_id !== "string" || event.payload.run_id !== event.run_id
       || event.payload.status !== expectedStatus
+      || (event.event_type === "run.completed" && Object.hasOwn(event.payload, "failure_code"))
+      || (Object.hasOwn(event.payload, "failure_code")
+        && (typeof event.payload.failure_code !== "string"
+          || !agentRunFailureCodes.has(event.payload.failure_code)))
       || (Object.hasOwn(event.payload, "summary") && (typeof event.payload.summary !== "string" || event.payload.summary.length > 4_000))) {
       throw smokeError(code);
     }
@@ -1012,8 +1045,17 @@ export async function readSmokeEvents({
           }
           eventTypes.push(eventType);
           if (eventType === "run.completed" || eventType === "run.failed") {
+            const terminal = eventType === "run.completed"
+              ? Object.freeze({ status: "succeeded" })
+              : Object.freeze({
+                status: "failed",
+                failureCode: event.payload.failure_code ?? "RUN_FAILURE_UNKNOWN",
+              });
             await reader.cancel().catch(() => undefined);
-            return Object.freeze([...eventTypes]);
+            return Object.freeze({
+              eventTypes: Object.freeze([...eventTypes]),
+              terminal,
+            });
           }
         }
         separator = pending.indexOf("\n\n");
@@ -1229,9 +1271,27 @@ export function createManagedRuntimeDependencies(environment, signal) {
       if (typeof conversationId !== "string") throw smokeError("SMOKE_CONVERSATION_RESPONSE_INVALID");
       return conversationId;
     },
-    async createRun(context, conversationId, content) {
+    async createRun(context, conversationId, content, options = undefined) {
+      let requestOptions;
+      if (options !== undefined) {
+        exactRecord(options, ["parentRunId"], "SMOKE_RUN_OPTIONS_INVALID");
+        const parentRunId = options.parentRunId;
+        if (
+          typeof parentRunId !== "string"
+          || parentRunId.length < 1
+          || parentRunId.length > 255
+          || /[\u0000-\u001f\u007f]/u.test(parentRunId)
+        ) throw smokeError("SMOKE_RUN_OPTIONS_INVALID");
+        requestOptions = Object.freeze({
+          parentRunId,
+          nonce: createHash("sha256")
+            .update(`core-agent-explicit-retry\0${parentRunId}`, "utf8")
+            .digest("hex")
+            .slice(0, 16),
+        });
+      }
       const response = await requestJson(`/internal/v1/conversations/${encodeURIComponent(conversationId)}/runs`, {
-        method: "POST", body: createSyntheticRunRequest(identifiers, content), bootstrapKey: state.bootstrapKey,
+        method: "POST", body: createSyntheticRunRequest(identifiers, content, requestOptions), bootstrapKey: state.bootstrapKey,
         tenantId: context.tenantId, statuses: [202], signal,
       });
       const runId = dataProperty(response, "run_id", "SMOKE_RUN_RESPONSE_INVALID");
@@ -1776,17 +1836,21 @@ export async function runControlPlaneSmoke({
       operations.stage?.("run");
       const conversationId = await operations.createConversation(context);
       const runId = await operations.createRun(context, conversationId, fixedIdentifiers.promptIdentifier);
-      const eventTypes = await operations.readEvents(context, conversationId, runId);
+      const events = await operations.readEvents(context, conversationId, runId);
       const run = await operations.queryRun(context, runId);
       const runStatus = dataProperty(run, "status", "SMOKE_RUN_RESPONSE_INVALID");
-      if (eventTypes.at(-1) !== "run.completed" || runStatus !== "succeeded") throw smokeError("SMOKE_RUN_FAILED");
+      if (
+        events.eventTypes.at(-1) !== "run.completed"
+        || events.terminal.status !== "succeeded"
+        || runStatus !== "succeeded"
+      ) throw smokeError("SMOKE_RUN_FAILED");
       const assistantMessageCount = await operations.countAssistantMessages(context, runId);
       await operations.inspectRuntime(context, runtime);
       await operations.scanDatabase(context);
       return validateOutput({
         assistant_message_count: assistantMessageCount,
         conversation_id: conversationId,
-        event_types: [...eventTypes],
+        event_types: [...events.eventTypes],
         profile_id: context.profileId,
         run_id: runId,
         run_status: runStatus,

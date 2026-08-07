@@ -24,16 +24,19 @@ describe("managed Runtime chat adapter", () => {
         expect(runId).toBe("run_internal");
         order.push("events");
         onDelta("hello");
-        return ["run.started", "message.delta", "message.completed", "run.completed"];
+        return {
+          eventTypes: ["run.started", "message.delta", "message.completed", "run.completed"],
+          terminal: { status: "succeeded" },
+        };
       }),
       restartApiWorker: vi.fn(async () => undefined),
     };
     const port = createRuntimeChatPort({ context, operations });
     await expect(port.createConversation()).resolves.toBe("conversation_internal");
-    await port.runPrompt("conversation_internal", "synthetic prompt", {
+    await expect(port.runPrompt("conversation_internal", "synthetic prompt", {
       onStarted: () => order.push("started"),
       onDelta: (delta) => order.push(delta),
-    });
+    })).resolves.toEqual({ status: "succeeded", runId: "run_internal" });
     expect(order).toEqual(["created", "started", "events", "hello"]);
     await port.restartApiWorker();
     expect(operations.restartApiWorker).toHaveBeenCalledOnce();
@@ -75,13 +78,52 @@ describe("managed Runtime chat adapter", () => {
       operations: {
         createConversation: async () => "conversation_internal",
         createRun: async () => "run_internal",
-        readEvents: async () => ["run.started", "run.failed"],
+        readEvents: async () => ({
+          eventTypes: ["run.started", "run.failed"],
+          terminal: { status: "failed", failureCode: "MODEL_BUSY" },
+        }),
         restartApiWorker: async () => undefined,
       },
     });
     await expect(port.runPrompt("conversation_internal", "synthetic", {
       onStarted() {},
       onDelta() {},
-    })).rejects.toThrowError("CLIENT_RUN_FAILED");
+    })).resolves.toEqual({
+      status: "failed",
+      runId: "run_internal",
+      failureCode: "MODEL_BUSY",
+    });
+  });
+
+  it("passes one parent Run only through the server-only retry boundary", async () => {
+    const createRun = vi.fn(async (
+      _context,
+      _conversationId,
+      _content,
+      options,
+    ) => {
+      expect(options).toEqual({ parentRunId: "run_failed_parent" });
+      return "run_child";
+    });
+    const port = createRuntimeChatPort({
+      context: {},
+      operations: {
+        createConversation: async () => "conversation_internal",
+        createRun,
+        readEvents: async () => ({
+          eventTypes: ["run.started", "run.completed"],
+          terminal: { status: "succeeded" },
+        }),
+        restartApiWorker: async () => undefined,
+      },
+    });
+
+    await expect(port.runPrompt(
+      "conversation_internal",
+      "server held original",
+      { onStarted() {}, onDelta() {} },
+      { parentRunId: "run_failed_parent" },
+    )).resolves.toEqual({ status: "succeeded", runId: "run_child" });
+    expect(createRun).toHaveBeenCalledOnce();
   });
 });

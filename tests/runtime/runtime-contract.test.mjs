@@ -340,7 +340,10 @@ function successfulSmokeDependencies(overrides = {}) {
     readEvents: async (_context, _conversationId, runId) => {
       assert.equal(runId, "synthetic-run-success");
       calls.push("events");
-      return ["run.queued", "run.completed"];
+      return {
+        eventTypes: ["run.queued", "run.completed"],
+        terminal: { status: "succeeded" },
+      };
     },
     queryRun: async () => {
       calls.push("query-run");
@@ -537,7 +540,10 @@ test("REAL_HERMES SSE requires a ProductEvent terminal envelope for the created 
       productEvent("run.completed", 2),
     ]),
   });
-  assert.deepEqual(result, ["run.queued", "run.completed"]);
+  assert.deepEqual(result, {
+    eventTypes: ["run.queued", "run.completed"],
+    terminal: { status: "succeeded" },
+  });
   for (const response of [
     eventStreamResponse([productEvent("run.completed", 1)], "application/json"),
     eventStreamResponse([productEvent("run.completed", 1, "synthetic-run-other")]),
