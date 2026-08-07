@@ -1,5 +1,7 @@
 import { isIP } from "node:net";
 
+import type { AgentRunFailureCode } from "@core-agent/contracts";
+
 import type { SecretMaterial } from "../secrets/secret-store.js";
 
 export type HermesStreamErrorCode =
@@ -18,7 +20,8 @@ export type HermesStreamErrorCode =
   | "SSE_LINE_LIMIT"
   | "ASSISTANT_CONTENT_LIMIT"
   | "EMPTY_ASSISTANT_OUTPUT"
-  | "STREAM_ENDED_BEFORE_DONE";
+  | "STREAM_ENDED_BEFORE_DONE"
+  | "MANAGED_TERMINAL_FAILURE";
 
 const messages: Record<HermesStreamErrorCode, string> = {
   INVALID_MANAGED_ORIGIN: "Hermes managed origin is invalid",
@@ -37,10 +40,34 @@ const messages: Record<HermesStreamErrorCode, string> = {
   ASSISTANT_CONTENT_LIMIT: "Hermes stream exceeded the content limit",
   EMPTY_ASSISTANT_OUTPUT: "Hermes stream returned empty assistant output",
   STREAM_ENDED_BEFORE_DONE: "Hermes stream ended before DONE",
+  MANAGED_TERMINAL_FAILURE: "Hermes managed terminal reported a failure",
 };
 
+function defaultFailureCode(code: HermesStreamErrorCode): AgentRunFailureCode {
+  if (code === "DEPENDENCY_TIMEOUT") return "MODEL_RESPONSE_TIMEOUT";
+  if (code === "DEPENDENCY_UNAVAILABLE") return "AGENT_RUNTIME_NOT_READY";
+  if (code === "EMPTY_ASSISTANT_OUTPUT") return "MODEL_EMPTY_RESPONSE";
+  if (code === "STREAM_ENDED_BEFORE_DONE") return "MODEL_STREAM_INTERRUPTED";
+  if (
+    code === "INVALID_RESPONSE_STATUS"
+    || code === "INVALID_RESPONSE_CONTENT_TYPE"
+    || code === "INVALID_RESPONSE_BODY"
+    || code === "INVALID_STREAM_FIELD"
+    || code === "INVALID_STREAM_JSON"
+    || code === "INVALID_STREAM_UTF8"
+    || code === "SSE_LINE_LIMIT"
+    || code === "ASSISTANT_CONTENT_LIMIT"
+    || code === "MANAGED_TERMINAL_FAILURE"
+  ) return "MODEL_RESPONSE_INVALID";
+  return "RUN_INTERNAL_ERROR";
+}
+
 export class HermesStreamError extends Error {
-  public constructor(public readonly code: HermesStreamErrorCode, public readonly retryable: boolean) {
+  public constructor(
+    public readonly code: HermesStreamErrorCode,
+    public readonly retryable: boolean,
+    public readonly failureCode: AgentRunFailureCode = defaultFailureCode(code),
+  ) {
     super(messages[code]);
     this.name = "HermesStreamError";
   }

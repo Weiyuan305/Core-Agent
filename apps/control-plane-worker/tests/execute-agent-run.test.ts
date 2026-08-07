@@ -106,7 +106,7 @@ test("disconnect after first durable delta terminalizes without automatic replay
   assert.equal(result.kind, "failed");
   assert.equal(hermesCalls, 1);
   assert.deepEqual(setup.calls, [
-    "begin", "inspect", "mark-dispatched", "delta:partial", "fail:RUN_INTERNAL_ERROR:Agent execution failed after dispatch",
+    "begin", "inspect", "mark-dispatched", "delta:partial", "fail:AGENT_RUNTIME_NOT_READY:Agent execution failed after dispatch",
   ]);
   assert.equal(setup.calls.includes("retry"), false);
 });
@@ -123,7 +123,26 @@ test("Hermes acceptance before the first delta is already unsafe and never retri
 
   assert.deepEqual(result, { kind: "failed", summary: "Agent execution failed after dispatch" });
   assert.deepEqual(setup.calls, [
-    "begin", "inspect", "mark-dispatched", "hermes-accepted", "fail:RUN_INTERNAL_ERROR:Agent execution failed after dispatch",
+    "begin", "inspect", "mark-dispatched", "hermes-accepted", "fail:AGENT_RUNTIME_NOT_READY:Agent execution failed after dispatch",
+  ]);
+  assert.equal(setup.calls.includes("retry"), false);
+});
+
+test("managed Hermes failure keeps its precise code after durable dispatch", async () => {
+  const setup = port({
+    stream: () => scriptedStream([
+      new HermesStreamError("MANAGED_TERMINAL_FAILURE", true, "MODEL_SERVICE_UNAVAILABLE"),
+    ]),
+  });
+
+  const result = await handleExecuteAgentRun(setup.value, job, new AbortController().signal);
+
+  assert.deepEqual(result, { kind: "failed", summary: "Agent execution failed after dispatch" });
+  assert.deepEqual(setup.calls, [
+    "begin",
+    "inspect",
+    "mark-dispatched",
+    "fail:MODEL_SERVICE_UNAVAILABLE:Agent execution failed after dispatch",
   ]);
   assert.equal(setup.calls.includes("retry"), false);
 });
@@ -191,4 +210,20 @@ test("stored authority inconsistency terminalizes with a stable summary and no e
   const result = await handleExecuteAgentRun(setup.value, job, new AbortController().signal);
   assert.deepEqual(result, { kind: "failed", summary: "Agent execution admission failed" });
   assert.deepEqual(setup.calls, ["begin", "fail:RUN_INTERNAL_ERROR:Agent execution admission failed"]);
+});
+
+test("managed Runtime inspection failure is classified without external diagnostics", async () => {
+  const setup = port({
+    inspectRuntime: async () => {
+      setup.calls.push("inspect");
+      throw new Error("supervisor-private-summary");
+    },
+  });
+  const result = await handleExecuteAgentRun(setup.value, job, new AbortController().signal);
+  assert.deepEqual(result, { kind: "failed", summary: "Agent execution failed before durable output" });
+  assert.deepEqual(setup.calls, [
+    "begin",
+    "inspect",
+    "fail:AGENT_RUNTIME_NOT_READY:Agent execution failed before durable output",
+  ]);
 });

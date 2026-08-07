@@ -74,10 +74,12 @@ export async function handleExecuteAgentRun(
   }
   if (begun.kind === "lease_lost") return leaseLost();
   let dispatched = false;
+  let runtimeInspected = false;
   let content = "";
   try {
     if (signal.aborted) return leaseLost();
     const origin = await port.inspectRuntime(begun.facts, signal);
+    runtimeInspected = true;
     if (signal.aborted) return leaseLost();
     const marked = await port.markDispatched(jobRef);
     if (marked.kind === "lease_lost") return leaseLost();
@@ -95,11 +97,19 @@ export async function handleExecuteAgentRun(
   } catch (error) {
     if (isDatabaseTransactionRetryExhaustedError(error)) throw error;
     if (signal.aborted) return leaseLost();
-    if (dispatched) return terminalFailure(port, jobRef, internalFailure("Agent execution failed after dispatch"));
+    if (dispatched) {
+      return terminalFailure(port, jobRef, {
+        code: error instanceof HermesStreamError ? error.failureCode : "RUN_INTERNAL_ERROR",
+        summary: "Agent execution failed after dispatch",
+      });
+    }
     if (retryable(error) && job.attemptCount < job.maxAttempts) {
       const retried = await port.retry(jobRef, "Agent execution dependency is unavailable");
       return retried.kind === "lease_lost" ? leaseLost() : { kind: "retry", summary: "Agent execution dependency is unavailable" };
     }
-    return terminalFailure(port, jobRef, internalFailure("Agent execution failed before durable output"));
+    return terminalFailure(port, jobRef, {
+      code: runtimeInspected ? "RUN_INTERNAL_ERROR" : "AGENT_RUNTIME_NOT_READY",
+      summary: "Agent execution failed before durable output",
+    });
   }
 }

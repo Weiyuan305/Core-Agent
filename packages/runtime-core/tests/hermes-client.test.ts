@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   HermesClient,
+  HermesStreamError,
   type SecretMaterial,
 } from "../src/index.js";
 
@@ -47,6 +48,121 @@ const baseInput = {
   timeoutMs: 90_000,
   content: "Synthetic hello",
 } as const;
+
+function managedFailurePayload(errorCode: string, retryable: boolean, partial = false): Uint8Array {
+  return new TextEncoder().encode([
+    `data: ${JSON.stringify({
+      choices: [{ index: 0, delta: {}, finish_reason: "error" }],
+      hermes: {
+        completed: false,
+        partial,
+        failed: true,
+        error_code: errorCode,
+        retryable,
+      },
+    })}\n\n`,
+    "data: [DONE]\n\n",
+  ].join(""));
+}
+
+test("Hermes client maps every managed terminal failure to one internal Run code", async () => {
+  const cases = [
+    ["model_busy", "MODEL_BUSY", true],
+    ["model_service_unavailable", "MODEL_SERVICE_UNAVAILABLE", true],
+    ["model_response_timeout", "MODEL_RESPONSE_TIMEOUT", true],
+    ["model_access_denied", "MODEL_ACCESS_DENIED", false],
+    ["model_not_available", "MODEL_NOT_AVAILABLE", false],
+    ["model_response_invalid", "MODEL_RESPONSE_INVALID", true],
+  ] as const;
+
+  for (const [managedCode, failureCode, retryable] of cases) {
+    const ingress = material();
+    const client = new HermesClient({
+      fetch: async () => sseResponse([managedFailurePayload(managedCode, retryable)]),
+    });
+    await assert.rejects(
+      collect(client.streamChat({ ...baseInput, ingressMaterial: ingress.secret })),
+      (error: unknown) => {
+        assert.equal(error instanceof HermesStreamError, true);
+        if (!(error instanceof HermesStreamError)) return false;
+        assert.equal(error.failureCode, failureCode);
+        assert.equal(error.retryable, retryable);
+        return true;
+      },
+    );
+    assert.equal(ingress.releases(), 1);
+  }
+});
+
+test("Hermes client rejects malformed and legacy error terminals without reflecting raw diagnostics", async () => {
+  const canary = "raw-provider-token-canary";
+  const cases = [
+    managedFailurePayload("provider_503", true),
+    new TextEncoder().encode([
+      `data: ${JSON.stringify({
+        choices: [{ index: 0, delta: {}, finish_reason: "error" }],
+        error: { message: canary, body: canary },
+        hermes: { error: canary, error_code: "agent_error" },
+      })}\n\n`,
+      "data: [DONE]\n\n",
+    ].join("")),
+    new TextEncoder().encode([
+      `data: ${JSON.stringify({
+        choices: [{ index: 0, delta: {}, finish_reason: "error" }],
+        hermes: {
+          completed: false,
+          partial: false,
+          failed: true,
+          error_code: "model_service_unavailable",
+          retryable: true,
+          message: canary,
+        },
+      })}\n\n`,
+      "data: [DONE]\n\n",
+    ].join("")),
+  ];
+
+  for (const payload of cases) {
+    const ingress = material();
+    const client = new HermesClient({ fetch: async () => sseResponse([payload]) });
+    await assert.rejects(
+      collect(client.streamChat({ ...baseInput, ingressMaterial: ingress.secret })),
+      (error: unknown) => {
+        assert.equal(error instanceof HermesStreamError, true);
+        if (!(error instanceof HermesStreamError)) return false;
+        assert.equal(error.failureCode, "MODEL_RESPONSE_INVALID");
+        assert.doesNotMatch(`${String(error)} ${JSON.stringify(error)}`, new RegExp(canary));
+        return true;
+      },
+    );
+    assert.equal(ingress.releases(), 1);
+  }
+});
+
+test("Hermes client rejects duplicate terminals and data after a terminal", async () => {
+  const terminal = JSON.stringify({
+    choices: [{ index: 0, delta: {}, finish_reason: "error" }],
+    hermes: {
+      completed: false,
+      partial: false,
+      failed: true,
+      error_code: "model_busy",
+      retryable: true,
+    },
+  });
+  for (const body of [
+    `data: ${terminal}\n\ndata: ${terminal}\n\ndata: [DONE]\n\n`,
+    `data: ${terminal}\n\ndata: ${JSON.stringify({ choices: [{ delta: { content: "late" } }] })}\n\ndata: [DONE]\n\n`,
+  ]) {
+    const ingress = material();
+    const client = new HermesClient({ fetch: async () => sseResponse([new TextEncoder().encode(body)]) });
+    await assert.rejects(
+      collect(client.streamChat({ ...baseInput, ingressMaterial: ingress.secret })),
+      (error: unknown) => error instanceof HermesStreamError
+        && error.failureCode === "MODEL_RESPONSE_INVALID",
+    );
+  }
+});
 
 test("Hermes client decodes split SSE frames and UTF-8 boundaries, sends the bounded request, and releases material", async () => {
   const encoder = new TextEncoder();
@@ -145,6 +261,7 @@ test("Hermes client redacts a raw transport disconnect after a parsed delta and 
   await assert.rejects((async () => {
     for await (const delta of client.streamChat({ ...baseInput, ingressMaterial: ingress.secret })) seen.push(delta);
   })(), (error: unknown) => {
+    assert.equal(error instanceof HermesStreamError && error.failureCode === "MODEL_STREAM_INTERRUPTED", true);
     assert.doesNotMatch(String(error), /raw-provider-token|socket/);
     return true;
   });
@@ -181,7 +298,12 @@ test("Hermes client accepts only the managed private http origin and one validat
 test("Hermes client rejects DONE without any non-empty assistant content", async () => {
   const ingress = material();
   const client = new HermesClient({ fetch: async () => sseResponse([new TextEncoder().encode("data: [DONE]\n\n")]) });
-  await assert.rejects(collect(client.streamChat({ ...baseInput, ingressMaterial: ingress.secret })), /empty assistant output/i);
+  await assert.rejects(
+    collect(client.streamChat({ ...baseInput, ingressMaterial: ingress.secret })),
+    (error: unknown) => error instanceof HermesStreamError
+      && error.failureCode === "MODEL_EMPTY_RESPONSE"
+      && /empty assistant output/i.test(String(error)),
+  );
   assert.equal(ingress.releases(), 1);
 });
 
@@ -195,6 +317,12 @@ test("Hermes client composes timeout and caller abort and releases material on e
     const pending = collect(client.streamChat({ ...baseInput, timeoutMs: 5, signal: caller.signal, ingressMaterial: ingress.secret }));
     if (abortBy === "caller") caller.abort(new Error("caller-private-reason"));
     await assert.rejects(pending, (error: unknown) => {
+      assert.equal(
+        error instanceof HermesStreamError && error.failureCode === (
+          abortBy === "timeout" ? "MODEL_RESPONSE_TIMEOUT" : "RUN_INTERNAL_ERROR"
+        ),
+        true,
+      );
       assert.doesNotMatch(String(error), /caller-private-reason/);
       return true;
     });
