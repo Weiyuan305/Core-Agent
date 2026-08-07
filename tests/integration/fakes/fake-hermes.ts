@@ -12,6 +12,14 @@ const fakeExternalTimeoutMs = 1_500;
 
 export type HermesFailureScript =
   | "success"
+  | "managed_model_busy"
+  | "managed_model_service_unavailable"
+  | "managed_model_response_timeout"
+  | "managed_model_access_denied"
+  | "managed_model_not_available"
+  | "managed_model_response_invalid"
+  | "managed_unknown_error"
+  | "empty_response"
   | "pre_delta_timeout"
   | "post_delta_disconnect"
   | "invalid_json"
@@ -24,6 +32,67 @@ interface HoldScript {
 }
 
 type HermesScript = HermesFailureScript | HoldScript;
+
+export const HERMES_CONVERSATION_SCENARIOS = Object.freeze({
+  happy_path: "success",
+  busy: "managed_model_busy",
+  unavailable: "managed_model_service_unavailable",
+  timeout: "managed_model_response_timeout",
+  denied: "managed_model_access_denied",
+  missing_model: "managed_model_not_available",
+  malformed_response: "invalid_json",
+  mid_stream_interruption: "post_delta_disconnect",
+  empty_response: "empty_response",
+  unknown_error: "managed_unknown_error",
+} as const satisfies Readonly<Record<string, HermesFailureScript>>);
+
+const managedFailureByScript = Object.freeze({
+  managed_model_busy: { errorCode: "model_busy", retryable: true },
+  managed_model_service_unavailable: {
+    errorCode: "model_service_unavailable",
+    retryable: true,
+  },
+  managed_model_response_timeout: {
+    errorCode: "model_response_timeout",
+    retryable: true,
+  },
+  managed_model_access_denied: {
+    errorCode: "model_access_denied",
+    retryable: false,
+  },
+  managed_model_not_available: {
+    errorCode: "model_not_available",
+    retryable: false,
+  },
+  managed_model_response_invalid: {
+    errorCode: "model_response_invalid",
+    retryable: true,
+  },
+} as const);
+
+type ManagedFailureScript = keyof typeof managedFailureByScript;
+
+function isManagedFailureScript(value: string): value is ManagedFailureScript {
+  return Object.hasOwn(managedFailureByScript, value);
+}
+
+function managedTerminal(errorCode: string, retryable: boolean): string {
+  return [
+    `data: ${JSON.stringify({
+      choices: [{ index: 0, delta: {}, finish_reason: "error" }],
+      hermes: {
+        completed: false,
+        partial: false,
+        failed: true,
+        error_code: errorCode,
+        retryable,
+      },
+    })}`,
+    "",
+    "data: [DONE]",
+    "",
+  ].join("\n");
+}
 
 export interface SanitizedHermesRequest {
   readonly kind: "readiness" | "execution";
@@ -243,6 +312,19 @@ export class FakeHermes {
         return;
       }
       response.writeHead(200, { "content-type": "text/event-stream" });
+      if (isManagedFailureScript(kind)) {
+        const failure = managedFailureByScript[kind];
+        response.end(managedTerminal(failure.errorCode, failure.retryable));
+        return;
+      }
+      if (kind === "managed_unknown_error") {
+        response.end(managedTerminal("future_provider_failure", false));
+        return;
+      }
+      if (kind === "empty_response") {
+        response.end("data: [DONE]\n\n");
+        return;
+      }
       if (kind === "invalid_json") {
         response.end("data: {invalid-json}\n\n");
         return;
@@ -251,11 +333,13 @@ export class FakeHermes {
         response.end(`data: ${"x".repeat(MAX_HERMES_SSE_LINE_BYTES + 1)}\n\n`);
         return;
       }
+      if (kind === "post_delta_disconnect") response.flushHeaders();
       response.write(
         `data: ${JSON.stringify({ choices: [{ delta: { content: "Synthetic " } }] })}\n\n`,
       );
       if (kind === "post_delta_disconnect") {
-        response.socket?.destroy();
+        const socket = response.socket;
+        setTimeout(() => socket?.destroy(), 10);
         return;
       }
       response.end([

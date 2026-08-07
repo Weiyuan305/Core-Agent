@@ -1,6 +1,6 @@
 # Conversation Reliability v1 Design
 
-**Status:** Design approved; implementation authorized
+**Status:** Implemented; deterministic verification passed; real-provider acceptance pending
 **Date:** 2026-08-07  
 **Primary surface:** B2B consultant Web workspace  
 **Future surfaces:** student Web, iPhone, and macOS clients
@@ -409,6 +409,14 @@ does not roll back the additive database migration: tolerant consumers convert l
 generic frames to `MODEL_RESPONSE_INVALID`/`UNKNOWN`. Rollback evidence records only
 digests, versions, fixed codes, and final states.
 
+Migration `009_agent_run_failure_code.sql` is forward-only. After it is applied, an
+application rollback is supported only to a build that writes a valid `failure_code`
+for every failed Run and understands schema version 9. A pre-migration Worker must not
+be restored because its old failure write would violate the new database invariant.
+The Hermes product image may still be rolled back independently to the previous
+reviewed digest while the schema-v9-compatible API, Worker, Runtime Core, and Gateway
+remain deployed.
+
 ## 12. Acceptance criteria
 
 The milestone is accepted only when:
@@ -430,3 +438,9 @@ The milestone is accepted only when:
 Completion of this design enables the next design cycle for Capability Registry and
 entitlement-controlled MCP/Skill attachment. It does not itself claim those product
 capabilities.
+
+Implementation and verification evidence is recorded in
+[Conversation Reliability v1 evidence](../../testing/conversation-reliability-v1.md).
+The implementation status does not mean the product milestone is accepted: criterion
+12 remains pending until the configured real provider completes one non-sensitive
+happy-path acceptance through the managed product image.

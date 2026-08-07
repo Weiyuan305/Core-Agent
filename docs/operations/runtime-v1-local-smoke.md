@@ -42,11 +42,24 @@ message, response body, URL, provider/model name, credential, or traceback may
 appear. A local mutable tag and a synthetic fixture are development evidence,
 not release or AC10 evidence.
 
+For Conversation Reliability v1, record deterministic and real-path outcomes in
+[`docs/testing/conversation-reliability-v1.md`](../testing/conversation-reliability-v1.md).
+Record only UTC time, pass/fail, fixed failure code, final Run state, and immutable or
+local image digest. Do not record prompt text, assistant text, provider response,
+credential material, internal URL, or traceback. A deterministic synthetic success
+does not satisfy the mandatory real-provider happy path.
+
 For rollback, select the previous reviewed immutable product-image digest from
 version control and use the normal Runtime lifecycle path so the generation is
 incremented. Do not retag or rebuild the previous image. The additive Agent Run
 failure-code migration remains deployed; application consumers retain their
 legacy unknown/invalid fallbacks.
+
+Do not roll the API or Worker back to a build older than database schema version 9.
+Such a Worker does not write `agent_runs.failure_code` and is incompatible with the
+forward-only state constraint. Image rollback is independent: keep a schema-v9-aware
+application deployment and select the previous reviewed Hermes digest for the target
+platform from `infra/hermes/product-images.lock.json`.
 
 ### Publish and review the private Hermes Runtime
 
