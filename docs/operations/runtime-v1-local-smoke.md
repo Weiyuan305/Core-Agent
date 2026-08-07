@@ -17,6 +17,37 @@ Generated Hermes runtime resources are owned by the Supervisor.
 `npm run hermes:build` checks the product Dockerfile and creates the local tag
 `core-agent/hermes-runtime:dev`. That mutable local tag is not AC10 evidence.
 
+### Managed terminal error overlay
+
+The product Dockerfile installs the narrow error projection described by
+[ADR 0007](../architecture/0007-managed-hermes-error-projection.md). For the
+locked `v2026.7.30` base, the target is
+`/opt/hermes/gateway/platforms/api_server.py` with SHA-256
+`2d5526cd830e6aebcaecc0d9083cfd3aa63bdcfacc2389b7beec6ca32ae99dd8`.
+The build must stop with a fixed `HERMES_PATCH_*` code if the target, hash, or
+exact context differs. Do not bypass that gate, apply the patch fuzzily, or
+copy code from a local Hermes checkout.
+
+Before publishing, run the deterministic runtime tests and build a disposable
+local image:
+
+```bash
+npm run test:runtime
+npm run hermes:build -- --tag core-agent-hermes-runtime:conversation-reliability-local
+```
+
+Inspect a synthetic failed stream. It must end with one closed terminal record
+containing only `choices` and `hermes`, followed by `[DONE]`. No provider
+message, response body, URL, provider/model name, credential, or traceback may
+appear. A local mutable tag and a synthetic fixture are development evidence,
+not release or AC10 evidence.
+
+For rollback, select the previous reviewed immutable product-image digest from
+version control and use the normal Runtime lifecycle path so the generation is
+incremented. Do not retag or rebuild the previous image. The additive Agent Run
+failure-code migration remains deployed; application consumers retain their
+legacy unknown/invalid fallbacks.
+
 ### Publish and review the private Hermes Runtime
 
 The only release path is the manual **Publish Hermes Runtime** workflow at

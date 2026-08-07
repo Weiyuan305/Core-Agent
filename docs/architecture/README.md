@@ -13,6 +13,7 @@ the alternatives considered, and the consequences accepted at the time.
 | [0004](0004-control-plane-internal-api-security-and-streaming.md) | Accepted | Internal API, SecretStore, asynchronous Run/SSE, and Message contract addendum |
 | [0005](0005-hermes-profile-bootstrap-without-container-exec.md) | Accepted | Fixed no-network Profile initializer and file-backed Hermes ingress secret |
 | [0006](0006-idempotent-provisioning-and-runtime-command-intent.md) | Accepted | Atomic tenant provisioning, truthful runtime commands, and durable restart intent |
+| [0007](0007-managed-hermes-error-projection.md) | Accepted | Exact, non-reflective terminal failure projection in the pinned managed Hermes image |
 
 ## Change policy
 

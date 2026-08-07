@@ -420,6 +420,43 @@ test("Hermes private release operations are explicit and keep credentials out of
   assert.doesNotMatch(environmentExample, /(?:ghp_|github_pat_|Bearer\s+)/iu);
 });
 
+test("Hermes product image installs the exact reviewed terminal projection overlay", async () => {
+  const dockerfile = await repositorySource("infra/hermes/Dockerfile");
+  const installer = await repositorySource(
+    "infra/hermes/runtime/install_error_projection.py",
+  );
+  const projection = await repositorySource(
+    "infra/hermes/runtime/error_projection.py",
+  );
+  const reviewPatch = await repositorySource(
+    "infra/hermes/patches/v2026.7.30-gateway-error-projection.patch",
+  );
+
+  assert.match(
+    installer,
+    /TARGET_PATH = Path\("\/opt\/hermes\/gateway\/platforms\/api_server\.py"\)/u,
+  );
+  assert.match(
+    installer,
+    /EXPECTED_UPSTREAM_SHA256 = "2d5526cd830e6aebcaecc0d9083cfd3aa63bdcfacc2389b7beec6ca32ae99dd8"/u,
+  );
+  assert.match(projection, /def project_terminal_failure\(/u);
+  assert.doesNotMatch(projection, /["'](?:message|provider|model|url|traceback)["']\s*:/iu);
+
+  for (const marker of [
+    "COPY infra/hermes/runtime/error_projection.py /opt/hermes/core_agent_error_projection.py",
+    "COPY infra/hermes/runtime/install_error_projection.py /opt/core-agent/install_error_projection.py",
+    "COPY infra/hermes/patches/v2026.7.30-gateway-error-projection.patch /opt/core-agent/v2026.7.30-gateway-error-projection.patch",
+    "python3 /opt/core-agent/install_error_projection.py",
+  ]) {
+    assert.ok(dockerfile.includes(marker), marker);
+  }
+  assert.match(dockerfile, /chmod 0444[\s\\]+[\s\S]*\/opt\/hermes\/core_agent_error_projection\.py/u);
+  assert.match(reviewPatch, /from core_agent_error_projection import project_terminal_failure/u);
+  assert.match(reviewPatch, /finish_chunk = project_terminal_failure/u);
+  assert.doesNotMatch(reviewPatch, /^\+.*(?:format_exc|"error"\s*:)/mu);
+});
+
 test("Hermes image resolver accepts one explicit reviewed product lock", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "core-agent-hermes-lock-resolver-"));
   context.after(() => rm(root, { recursive: true, force: true }));

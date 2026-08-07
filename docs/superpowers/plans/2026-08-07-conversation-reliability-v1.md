@@ -297,8 +297,9 @@ git commit -m "feat(runtime): classify hermes terminal failures"
 - Modify: `infra/hermes/Dockerfile`
 - Create: `tests/runtime/hermes-error-projection.test.mjs`
 - Modify: `tests/runtime/hermes-release.test.mjs`
-- Create: `docs/adr/0010-managed-hermes-error-projection.md`
-- Modify: `docs/runbooks/hermes-runtime-release.md`
+- Create: `docs/architecture/0007-managed-hermes-error-projection.md`
+- Modify: `docs/architecture/README.md`
+- Modify: `docs/operations/runtime-v1-local-smoke.md`
 
 - [ ] **Step 1: Capture and pin the exact upstream patch target**
 
@@ -339,7 +340,7 @@ The Dockerfile copies the projection, installer, and patch, then runs the instal
 
 - [ ] **Step 5: Document the plugin-first exception and rollback**
 
-ADR 0010 must record why request-construction and generic post-LLM plugin hooks do not cover every abnormal provider terminal path, why the overlay is narrowly allowed, which upstream revision it targets, and that rollback selects the previous product-image digest.
+ADR 0007 must record why request-construction and generic post-LLM plugin hooks do not cover every abnormal provider terminal path, why the overlay is narrowly allowed, which upstream revision it targets, and that rollback selects the previous product-image digest.
 
 - [ ] **Step 6: Verify the overlay and local product image**
 
@@ -352,7 +353,7 @@ Run a local error-fixture smoke against the built image and assert the exact ter
 - [ ] **Step 7: Commit**
 
 ```bash
-git add infra/hermes tests/runtime docs/adr docs/runbooks/hermes-runtime-release.md
+git add infra/hermes tests/runtime docs/architecture docs/operations/runtime-v1-local-smoke.md
 git commit -m "feat(hermes): project safe terminal failure codes"
 ```
 
