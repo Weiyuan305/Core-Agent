@@ -68,6 +68,25 @@ describe("consultant workspace", () => {
     expect(port.runConversation).toHaveBeenCalledWith(firstId, "请制定下一步计划");
   });
 
+  it("handles Home and End explicitly inside the focused transcript", async () => {
+    await renderReady();
+    const user = userEvent.setup();
+    await user.type(screen.getByRole("textbox", { name: "给 Core Agent 发送任务或指令" }), "键盘滚动");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await screen.findByText("这是流式回复");
+
+    const transcript = screen.getByRole("log", { name: "对话记录" });
+    Object.defineProperties(transcript, {
+      clientHeight: { configurable: true, value: 100 },
+      scrollHeight: { configurable: true, value: 1_000 },
+    });
+    transcript.scrollTop = 450;
+    fireEvent.keyDown(transcript, { key: "Home" });
+    expect(transcript.scrollTop).toBe(0);
+    fireEvent.keyDown(transcript, { key: "End" });
+    expect(transcript.scrollTop).toBe(1_000);
+  });
+
   it("keeps the draft editable but disables a second send during streaming", async () => {
     let release!: () => void;
     let started!: () => void;

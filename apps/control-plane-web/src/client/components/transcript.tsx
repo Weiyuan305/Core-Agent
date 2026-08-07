@@ -83,6 +83,15 @@ export function Transcript({
         aria-label={empty ? undefined : "对话记录"}
         aria-live={empty ? undefined : "polite"}
         className={`transcript${empty ? " transcript--empty" : ""}`}
+        onKeyDown={(event) => {
+          if (event.key === "Home") {
+            event.preventDefault();
+            event.currentTarget.scrollTop = 0;
+          } else if (event.key === "End") {
+            event.preventDefault();
+            event.currentTarget.scrollTop = event.currentTarget.scrollHeight;
+          }
+        }}
         onScroll={(event) => {
           const distance = event.currentTarget.scrollHeight
             - event.currentTarget.clientHeight
