@@ -1,3 +1,5 @@
+import { useEffect, useRef } from "react";
+
 import type { ClientConversation } from "../../shared/protocol.js";
 import { PlusIcon } from "../icons.js";
 
@@ -11,6 +13,12 @@ interface StudentConversationSidebarProps {
 }
 
 export function StudentConversationSidebar(props: StudentConversationSidebarProps) {
+  const selectedConversationRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    selectedConversationRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [props.mobileVisible, props.selectedConversationId]);
+
   return (
     <nav
       aria-label="学生与对话"
@@ -48,6 +56,7 @@ export function StudentConversationSidebar(props: StudentConversationSidebarProp
                 className="conversation-row"
                 key={conversation.id}
                 onClick={() => props.onSelectConversation(conversation.id)}
+                ref={selected ? selectedConversationRef : undefined}
                 type="button"
               >
                 <span>{conversation.title}</span>

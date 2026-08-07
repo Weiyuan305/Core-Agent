@@ -79,3 +79,132 @@ test("shows a calm retryable failure without technical details", async ({ page }
   });
   expect(violations).toEqual([]);
 });
+
+test("keeps long conversations inside a vertically scrollable transcript", async ({ page }) => {
+  await page.goto("/");
+  const composer = page.getByRole("textbox", { name: "给 Core Agent 发送任务或指令" });
+  await composer.fill("匿名长回复界面测试");
+  await page.getByRole("button", { name: "发送" }).click();
+  await expect(page.getByText(/这是一段用于验证长对话滚动区域的匿名合成内容/u)).toBeVisible();
+
+  const layout = await page.evaluate(() => {
+    const workspace = document.querySelector<HTMLElement>(".workspace");
+    const conversation = document.querySelector<HTMLElement>(".conversation-workspace");
+    const transcript = document.querySelector<HTMLElement>(".transcript");
+    if (workspace === null || conversation === null || transcript === null) throw new Error("layout missing");
+    return {
+      conversationHeight: conversation.clientHeight,
+      transcriptClientHeight: transcript.clientHeight,
+      transcriptScrollHeight: transcript.scrollHeight,
+      viewportHeight: window.innerHeight,
+      workspaceHeight: workspace.clientHeight,
+    };
+  });
+
+  expect(layout.workspaceHeight).toBe(layout.viewportHeight);
+  expect(layout.conversationHeight).toBeLessThanOrEqual(layout.workspaceHeight);
+  expect(layout.transcriptScrollHeight).toBeGreaterThan(layout.transcriptClientHeight);
+
+  const transcript = page.getByRole("log");
+  await expect.poll(() => transcript.evaluate((element) => (
+    element.scrollHeight - element.clientHeight - element.scrollTop
+  ))).toBeLessThanOrEqual(1);
+  await transcript.hover();
+  await page.mouse.wheel(0, -800);
+  await expect(page.getByRole("button", { name: "回到最新消息" })).toBeVisible();
+  await page.getByRole("button", { name: "回到最新消息" }).click();
+  await expect.poll(() => transcript.evaluate((element) => (
+    element.scrollHeight - element.clientHeight - element.scrollTop
+  ))).toBeLessThanOrEqual(1);
+  await expect(page.getByRole("button", { name: "回到最新消息" })).toHaveCount(0);
+});
+
+test("keeps the selected Conversation visible in a constrained scrolling list", async ({ page }, testInfo) => {
+  await page.goto("/");
+  if (testInfo.project.name === "iphone") {
+    await page.getByRole("button", { name: "返回学生与对话" }).click();
+    await expect(page.getByRole("navigation", { name: "学生与对话" })).toBeVisible();
+  }
+  for (let index = 0; index < 11; index += 1) {
+    await page.getByRole("button", { name: "新建对话" }).click();
+    if (testInfo.project.name === "iphone") {
+      await page.getByRole("button", { name: "返回学生与对话" }).click();
+      await expect(page.getByRole("navigation", { name: "学生与对话" })).toBeVisible();
+    }
+  }
+
+  const list = page.locator(".conversation-list__items");
+  const selected = page.locator('.conversation-row[aria-current="page"]');
+  const metrics = await page.evaluate(() => {
+    const items = document.querySelector<HTMLElement>(".conversation-list__items");
+    const current = document.querySelector<HTMLElement>('.conversation-row[aria-current="page"]');
+    if (items === null || current === null) throw new Error("Conversation list missing");
+    const listRect = items.getBoundingClientRect();
+    const currentRect = current.getBoundingClientRect();
+    return {
+      clientHeight: items.clientHeight,
+      currentBottom: currentRect.bottom,
+      currentTop: currentRect.top,
+      listBottom: listRect.bottom,
+      listTop: listRect.top,
+      scrollHeight: items.scrollHeight,
+      scrollTop: items.scrollTop,
+    };
+  });
+
+  await expect(list).toBeVisible();
+  await expect(selected).toHaveCount(1);
+  expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight);
+  expect(metrics.scrollTop).toBeGreaterThan(0);
+  expect(metrics.currentTop).toBeGreaterThanOrEqual(metrics.listTop);
+  expect(metrics.currentBottom).toBeLessThanOrEqual(metrics.listBottom + 1);
+});
+
+test("reclaims the desktop inspector column when student details close", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "wide desktop grid only");
+  await page.goto("/");
+  const inspector = page.getByRole("complementary", { name: "当前学生" });
+  await expect(inspector).toBeVisible();
+  const before = await page.locator(".conversation-workspace").evaluate((element) => element.clientWidth);
+  await inspector.getByRole("button", { name: "关闭学生信息" }).click();
+  await expect(inspector).toHaveCount(0);
+  const after = await page.locator(".conversation-workspace").evaluate((element) => element.clientWidth);
+  expect(after - before).toBeGreaterThanOrEqual(270);
+});
+
+test("moves a newly submitted turn into view after the reader scrolled away", async ({ page }) => {
+  await page.goto("/");
+  const composer = page.getByRole("textbox", { name: "给 Core Agent 发送任务或指令" });
+  await composer.fill("匿名长回复界面测试");
+  await page.getByRole("button", { name: "发送" }).click();
+  await expect(page.getByText(/这是一段用于验证长对话滚动区域的匿名合成内容/u)).toBeVisible();
+  const transcript = page.getByRole("log");
+  await transcript.hover();
+  await page.mouse.wheel(0, -800);
+
+  await composer.fill("匿名合成界面测试");
+  await page.getByRole("button", { name: "发送" }).click();
+  await expect(page.getByText("这是用于界面验收的匿名合成回复。")).toBeVisible();
+  await expect.poll(() => transcript.evaluate((element) => (
+    element.scrollHeight - element.clientHeight - element.scrollTop
+  ))).toBeLessThanOrEqual(1);
+});
+
+test("makes the transcript keyboard focusable and scrollable", async ({ page }) => {
+  await page.goto("/");
+  const composer = page.getByRole("textbox", { name: "给 Core Agent 发送任务或指令" });
+  await composer.fill("匿名长回复界面测试");
+  await page.getByRole("button", { name: "发送" }).click();
+  await expect(page.getByText(/这是一段用于验证长对话滚动区域的匿名合成内容/u)).toBeVisible();
+
+  const transcript = page.getByRole("log", { name: "对话记录" });
+  await expect(transcript).toHaveAttribute("tabindex", "0");
+  await transcript.focus();
+  await expect(transcript).toBeFocused();
+  await page.keyboard.press("Home");
+  await expect.poll(() => transcript.evaluate((element) => element.scrollTop)).toBeLessThanOrEqual(2);
+  await page.keyboard.press("End");
+  await expect.poll(() => transcript.evaluate((element) => (
+    element.scrollHeight - element.clientHeight - element.scrollTop
+  ))).toBeLessThanOrEqual(1);
+});

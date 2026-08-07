@@ -199,7 +199,7 @@ export function ConsultantWorkspaceApp({ port = defaultPort }: ConsultantWorkspa
   }
 
   return (
-    <div className={`workspace${mobileListVisible ? " workspace--mobile-list" : ""}`}>
+    <div className={`workspace${inspectorOpen ? " workspace--inspector-open" : ""}${mobileListVisible ? " workspace--mobile-list" : ""}`}>
       <GlobalNavigationRail />
       <StudentConversationSidebar
         conversations={conversations}

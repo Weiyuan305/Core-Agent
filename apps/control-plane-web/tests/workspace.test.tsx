@@ -96,6 +96,35 @@ describe("consultant workspace", () => {
     await screen.findByText("完成");
   });
 
+  it("shows a clear thinking state until the first reply content arrives", async () => {
+    let release!: () => void;
+    let started!: () => void;
+    const didStart = new Promise<void>((resolve) => { started = resolve; });
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    const port = fakePort({
+      async *runConversation(): AsyncGenerator<ClientFrame> {
+        yield { type: "run.started" };
+        started();
+        await hold;
+        yield { type: "message.delta", delta: "开始回复" };
+        yield { type: "message.completed" };
+        yield { type: "run.completed" };
+      },
+    });
+    await renderReady(port);
+    const user = userEvent.setup();
+    await user.type(screen.getByRole("textbox"), "需要一些时间的问题");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await didStart;
+
+    const thinking = await screen.findByText("正在思考…");
+    expect(thinking.closest(".assistant-thinking")).not.toBeNull();
+
+    await act(async () => { release(); await hold; });
+    await screen.findByText("开始回复");
+    expect(screen.queryByText("正在思考…")).toBeNull();
+  });
+
   it("renders a zero-content failure as one calm status card and retries through the child-Run route", async () => {
     const runConversation = vi.fn(async function* (): AsyncGenerator<ClientFrame> {
       yield { type: "run.started" };

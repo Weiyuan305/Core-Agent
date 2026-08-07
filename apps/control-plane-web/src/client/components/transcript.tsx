@@ -1,3 +1,5 @@
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+
 import type { ClientRunFailureReason } from "../../shared/protocol.js";
 import { RUN_FAILURE_COPY } from "../content/run-failure-copy.js";
 import type { ConversationChatState } from "../state/chat-reducer.js";
@@ -13,6 +15,8 @@ interface FailureNoticeProps {
   readonly busy: boolean;
   readonly reason: ClientRunFailureReason;
 }
+
+const latestThreshold = 48;
 
 function FailureNotice({ actionable, busy, reason, onAction }: FailureNoticeProps & {
   readonly onAction: (reason: ClientRunFailureReason) => void;
@@ -44,9 +48,71 @@ export function Transcript({
   actionBusy,
   onFailureAction,
 }: TranscriptProps) {
+  const transcriptRef = useRef<HTMLDivElement>(null);
+  const followLatestRef = useRef(true);
+  const [showLatest, setShowLatest] = useState(false);
+  const latestTurn = conversation.turns.at(-1);
+  const latestContentLength = latestTurn?.content.length ?? 0;
+  const latestDelivery = latestTurn?.delivery;
+
+  const scrollToLatest = (): void => {
+    const transcript = transcriptRef.current;
+    if (transcript === null) return;
+    followLatestRef.current = true;
+    transcript.scrollTop = transcript.scrollHeight;
+    setShowLatest(false);
+  };
+
+  useLayoutEffect(() => {
+    const transcript = transcriptRef.current;
+    if (transcript === null) return;
+    if (conversation.status === "submitting") followLatestRef.current = true;
+    if (followLatestRef.current) {
+      transcript.scrollTop = transcript.scrollHeight;
+      setShowLatest(false);
+      return;
+    }
+    setShowLatest(
+      transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop > latestThreshold,
+    );
+  }, [conversation.status, conversation.turns.length, latestContentLength, latestDelivery]);
+
+  const transcript = (content: ReactNode, empty = false) => (
+    <div className="transcript-region">
+      <div
+        aria-label={empty ? undefined : "对话记录"}
+        aria-live={empty ? undefined : "polite"}
+        className={`transcript${empty ? " transcript--empty" : ""}`}
+        onScroll={(event) => {
+          const distance = event.currentTarget.scrollHeight
+            - event.currentTarget.clientHeight
+            - event.currentTarget.scrollTop;
+          const followsLatest = distance <= latestThreshold;
+          followLatestRef.current = followsLatest;
+          setShowLatest(!followsLatest);
+        }}
+        ref={transcriptRef}
+        role={empty ? undefined : "log"}
+        tabIndex={empty ? undefined : 0}
+      >
+        {content}
+      </div>
+      {showLatest && !empty ? (
+        <button
+          aria-label="回到最新消息"
+          className="transcript-jump-button"
+          onClick={scrollToLatest}
+          type="button"
+        >
+          回到最新
+        </button>
+      ) : null}
+    </div>
+  );
+
   if (conversation.turns.length === 0) {
-    return (
-      <div className="transcript transcript--empty">
+    return transcript(
+      <>
         <div className="transcript__mobile-agent">
           <span aria-hidden="true">C</span>
           <h2>Core Agent</h2>
@@ -55,7 +121,8 @@ export function Transcript({
           <span aria-hidden="true">C</span>
           <h2>Core Agent</h2>
         </div>
-      </div>
+      </>,
+      true,
     );
   }
   const busy = conversation.status === "submitting" || conversation.status === "streaming";
@@ -66,8 +133,8 @@ export function Transcript({
       .find((turn) => turn.role === "assistant" && turn.delivery === "failed")
       ?.id;
   }
-  return (
-    <div aria-live="polite" className="transcript" role="log">
+  return transcript(
+    <>
       <div className="transcript__mobile-agent">
         <span aria-hidden="true">C</span>
         <h2>Core Agent</h2>
@@ -99,7 +166,12 @@ export function Transcript({
               {turn.role === "assistant" ? <h2>Core Agent</h2> : null}
               {turn.content.length > 0 ? <p>{turn.content}</p> : null}
               {turn.delivery === "streaming" && turn.content.length === 0
-                ? <span className="stream-caret" aria-label="正在回复" />
+                ? (
+                  <span className="assistant-thinking">
+                    <span aria-hidden="true" className="stream-caret" />
+                    <span>正在思考…</span>
+                  </span>
+                )
                 : null}
               {failureReason !== undefined ? (
                 <div className="run-failure-notice">
@@ -115,6 +187,6 @@ export function Transcript({
           );
         })}
       </div>
-    </div>
+    </>,
   );
 }

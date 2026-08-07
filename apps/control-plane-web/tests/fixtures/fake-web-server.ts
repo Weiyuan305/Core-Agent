@@ -28,6 +28,13 @@ async function start(): Promise<void> {
         } as const;
       }
       await delay(12);
+      if (content === "匿名长回复界面测试" && options === undefined) {
+        sink.onDelta("这是一段用于验证长对话滚动区域的匿名合成内容。".repeat(80));
+        return {
+          status: "succeeded",
+          runId: "synthetic_run_long_success",
+        } as const;
+      }
       sink.onDelta(options === undefined ? "这是用于界面验收的" : "这是重新生成的");
       await delay(12);
       sink.onDelta("匿名合成回复。");
