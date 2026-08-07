@@ -1,6 +1,7 @@
 import Type, { type Static } from "typebox";
 
 import { OpaqueIdSchema, ResourceMetadataFields, UtcTimestampSchema } from "../common/primitives.js";
+import { AgentRunFailureCodeSchema } from "./failures.js";
 import { CaseRefSchema, StudentRefSchema } from "./refs.js";
 
 export const ContainerDesiredStateSchema = Type.Union([
@@ -95,6 +96,7 @@ export const AgentRunSchema = Type.Object(
     status: AgentRunStatusSchema,
     started_at: Type.Optional(UtcTimestampSchema),
     finished_at: Type.Optional(UtcTimestampSchema),
+    failure_code: Type.Optional(AgentRunFailureCodeSchema),
     failure_summary: Type.Optional(Type.String({ maxLength: 1000 })),
   },
   { additionalProperties: false, $id: "core-agent://v1/agent-run" },

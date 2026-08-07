@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import Schema from "typebox/schema";
 
+import * as Contracts from "../src/index.js";
+
 import {
   AgentRunSchema,
   ApprovalSchema,
@@ -186,6 +188,7 @@ test("runtime summaries enforce only the specified maximum length", () => {
     run_id: "run_demo", tenant_id: "tenant_demo", conversation_id: "conversation_demo",
     request_id: "request_demo", trace_id: "trace_demo", client_request_id: "client_request_demo",
     idempotency_key: "run_idempotency_demo", status: "failed",
+    failure_code: "RUN_FAILURE_UNKNOWN",
   };
   const task = {
     ...resource,
@@ -200,6 +203,56 @@ test("runtime summaries enforce only the specified maximum length", () => {
   assert.equal(Schema.Compile(RuntimeContainerSchema).Check({ ...container, failure_summary: "x".repeat(1001) }), false);
   assert.equal(Schema.Compile(AgentRunSchema).Check({ ...run, failure_summary: "x".repeat(1001) }), false);
   assert.equal(Schema.Compile(TaskSchema).Check({ ...task, result_summary: "x".repeat(1001) }), false);
+});
+
+test("Agent Run resources add a closed optional failure code compatibly", () => {
+  const validator = Schema.Compile(AgentRunSchema);
+  const failedRun = {
+    ...resource,
+    run_id: "run_demo",
+    tenant_id: "tenant_demo",
+    conversation_id: "conversation_demo",
+    request_id: "request_demo",
+    trace_id: "trace_demo",
+    client_request_id: "client_request_demo",
+    idempotency_key: "run_idempotency_demo",
+    status: "failed",
+  };
+  const failureCodes = [
+    "MODEL_BUSY",
+    "MODEL_SERVICE_UNAVAILABLE",
+    "MODEL_RESPONSE_TIMEOUT",
+    "MODEL_ACCESS_DENIED",
+    "MODEL_NOT_AVAILABLE",
+    "MODEL_RESPONSE_INVALID",
+    "MODEL_STREAM_INTERRUPTED",
+    "MODEL_EMPTY_RESPONSE",
+    "AGENT_RUNTIME_NOT_READY",
+    "RUN_INTERNAL_ERROR",
+    "RUN_FAILURE_UNKNOWN",
+  ] as const;
+
+  assert.equal(validator.Check(failedRun), true);
+  for (const failure_code of failureCodes) {
+    assert.equal(validator.Check({ ...failedRun, failure_code }), true, failure_code);
+  }
+  assert.equal(validator.Check({ ...failedRun, failure_code: "PROVIDER_503" }), false);
+  assert.equal(validator.Check({ ...failedRun, status: "succeeded", failure_code: "RUN_FAILURE_UNKNOWN" }), true);
+});
+
+test("Agent Run failure semantics require a code only for failed state", () => {
+  const candidate = (Contracts as Record<string, unknown>).validateAgentRunFailureState;
+  assert.equal(typeof candidate, "function");
+  if (typeof candidate !== "function") return;
+  const validate = candidate as (run: { status: string; failure_code?: string }) => Array<{ code: string }>;
+
+  assert.deepEqual(validate({ status: "failed", failure_code: "MODEL_BUSY" }), []);
+  assert.deepEqual(validate({ status: "running" }), []);
+  assert.deepEqual(validate({ status: "failed" }).map((item) => item.code), ["RUN_FAILURE_CODE_REQUIRED"]);
+  assert.deepEqual(
+    validate({ status: "succeeded", failure_code: "RUN_FAILURE_UNKNOWN" }).map((item) => item.code),
+    ["RUN_FAILURE_CODE_FORBIDDEN"],
+  );
 });
 
 test("clients cannot report observed state and volume deletion stays explicit", () => {

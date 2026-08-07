@@ -90,7 +90,7 @@ export const AgentRunFailureCodeSchema = Type.Union(
 export type AgentRunFailureCode = Static<typeof AgentRunFailureCodeSchema>;
 ```
 
-Model the Agent Run terminal invariant as a union/intersection so `status: "failed"` requires `failure_code` and all other statuses forbid it. Add optional `code` only to the `run.failed` event branch for historical compatibility. Register and export the new schema.
+Add `failure_code` as a structurally optional closed property on `AgentRunSchema`, plus `validateAgentRunFailureState` to require it exactly for failed Runs in new producers. Structural optionality preserves the additive v1 wire contract; PostgreSQL and repository validation enforce the stronger production invariant. Add optional `code` only to the `run.failed` event branch for historical compatibility. Export the schema but embed it in existing resource/event schemas instead of adding a new top-level registry file, because accepted release manifests are immutable exact file sets.
 
 - [ ] **Step 5: Release the additive contract snapshot**
 

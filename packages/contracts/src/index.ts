@@ -1,9 +1,10 @@
-export const CONTRACT_PACKAGE_VERSION = "0.3.0" as const;
+export const CONTRACT_PACKAGE_VERSION = "0.4.0" as const;
 export const WIRE_SCHEMA_VERSION = 1 as const;
 
 export * from "./common/primitives.js";
 export * from "./common/validation.js";
 export * from "./runtime/refs.js";
+export * from "./runtime/failures.js";
 export * from "./tenant/identity.js";
 export * from "./profile/profile.js";
 export * from "./approval/schema.js";

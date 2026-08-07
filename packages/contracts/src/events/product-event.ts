@@ -8,6 +8,7 @@ import {
   UtcTimestampSchema,
 } from "../common/primitives.js";
 import { type ContractViolation, violation } from "../common/validation.js";
+import { AgentRunFailureCodeSchema } from "../runtime/failures.js";
 import {
   ErrorCategorySchema,
   StableErrorCodeSchema,
@@ -123,7 +124,12 @@ const RunWaitingApprovalEventSchema = createRunEventBranch(
   "waiting_approval",
 );
 const RunCompletedEventSchema = createRunEventBranch("run.completed", "succeeded");
-const RunFailedEventSchema = createRunEventBranch("run.failed", "failed");
+const RunFailedEventSchema = createEventBranch("run.failed", {
+  run_id: OpaqueIdSchema,
+  status: Type.Literal("failed"),
+  code: Type.Optional(AgentRunFailureCodeSchema),
+  summary: Type.Optional(Type.String({ maxLength: 4000 })),
+});
 const RunCancelledEventSchema = createRunEventBranch("run.cancelled", "cancelled");
 
 export const RunEventSchema = Type.Union(

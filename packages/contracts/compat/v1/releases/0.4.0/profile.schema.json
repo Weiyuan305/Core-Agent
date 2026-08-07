@@ -1,0 +1,91 @@
+{
+  "$id": "core-agent://v1/profile",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "created_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "hermes_profile_ref": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "owner_actor_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "profile_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "profile_kind": {
+      "anyOf": [
+        {
+          "const": "default",
+          "type": "string"
+        },
+        {
+          "const": "consultant",
+          "type": "string"
+        }
+      ]
+    },
+    "resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "status": {
+      "anyOf": [
+        {
+          "const": "provisioning",
+          "type": "string"
+        },
+        {
+          "const": "active",
+          "type": "string"
+        },
+        {
+          "const": "suspended",
+          "type": "string"
+        },
+        {
+          "const": "archived",
+          "type": "string"
+        }
+      ]
+    },
+    "tenant_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "resource_version",
+    "created_at",
+    "updated_at",
+    "profile_id",
+    "tenant_id",
+    "owner_actor_id",
+    "profile_kind",
+    "status",
+    "hermes_profile_ref"
+  ],
+  "type": "object"
+}

@@ -85,6 +85,30 @@ test("accepts all 22 approved event types across ten strict families", () => {
   }
 });
 
+test("run.failed accepts a closed optional failure code for historical compatibility", () => {
+  const validator = Schema.Compile(ProductEventSchema);
+  const legacyEvent = {
+    ...base,
+    event_type: "run.failed",
+    payload: { run_id: "run_demo", status: "failed" },
+  };
+  const currentEvent = {
+    ...legacyEvent,
+    payload: {
+      ...legacyEvent.payload,
+      code: "MODEL_SERVICE_UNAVAILABLE",
+      summary: "Agent execution failed after dispatch",
+    },
+  };
+
+  assert.equal(validator.Check(legacyEvent), true);
+  assert.equal(validator.Check(currentEvent), true);
+  assert.equal(validator.Check({
+    ...currentEvent,
+    payload: { ...currentEvent.payload, code: "PROVIDER_503" },
+  }), false);
+});
+
 test("rejects every fixed event type and status contradiction", () => {
   const contradictions = [
     { event_type: "conversation.created", payload: { conversation_id: "conversation_demo", status: "archived" } },

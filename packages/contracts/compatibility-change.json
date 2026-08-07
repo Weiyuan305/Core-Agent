@@ -1,6 +1,6 @@
 {
-  "package_version": "0.3.0",
+  "package_version": "0.4.0",
   "wire_schema_version": 1,
   "change_level": "minor",
-  "reason": "Add the runtime.command_accepted ProductEvent branch"
+  "reason": "Add structured Agent Run failure codes and an optional run.failed event code"
 }

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0 - 2026-08-07
+
+- Add the closed `AgentRunFailureCode` vocabulary and expose it on Agent Run
+  resources. Structural compatibility remains additive; producer and persistence
+  invariants require it exactly for failed Runs.
+- Add the optional `run.failed.payload.code` field so historical events remain
+  readable while new producers can persist structured failure semantics.
+
 ## 0.3.0 - 2026-08-04
 
 - Add the `runtime.command_accepted` ProductEvent branch with command-specific
