@@ -581,6 +581,20 @@ test("CI preserves contracts and separates deterministic runtime gates", async (
   assert.equal(workflow.jobs.compose.steps.find((step) => step.name === "Validate Compose configuration").env.CORE_AGENT_DOCKER_SOCKET_SOURCE, "/var/run/docker.sock");
 });
 
+test("isolated CI consumers build shared contracts before execution", async () => {
+  const workflow = await yaml(".github/workflows/runtime-contract.yml");
+  for (const [jobName, consumerCommand] of [
+    ["web-browser", "npm run test:browser -w @core-agent/control-plane-web"],
+    ["compose", "npm run test:runtime"],
+  ]) {
+    const steps = workflow.jobs[jobName].steps;
+    const buildIndex = steps.findIndex((step) => step.run === "npm run contracts:build");
+    const consumerIndex = steps.findIndex((step) => step.run === consumerCommand);
+    assert(buildIndex >= 0, `${jobName} must build shared contracts`);
+    assert(consumerIndex > buildIndex, `${jobName} must build shared contracts before its consumer`);
+  }
+});
+
 test("runtime example environment contains paths and generated references only", async () => {
   const text = await source(".env.runtime.example");
   assert.match(text, /CORE_AGENT_PLATFORM=linux\/\$\{ARCHITECTURE\}/u);
