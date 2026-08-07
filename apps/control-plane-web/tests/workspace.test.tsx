@@ -30,6 +30,12 @@ function fakePort(overrides: Partial<ClientGatewayPort> = {}): ClientGatewayPort
       yield { type: "message.completed" };
       yield { type: "run.completed" };
     }),
+    retryConversation: vi.fn(async function* (): AsyncGenerator<ClientFrame> {
+      yield { type: "run.started" };
+      yield { type: "message.delta", delta: "重试成功" };
+      yield { type: "message.completed" };
+      yield { type: "run.completed" };
+    }),
     restartApiWorker: vi.fn(async () => undefined),
     health: vi.fn(async () => ({ state: "ready" as const })),
     ...overrides,
@@ -88,6 +94,103 @@ describe("consultant workspace", () => {
     expect((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled).toBe(true);
     await act(async () => { release(); await hold; });
     await screen.findByText("完成");
+  });
+
+  it("renders a zero-content failure as one calm status card and retries through the child-Run route", async () => {
+    const runConversation = vi.fn(async function* (): AsyncGenerator<ClientFrame> {
+      yield { type: "run.started" };
+      yield { type: "run.failed", reason: "BUSY" };
+    });
+    const retryConversation = vi.fn(async function* (): AsyncGenerator<ClientFrame> {
+      yield { type: "run.started" };
+      yield { type: "message.delta", delta: "重试后的回复" };
+      yield { type: "message.completed" };
+      yield { type: "run.completed" };
+    });
+    const port = fakePort({
+      runConversation,
+      retryConversation,
+    });
+    await renderReady(port);
+    const user = userEvent.setup();
+    const composer = screen.getByRole("textbox", { name: "给 Core Agent 发送任务或指令" });
+    await user.type(composer, "需要重试");
+    const send = screen.getByRole("button", { name: "发送" });
+    await user.click(send);
+
+    const message = await screen.findByText("现在请求较多，请稍后再试。");
+    expect(message.closest(".run-failure-card")).not.toBeNull();
+    expect(document.querySelector(".stream-caret")).toBeNull();
+    expect(screen.getByRole("log").getAttribute("aria-live")).toBe("polite");
+    expect(document.activeElement).toBe(send);
+
+    await user.click(screen.getByRole("button", { name: "再试一次" }));
+    await screen.findByText("重试后的回复");
+    expect(retryConversation).toHaveBeenCalledWith(firstId);
+    expect(runConversation).toHaveBeenCalledOnce();
+  });
+
+  it("keeps partial content and shows the precise incomplete notice", async () => {
+    const port = fakePort({
+      async *runConversation(): AsyncGenerator<ClientFrame> {
+        yield { type: "run.started" };
+        yield { type: "message.delta", delta: "已经生成的内容" };
+        yield { type: "run.failed", reason: "REPLY_INTERRUPTED" };
+      },
+    });
+    await renderReady(port);
+    const user = userEvent.setup();
+    await user.type(screen.getByRole("textbox"), "触发部分回复");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByText("已经生成的内容")).not.toBeNull();
+    expect(screen.getByText("这条回复没有完成，内容可能不完整。")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "重新生成" })).not.toBeNull();
+  });
+
+  it("does not show a dead action for service configuration failures", async () => {
+    const port = fakePort({
+      async *runConversation(): AsyncGenerator<ClientFrame> {
+        yield { type: "run.started" };
+        yield { type: "run.failed", reason: "SERVICE_UNAVAILABLE" };
+      },
+    });
+    await renderReady(port);
+    const user = userEvent.setup();
+    await user.type(screen.getByRole("textbox"), "不可重试场景");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByText("这项服务暂时无法使用。如问题持续，请联系支持。")).not.toBeNull();
+    expect(screen.queryByRole("button", { name: /(?:重试|支持)/u })).toBeNull();
+  });
+
+  it("shows one disabled loading action while a retry is in flight", async () => {
+    let release!: () => void;
+    let admitted!: () => void;
+    const isAdmitted = new Promise<void>((resolve) => { admitted = resolve; });
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    const port = fakePort({
+      async *runConversation(): AsyncGenerator<ClientFrame> {
+        yield { type: "run.started" };
+        yield { type: "run.failed", reason: "NO_REPLY" };
+      },
+      async *retryConversation(): AsyncGenerator<ClientFrame> {
+        yield { type: "run.started" };
+        admitted();
+        await hold;
+        yield { type: "message.delta", delta: "恢复" };
+        yield { type: "message.completed" };
+        yield { type: "run.completed" };
+      },
+    });
+    await renderReady(port);
+    const user = userEvent.setup();
+    await user.type(screen.getByRole("textbox"), "无回复");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await user.click(await screen.findByRole("button", { name: "再试一次" }));
+    await isAdmitted;
+    const loading = screen.getByRole("button", { name: "正在处理…" });
+    expect((loading as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => { release(); await hold; });
+    await screen.findByText("恢复");
   });
 
   it("creates and selects a new real Conversation", async () => {

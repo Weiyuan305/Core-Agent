@@ -1,6 +1,6 @@
 import type { RefObject } from "react";
 
-import type { ClientConversation } from "../../shared/protocol.js";
+import type { ClientConversation, ClientRunFailureReason } from "../../shared/protocol.js";
 import { BackIcon, InspectorIcon } from "../icons.js";
 import type { ConversationChatState } from "../state/chat-reducer.js";
 import { MessageComposer } from "./message-composer.js";
@@ -12,9 +12,10 @@ interface ConversationWorkspaceProps {
   readonly conversationState: ConversationChatState;
   readonly inspectorOpen: boolean;
   readonly inspectorTriggerRef: RefObject<HTMLButtonElement | null>;
+  readonly failureActionBusy: boolean;
   readonly onBack: () => void;
   readonly onDraftChange: (value: string) => void;
-  readonly onRetry: () => void;
+  readonly onFailureAction: (reason: ClientRunFailureReason) => void;
   readonly onSend: () => void;
   readonly onToggleInspector: () => void;
 }
@@ -44,7 +45,11 @@ export function ConversationWorkspace(props: ConversationWorkspaceProps) {
           <InspectorIcon />
         </button>
       </header>
-      <Transcript conversation={props.conversationState} onRetry={props.onRetry} />
+      <Transcript
+        actionBusy={busy || props.failureActionBusy}
+        conversation={props.conversationState}
+        onFailureAction={props.onFailureAction}
+      />
       <MessageComposer
         busy={busy}
         draft={props.conversationState.draft}

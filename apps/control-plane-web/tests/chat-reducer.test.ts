@@ -36,13 +36,33 @@ describe("chat reducer", () => {
     expect(state.conversations[firstId]?.status).toBe("idle");
   });
 
-  it("retains the visible retry message without duplicating the failed attempt", () => {
+  it("retains partial content and its public failure reason", () => {
     let state = reduceChatState(bootstrapped(), { type: "run.started", localMessage: "重试这条" });
     state = reduceChatState(state, { type: "run.frame", frame: { type: "run.started" } });
-    state = reduceChatState(state, { type: "run.frame", frame: { type: "run.failed", code: "CLIENT_RUN_FAILED" } });
+    state = reduceChatState(state, { type: "run.frame", frame: { type: "message.delta", delta: "部分内容" } });
+    state = reduceChatState(state, { type: "run.frame", frame: { type: "run.failed", reason: "REPLY_INTERRUPTED" } });
     expect(state.conversations[firstId]?.status).toBe("failed");
     expect(state.conversations[firstId]?.lastSubmittedMessage).toBe("重试这条");
     expect(state.conversations[firstId]?.turns).toHaveLength(2);
+    expect(state.conversations[firstId]?.turns.at(-1)).toMatchObject({
+      content: "部分内容",
+      delivery: "failed",
+      failureReason: "REPLY_INTERRUPTED",
+    });
+  });
+
+  it("starts an explicit retry without duplicating the consultant turn", () => {
+    let state = reduceChatState(bootstrapped(), { type: "run.started", localMessage: "只出现一次" });
+    state = reduceChatState(state, { type: "run.frame", frame: { type: "run.started" } });
+    state = reduceChatState(state, { type: "run.frame", frame: { type: "run.failed", reason: "BUSY" } });
+    state = reduceChatState(state, { type: "retry.started" });
+    expect(state.conversations[firstId]?.turns.map((turn) => turn.role)).toEqual([
+      "consultant",
+      "assistant",
+      "assistant",
+    ]);
+    expect(state.conversations[firstId]?.turns.filter((turn) => turn.role === "consultant")).toHaveLength(1);
+    expect(state.conversations[firstId]?.status).toBe("submitting");
   });
 
   it("rejects impossible reducer transitions", () => {

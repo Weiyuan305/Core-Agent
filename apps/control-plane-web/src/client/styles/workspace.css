@@ -323,7 +323,7 @@
   white-space: pre-wrap;
 }
 
-.turn h3 {
+.turn h2 {
   color: var(--action);
   font-size: 14px;
   font-weight: 600;
@@ -352,15 +352,52 @@
   width: 2px;
 }
 
-.turn__failure {
+.run-failure-card,
+.run-failure-notice {
   align-items: center;
-  color: var(--muted);
   display: flex;
-  gap: 12px;
-  margin-top: 10px;
+  gap: 11px;
 }
 
-.turn__failure p {
+.run-failure-card {
+  align-self: flex-start;
+  background: var(--canvas-secondary);
+  border: 1px solid var(--hairline-strong);
+  border-radius: 14px;
+  color: var(--ink);
+  line-height: 1.45;
+  max-width: 560px;
+  padding: 14px 16px;
+}
+
+.run-failure-notice {
+  border-top: 1px solid var(--hairline);
+  color: var(--muted);
+  margin-top: 10px;
+  padding-top: 11px;
+}
+
+.run-failure-card__indicator {
+  align-self: flex-start;
+  background: var(--muted-secondary);
+  border-radius: 50%;
+  flex: 0 0 auto;
+  height: 7px;
+  margin-top: 7px;
+  width: 7px;
+}
+
+.run-failure-card__content {
+  align-items: center;
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  min-width: 0;
+}
+
+.run-failure-card__content p {
+  flex: 1 1 260px;
   font-size: 14px;
 }
 
@@ -368,6 +405,21 @@
   border: 0;
   min-height: 44px;
   padding: 0 10px;
+}
+
+.run-failure-card__action {
+  border-radius: 9px;
+  flex: 0 0 auto;
+  margin: -8px -8px -8px 0;
+}
+
+.run-failure-card__action:hover:not(:disabled) {
+  background: rgba(0, 102, 204, 0.08);
+}
+
+.run-failure-card__action:disabled {
+  color: var(--muted-secondary);
+  cursor: default;
 }
 
 .composer-region {
@@ -668,6 +720,10 @@
     border-radius: 0;
     border-right: 2px solid var(--action);
     padding: 4px 17px 4px 0;
+  }
+
+  .run-failure-card {
+    max-width: 100%;
   }
 
   .composer-region {

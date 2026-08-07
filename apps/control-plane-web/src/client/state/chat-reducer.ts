@@ -1,4 +1,8 @@
-import { isValidClientMessage, type ClientFrame } from "../../shared/protocol.js";
+import {
+  isValidClientMessage,
+  type ClientFrame,
+  type ClientRunFailureReason,
+} from "../../shared/protocol.js";
 
 export type ChatStatus = "idle" | "submitting" | "streaming" | "failed";
 
@@ -7,6 +11,7 @@ export interface ChatTurn {
   readonly role: "consultant" | "assistant";
   readonly content: string;
   readonly delivery: "complete" | "streaming" | "failed";
+  readonly failureReason?: ClientRunFailureReason;
 }
 
 export interface ConversationChatState {
@@ -28,6 +33,7 @@ export type ChatAction =
   | { readonly type: "conversation.selected"; readonly conversationId: string }
   | { readonly type: "draft.changed"; readonly conversationId?: string; readonly value: string }
   | { readonly type: "run.started"; readonly conversationId?: string; readonly localMessage: string }
+  | { readonly type: "retry.started"; readonly conversationId?: string }
   | { readonly type: "run.frame"; readonly conversationId?: string; readonly frame: ClientFrame };
 
 function invalidState(): never {
@@ -90,7 +96,11 @@ function receiveFrame(state: ChatState, conversationId: string, frame: ClientFra
   }
   if (frame.type === "run.failed") {
     if (!new Set<ChatStatus>(["submitting", "streaming"]).has(conversation.status)) return invalidState();
-    turns[assistantIndex] = Object.freeze({ ...assistant, delivery: "failed" });
+    turns[assistantIndex] = Object.freeze({
+      ...assistant,
+      delivery: "failed",
+      failureReason: frame.reason,
+    });
     return updateConversation(state, conversationId, {
       ...conversation,
       status: "failed",
@@ -152,6 +162,29 @@ export function reduceChatState(state: ChatState, action: ChatAction): ChatState
       status: "submitting",
       turns: Object.freeze([...conversation.turns, consultant, assistant]),
     }, state.nextTurnNumber + 2);
+  }
+  if (action.type === "retry.started") {
+    const conversationId = targetConversationId(state, action.conversationId);
+    const conversation = state.conversations[conversationId] ?? invalidState();
+    const failedTurn = conversation.turns.at(-1);
+    if (
+      conversation.status !== "failed"
+      || failedTurn?.role !== "assistant"
+      || failedTurn.delivery !== "failed"
+      || failedTurn.failureReason === undefined
+      || conversation.lastSubmittedMessage === undefined
+    ) return invalidState();
+    const assistant: ChatTurn = Object.freeze({
+      id: `turn_${state.nextTurnNumber}`,
+      role: "assistant",
+      content: "",
+      delivery: "streaming",
+    });
+    return updateConversation(state, conversationId, {
+      ...conversation,
+      status: "submitting",
+      turns: Object.freeze([...conversation.turns, assistant]),
+    }, state.nextTurnNumber + 1);
   }
   if (action.type === "run.frame") {
     return receiveFrame(state, targetConversationId(state, action.conversationId), action.frame);

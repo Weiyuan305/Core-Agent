@@ -54,3 +54,28 @@ test("completes the consultant flow without overflow or accessibility violations
   });
   expect(violations).toEqual([]);
 });
+
+test("shows a calm retryable failure without technical details", async ({ page }) => {
+  await page.addInitScript({ path: axePath });
+  await page.goto("/");
+  const composer = page.getByRole("textbox", { name: "给 Core Agent 发送任务或指令" });
+  await composer.fill("匿名失败界面测试");
+  await page.getByRole("button", { name: "发送" }).click();
+
+  await expect(page.getByText("现在请求较多，请稍后再试。")).toBeVisible();
+  const retry = page.getByRole("button", { name: "再试一次" });
+  await retry.focus();
+  await expect(retry).toBeFocused();
+  const transcript = page.getByRole("log");
+  await expect(transcript).not.toContainText(/(?:503|SSE|Hermes|Worker|MODEL_|CLIENT_RUN_FAILED|tokenhub)/u);
+
+  await retry.click();
+  await expect(page.getByText("这是重新生成的匿名合成回复。")).toBeVisible();
+  await expect(retry).toHaveCount(0);
+
+  const violations = await page.evaluate(async () => {
+    const axe = (window as unknown as { axe: { run: () => Promise<{ violations: readonly unknown[] }> } }).axe;
+    return (await axe.run()).violations;
+  });
+  expect(violations).toEqual([]);
+});

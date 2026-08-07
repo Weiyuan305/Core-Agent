@@ -17,12 +17,24 @@ async function start(): Promise<void> {
       conversationNumber += 1;
       return `synthetic_internal_conversation_${conversationNumber}`;
     },
-    async runPrompt(_conversationId, _content, sink): Promise<void> {
+    async runPrompt(_conversationId, content, sink, options) {
       sink.onStarted();
+      if (content === "匿名失败界面测试" && options === undefined) {
+        await delay(12);
+        return {
+          status: "failed",
+          runId: "synthetic_run_busy",
+          failureCode: "MODEL_BUSY",
+        } as const;
+      }
       await delay(12);
-      sink.onDelta("这是用于界面验收的");
+      sink.onDelta(options === undefined ? "这是用于界面验收的" : "这是重新生成的");
       await delay(12);
       sink.onDelta("匿名合成回复。");
+      return {
+        status: "succeeded",
+        runId: options === undefined ? "synthetic_run_success" : "synthetic_run_retry_success",
+      } as const;
     },
     async restartApiWorker(): Promise<void> {
       await delay(24);

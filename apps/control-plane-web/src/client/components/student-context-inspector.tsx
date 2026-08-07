@@ -13,11 +13,11 @@ export function StudentContextInspector(props: StudentContextInspectorProps) {
   const reduceMotion = useReducedMotion();
   return (
     <motion.aside
-      animate={{ opacity: 1, x: 0 }}
+      animate={{ x: 0 }}
       aria-label="当前学生"
       className="student-inspector"
-      exit={{ opacity: 0, x: reduceMotion ? 0 : 24 }}
-      initial={{ opacity: 0, x: reduceMotion ? 0 : 24 }}
+      exit={{ x: reduceMotion ? 0 : 24 }}
+      initial={{ x: reduceMotion ? 0 : 24 }}
       transition={reduceMotion ? { duration: 0.12 } : { type: "spring", bounce: 0, duration: 0.4 }}
     >
       <header className="student-inspector__header">
