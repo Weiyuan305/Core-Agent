@@ -155,4 +155,3 @@ clone cost bounded while the source lock preserves immutable upstream provenance
 - [Managed Hermes terminal error projection](0007-managed-hermes-error-projection.md)
 - [Hermes source vendoring implementation plan](../superpowers/plans/2026-08-07-hermes-source-vendoring.md)
 - [Conversation Reliability v1 design](../superpowers/specs/2026-08-07-conversation-reliability-v1-design.md)
-
