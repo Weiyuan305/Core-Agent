@@ -23,6 +23,13 @@ gates are implemented. The opt-in real Hermes acceptance smoke is available but
 AC10 remains pending until it runs on a target platform with a reviewed
 Core-Agent product-image digest.
 
+After the current live-provider conversation acceptance is recorded, the next
+runtime-distribution migration will vendor the reviewed Hermes source into this
+monorepo and build the same isolated company runtime from source. The accepted
+decision and deferred execution steps are recorded in
+[ADR 0008](docs/architecture/0008-vendored-hermes-source-and-upstream-sync.md) and
+the [Hermes source vendoring plan](docs/superpowers/plans/2026-08-07-hermes-source-vendoring.md).
+
 ## Control Plane Contracts
 
 The versioned Control Plane wire contracts live in
