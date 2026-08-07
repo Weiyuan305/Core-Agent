@@ -238,7 +238,7 @@ test("Agent Run retry creates a distinct queued child only from a failed parent 
   const setup = await setupConversation("tenant_run_retry");
   const parentRequest = runRequest("idem_parent_run", "client_parent_run", "message_parent_run");
   const parent = await createAgentRun({ db, providerCatalog, now: () => admissionNow }, setup.context, setup.conversation.conversation_id, parentRequest);
-  await db.updateTable("agent_runs").set({ status: "failed", finished_at: admissionNow, failure_summary: "Synthetic parent failure" })
+  await db.updateTable("agent_runs").set({ status: "failed", finished_at: admissionNow, failure_code: "RUN_FAILURE_UNKNOWN", failure_summary: "Synthetic parent failure" })
     .where("tenant_id", "=", setup.context.tenantId).where("run_id", "=", parent.run_id).execute();
   const childInput = withPayloadHash({
     schema_version: 1 as const,
@@ -270,11 +270,11 @@ test("Agent Run retry hides absent, cross-tenant, and other-Conversation parents
   const first = await setupConversation("tenant_run_parent_a", "idem_parent_conversation_a");
   const second = await setupConversation("tenant_run_parent_b", "idem_parent_conversation_b");
   const secondParent = await createAgentRun({ db, providerCatalog, now: () => admissionNow }, second.context, second.conversation.conversation_id, runRequest("idem_parent_other_tenant", "client_parent_other_tenant", "message_parent_other_tenant"));
-  await db.updateTable("agent_runs").set({ status: "failed", finished_at: admissionNow, failure_summary: "Synthetic" })
+  await db.updateTable("agent_runs").set({ status: "failed", finished_at: admissionNow, failure_code: "RUN_FAILURE_UNKNOWN", failure_summary: "Synthetic" })
     .where("tenant_id", "=", second.context.tenantId).where("run_id", "=", secondParent.run_id).execute();
   const secondConversation = await createConversation({ db, now: () => admissionNow }, first.context, conversationRequest(first.context.tenantId, first.profileId, "idem_second_conversation_same_tenant"));
   const otherConversationParent = await createAgentRun({ db, providerCatalog, now: () => admissionNow }, first.context, secondConversation.conversation_id, runRequest("idem_parent_other_conversation", "client_parent_other_conversation", "message_parent_other_conversation"));
-  await db.updateTable("agent_runs").set({ status: "failed", finished_at: admissionNow, failure_summary: "Synthetic" })
+  await db.updateTable("agent_runs").set({ status: "failed", finished_at: admissionNow, failure_code: "RUN_FAILURE_UNKNOWN", failure_summary: "Synthetic" })
     .where("tenant_id", "=", first.context.tenantId).where("run_id", "=", otherConversationParent.run_id).execute();
 
   for (const [key, parentRunId] of [

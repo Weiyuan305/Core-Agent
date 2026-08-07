@@ -80,6 +80,7 @@ export {
 export { WorkerRuntimeRepository, type ProvisionAdmissionResult, type ProvisionCompletionResult, type ProvisionFailureResult, type ReconcileClaimedIntent, type ReconcileFailureResult, type ReconcileRetryResult, type ReconcileSuccessIntent, type RuntimeWorkerJobRef, type StoredProvisionFacts, type StoredProvisionProfile, type StoredReconcileFacts } from "./repositories/worker-runtime.js";
 export {
   WorkerAgentRunRepository,
+  type AgentRunFailure,
   type AgentRunBeginResult,
   type AgentRunWorkerJobRef,
   type StoredAgentRunExecutionFacts,

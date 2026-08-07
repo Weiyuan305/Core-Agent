@@ -96,7 +96,7 @@ test("run.failed accepts a closed optional failure code for historical compatibi
     ...legacyEvent,
     payload: {
       ...legacyEvent.payload,
-      code: "MODEL_SERVICE_UNAVAILABLE",
+      failure_code: "MODEL_SERVICE_UNAVAILABLE",
       summary: "Agent execution failed after dispatch",
     },
   };
@@ -105,7 +105,7 @@ test("run.failed accepts a closed optional failure code for historical compatibi
   assert.equal(validator.Check(currentEvent), true);
   assert.equal(validator.Check({
     ...currentEvent,
-    payload: { ...currentEvent.payload, code: "PROVIDER_503" },
+    payload: { ...currentEvent.payload, failure_code: "PROVIDER_503" },
   }), false);
 });
 

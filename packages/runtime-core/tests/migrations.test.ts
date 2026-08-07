@@ -90,14 +90,14 @@ test.after(async () => {
   await db.destroy();
 });
 
-test("empty database migrates exactly to schema version 8 with Worker claim indexes", async () => {
+test("empty database migrates exactly to schema version 9 with Agent Run failure codes", async () => {
   await applyMigrations(pool, migrationsDirectory);
 
-  assert.equal(EXPECTED_SCHEMA_VERSION, 8);
+  assert.equal(EXPECTED_SCHEMA_VERSION, 9);
   assert.equal(await readSchemaVersion(db), EXPECTED_SCHEMA_VERSION);
   await assert.doesNotReject(assertSchemaVersion(db, EXPECTED_SCHEMA_VERSION));
   await assert.rejects(assertSchemaVersion(db, 3), /ahead/);
-  await assert.rejects(assertSchemaVersion(db, 9), /behind/);
+  await assert.rejects(assertSchemaVersion(db, 10), /behind/);
   const runtimeCommandColumn = await sql<{ column_name: string }>`
     select column_name from information_schema.columns
     where table_schema = 'public' and table_name = 'worker_jobs' and column_name = 'runtime_command'
@@ -113,6 +113,11 @@ test("empty database migrates exactly to schema version 8 with Worker claim inde
     ) order by column_name
   `.execute(db);
   assert.deepEqual(workerFactColumns.rows.map((row) => row.column_name), ["command_version", "last_error_summary", "lease_expires_at", "lease_owner", "runtime_platform", "target_command_version"]);
+  const agentRunFailureColumn = await sql<{ column_name: string }>`
+    select column_name from information_schema.columns
+    where table_schema = 'public' and table_name = 'agent_runs' and column_name = 'failure_code'
+  `.execute(db);
+  assert.deepEqual(agentRunFailureColumn.rows, [{ column_name: "failure_code" }]);
   const indexes = await sql<{ indexname: string }>`
     select indexname from pg_indexes
     where schemaname = 'public' and indexname in (
@@ -132,15 +137,16 @@ test("empty database migrates exactly to schema version 8 with Worker claim inde
   ]);
 });
 
-test("version 8 upgrades a genuine v7 database and supports Worker claim plans", { timeout: 10_000 }, async () => {
+test("version 9 upgrades a genuine v7 database and supports Worker claim plans", { timeout: 10_000 }, async () => {
   const v7Directory = await mkdtemp(join(tmpdir(), "core-agent-v7-migrations-"));
   await cp(migrationsDirectory, v7Directory, { recursive: true });
   await rm(join(v7Directory, "008_outbox_exhausted_recovery_index.sql"));
+  await rm(join(v7Directory, "009_agent_run_failure_code.sql"));
   try {
     await applyMigrations(pool, v7Directory);
     assert.equal(await readSchemaVersion(db), 7);
     await applyMigrations(pool, migrationsDirectory);
-    assert.equal(await readSchemaVersion(db), 8);
+    assert.equal(await readSchemaVersion(db), 9);
 
     const plans = await db.connection().execute(async (connection) => {
       await sql`set enable_seqscan = off`.execute(connection);
@@ -181,6 +187,80 @@ test("version 8 upgrades a genuine v7 database and supports Worker claim plans",
   }
 });
 
+test("version 9 backfills failed Runs and enforces failure code state", async () => {
+  const v8Directory = await mkdtemp(join(tmpdir(), "core-agent-v8-migrations-"));
+  await cp(migrationsDirectory, v8Directory, { recursive: true });
+  await rm(join(v8Directory, "009_agent_run_failure_code.sql"));
+  try {
+    await applyMigrations(pool, v8Directory);
+    assert.equal(await readSchemaVersion(db), 8);
+    const tenantId = "tenant_v8_failure_upgrade";
+    const actorId = `actor_${tenantId}`;
+    const profileId = "profile_v8_failure_upgrade";
+    const conversationId = "conversation_v8_failure_upgrade";
+    const createdAt = new Date("2026-08-07T00:00:00.000Z");
+    await seedTenant(tenantId);
+    await seedActor(tenantId, actorId);
+    await seedProfile(tenantId, profileId);
+    await db.insertInto("conversations").values({
+      tenant_id: tenantId,
+      conversation_id: conversationId,
+      profile_id: profileId,
+      created_by_actor_id: actorId,
+      status: "active",
+      schema_version: 1,
+      resource_version: 1,
+      student_ref: null,
+      case_ref: null,
+      created_at: createdAt,
+      updated_at: createdAt,
+    }).execute();
+    await db.insertInto("agent_runs").values([
+      {
+        tenant_id: tenantId, run_id: "run_v8_failed", conversation_id: conversationId,
+        request_id: "request_v8_failed", trace_id: "trace_v8_failed",
+        client_request_id: "client_v8_failed", idempotency_key: "idem_v8_failed",
+        parent_run_id: null, schema_version: 1, resource_version: 1, status: "failed",
+        started_at: createdAt, finished_at: createdAt, failure_summary: "Legacy failure",
+        created_at: createdAt, updated_at: createdAt,
+      },
+      {
+        tenant_id: tenantId, run_id: "run_v8_succeeded", conversation_id: conversationId,
+        request_id: "request_v8_succeeded", trace_id: "trace_v8_succeeded",
+        client_request_id: "client_v8_succeeded", idempotency_key: "idem_v8_succeeded",
+        parent_run_id: null, schema_version: 1, resource_version: 1, status: "succeeded",
+        started_at: createdAt, finished_at: createdAt, failure_summary: null,
+        created_at: createdAt, updated_at: createdAt,
+      },
+    ]).execute();
+
+    await applyMigrations(pool, migrationsDirectory);
+
+    const rows = await pool.query<{ run_id: string; failure_code: string | null }>(
+      "select run_id, failure_code from agent_runs where tenant_id = $1 order by run_id",
+      [tenantId],
+    );
+    assert.deepEqual(rows.rows, [
+      { run_id: "run_v8_failed", failure_code: "RUN_FAILURE_UNKNOWN" },
+      { run_id: "run_v8_succeeded", failure_code: null },
+    ]);
+    await assert.rejects(
+      pool.query("update agent_runs set failure_code = null where tenant_id = $1 and run_id = 'run_v8_failed'", [tenantId]),
+      /agent_runs_failure_code_state_check/,
+    );
+    await assert.rejects(
+      pool.query("update agent_runs set failure_code = 'RUN_INTERNAL_ERROR' where tenant_id = $1 and run_id = 'run_v8_succeeded'", [tenantId]),
+      /agent_runs_failure_code_state_check/,
+    );
+    await assert.rejects(
+      pool.query("update agent_runs set failure_code = 'PROVIDER_503' where tenant_id = $1 and run_id = 'run_v8_failed'", [tenantId]),
+      /agent_runs_failure_code_allowlist_check/,
+    );
+  } finally {
+    await rm(v8Directory, { recursive: true, force: true });
+  }
+});
+
 test("version 4 terminalizes ambiguous legacy reconcile jobs and enforces the job-kind invariant", async () => {
   const legacyDirectory = await mkdtemp(join(tmpdir(), "core-agent-v3-migrations-"));
   await cp(migrationsDirectory, legacyDirectory, { recursive: true });
@@ -189,6 +269,7 @@ test("version 4 terminalizes ambiguous legacy reconcile jobs and enforces the jo
   await rm(join(legacyDirectory, "006_worker_job_attempt_fence.sql"));
   await rm(join(legacyDirectory, "007_agent_run_claim_indexes.sql"));
   await rm(join(legacyDirectory, "008_outbox_exhausted_recovery_index.sql"));
+  await rm(join(legacyDirectory, "009_agent_run_failure_code.sql"));
   try {
     await applyMigrations(pool, legacyDirectory);
     await seedTenant("tenant_upgrade");
@@ -302,6 +383,7 @@ test("version 5 fails genuine active v4 command intent closed and preserves term
   await rm(join(v4Directory, "006_worker_job_attempt_fence.sql"));
   await rm(join(v4Directory, "007_agent_run_claim_indexes.sql"));
   await rm(join(v4Directory, "008_outbox_exhausted_recovery_index.sql"));
+  await rm(join(v4Directory, "009_agent_run_failure_code.sql"));
   try {
     await applyMigrations(pool, v4Directory);
     await seedTenant("tenant_v4_worker_upgrade");
@@ -333,6 +415,7 @@ test("latest schema upgrades a genuine v5 database through the version 6 Worker 
   await rm(join(v5Directory, "006_worker_job_attempt_fence.sql"));
   await rm(join(v5Directory, "007_agent_run_claim_indexes.sql"));
   await rm(join(v5Directory, "008_outbox_exhausted_recovery_index.sql"));
+  await rm(join(v5Directory, "009_agent_run_failure_code.sql"));
   try {
     await applyMigrations(pool, v5Directory);
     assert.equal(await readSchemaVersion(db), 5);
@@ -363,6 +446,7 @@ test("version 6 fails closed when genuine v5 storage already exceeds the Worker 
   await rm(join(v5Directory, "006_worker_job_attempt_fence.sql"));
   await rm(join(v5Directory, "007_agent_run_claim_indexes.sql"));
   await rm(join(v5Directory, "008_outbox_exhausted_recovery_index.sql"));
+  await rm(join(v5Directory, "009_agent_run_failure_code.sql"));
   try {
     await applyMigrations(pool, v5Directory);
     await seedTenant("tenant_v5_invalid_attempt");

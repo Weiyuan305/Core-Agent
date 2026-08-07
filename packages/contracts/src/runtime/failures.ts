@@ -1,4 +1,4 @@
-import Type, { type Static } from "typebox";
+import Type from "typebox";
 
 import { type ContractViolation, violation } from "../common/validation.js";
 
@@ -17,10 +17,22 @@ export const AGENT_RUN_FAILURE_CODES = [
 ] as const;
 
 export const AgentRunFailureCodeSchema = Type.Union(
-  AGENT_RUN_FAILURE_CODES.map((code) => Type.Literal(code)),
+  [
+    Type.Literal("MODEL_BUSY"),
+    Type.Literal("MODEL_SERVICE_UNAVAILABLE"),
+    Type.Literal("MODEL_RESPONSE_TIMEOUT"),
+    Type.Literal("MODEL_ACCESS_DENIED"),
+    Type.Literal("MODEL_NOT_AVAILABLE"),
+    Type.Literal("MODEL_RESPONSE_INVALID"),
+    Type.Literal("MODEL_STREAM_INTERRUPTED"),
+    Type.Literal("MODEL_EMPTY_RESPONSE"),
+    Type.Literal("AGENT_RUNTIME_NOT_READY"),
+    Type.Literal("RUN_INTERNAL_ERROR"),
+    Type.Literal("RUN_FAILURE_UNKNOWN"),
+  ],
 );
 
-export type AgentRunFailureCode = Static<typeof AgentRunFailureCodeSchema>;
+export type AgentRunFailureCode = (typeof AGENT_RUN_FAILURE_CODES)[number];
 
 export function validateAgentRunFailureState(run: {
   readonly status: string;

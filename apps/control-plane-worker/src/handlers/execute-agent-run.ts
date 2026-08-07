@@ -2,6 +2,7 @@ import {
   HermesStreamError,
   isDatabaseTransactionRetryExhaustedError,
   type AgentRunBeginResult,
+  type AgentRunFailure,
   type AgentRunWorkerJobRef,
   type ClaimedJob,
   type JobLeaseResult,
@@ -20,7 +21,7 @@ export interface ExecuteAgentRunPort {
   persistDelta(job: AgentRunWorkerJobRef, messageId: string, delta: string): Promise<JobLeaseResult>;
   complete(job: AgentRunWorkerJobRef, facts: StoredAgentRunExecutionFacts, content: string): Promise<JobLeaseResult>;
   retry(job: AgentRunWorkerJobRef, summary: string): Promise<JobLeaseResult>;
-  fail(job: AgentRunWorkerJobRef, summary: string): Promise<JobLeaseResult>;
+  fail(job: AgentRunWorkerJobRef, failure: AgentRunFailure): Promise<JobLeaseResult>;
 }
 
 function ref(workerId: string, job: ExecuteAgentRunJob): AgentRunWorkerJobRef {
@@ -39,10 +40,14 @@ function retryable(error: unknown): boolean {
 async function terminalFailure(
   port: ExecuteAgentRunPort,
   jobRef: AgentRunWorkerJobRef,
-  summary: string,
+  failure: AgentRunFailure,
 ): Promise<HandlerResult> {
-  const result = await port.fail(jobRef, summary);
-  return result.kind === "lease_lost" ? leaseLost() : { kind: "failed", summary };
+  const result = await port.fail(jobRef, failure);
+  return result.kind === "lease_lost" ? leaseLost() : { kind: "failed", summary: failure.summary };
+}
+
+function internalFailure(summary: string): AgentRunFailure {
+  return { code: "RUN_INTERNAL_ERROR", summary };
 }
 
 export async function handleExecuteAgentRun(
@@ -53,10 +58,10 @@ export async function handleExecuteAgentRun(
 ): Promise<HandlerResult> {
   const jobRef = ref(workerId, job);
   if (job.recoveryOnly) {
-    return terminalFailure(port, jobRef, "Final-attempt recovery cannot safely replay Agent execution");
+    return terminalFailure(port, jobRef, internalFailure("Final-attempt recovery cannot safely replay Agent execution"));
   }
   if (job.effectState === "unsafe_to_replay") {
-    return terminalFailure(port, jobRef, "Agent execution cannot safely replay durable output");
+    return terminalFailure(port, jobRef, internalFailure("Agent execution cannot safely replay durable output"));
   }
   if (signal.aborted) return leaseLost();
 
@@ -65,7 +70,7 @@ export async function handleExecuteAgentRun(
   catch (error) {
     if (isDatabaseTransactionRetryExhaustedError(error)) throw error;
     if (signal.aborted) return leaseLost();
-    return terminalFailure(port, jobRef, "Agent execution admission failed");
+    return terminalFailure(port, jobRef, internalFailure("Agent execution admission failed"));
   }
   if (begun.kind === "lease_lost") return leaseLost();
   let dispatched = false;
@@ -90,11 +95,11 @@ export async function handleExecuteAgentRun(
   } catch (error) {
     if (isDatabaseTransactionRetryExhaustedError(error)) throw error;
     if (signal.aborted) return leaseLost();
-    if (dispatched) return terminalFailure(port, jobRef, "Agent execution failed after dispatch");
+    if (dispatched) return terminalFailure(port, jobRef, internalFailure("Agent execution failed after dispatch"));
     if (retryable(error) && job.attemptCount < job.maxAttempts) {
       const retried = await port.retry(jobRef, "Agent execution dependency is unavailable");
       return retried.kind === "lease_lost" ? leaseLost() : { kind: "retry", summary: "Agent execution dependency is unavailable" };
     }
-    return terminalFailure(port, jobRef, "Agent execution failed before durable output");
+    return terminalFailure(port, jobRef, internalFailure("Agent execution failed before durable output"));
   }
 }

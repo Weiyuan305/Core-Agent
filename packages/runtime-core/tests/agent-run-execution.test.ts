@@ -176,7 +176,7 @@ test("Agent Run completion and failure share conversation-run order with parent 
     const beforeDeadlocks = await databaseDeadlocks();
     const terminal = operation === "complete"
       ? setup.repository.complete(ref, begun.facts, "Final answer")
-      : setup.repository.fail(ref, "Synthetic terminal failure");
+      : setup.repository.fail(ref, { code: "RUN_INTERNAL_ERROR", summary: "Synthetic terminal failure" });
     await waitForLockWaiters(1);
     const childAdmission = createAgentRun({ db, providerCatalog, now: () => admissionNow }, serviceContext(setup.tenantId), setup.conversation.conversation_id, withPayloadHash({
       schema_version: 1 as const,
@@ -292,7 +292,10 @@ test("a crash after dispatch mark is reclaimed as unsafe and cannot become a saf
   const [reclaimed] = await claimJobs(db, { tenantId: setup.tenantId, workerId: "worker_recovery", limit: 1, leaseMs: 300_000 });
   assert.equal(reclaimed?.effectState, "unsafe_to_replay");
   assert.equal(reclaimed?.recoveryOnly, false);
-  assert.deepEqual(await setup.repository.fail({ ...ref, workerId: "worker_recovery", attemptCount: reclaimed!.attemptCount }, "Unsafe dispatched request cannot replay"), { kind: "updated" });
+  assert.deepEqual(await setup.repository.fail(
+    { ...ref, workerId: "worker_recovery", attemptCount: reclaimed!.attemptCount },
+    { code: "RUN_INTERNAL_ERROR", summary: "Unsafe dispatched request cannot replay" },
+  ), { kind: "updated" });
 });
 
 test("unsafe recovery failure atomically terminalizes Run and job without an assistant Message", async () => {
@@ -303,10 +306,14 @@ test("unsafe recovery failure atomically terminalizes Run and job without an ass
   if (begun.kind !== "admitted") return;
   assert.deepEqual(await setup.repository.markDispatched(ref), { kind: "updated" });
   assert.deepEqual(await setup.repository.persistDelta(ref, begun.facts.assistantMessageId, "partial"), { kind: "updated" });
-  assert.deepEqual(await setup.repository.fail(ref, "Bearer private-secret socket provider-body"), { kind: "updated" });
+  assert.deepEqual(await setup.repository.fail(ref, {
+    code: "MODEL_SERVICE_UNAVAILABLE",
+    summary: "Bearer private-secret socket provider-body",
+  }), { kind: "updated" });
 
   const storedRun = await db.selectFrom("agent_runs").selectAll().where("tenant_id", "=", setup.tenantId).where("run_id", "=", setup.run.run_id).executeTakeFirstOrThrow();
   assert.equal(storedRun.status, "failed");
+  assert.equal(storedRun.failure_code, "MODEL_SERVICE_UNAVAILABLE");
   assert.equal(storedRun.failure_summary, "[REDACTED] socket provider-body");
   assert.equal(await db.selectFrom("messages").selectAll().where("tenant_id", "=", setup.tenantId).where("role", "=", "assistant").execute().then((rows) => rows.length), 0);
   assert.deepEqual(
@@ -314,6 +321,7 @@ test("unsafe recovery failure atomically terminalizes Run and job without an ass
     ["run.started", "message.delta", "run.failed"],
   );
   const failedEvent = await db.selectFrom("product_events").select("payload").where("tenant_id", "=", setup.tenantId).where("event_type", "=", "run.failed").executeTakeFirstOrThrow();
+  assert.equal((failedEvent.payload as { failure_code?: unknown }).failure_code, "MODEL_SERVICE_UNAVAILABLE");
   assert.doesNotMatch(JSON.stringify(failedEvent.payload), /private-secret/);
 });
 
@@ -331,7 +339,7 @@ test("database-clock lease loss before begin, delta, completion, and failure wri
         ? await setup.repository.persistDelta(ref, (begun as Extract<typeof begun, { kind: "admitted" }>).facts.assistantMessageId, "stale")
         : phase === "complete"
           ? await setup.repository.complete(ref, (begun as Extract<typeof begun, { kind: "admitted" }>).facts, "stale")
-          : await setup.repository.fail(ref, "stale failure");
+          : await setup.repository.fail(ref, { code: "RUN_INTERNAL_ERROR", summary: "stale failure" });
     assert.deepEqual(result, { kind: "lease_lost" });
     const storedRun = await db.selectFrom("agent_runs").selectAll().where("tenant_id", "=", setup.tenantId).executeTakeFirstOrThrow();
     assert.equal(storedRun.status, phase === "begin" ? "queued" : "running");
@@ -358,7 +366,7 @@ test("lease expiry while waiting on the Run row rolls back delta, completion, an
         ? setup.repository.persistDelta(ref, begun.facts.assistantMessageId, "stale")
         : phase === "complete"
           ? setup.repository.complete(ref, begun.facts, "durable")
-          : setup.repository.fail(ref, "stale failure");
+          : setup.repository.fail(ref, { code: "RUN_INTERNAL_ERROR", summary: "stale failure" });
       await waitForLockWaiters(1);
       await holdUntilDatabaseLeaseExpires(blocker, setup.tenantId, setup.job.jobId);
       await blocker.query("commit");
@@ -487,8 +495,11 @@ test("same-owner Agent Run reclaim fences a stale unsafe terminal attempt", asyn
     .where("tenant_id", "=", setup.tenantId).where("job_id", "=", setup.job.jobId).execute();
   const [current] = await claimJobs(db, { tenantId: setup.tenantId, workerId: "worker_execute", limit: 1, leaseMs: 300_000 });
   assert.ok(current);
-  assert.deepEqual(await setup.repository.fail(stale, "stale unsafe terminal"), { kind: "lease_lost" });
-  assert.deepEqual(await setup.repository.fail({ ...stale, attemptCount: current.attemptCount }, "current unsafe terminal"), { kind: "updated" });
+  assert.deepEqual(await setup.repository.fail(stale, { code: "RUN_INTERNAL_ERROR", summary: "stale unsafe terminal" }), { kind: "lease_lost" });
+  assert.deepEqual(await setup.repository.fail(
+    { ...stale, attemptCount: current.attemptCount },
+    { code: "RUN_INTERNAL_ERROR", summary: "current unsafe terminal" },
+  ), { kind: "updated" });
 });
 
 test("same-owner Agent Run reclaim fences a stale pre-effect dispatch attempt", async () => {

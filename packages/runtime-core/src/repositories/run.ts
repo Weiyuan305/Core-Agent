@@ -1,4 +1,10 @@
-import { AgentRunSchema, MessageSchema, type AgentRun, type Message } from "@core-agent/contracts";
+import {
+  AgentRunSchema,
+  MessageSchema,
+  validateAgentRunFailureState,
+  type AgentRun,
+  type Message,
+} from "@core-agent/contracts";
 
 import type { TenantRepositoryContext } from "./resources.js";
 import { safeContractInteger, validateContract } from "./resources.js";
@@ -9,6 +15,7 @@ export class AgentRunRepository {
   public async insert(run: AgentRun): Promise<void> {
     if (run.tenant_id !== this.context.tenantId) throw new Error("Resource tenant ID does not match repository scope");
     validateContract<AgentRun>(AgentRunSchema, run);
+    if (validateAgentRunFailureState(run).length > 0) throw new Error("Agent Run violates failure state invariants");
     await this.context.db.insertInto("agent_runs").values({
       tenant_id: run.tenant_id,
       run_id: run.run_id,
@@ -23,6 +30,7 @@ export class AgentRunRepository {
       status: run.status,
       started_at: run.started_at === undefined ? null : new Date(run.started_at),
       finished_at: run.finished_at === undefined ? null : new Date(run.finished_at),
+      failure_code: run.failure_code ?? null,
       failure_summary: run.failure_summary ?? null,
       created_at: new Date(run.created_at),
       updated_at: new Date(run.updated_at),
@@ -31,11 +39,12 @@ export class AgentRunRepository {
 
   public async find(runId: string): Promise<AgentRun | undefined> {
     const row = await this.context.db.selectFrom("agent_runs")
-      .select(["tenant_id", "run_id", "conversation_id", "request_id", "trace_id", "client_request_id", "idempotency_key", "parent_run_id", "schema_version", "resource_version", "status", "started_at", "finished_at", "failure_summary", "created_at", "updated_at"])
+      .select(["tenant_id", "run_id", "conversation_id", "request_id", "trace_id", "client_request_id", "idempotency_key", "parent_run_id", "schema_version", "resource_version", "status", "started_at", "finished_at", "failure_code", "failure_summary", "created_at", "updated_at"])
       .where("tenant_id", "=", this.context.tenantId)
       .where("run_id", "=", runId)
       .executeTakeFirst();
-    return row === undefined ? undefined : validateContract<AgentRun>(AgentRunSchema, {
+    if (row === undefined) return undefined;
+    const run = validateContract<AgentRun>(AgentRunSchema, {
       tenant_id: row.tenant_id,
       run_id: row.run_id,
       conversation_id: row.conversation_id,
@@ -49,10 +58,13 @@ export class AgentRunRepository {
       status: row.status,
       ...(row.started_at === null ? {} : { started_at: row.started_at.toISOString() }),
       ...(row.finished_at === null ? {} : { finished_at: row.finished_at.toISOString() }),
+      ...(row.failure_code === null ? {} : { failure_code: row.failure_code }),
       ...(row.failure_summary === null ? {} : { failure_summary: row.failure_summary }),
       created_at: row.created_at.toISOString(),
       updated_at: row.updated_at.toISOString(),
     });
+    if (validateAgentRunFailureState(run).length > 0) throw new Error("Agent Run violates failure state invariants");
+    return run;
   }
 }
 

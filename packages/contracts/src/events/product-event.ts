@@ -127,7 +127,7 @@ const RunCompletedEventSchema = createRunEventBranch("run.completed", "succeeded
 const RunFailedEventSchema = createEventBranch("run.failed", {
   run_id: OpaqueIdSchema,
   status: Type.Literal("failed"),
-  code: Type.Optional(AgentRunFailureCodeSchema),
+  failure_code: Type.Optional(AgentRunFailureCodeSchema),
   summary: Type.Optional(Type.String({ maxLength: 4000 })),
 });
 const RunCancelledEventSchema = createRunEventBranch("run.cancelled", "cancelled");

@@ -66,7 +66,7 @@ function port(overrides: Partial<ReviewedExecuteAgentRunPort> = {}) {
     persistDelta: async (_job, _messageId, delta) => { calls.push(`delta:${delta}`); return { kind: "updated" }; },
     complete: async (_job, _facts, content) => { calls.push(`complete:${content}`); return { kind: "updated" }; },
     retry: async () => { calls.push("retry"); return { kind: "updated" }; },
-    fail: async (_job, summary) => { calls.push(`fail:${summary}`); return { kind: "updated" }; },
+    fail: async (_job, failure) => { calls.push(`fail:${failure.code}:${failure.summary}`); return { kind: "updated" }; },
     ...overrides,
   } satisfies ReviewedExecuteAgentRunPort;
   return { value, calls };
@@ -106,7 +106,7 @@ test("disconnect after first durable delta terminalizes without automatic replay
   assert.equal(result.kind, "failed");
   assert.equal(hermesCalls, 1);
   assert.deepEqual(setup.calls, [
-    "begin", "inspect", "mark-dispatched", "delta:partial", "fail:Agent execution failed after dispatch",
+    "begin", "inspect", "mark-dispatched", "delta:partial", "fail:RUN_INTERNAL_ERROR:Agent execution failed after dispatch",
   ]);
   assert.equal(setup.calls.includes("retry"), false);
 });
@@ -123,7 +123,7 @@ test("Hermes acceptance before the first delta is already unsafe and never retri
 
   assert.deepEqual(result, { kind: "failed", summary: "Agent execution failed after dispatch" });
   assert.deepEqual(setup.calls, [
-    "begin", "inspect", "mark-dispatched", "hermes-accepted", "fail:Agent execution failed after dispatch",
+    "begin", "inspect", "mark-dispatched", "hermes-accepted", "fail:RUN_INTERNAL_ERROR:Agent execution failed after dispatch",
   ]);
   assert.equal(setup.calls.includes("retry"), false);
 });
@@ -164,7 +164,9 @@ test("unsafe reclaim and final-attempt recovery terminalize with zero inspect, s
     const result = await handleExecuteAgentRun(setup.value, recovered, new AbortController().signal);
     assert.equal(result.kind, "failed");
     assert.deepEqual(setup.calls, [
-      recovered.recoveryOnly ? "fail:Final-attempt recovery cannot safely replay Agent execution" : "fail:Agent execution cannot safely replay durable output",
+      recovered.recoveryOnly
+        ? "fail:RUN_INTERNAL_ERROR:Final-attempt recovery cannot safely replay Agent execution"
+        : "fail:RUN_INTERNAL_ERROR:Agent execution cannot safely replay durable output",
     ]);
   }
 });
@@ -188,5 +190,5 @@ test("stored authority inconsistency terminalizes with a stable summary and no e
   const setup = port({ begin: async () => { setup.calls.push("begin"); throw new Error("provider secret private value"); } });
   const result = await handleExecuteAgentRun(setup.value, job, new AbortController().signal);
   assert.deepEqual(result, { kind: "failed", summary: "Agent execution admission failed" });
-  assert.deepEqual(setup.calls, ["begin", "fail:Agent execution admission failed"]);
+  assert.deepEqual(setup.calls, ["begin", "fail:RUN_INTERNAL_ERROR:Agent execution admission failed"]);
 });

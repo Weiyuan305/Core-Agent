@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import type { AgentRun, Message } from "@core-agent/contracts";
+import type { AgentRun, AgentRunFailureCode, Message } from "@core-agent/contracts";
 import { sql, type Kysely, type Transaction } from "kysely";
 
 import type { ProviderCatalog } from "../config/provider-catalog.js";
@@ -25,6 +25,11 @@ export interface AgentRunWorkerJobRef {
   readonly workerId: string;
   readonly attemptCount: number;
   readonly runId: string;
+}
+
+export interface AgentRunFailure {
+  readonly code: AgentRunFailureCode;
+  readonly summary: string;
 }
 
 export interface StoredAgentRunExecutionFacts {
@@ -361,7 +366,7 @@ export class WorkerAgentRunRepository {
         event_type: "message.completed", payload: { message_id: facts.assistantMessageId, content },
       }] });
       assertAgentRunTransition("running", "succeeded");
-      const updated = await trx.updateTable("agent_runs").set({ status: "succeeded", finished_at: now, failure_summary: null, resource_version: sql`resource_version + 1`, updated_at: now })
+      const updated = await trx.updateTable("agent_runs").set({ status: "succeeded", finished_at: now, failure_code: null, failure_summary: null, resource_version: sql`resource_version + 1`, updated_at: now })
         .where("tenant_id", "=", job.tenantId).where("run_id", "=", job.runId).where("status", "=", "running").returning(["request_id", "trace_id", "resource_version"]).executeTakeFirstOrThrow();
       await appendProductEvents(context, { streamId: `conversation_${run.conversation_id}`, deliveryTarget: "internal_event_stream", events: [{
         ...baseEvent(run, conversation.profile_id, job.jobId, now), event_id: eventId("event_run_completed", job.jobId),
@@ -385,8 +390,8 @@ export class WorkerAgentRunRepository {
     }) as Promise<JobLeaseResult>;
   }
 
-  public async fail(job: AgentRunWorkerJobRef, summary: string): Promise<JobLeaseResult> {
-    const redacted = redactSummary(summary, 1_000, this.redactor) || "Agent execution failed";
+  public async fail(job: AgentRunWorkerJobRef, failure: AgentRunFailure): Promise<JobLeaseResult> {
+    const redacted = redactSummary(failure.summary, 1_000, this.redactor) || "Agent execution failed";
     const conversationId = await resolveRunConversationId(this.db, job);
     return fenced(this.db, async (trx) => {
       const conversation = await trx.selectFrom("conversations").select("profile_id").where("tenant_id", "=", job.tenantId).where("conversation_id", "=", conversationId).forUpdate().executeTakeFirst();
@@ -397,12 +402,12 @@ export class WorkerAgentRunRepository {
       await requireStillOwned(trx, job);
       assertAgentRunTransition(run.status as AgentRun["status"], "failed");
       const now = this.now();
-      const updated = await trx.updateTable("agent_runs").set({ status: "failed", finished_at: now, failure_summary: redacted, resource_version: sql`resource_version + 1`, updated_at: now })
+      const updated = await trx.updateTable("agent_runs").set({ status: "failed", finished_at: now, failure_code: failure.code, failure_summary: redacted, resource_version: sql`resource_version + 1`, updated_at: now })
         .where("tenant_id", "=", job.tenantId).where("run_id", "=", job.runId).where("status", "=", run.status).returning(["request_id", "trace_id", "resource_version"]).executeTakeFirstOrThrow();
       const context = { tenantId: job.tenantId, trx };
       await appendProductEvents(context, { streamId: `conversation_${run.conversation_id}`, deliveryTarget: "internal_event_stream", events: [{
         ...baseEvent(run, conversation.profile_id, job.jobId, now), event_id: eventId("event_run_failed", job.jobId),
-        event_type: "run.failed", payload: { run_id: job.runId, status: "failed", summary: redacted },
+        event_type: "run.failed", payload: { run_id: job.runId, status: "failed", failure_code: failure.code, summary: redacted },
       }] });
       await appendRunAudit(context, job, updated, "failed", redacted, now);
       await updateOwnedJob(trx, job, { status: "failed", lease_owner: null, lease_expires_at: null, last_error_summary: redacted, updated_at: now });

@@ -60,13 +60,13 @@ const internalFailureCodes = [
 
 - [ ] **Step 2: Write failing ProductEvent compatibility tests**
 
-Prove that a new `run.failed` event accepts `payload.code`, a legacy event without `code` still validates, and an unknown code is rejected. Also assert that `summary` remains optional and never replaces the code.
+Prove that a new `run.failed` event accepts `payload.failure_code`, a legacy event without `failure_code` still validates, and an unknown code is rejected. Also assert that `summary` remains optional and never replaces the code.
 
 ```ts
 const failedPayload = {
   run_id: "run_01",
   status: "failed",
-  code: "MODEL_SERVICE_UNAVAILABLE",
+  failure_code: "MODEL_SERVICE_UNAVAILABLE",
   summary: "Agent execution failed after dispatch",
 };
 ```
@@ -87,10 +87,10 @@ export const AgentRunFailureCodeSchema = Type.Union(
   { $id: "AgentRunFailureCode" },
 );
 
-export type AgentRunFailureCode = Static<typeof AgentRunFailureCodeSchema>;
+export type AgentRunFailureCode = (typeof AGENT_RUN_FAILURE_CODES)[number];
 ```
 
-Add `failure_code` as a structurally optional closed property on `AgentRunSchema`, plus `validateAgentRunFailureState` to require it exactly for failed Runs in new producers. Structural optionality preserves the additive v1 wire contract; PostgreSQL and repository validation enforce the stronger production invariant. Add optional `code` only to the `run.failed` event branch for historical compatibility. Export the schema but embed it in existing resource/event schemas instead of adding a new top-level registry file, because accepted release manifests are immutable exact file sets.
+Add `failure_code` as a structurally optional closed property on `AgentRunSchema`, plus `validateAgentRunFailureState` to require it exactly for failed Runs in new producers. Structural optionality preserves the additive v1 wire contract; PostgreSQL and repository validation enforce the stronger production invariant. Add optional `failure_code` only to the `run.failed` event branch for historical compatibility. Export the schema but embed it in existing resource/event schemas instead of adding a new top-level registry file, because accepted release manifests are immutable exact file sets.
 
 - [ ] **Step 5: Release the additive contract snapshot**
 
@@ -165,7 +165,7 @@ Assert that `fail(job, failure)` atomically persists `failure_code`, preserves t
   payload: {
     run_id: job.runId,
     status: "failed",
-    code: "MODEL_SERVICE_UNAVAILABLE",
+    failure_code: "MODEL_SERVICE_UNAVAILABLE",
     summary: "Agent execution failed after dispatch",
   },
 }

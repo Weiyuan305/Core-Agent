@@ -44,9 +44,33 @@ test("schema version 8 installs the exhausted Outbox recovery index", async () =
   const migration = await readFile(join(migrationsDirectory, "008_outbox_exhausted_recovery_index.sql"), "utf8");
   const schemaVersion = await readFile(schemaVersionPath, "utf8");
 
-  assert.match(schemaVersion, /export const EXPECTED_SCHEMA_VERSION = 8;/);
+  assert.match(schemaVersion, /export const EXPECTED_SCHEMA_VERSION = 9;/);
   assert.match(migration, /create index outbox_exhausted_recovery_idx/i);
   assert.match(migration, /on outbox \(created_at, tenant_id, outbox_id\)/i);
   assert.match(migration, /include \(lease_owner, lease_expires_at\)/i);
   assert.match(migration, /where status = 'pending' and attempt_count >= 10/i);
+});
+
+test("schema version 9 backfills and constrains Agent Run failure codes", async () => {
+  const migration = await readFile(
+    join(migrationsDirectory, "009_agent_run_failure_code.sql"),
+    "utf8",
+  ).catch(() => "");
+  assert.match(migration, /alter table agent_runs add column failure_code text;/i);
+  assert.match(migration, /set failure_code = 'RUN_FAILURE_UNKNOWN'/i);
+  assert.match(migration, /agent_runs_failure_code_allowlist_check/i);
+  assert.match(migration, /agent_runs_failure_code_state_check/i);
+  for (const code of [
+    "MODEL_BUSY",
+    "MODEL_SERVICE_UNAVAILABLE",
+    "MODEL_RESPONSE_TIMEOUT",
+    "MODEL_ACCESS_DENIED",
+    "MODEL_NOT_AVAILABLE",
+    "MODEL_RESPONSE_INVALID",
+    "MODEL_STREAM_INTERRUPTED",
+    "MODEL_EMPTY_RESPONSE",
+    "AGENT_RUNTIME_NOT_READY",
+    "RUN_INTERNAL_ERROR",
+    "RUN_FAILURE_UNKNOWN",
+  ]) assert.match(migration, new RegExp(`'${code}'`));
 });

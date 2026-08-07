@@ -1,6 +1,8 @@
 import { Kysely, PostgresDialect, type ColumnType } from "kysely";
 import type { Pool } from "pg";
 
+import type { AgentRunFailureCode } from "@core-agent/contracts";
+
 type JsonValue = unknown;
 type RuntimeBigIntInput = string | number | bigint;
 
@@ -21,7 +23,7 @@ export interface RuntimeDatabase {
   runtime_containers: { tenant_id: string; container_id: string; schema_version: number; resource_version: RuntimeBigInt; command_version: ColumnType<string, RuntimeBigIntInput | undefined, RuntimeBigIntInput>; runtime_kind: string; desired_state: string; observed_state: string; image_ref: string; runtime_platform: ColumnType<string | null, string | null | undefined, string | null>; generation: number; volume_ref: string; health_status: string; last_probed_at: Date | null; failure_summary: string | null; created_at: Date; updated_at: Date };
   conversations: { tenant_id: string; conversation_id: string; profile_id: string; created_by_actor_id: string; status: string; schema_version: number; resource_version: RuntimeBigInt; student_ref: JsonValue | null; case_ref: JsonValue | null; created_at: Date; updated_at: Date };
   sessions: { tenant_id: string; session_id: string; profile_id: string; actor_id: string; conversation_id: string; schema_version: number; resource_version: RuntimeBigInt; status: string; last_active_at: Date; expires_at: Date; hermes_session_ref: string | null; created_at: Date; updated_at: Date };
-  agent_runs: { tenant_id: string; run_id: string; conversation_id: string; request_id: string; trace_id: string; client_request_id: string; idempotency_key: string; parent_run_id: string | null; schema_version: number; resource_version: RuntimeBigInt; status: string; started_at: Date | null; finished_at: Date | null; failure_summary: string | null; created_at: Date; updated_at: Date };
+  agent_runs: { tenant_id: string; run_id: string; conversation_id: string; request_id: string; trace_id: string; client_request_id: string; idempotency_key: string; parent_run_id: string | null; schema_version: number; resource_version: RuntimeBigInt; status: string; started_at: Date | null; finished_at: Date | null; failure_code: ColumnType<AgentRunFailureCode | null, AgentRunFailureCode | null | undefined, AgentRunFailureCode | null>; failure_summary: string | null; created_at: Date; updated_at: Date };
   messages: { tenant_id: string; message_id: string; conversation_id: string; run_id: string; schema_version: number; resource_version: RuntimeBigInt; role: string; status: string; content: string; created_at: Date; updated_at: Date };
   secret_references: { tenant_id: string; reference_id: string; purpose: string; version: RuntimeBigInt; status: string; created_at: Date; updated_at: Date };
   worker_jobs: { tenant_id: string; job_id: string; job_kind: string; status: string; attempt_count: number; max_attempts: number; lease_owner: string | null; lease_expires_at: Date | null; next_attempt_at: Date; payload_ref: string; runtime_command: string | null; target_command_version: ColumnType<string | null, RuntimeBigIntInput | null | undefined, RuntimeBigIntInput | null>; effect_state: string; last_error_summary: string | null; run_id: string | null; container_id: string | null; created_at: Date; updated_at: Date };

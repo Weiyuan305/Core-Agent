@@ -1177,7 +1177,7 @@
             "payload": {
               "additionalProperties": false,
               "properties": {
-                "code": {
+                "failure_code": {
                   "anyOf": [
                     {
                       "const": "MODEL_BUSY",
