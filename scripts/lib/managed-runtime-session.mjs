@@ -1030,9 +1030,6 @@ export async function readSmokeEvents({
         pending = pending.slice(separator + 2);
         const data = frame.split("\n").find((line) => line.startsWith("data: "))?.slice(6);
         if (data !== undefined) {
-          retainedBytes += Buffer.byteLength(data, "utf8");
-          if (eventCount >= maximumEvents || retainedBytes > maximumRetainedBytes) throw smokeError("SMOKE_SSE_FAILED");
-          eventCount += 1;
           const event = parseJson(data, "SMOKE_SSE_FAILED");
           const eventType = validateProductEventEnvelope(event, { conversationId, tenantId, runId });
           const eventRunId = optionalDataProperty(event, "run_id", "SMOKE_SSE_FAILED");
@@ -1040,6 +1037,9 @@ export async function readSmokeEvents({
             separator = pending.indexOf("\n\n");
             continue;
           }
+          retainedBytes += Buffer.byteLength(data, "utf8");
+          if (eventCount >= maximumEvents || retainedBytes > maximumRetainedBytes) throw smokeError("SMOKE_SSE_FAILED");
+          eventCount += 1;
           if (eventType === "message.delta" && onDelta !== undefined) {
             await onDelta(event.payload.delta);
           }
@@ -1104,6 +1104,25 @@ export async function restartApiWorkerTopology({
   );
   await waitUntilReady();
   await stabilize(stabilityMs, signal);
+}
+
+export async function startControlPlaneTopology(child) {
+  if (typeof child !== "function") throw smokeError("SMOKE_CHILD_COMMAND_INVALID");
+  await child(
+    "docker",
+    composeArgs(
+      "up",
+      "-d",
+      "--build",
+      "postgres",
+      "migrate",
+      "api",
+      "api-ingress",
+      "worker",
+      "supervisor",
+    ),
+    { timeoutMs: 180_000, maxOutputBytes: 4 * 1024 * 1024 },
+  );
 }
 
 export async function waitForApiReadiness({
@@ -1220,10 +1239,7 @@ export function createManagedRuntimeDependencies(environment, signal) {
       await child("docker", composeArgs("config", "--quiet"));
     },
     async startTopology() {
-      await child("docker", composeArgs("up", "-d", "postgres", "migrate", "api", "api-ingress", "worker", "supervisor"), {
-        timeoutMs: 180_000,
-        maxOutputBytes: 4 * 1024 * 1024,
-      });
+      await startControlPlaneTopology(child);
       await waitForApiReadiness({
         attempt: () => requestJson("/health/ready", { bootstrapKey: state.bootstrapKey, statuses: [200], signal }),
         signal,

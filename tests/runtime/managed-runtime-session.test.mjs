@@ -14,6 +14,7 @@ import {
   smokePublicErrorCode,
   waitForApiReadiness,
 } from "../../scripts/lib/managed-runtime-session.mjs";
+import * as managedRuntimeModule from "../../scripts/lib/managed-runtime-session.mjs";
 import * as smokeWrapper from "../../scripts/smoke-control-plane.mjs";
 
 const wrapperSource = await readFile(
@@ -40,6 +41,35 @@ test("managed Runtime implementation is behind a thin smoke compatibility wrappe
   assert.match(wrapperSource, /export \* from "\.\/lib\/managed-runtime-session\.mjs"/u);
   assert.match(wrapperSource, /process\.once\("SIGINT"/u);
   assert.match(wrapperSource, /process\.once\("SIGTERM"/u);
+});
+
+test("managed topology rebuilds current service images before migration and startup", async () => {
+  const startControlPlaneTopology = managedRuntimeModule.startControlPlaneTopology;
+  assert.equal(typeof startControlPlaneTopology, "function");
+  const calls = [];
+  await startControlPlaneTopology((command, args, options) => {
+    calls.push([command, args, options]);
+  });
+  assert.deepEqual(calls, [[
+    "docker",
+    [
+      "compose",
+      "--project-name",
+      "core-agent-runtime-v1-smoke",
+      "-f",
+      "infra/runtime/compose.dev.yaml",
+      "up",
+      "-d",
+      "--build",
+      "postgres",
+      "migrate",
+      "api",
+      "api-ingress",
+      "worker",
+      "supervisor",
+    ],
+    { timeoutMs: 180_000, maxOutputBytes: 4 * 1024 * 1024 },
+  ]]);
 });
 
 test("smoke public errors remain fixed and never reflect unknown failures", () => {
@@ -395,6 +425,56 @@ test("managed SSE emits deltas only for the active Run in one Conversation", asy
       }),
     ]),
   });
+  assert.deepEqual(deltas, ["visible current delta"]);
+  assert.deepEqual(events, {
+    eventTypes: ["message.delta", "run.completed"],
+    terminal: { status: "succeeded" },
+  });
+});
+
+test("managed SSE applies safety limits only to the active Run", async () => {
+  const deltas = [];
+  const events = await readSmokeEvents({
+    conversationId: "synthetic-managed-conversation",
+    tenantId: "synthetic-managed-tenant",
+    runId: "synthetic-managed-run-current",
+    bootstrapKey: Buffer.from("synthetic-managed-key"),
+    onDelta: async (delta) => deltas.push(delta),
+    limits: { maximumEvents: 2, maximumRetainedBytes: 1_000_000 },
+    fetchImpl: async () => sessionEventStream([
+      sessionProductEvent({
+        eventType: "message.delta",
+        sequence: 1,
+        runId: "synthetic-managed-run-old",
+        payload: { message_id: "synthetic-message-old", delta: "ignored old delta one" },
+      }),
+      sessionProductEvent({
+        eventType: "message.delta",
+        sequence: 2,
+        runId: "synthetic-managed-run-old",
+        payload: { message_id: "synthetic-message-old", delta: "ignored old delta two" },
+      }),
+      sessionProductEvent({
+        eventType: "run.completed",
+        sequence: 3,
+        runId: "synthetic-managed-run-old",
+        payload: { run_id: "synthetic-managed-run-old", status: "succeeded" },
+      }),
+      sessionProductEvent({
+        eventType: "message.delta",
+        sequence: 4,
+        runId: "synthetic-managed-run-current",
+        payload: { message_id: "synthetic-message-current", delta: "visible current delta" },
+      }),
+      sessionProductEvent({
+        eventType: "run.completed",
+        sequence: 5,
+        runId: "synthetic-managed-run-current",
+        payload: { run_id: "synthetic-managed-run-current", status: "succeeded" },
+      }),
+    ]),
+  });
+
   assert.deepEqual(deltas, ["visible current delta"]);
   assert.deepEqual(events, {
     eventTypes: ["message.delta", "run.completed"],

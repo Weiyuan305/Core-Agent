@@ -14,6 +14,10 @@ import type { FastifyInstance } from "fastify";
 import { Pool } from "pg";
 
 import { buildControlPlaneApp } from "./app.js";
+import {
+  createPostgresEventNotifier,
+  type CloseableEventNotifier,
+} from "./sse.js";
 
 const require = createRequire(import.meta.url);
 const createPinoLogger = require("pino") as () => FastifyBaseLogger;
@@ -48,7 +52,9 @@ export async function startControlPlaneServer(environment: NodeJS.ProcessEnv = p
   const db = createRuntimeDatabase(pool);
   const logger = createPinoLogger();
   let app: FastifyInstance | undefined;
+  let eventNotifier: CloseableEventNotifier | undefined;
   try {
+    eventNotifier = await createPostgresEventNotifier(pool);
     app = await buildControlPlaneApp({
       environment: configuration,
       db,
@@ -56,13 +62,21 @@ export async function startControlPlaneServer(environment: NodeJS.ProcessEnv = p
       imageLock: await readJson(imageLockPath),
       logger,
       redactor: createRedactor([]),
+      eventNotifier,
     });
-    app.addHook("onClose", async () => db.destroy());
+    app.addHook("onClose", async () => {
+      await eventNotifier?.close();
+      await db.destroy();
+    });
     await app.listen({ host: configuration.apiHost, port: configuration.apiPort });
     return app;
   } catch (error) {
-    await app?.close().catch(() => undefined);
-    await db.destroy().catch(() => undefined);
+    if (app !== undefined) {
+      await app.close().catch(() => undefined);
+    } else {
+      await eventNotifier?.close().catch(() => undefined);
+      await db.destroy().catch(() => undefined);
+    }
     throw error;
   }
 }
