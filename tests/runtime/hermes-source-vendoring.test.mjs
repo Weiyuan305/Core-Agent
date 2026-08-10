@@ -177,10 +177,13 @@ test("Hermes source lock accepts only one closed immutable provenance shape", ()
   assert.equal(accessorInvocations, 0);
 });
 
-test("Hermes source verification permits only the complete bootstrap absence", async (context) => {
+test("Hermes source verification requires both the vendored tree and source lock", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "core-agent-hermes-bootstrap-"));
   context.after(() => rm(root, { recursive: true, force: true }));
-  await assert.doesNotReject(() => verifyHermesSource({ repositoryRoot: root }));
+  await assertClosedRejection(
+    () => verifyHermesSource({ repositoryRoot: root }),
+    "HERMES_SOURCE_LOCK_INVALID",
+  );
 
   const sourceRoot = join(root, "third_party", "hermes-agent");
   await mkdir(sourceRoot, { recursive: true });

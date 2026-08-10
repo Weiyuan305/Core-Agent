@@ -189,7 +189,6 @@ export async function verifyHermesSource(options = {}) {
   const lockPath = join(repositoryRoot, "infra", "hermes", "upstream-source.lock.json");
   const sourceMetadata = await exists(sourceRoot);
   const lockMetadata = await exists(lockPath);
-  if (sourceMetadata === null && lockMetadata === null) return null;
   if (
     sourceMetadata === null
     || lockMetadata === null
