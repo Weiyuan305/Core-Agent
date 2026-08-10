@@ -19,14 +19,15 @@ Runtime v1 now implements the internal single-node Control Plane: PostgreSQL
 migrations and repositories, the private Fastify API, durable Worker jobs and
 SSE, the Docker-owning Runtime Supervisor, and a loopback consultant Web client.
 Deterministic unit, browser, PostgreSQL, fake-integration, Compose, and security
-gates are implemented. The opt-in real Hermes acceptance smoke is available but
-AC10 remains pending until it runs on a target platform with a reviewed
-Core-Agent product-image digest.
+gates are implemented. AC10 and the Conversation Reliability live-provider gate
+passed on the target platform with the reviewed `v0.1.3` Core-Agent product-image
+digest; the bounded evidence is recorded in the
+[Runtime v1 acceptance record](docs/operations/runtime-v1-acceptance-evidence.md)
+and [Conversation Reliability record](docs/testing/conversation-reliability-v1.md).
 
-After the current live-provider conversation acceptance is recorded, the next
-runtime-distribution migration will vendor the reviewed Hermes source into this
-monorepo and build the same isolated company runtime from source. The accepted
-decision and deferred execution steps are recorded in
+The active runtime-distribution migration vendors the reviewed Hermes source into
+this monorepo and builds the same isolated company runtime from source. The accepted
+decision and controlled execution steps are recorded in
 [ADR 0008](docs/architecture/0008-vendored-hermes-source-and-upstream-sync.md) and
 the [Hermes source vendoring plan](docs/superpowers/plans/2026-08-07-hermes-source-vendoring.md).
 

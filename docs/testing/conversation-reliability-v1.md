@@ -1,8 +1,10 @@
 # Conversation Reliability v1 verification evidence
 
-Status: deterministic verification passed; real-provider happy path pending
+Status: deterministic verification and real-provider happy path passed
 
-Evidence date: 2026-08-07
+Evidence execution date: 2026-08-07
+
+Evidence recorded: 2026-08-10
 
 This record contains no prompt, assistant response, credential, provider body,
 internal URL, or traceback. Synthetic scenarios use only fixed anonymous fixtures.
@@ -73,13 +75,21 @@ evidence. The product-image lock remains unchanged.
 | --- | --- |
 | Deterministic happy path | Passed |
 | Deterministic failure mapping | Passed |
-| Real configured-provider happy path through this candidate image | Pending |
-| Product milestone accepted | No |
+| Real configured-provider happy path through the current Control Plane and reviewed product image | Passed |
+| Conversation Reliability milestone accepted | Yes |
 
-The configured real-provider check must use a non-sensitive prompt through Browser,
-Gateway, API, Worker, Runtime Core, and the managed candidate image. Record only UTC
-time, Run final state/code, and image digest. Do not mark the product milestone
-accepted until the Run completes successfully.
+The configured real-provider check used anonymous, non-sensitive Browser input through
+Gateway, API, Worker, Runtime Core, and the reviewed managed product image. Two Runs
+completed at `2026-08-07T09:59:51.389Z` and `2026-08-07T10:00:52.941Z`. Both reached
+`succeeded` with no failure code. Browser observation confirmed incremental assistant
+output, terminal recovery to ready, long-transcript scrolling, return-to-latest, and
+student-inspector collapse/reopen behavior.
+
+The accepted target was private release `v0.1.3` on `linux/arm64`, locked at
+`sha256:518bc0734d94c44760a62368a2dbb633ebce511a73534ab987aa621862d2a7be`.
+The running managed container's immutable image reference and image ID matched that
+lock. Evidence records no prompt, assistant response, provider identity, header,
+credential, internal URL, customer data, or student data.
 
 ## Rollback boundary
 
