@@ -24,6 +24,8 @@
 - Correlate B2B Membership and consultant Profile lifecycles across public member
   views and graph validation, including inactive Profiles retained after consultant
   role removal.
+- Require singular lifecycle-matched Profiles for consultant-bearing Memberships,
+  and publish explicit versioned consultant-role grant/remove command contracts.
 - Preserve the released Actor status vocabulary while defining identity-authority
   deletion lifecycle separately, and enforce B2B/B2C authority-mode boundaries.
 - Add the immutable 0.5.0 schema release while keeping accepted historical release

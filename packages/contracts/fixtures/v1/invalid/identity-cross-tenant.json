@@ -1,7 +1,7 @@
 {
   "schema_key": "identity-graph",
   "semantic_validator": "identity_graph",
-  "expected": { "structurally_valid": true, "violation_codes": ["TENANT_SCOPE_MISMATCH"] },
+  "expected": { "structurally_valid": true, "violation_codes": ["B2B_CONSULTANT_PROFILE_STATE_INVALID", "TENANT_SCOPE_MISMATCH"] },
   "value": {
     "schema_version": 1,
     "tenant": {

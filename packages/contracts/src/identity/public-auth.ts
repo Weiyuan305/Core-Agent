@@ -481,6 +481,36 @@ export const CompanyMemberListResponseSchema = response("company-member-list-res
   members: Type.Array(CompanyMemberViewSchema, { maxItems: 200 }),
   page_info: PageInfoSchema,
 });
+export const CompanyConsultantRoleGrantRequestSchema = request("company-consultant-role-grant-request", {
+  ...IdempotencyRequestProperties,
+  membership_id: OpaqueIdSchema,
+  expected_membership_resource_version: ResourceVersionSchema,
+});
+export const CompanyConsultantRoleGrantResponseSchema = response("company-consultant-role-grant-response", {
+  schema_version: SchemaVersionSchema,
+  membership_id: OpaqueIdSchema,
+  roles: CompanyMemberAdminConsultantRolesSchema,
+  membership_resource_version: ResourceVersionSchema,
+  profile_id: OpaqueIdSchema,
+  profile_resource_version: ResourceVersionSchema,
+  profile_status: Type.Literal("active"),
+});
+export const CompanyConsultantRoleRemoveRequestSchema = request("company-consultant-role-remove-request", {
+  ...IdempotencyRequestProperties,
+  membership_id: OpaqueIdSchema,
+  expected_membership_resource_version: ResourceVersionSchema,
+  profile_id: OpaqueIdSchema,
+  expected_profile_resource_version: ResourceVersionSchema,
+});
+export const CompanyConsultantRoleRemoveResponseSchema = response("company-consultant-role-remove-response", {
+  schema_version: SchemaVersionSchema,
+  membership_id: OpaqueIdSchema,
+  roles: CompanyMemberAdminRolesSchema,
+  membership_resource_version: ResourceVersionSchema,
+  profile_id: OpaqueIdSchema,
+  profile_resource_version: ResourceVersionSchema,
+  profile_status: Type.Literal("suspended"),
+});
 export const CompanyMemberSuspendRequestSchema = request("company-member-suspend-request", {
   ...VersionedWriteProperties,
   membership_id: OpaqueIdSchema,
@@ -562,6 +592,10 @@ export type CompanyMemberInviteResponse = Static<typeof CompanyMemberInviteRespo
 export type CompanyMemberView = Static<typeof CompanyMemberViewSchema>;
 export type CompanyMemberListRequest = Static<typeof CompanyMemberListRequestSchema>;
 export type CompanyMemberListResponse = Static<typeof CompanyMemberListResponseSchema>;
+export type CompanyConsultantRoleGrantRequest = Static<typeof CompanyConsultantRoleGrantRequestSchema>;
+export type CompanyConsultantRoleGrantResponse = Static<typeof CompanyConsultantRoleGrantResponseSchema>;
+export type CompanyConsultantRoleRemoveRequest = Static<typeof CompanyConsultantRoleRemoveRequestSchema>;
+export type CompanyConsultantRoleRemoveResponse = Static<typeof CompanyConsultantRoleRemoveResponseSchema>;
 export type CompanyMemberSuspendRequest = Static<typeof CompanyMemberSuspendRequestSchema>;
 export type CompanyMemberSuspendResponse = Static<typeof CompanyMemberSuspendResponseSchema>;
 export type CompanyMemberRevokeRequest = Static<typeof CompanyMemberRevokeRequestSchema>;

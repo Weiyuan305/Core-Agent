@@ -109,7 +109,10 @@ test("platform memberships are permanent admin-only authority without a seat", (
 test("rejects a cross-tenant profile", () => {
   const graph = structuredClone(b2bGraph);
   graph.profiles[0]!.tenant_id = "tenant_other";
-  assert.deepEqual(validateIdentityGraph(graph).map((item) => item.code), ["TENANT_SCOPE_MISMATCH"]);
+  assert.deepEqual(
+    validateIdentityGraph(graph).map((item) => item.code),
+    ["TENANT_SCOPE_MISMATCH", "B2B_CONSULTANT_PROFILE_STATE_INVALID"],
+  );
 });
 
 test("rejects B2C consultant profiles and multiple defaults", () => {
@@ -192,6 +195,43 @@ test("B2B consultant Profiles reject every Membership/Profile cross-state mismat
   assert.equal(validateIdentityGraph(retainedWithoutCompanyMembership).length > 0, true);
 });
 
+test("B2B consultant-bearing Memberships require one Profile and all B2B actors reject duplicates", () => {
+  for (const [membershipStatus, profileStatus] of [["active", "active"], ["suspended", "suspended"], ["revoked", "archived"]] as const) {
+    for (const roles of [["consultant"], ["admin", "consultant"]] as const) {
+      const missing = structuredClone(b2bGraph);
+      missing.memberships[0]!.membership_source = "company";
+      missing.memberships[0]!.status = membershipStatus;
+      missing.memberships[0]!.roles = [...roles];
+      missing.profiles = [];
+      assert.equal(validateIdentityGraph(missing).length > 0, true, `missing ${membershipStatus}/${roles.join("+")}`);
+
+      const duplicate = structuredClone(missing);
+      duplicate.profiles = [
+        { ...b2bGraph.profiles[0]!, status: profileStatus },
+        { ...b2bGraph.profiles[0]!, profile_id: "profile_duplicate", status: profileStatus },
+      ];
+      assert.equal(validateIdentityGraph(duplicate).length > 0, true, `duplicate ${membershipStatus}/${roles.join("+")}`);
+    }
+  }
+
+  const invited = structuredClone(b2bGraph);
+  invited.memberships[0]!.membership_source = "company";
+  invited.memberships[0]!.status = "invited";
+  invited.profiles = [];
+  assert.deepEqual(validateIdentityGraph(invited), []);
+  invited.profiles = [{ ...b2bGraph.profiles[0]!, status: "active" }];
+  assert.equal(validateIdentityGraph(invited).length > 0, true);
+
+  const duplicateRetained = structuredClone(b2bGraph);
+  duplicateRetained.memberships[0]!.membership_source = "company";
+  duplicateRetained.memberships[0]!.roles = ["admin"];
+  duplicateRetained.profiles = [
+    { ...b2bGraph.profiles[0]!, status: "suspended" },
+    { ...b2bGraph.profiles[0]!, profile_id: "profile_duplicate", status: "archived" },
+  ];
+  assert.equal(validateIdentityGraph(duplicateRetained).length > 0, true);
+});
+
 test("rejects B2B default profiles owned by student memberships", () => {
   const graph = structuredClone(b2bGraph);
   graph.memberships[0]!.roles = ["student"];
@@ -262,7 +302,7 @@ test("an ordinary actor cannot have multiple active or invited rows in one tenan
   });
   assert.deepEqual(
     validateIdentityGraph(graph).map((item) => item.code),
-    ["ACTOR_AUTHORITY_MEMBERSHIP_CONFLICT"],
+    ["ACTOR_AUTHORITY_MEMBERSHIP_CONFLICT", "B2B_CONSULTANT_PROFILE_STATE_INVALID"],
   );
   assert.deepEqual(
     validateIdentityGraphs([graph]).map((item) => item.code),

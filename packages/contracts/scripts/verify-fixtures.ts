@@ -63,7 +63,7 @@ const invalidFixtureContracts = {
     schemaKey: "identity-graph",
     semanticValidator: "identity_graph",
     structurallyValid: true,
-    violationCodes: ["TENANT_SCOPE_MISMATCH"],
+    violationCodes: ["B2B_CONSULTANT_PROFILE_STATE_INVALID", "TENANT_SCOPE_MISMATCH"],
   },
   "identity-b2c-consultant.json": {
     schemaKey: "identity-graph",

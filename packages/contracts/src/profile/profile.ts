@@ -142,6 +142,39 @@ export function validateIdentityGraph(graph: IdentityGraph): ContractViolation[]
     }
   }
 
+  if (graph.tenant.tenant_mode === "b2b") {
+    const profilesByActor = new Map<string, Profile[]>();
+    for (const profile of graph.profiles) {
+      if (profile.tenant_id !== graph.tenant.tenant_id) continue;
+      const profiles = profilesByActor.get(profile.owner_actor_id) ?? [];
+      profiles.push(profile);
+      profilesByActor.set(profile.owner_actor_id, profiles);
+    }
+    for (const profiles of profilesByActor.values()) {
+      if (profiles.length > 1) {
+        violations.push(violation("B2B_PROFILE_COUNT_INVALID", "profiles", "B2B Actor may have at most one consultant Profile"));
+      }
+    }
+    for (const membership of tenantMemberships) {
+      if (!membership.roles.includes("consultant")) continue;
+      const profiles = profilesByActor.get(membership.actor_id) ?? [];
+      if (membership.status === "invited") {
+        if (profiles.length !== 0) {
+          violations.push(violation("B2B_CONSULTANT_PROFILE_STATE_INVALID", "profiles", "Invited consultant Membership cannot have a Profile"));
+        }
+        continue;
+      }
+      const expectedStatus = membership.status === "active"
+        ? "active"
+        : membership.status === "suspended"
+          ? "suspended"
+          : "archived";
+      if (profiles.length !== 1 || profiles[0]?.profile_kind !== "consultant" || profiles[0]?.status !== expectedStatus) {
+        violations.push(violation("B2B_CONSULTANT_PROFILE_STATE_INVALID", "profiles", "Consultant-bearing Membership requires exactly one lifecycle-matched consultant Profile"));
+      }
+    }
+  }
+
   if (graph.tenant.tenant_mode === "b2c") {
     const activeStudents = tenantMemberships.filter((membership) => (
       membership.status === "active" && membership.roles.includes("student")

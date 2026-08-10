@@ -1,0 +1,56 @@
+{
+  "$id": "core-agent://v1/company-consultant-role-remove-response",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "membership_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "membership_resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "profile_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "profile_resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "profile_status": {
+      "const": "suspended",
+      "type": "string"
+    },
+    "roles": {
+      "items": false,
+      "maxItems": 1,
+      "minItems": 1,
+      "prefixItems": [
+        {
+          "const": "admin",
+          "type": "string"
+        }
+      ],
+      "type": "array"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    }
+  },
+  "required": [
+    "schema_version",
+    "membership_id",
+    "roles",
+    "membership_resource_version",
+    "profile_id",
+    "profile_resource_version",
+    "profile_status"
+  ],
+  "type": "object"
+}

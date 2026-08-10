@@ -1,0 +1,1 @@
+{"schema_key":"company-consultant-role-remove-response","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"membership_id":"membership_01","roles":["admin"],"membership_resource_version":6,"profile_id":"profile_01","profile_resource_version":2,"profile_status":"suspended"}}

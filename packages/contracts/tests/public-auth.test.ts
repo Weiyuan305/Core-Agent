@@ -16,6 +16,10 @@ const {
   AuthSubjectSchema,
   CompanyCreateRequestSchema,
   CompanyCreateResponseSchema,
+  CompanyConsultantRoleGrantRequestSchema,
+  CompanyConsultantRoleGrantResponseSchema,
+  CompanyConsultantRoleRemoveRequestSchema,
+  CompanyConsultantRoleRemoveResponseSchema,
   CompanyMemberInviteRequestSchema,
   CompanyMemberInviteResponseSchema,
   CompanyMemberListRequestSchema,
@@ -149,6 +153,8 @@ const requestCases: Array<[string, unknown, unknown]> = [
   ["company creation", CompanyCreateRequestSchema, { ...idem, display_name: "Synthetic Company", administrator_email: "admin@example.test" }],
   ["company member invite", CompanyMemberInviteRequestSchema, { ...idem, tenant_id: "tenant_01", email: "invitee@example.test", role: "consultant" }],
   ["company member list", CompanyMemberListRequestSchema, { schema_version: 1, tenant_id: "tenant_01", limit: 50 }],
+  ["company consultant role grant", CompanyConsultantRoleGrantRequestSchema, { ...idem, membership_id: "membership_01", expected_membership_resource_version: 4 }],
+  ["company consultant role remove", CompanyConsultantRoleRemoveRequestSchema, { ...idem, membership_id: "membership_01", expected_membership_resource_version: 5, profile_id: "profile_01", expected_profile_resource_version: 1 }],
   ["company member suspend", CompanyMemberSuspendRequestSchema, { ...idem, expected_resource_version: 1, membership_id: "membership_01", reason_code: "administrator_suspended" }],
   ["company member revoke", CompanyMemberRevokeRequestSchema, { ...idem, expected_resource_version: 1, membership_id: "membership_01", reason_code: "administrator_revoked" }],
   ["account deletion", AccountDeletionRequestSchema, { ...idem, expected_resource_version: 1, reason_code: "user_requested" }],
@@ -183,6 +189,8 @@ test("every public auth response is closed and provider-neutral", () => {
     ["company creation", CompanyCreateResponseSchema, { schema_version: 1, tenant_id: "tenant_01", tenant_resource_version: 1, administrator_invitation_id: "invitation_01", administrator_invitation_resource_version: 1, administrator_invitation_secret: invitationSecret }],
     ["company member invite", CompanyMemberInviteResponseSchema, { schema_version: 1, membership_id: "membership_01", membership_resource_version: 1, invitation_id: "invitation_01", invitation_resource_version: 1, invitation_secret: invitationSecret }],
     ["company member list", CompanyMemberListResponseSchema, { schema_version: 1, tenant_id: "tenant_01", members: [{ schema_version: 1, membership_id: "membership_01", actor_id: "actor_01", roles: ["consultant"], status: "active", source: "company", membership_resource_version: 2, profile_id: "profile_01", profile_resource_version: 1, profile_status: "active" }], page_info: { schema_version: 1, has_more: false } }],
+    ["company consultant role grant", CompanyConsultantRoleGrantResponseSchema, { schema_version: 1, membership_id: "membership_01", roles: ["admin", "consultant"], membership_resource_version: 5, profile_id: "profile_01", profile_resource_version: 1, profile_status: "active" }],
+    ["company consultant role remove", CompanyConsultantRoleRemoveResponseSchema, { schema_version: 1, membership_id: "membership_01", roles: ["admin"], membership_resource_version: 6, profile_id: "profile_01", profile_resource_version: 2, profile_status: "suspended" }],
     ["company member suspend", CompanyMemberSuspendResponseSchema, { schema_version: 1, membership_id: "membership_01", status: "suspended", resource_version: 2 }],
     ["company member revoke", CompanyMemberRevokeResponseSchema, { schema_version: 1, membership_id: "membership_01", status: "revoked", resource_version: 2 }],
     ["account deletion", AccountDeletionResponseSchema, { schema_version: 1, account_deletion_id: "deletion_01", status: "deletion_pending", scheduled_for: timestamp, resource_version: 1 }],
@@ -442,6 +450,70 @@ test("membership event reasons publish the complete closed lifecycle vocabulary"
       resource_version: 2,
     },
   }), false);
+});
+
+test("consultant role commands expose closed canonical Membership and Profile version loops", () => {
+  const grantRequest = compileRequired("CompanyConsultantRoleGrantRequestSchema", CompanyConsultantRoleGrantRequestSchema);
+  const grantResponse = compileRequired("CompanyConsultantRoleGrantResponseSchema", CompanyConsultantRoleGrantResponseSchema);
+  const removeRequest = compileRequired("CompanyConsultantRoleRemoveRequestSchema", CompanyConsultantRoleRemoveRequestSchema);
+  const removeResponse = compileRequired("CompanyConsultantRoleRemoveResponseSchema", CompanyConsultantRoleRemoveResponseSchema);
+  const memberView = compileRequired("CompanyMemberViewSchema", CompanyMemberViewSchema);
+  const admin = {
+    schema_version: 1,
+    membership_id: "membership_01",
+    actor_id: "actor_01",
+    roles: ["admin"],
+    status: "active",
+    source: "company",
+    membership_resource_version: 4,
+  };
+  const grant = {
+    ...idem,
+    membership_id: admin.membership_id,
+    expected_membership_resource_version: admin.membership_resource_version,
+  };
+  assert.equal(memberView.Check(admin), true);
+  assert.equal(grantRequest.Check(grant), true);
+  for (const field of ["roles", "action", "profile_status"]) {
+    assert.equal(grantRequest.Check({ ...grant, [field]: field === "roles" ? ["consultant"] : "client_forged" }), false, field);
+  }
+
+  const granted = {
+    schema_version: 1,
+    membership_id: admin.membership_id,
+    roles: ["admin", "consultant"],
+    membership_resource_version: 5,
+    profile_id: "profile_01",
+    profile_resource_version: 1,
+    profile_status: "active",
+  };
+  assert.equal(grantResponse.Check(granted), true);
+  assert.equal(grantResponse.Check({ ...granted, roles: ["consultant", "admin"] }), false);
+  const remove = {
+    ...idem,
+    membership_id: granted.membership_id,
+    expected_membership_resource_version: granted.membership_resource_version,
+    profile_id: granted.profile_id,
+    expected_profile_resource_version: granted.profile_resource_version,
+  };
+  assert.equal(removeRequest.Check(remove), true);
+  assert.equal(removeRequest.Check({ ...remove, expected_profile_resource_version: undefined }), false);
+  for (const field of ["roles", "action", "profile_status"]) {
+    assert.equal(removeRequest.Check({ ...remove, [field]: field === "roles" ? ["admin"] : "client_forged" }), false, field);
+  }
+
+  const removed = {
+    schema_version: 1,
+    membership_id: granted.membership_id,
+    roles: ["admin"],
+    membership_resource_version: 6,
+    profile_id: granted.profile_id,
+    profile_resource_version: 2,
+    profile_status: "suspended",
+  };
+  assert.equal(removeResponse.Check(removed), true);
+  assert.equal(removeResponse.Check({ ...removed, profile_status: "active" }), false);
+  assert.equal(memberView.Check({ ...admin, membership_resource_version: removed.membership_resource_version, profile_id: removed.profile_id, profile_resource_version: removed.profile_resource_version, profile_status: removed.profile_status }), true);
 });
 
 test("public mutation reasons are scoped to caller-authorized commands", () => {
