@@ -147,6 +147,7 @@ test("Hermes source lock accepts only one closed immutable provenance shape", ()
     { ...validLock(), extra: true },
     validLock({ upstream_repository: "https://example.invalid/hermes.git" }),
     validLock({ upstream_ref: "refs/heads/main" }),
+    validLock({ upstream_ref: "refs/tags/vYYYY.MM.DD" }),
     validLock({ upstream_commit: "A".repeat(40) }),
     validLock({ upstream_commit: "1".repeat(39) }),
     validLock({ upstream_tree: "2".repeat(39) }),
@@ -320,6 +321,21 @@ test("Hermes source lock generation resolves Git objects and writes retryable de
 
 test("Hermes source lock generation rejects unresolved identity and invalid CLI arguments", async (context) => {
   const fixture = await createRepositoryFixture(context);
+  let placeholderGitCalls = 0;
+  await assertClosedRejection(
+    () => generateHermesSourceLock({
+      repositoryRoot: fixture.root,
+      upstreamRef: "refs/tags/vYYYY.MM.DD",
+      upstreamCommit,
+      runGit: async () => {
+        placeholderGitCalls += 1;
+        return gitResult();
+      },
+    }),
+    "HERMES_SOURCE_LOCK_INVALID",
+  );
+  assert.equal(placeholderGitCalls, 0);
+
   const runGit = async (args) => {
     if (args[0] === "rev-parse") return gitResult(`${"9".repeat(40)}\n`);
     return gitResult();
@@ -372,4 +388,103 @@ test("root scripts and deterministic CI enforce the Hermes source verifier", asy
   assert.ok(installIndex >= 0);
   assert.ok(verifyIndex > installIndex);
   assert.ok(checkIndex > verifyIndex);
+});
+
+async function documentationSource(relativePath) {
+  try {
+    return await readFile(new URL(`../../${relativePath}`, import.meta.url), "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return "";
+    throw error;
+  }
+}
+
+function shellBlocks(markdown) {
+  return [...markdown.matchAll(/```(?:bash|sh)\n([\s\S]*?)\n```/gu)]
+    .map((match) => match[1])
+    .join("\n");
+}
+
+test("Hermes upstream intake is explicit, isolated, and cannot publish automatically", async () => {
+  const runbook = await documentationSource("docs/operations/hermes-upstream-sync.md");
+  const readme = await documentationSource("README.md");
+  const productionBoundary = await documentationSource(
+    "docs/operations/runtime-v1-production-boundary.md",
+  );
+  const commands = shellBlocks(runbook);
+
+  assert.notEqual(runbook, "", "missing Hermes upstream synchronization runbook");
+  for (const marker of [
+    "git switch main",
+    "git pull --ff-only origin main",
+    "git switch -c \"chore/hermes-upstream-${UPSTREAM_TAG}\"",
+    "git remote get-url hermes-upstream",
+    "https://github.com/NousResearch/hermes-agent.git",
+    "git fetch --no-tags hermes-upstream \"$UPSTREAM_REF\"",
+    "git rev-parse 'FETCH_HEAD^{commit}'",
+    "git rev-parse 'FETCH_HEAD^{tree}'",
+    "git subtree pull --prefix=third_party/hermes-agent hermes-upstream \"$UPSTREAM_COMMIT\" --squash",
+    "node scripts/generate-hermes-source-lock.mjs",
+    "npm run hermes:source:verify",
+    "npm run check",
+    "npm test",
+    "npm run test:postgres",
+    "npm run test:integration",
+  ]) {
+    assert.ok(commands.includes(marker), marker);
+  }
+  assert.match(commands, /UPSTREAM_TAG=vYYYY\.MM\.DD/u);
+  assert.match(commands, /test "\$UPSTREAM_TAG" != vYYYY\.MM\.DD/u);
+  assert.match(commands, /git ls-files[\s\S]+forbidden/u);
+  assert.match(commands, /git diff[\s\S]+third_party\/hermes-agent/u);
+  assert.doesNotMatch(
+    commands,
+    /(?:\blatest\b|refs\/heads\/(?:main|master)|git subtree pull[^\n]+hermes-upstream\s+(?:main|master)\b|git merge\b|git add[^\n]*product-images\.lock\.json)/u,
+  );
+
+  assert.match(runbook, /linux\/amd64/u);
+  assert.match(runbook, /linux\/arm64/u);
+  assert.match(runbook, /live-provider acceptance/iu);
+  assert.match(runbook, /manual[\s\S]{0,80}Publish Hermes Runtime/iu);
+  assert.match(runbook, /candidate[\s\S]{0,80}product-images\.lock\.json/iu);
+  assert.match(runbook, /previously accepted[\s\S]{0,80}digest/iu);
+  assert.match(runbook, /increment[\s\S]{0,80}Runtime generation/iu);
+  assert.match(runbook, /must not\s+automatically\s+publish/iu);
+  assert.match(runbook, /must not\s+automatically\s+commit[\s\S]{0,80}product-images\.lock\.json/iu);
+
+  assert.match(readme, /docs\/operations\/hermes-upstream-sync\.md/u);
+  assert.match(productionBoundary, /docs\/operations\/hermes-upstream-sync\.md/u);
+  assert.match(productionBoundary, /vendored Hermes source/iu);
+  assert.doesNotMatch(
+    productionBoundary,
+    /The official Hermes base lock is only a build input/u,
+  );
+});
+
+test("Hermes upstream review is seam-by-seam and rejects weakened product boundaries", async () => {
+  const runbook = await documentationSource("docs/operations/hermes-upstream-sync.md");
+
+  for (const marker of [
+    "prompt identity",
+    "SOUL/Profile",
+    "gateway streaming and errors",
+    "Profile lifecycle",
+    "memory consent and ACL",
+    "plugin, tool, Skill, MCP, and Policy hooks",
+    "provider redaction",
+    "Docker, user, filesystem, and network",
+    "Python and Node locks",
+    "license notices",
+    "tenant isolation",
+    "SecretStore",
+    "error projection",
+    "public protocol",
+    "non-root execution",
+    "immutable images",
+    "human approval for writes",
+  ]) {
+    assert.ok(runbook.includes(marker), marker);
+  }
+  assert.match(runbook, /focused commit[\s\S]{0,80}test/iu);
+  assert.match(runbook, /never[\s\S]{0,80}all-upstream[\s\S]{0,80}all-downstream/iu);
 });

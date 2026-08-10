@@ -22,6 +22,7 @@ const lockKeys = Object.freeze([
 const gitObjectPattern = /^[a-f0-9]{40}$/u;
 const digestPattern = /^[a-f0-9]{64}$/u;
 const tagRefPattern = /^refs\/tags\/[A-Za-z0-9._-]{1,128}$/u;
+const runbookPlaceholderRef = "refs/tags/vYYYY.MM.DD";
 const maximumGitOutputBytes = 1024 * 1024;
 const maximumLicenseBytes = 1024 * 1024;
 const defaultRepositoryRoot = fileURLToPath(new URL("../", import.meta.url));
@@ -76,6 +77,7 @@ export function validateHermesSourceLock(value) {
     || lock.upstream_repository !== officialRepository
     || typeof lock.upstream_ref !== "string"
     || !tagRefPattern.test(lock.upstream_ref)
+    || lock.upstream_ref === runbookPlaceholderRef
     || typeof lock.upstream_commit !== "string"
     || !gitObjectPattern.test(lock.upstream_commit)
     || typeof lock.upstream_tree !== "string"
@@ -231,6 +233,7 @@ export async function generateHermesSourceLock(options = {}) {
   if (
     typeof upstreamRef !== "string"
     || !tagRefPattern.test(upstreamRef)
+    || upstreamRef === runbookPlaceholderRef
     || typeof upstreamCommitValue !== "string"
     || !gitObjectPattern.test(upstreamCommitValue)
   ) {

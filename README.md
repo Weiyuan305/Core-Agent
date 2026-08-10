@@ -90,6 +90,15 @@ diagnostic evidence only; no default local or CI build selects them. The accepte
 `infra/hermes/product-images.lock.json` remains unchanged until a separately
 approved manual release is built, reviewed on both platforms, and cut over.
 
+## Update vendored Hermes
+
+Hermes upgrades are operator-run, tag- and commit-pinned subtree updates. Follow
+the [controlled upstream synchronization runbook](docs/operations/hermes-upstream-sync.md)
+for remote verification, seam-by-seam downstream review, source-lock regeneration,
+two-platform and live acceptance, and the separate manual publication gate. An
+upstream-sync pull request never updates the accepted product-image lock or
+publishes a runtime automatically.
+
 ## Strict smoke, terminal chat, and consultant Web
 
 Both real-runtime commands require the reviewed product-image lock and the

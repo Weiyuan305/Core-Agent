@@ -247,11 +247,19 @@ than applying a directory-wide cleanup.
 
 ## Product-image rollout
 
-The official Hermes base lock is only a build input. Publish the Core-Agent
-product image for each supported platform, capture registry RepoDigests, review
-them, and publish one immutable product-image lock. Mount that same lock
-read-only into API and Supervisor; do not use a local tag or let the two
-processes load different files.
+The locked vendored Hermes source is the canonical build input. The former
+official-image overlay and base lock are historical diagnostic evidence only and
+must not be selected by a local, CI, or release default. Follow the
+[controlled upstream synchronization runbook](hermes-upstream-sync.md), at
+repository path `docs/operations/hermes-upstream-sync.md`, for every upstream
+candidate.
+
+Publish the Core-Agent product image for each supported platform only through
+the separately approved manual workflow, capture registry RepoDigests, review
+them, and publish one immutable product-image lock. Mount that same lock read-only
+into API and Supervisor; do not use a local tag or let the two processes load
+different files. An upstream synchronization pull request never has authority to
+publish an image or change the accepted product lock.
 
 Before rollout, verify the product digest contains the fixed initializer and
 gateway entrypoints, run migrations, validate service configuration, and run
