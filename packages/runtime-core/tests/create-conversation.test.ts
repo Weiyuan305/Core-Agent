@@ -152,7 +152,7 @@ test("Conversation admission hides absent, cross-tenant, inactive, and untrusted
   const { profileId: inactiveTenantProfile } = await seedReadyTenant(db, inactiveTenant, { tenantStatus: "suspended" });
   const { profileId: inactiveProfile } = await seedReadyTenant(db, inactiveProfileTenant, { profileStatus: "suspended" });
   const { profileId: actorProfile } = await seedReadyTenant(db, actorTenant);
-  await db.updateTable("actors").set({ status: "disabled" }).where("tenant_id", "=", actorTenant).where("actor_id", "=", "core_agent_provisioner").execute();
+  await db.updateTable("actors").set({ status: "disabled" }).where("actor_id", "=", "core_agent_provisioner").execute();
 
   const attempts = [
     [activeTenant, "profile_absent", "idem_absent_profile"],

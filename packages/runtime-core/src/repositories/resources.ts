@@ -98,7 +98,6 @@ export class ActorRepository {
   public async insert(actor: Actor): Promise<void> {
     validateContract<Actor>(ActorSchema, actor);
     await this.context.db.insertInto("actors").values({
-      tenant_id: this.context.tenantId,
       actor_id: actor.actor_id,
       schema_version: actor.schema_version,
       resource_version: actor.resource_version,
@@ -107,13 +106,22 @@ export class ActorRepository {
       status: actor.status,
       created_at: new Date(actor.created_at),
       updated_at: new Date(actor.updated_at),
-    }).execute();
+    }).onConflict((conflict) => conflict.column("actor_id").doNothing()).execute();
+    const stored = await this.context.db.selectFrom("actors")
+      .select(["actor_kind", "display_name", "status"])
+      .where("actor_id", "=", actor.actor_id)
+      .forNoKeyUpdate()
+      .executeTakeFirstOrThrow();
+    if (
+      stored.actor_kind !== actor.actor_kind
+      || stored.display_name !== (actor.display_name ?? null)
+      || stored.status !== actor.status
+    ) throw new Error("Global Actor facts conflict with existing identity authority");
   }
 
   public async find(actorId: string): Promise<Actor | undefined> {
     const row = await this.context.db.selectFrom("actors")
       .select(["actor_id", "schema_version", "resource_version", "actor_kind", "display_name", "status", "created_at", "updated_at"])
-      .where("tenant_id", "=", this.context.tenantId)
       .where("actor_id", "=", actorId)
       .executeTakeFirst();
     return row === undefined ? undefined : validateContract<Actor>(ActorSchema, {
@@ -122,7 +130,7 @@ export class ActorRepository {
       resource_version: safeContractInteger(row.resource_version),
       actor_kind: row.actor_kind,
       ...(row.display_name === null ? {} : { display_name: row.display_name }),
-      status: row.status,
+      status: row.status === "active" ? "active" : "disabled",
       created_at: row.created_at.toISOString(),
       updated_at: row.updated_at.toISOString(),
     });
@@ -135,6 +143,9 @@ export class MembershipRepository {
   public async insert(membership: Membership): Promise<void> {
     assertOwnedByTenant(membership, this.context.tenantId);
     validateContract<Membership>(MembershipSchema, membership);
+    if (membership.membership_source === undefined) {
+      throw new Error("Membership source must be explicit for database writes");
+    }
     await this.context.db.insertInto("memberships").values({
       tenant_id: membership.tenant_id,
       membership_id: membership.membership_id,
@@ -142,6 +153,7 @@ export class MembershipRepository {
       schema_version: membership.schema_version,
       resource_version: membership.resource_version,
       roles: membership.roles,
+      membership_source: membership.membership_source,
       seat_ref: membership.seat_ref ?? null,
       status: membership.status,
       created_at: new Date(membership.created_at),
@@ -151,7 +163,7 @@ export class MembershipRepository {
 
   public async find(membershipId: string): Promise<Membership | undefined> {
     const row = await this.context.db.selectFrom("memberships")
-      .select(["tenant_id", "membership_id", "actor_id", "schema_version", "resource_version", "roles", "seat_ref", "status", "created_at", "updated_at"])
+      .select(["tenant_id", "membership_id", "actor_id", "schema_version", "resource_version", "roles", "membership_source", "seat_ref", "status", "created_at", "updated_at"])
       .where("tenant_id", "=", this.context.tenantId)
       .where("membership_id", "=", membershipId)
       .executeTakeFirst();
@@ -162,6 +174,7 @@ export class MembershipRepository {
       schema_version: row.schema_version,
       resource_version: safeContractInteger(row.resource_version),
       roles: row.roles,
+      membership_source: row.membership_source,
       ...(row.seat_ref === null ? {} : { seat_ref: row.seat_ref }),
       status: row.status,
       created_at: row.created_at.toISOString(),

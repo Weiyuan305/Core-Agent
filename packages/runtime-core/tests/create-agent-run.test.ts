@@ -188,7 +188,7 @@ test("Agent Run fails closed on duplicate or Profile-mismatched active Sessions"
 
   const mismatch = await setupConversation("tenant_run_mismatch_session");
   const secondOwner = "owner_second_profile";
-  await db.insertInto("actors").values({ tenant_id: mismatch.context.tenantId, actor_id: secondOwner, schema_version: 1, resource_version: 1, actor_kind: "human", display_name: "Second", status: "active", created_at: admissionNow, updated_at: admissionNow }).execute();
+  await db.insertInto("actors").values({ actor_id: secondOwner, schema_version: 1, resource_version: 1, actor_kind: "human", display_name: "Second", status: "active", created_at: admissionNow, updated_at: admissionNow }).execute();
   await db.insertInto("profiles").values({ tenant_id: mismatch.context.tenantId, profile_id: "profile_second", schema_version: 1, resource_version: 1, owner_actor_id: secondOwner, profile_kind: "default", hermes_profile_ref: "hermes_second", description: "Second profile", status: "active", provider_config_id: "provider_admission", model_id: "model_admission", created_at: admissionNow, updated_at: admissionNow }).execute();
   await db.updateTable("sessions").set({ profile_id: "profile_second" }).where("tenant_id", "=", mismatch.context.tenantId).execute();
   await assert.rejects(

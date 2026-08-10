@@ -63,7 +63,7 @@ async function insertExecuteBacklog(
   conversations: readonly { conversationId: string; count: number; createdOffset: number }[],
 ): Promise<void> {
   await db.insertInto("actors").values({
-    tenant_id: "tenant_jobs", actor_id: "actor_jobs", schema_version: 1, resource_version: 1,
+    actor_id: "actor_jobs", schema_version: 1, resource_version: 1,
     actor_kind: "human", display_name: "Jobs actor", status: "active", created_at: new Date(0), updated_at: new Date(0),
   }).execute();
   await db.insertInto("profiles").values({

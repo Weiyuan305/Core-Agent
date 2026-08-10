@@ -443,14 +443,15 @@ test("begin fails closed and rolls back run.started when current tenant, Actor, 
   for (const authority of ["tenant", "actor", "membership", "role"] as const) {
     const setup = await setupExecution(`tenant_execute_authority_${authority}`);
     if (authority === "tenant") await db.updateTable("tenants").set({ status: "suspended" }).where("tenant_id", "=", setup.tenantId).execute();
-    if (authority === "actor") await db.updateTable("actors").set({ status: "disabled" }).where("tenant_id", "=", setup.tenantId).where("actor_id", "=", "core_agent_provisioner").execute();
+    if (authority === "actor") await db.updateTable("actors").set({ status: "disabled" }).where("actor_id", "=", "core_agent_provisioner").execute();
     if (authority === "membership") await db.updateTable("memberships").set({ status: "suspended" }).where("tenant_id", "=", setup.tenantId).where("membership_id", "=", "core_agent_provisioner_admin").execute();
-    if (authority === "role") await db.updateTable("memberships").set({ roles: ["student"] }).where("tenant_id", "=", setup.tenantId).where("membership_id", "=", "core_agent_provisioner_admin").execute();
+    if (authority === "role") await db.updateTable("memberships").set({ roles: ["consultant"], membership_source: "company" }).where("tenant_id", "=", setup.tenantId).where("membership_id", "=", "core_agent_provisioner_admin").execute();
     const ref = { tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute", attemptCount: setup.job.attemptCount, runId: setup.run.run_id };
     await assert.rejects(setup.repository.begin(ref));
     const run = await db.selectFrom("agent_runs").select("status").where("tenant_id", "=", setup.tenantId).where("run_id", "=", setup.run.run_id).executeTakeFirstOrThrow();
     assert.equal(run.status, "queued");
     assert.equal(await db.selectFrom("product_events").selectAll().where("tenant_id", "=", setup.tenantId).where("event_type", "=", "run.started").execute().then((rows) => rows.length), 0);
+    if (authority === "actor") await db.updateTable("actors").set({ status: "active" }).where("actor_id", "=", "core_agent_provisioner").execute();
   }
 });
 

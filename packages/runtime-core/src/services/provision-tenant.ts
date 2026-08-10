@@ -113,7 +113,11 @@ function assertUnique(values: readonly string[], label: string): void {
 }
 
 function validateIdentityRequest(graph: IdentityGraph): void {
-  if (validateIdentityGraph(graph).length > 0) invalid("Identity graph is inconsistent");
+  const authorityGraph: IdentityGraph = {
+    ...graph,
+    profiles: graph.profiles.map((profile) => ({ ...profile, status: "active" })),
+  };
+  if (validateIdentityGraph(authorityGraph).length > 0) invalid("Identity graph is inconsistent");
   if (graph.tenant.tenant_mode === "b2b" && graph.profiles.length < 1) {
     invalid("B2B provisioning requires a consultant profile");
   }
@@ -221,12 +225,25 @@ export async function provisionTenant(
     const now = (dependencies.now?.() ?? new Date());
     const nowIso = now.toISOString();
     const graph = request.identity_graph;
-    const insertedTenant = await trx.insertInto("tenants").values({
-      tenant_id: tenantId, schema_version: 1, resource_version: 1,
-      tenant_mode: graph.tenant.tenant_mode, status: "provisioning",
-      display_name: graph.tenant.display_name, created_at: now, updated_at: now,
-    }).onConflict((conflict) => conflict.column("tenant_id").doNothing()).returning("tenant_id").executeTakeFirst();
     const tenantTransaction: TenantTransaction = { tenantId, trx };
+    const repositories = new ResourceRepositories(dependencies.db).forTransaction(tenantTransaction);
+    const existingTenant = await trx.selectFrom("tenants").select("tenant_id")
+      .where("tenant_id", "=", tenantId).executeTakeFirst();
+    let insertedTenant: { tenant_id: string } | undefined;
+    if (existingTenant === undefined) {
+      for (const actor of graph.actors) {
+        await repositories.actors.insert({ ...actor, schema_version: 1, resource_version: 1, created_at: nowIso, updated_at: nowIso });
+      }
+      await repositories.actors.insert({
+        schema_version: 1, resource_version: 1, actor_id: context.actorId, actor_kind: "service",
+        display_name: "Core Agent Provisioner", status: "active", created_at: nowIso, updated_at: nowIso,
+      });
+      insertedTenant = await trx.insertInto("tenants").values({
+        tenant_id: tenantId, schema_version: 1, resource_version: 1,
+        tenant_mode: graph.tenant.tenant_mode, status: "provisioning",
+        display_name: graph.tenant.display_name, created_at: now, updated_at: now,
+      }).onConflict((conflict) => conflict.column("tenant_id").doNothing()).returning("tenant_id").executeTakeFirst();
+    }
     const admission = await beginIdempotentCommand<ProvisionTenantResponse>(tenantTransaction, {
       key: request.idempotency_key,
       payloadHash: request.payload_hash,
@@ -244,20 +261,12 @@ export async function provisionTenant(
     if (admission.kind === "in_progress") throw new DomainError("IDEMPOTENCY_CONFLICT", "Provisioning command is already in progress");
     if (insertedTenant === undefined) throw new DomainError("RESOURCE_VERSION_CONFLICT", "Tenant already exists");
 
-    const repositories = new ResourceRepositories(dependencies.db).forTransaction(tenantTransaction);
-    for (const actor of graph.actors) {
-      await repositories.actors.insert({ ...actor, schema_version: 1, resource_version: 1, created_at: nowIso, updated_at: nowIso });
-    }
     for (const membership of graph.memberships) {
       await repositories.memberships.insert({ ...membership, schema_version: 1, resource_version: 1, created_at: nowIso, updated_at: nowIso });
     }
-    await repositories.actors.insert({
-      schema_version: 1, resource_version: 1, actor_id: context.actorId, actor_kind: "service",
-      display_name: "Core Agent Provisioner", status: "active", created_at: nowIso, updated_at: nowIso,
-    });
     await repositories.memberships.insert({
       schema_version: 1, resource_version: 1, membership_id: context.membershipId,
-      tenant_id: tenantId, actor_id: context.actorId, roles: ["admin"], status: "active",
+      tenant_id: tenantId, actor_id: context.actorId, roles: ["admin"], membership_source: "platform", status: "active",
       created_at: nowIso, updated_at: nowIso,
     });
     for (const profile of graph.profiles) {

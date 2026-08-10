@@ -42,6 +42,21 @@ test("provision completion and Conversation admission share tenant profile runti
   ]);
 });
 
+test("tenant provisioning locks global Actor authority before Tenant Membership and Profile", async () => {
+  const provision = await readFile(join(root, "services", "provision-tenant.ts"), "utf8");
+  const resources = await readFile(join(root, "repositories", "resources.ts"), "utf8");
+  const transaction = method(provision, "return serializable", "const secretReferences");
+  const actorInsert = method(resources, "public async insert(actor", "public async find(actorId");
+
+  ordered(transaction, [
+    "repositories.actors.insert",
+    'insertInto("tenants")',
+    "repositories.memberships.insert",
+    "repositories.profiles.insert",
+  ]);
+  assert.match(actorInsert, /selectFrom\("actors"\)[\s\S]*\.forNoKeyUpdate\(\)/);
+});
+
 test("every Agent Run transaction that locks a run follows conversation run worker-job order", async () => {
   const source = await readFile(join(root, "repositories", "worker-agent-run.ts"), "utf8");
   for (const [start, end] of [

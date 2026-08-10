@@ -190,7 +190,7 @@ export class WorkerAgentRunRepository {
       if (run === undefined || run.conversation_id !== conversationId) throw new Error("Stored Agent Run execution identity is unavailable");
       const claimed = await lockedOwnedJob(trx, job);
       if (claimed.effect_state !== "pre_effect") throw new Error("Unsafe Agent execution cannot begin");
-      const actor = await trx.selectFrom("actors").select(["actor_kind", "status"]).where("tenant_id", "=", job.tenantId)
+      const actor = await trx.selectFrom("actors").select(["actor_kind", "status"])
         .where("actor_id", "=", conversation.created_by_actor_id).forShare().executeTakeFirst();
       const membership = await trx.selectFrom("memberships").select(["actor_id", "roles", "status"]).where("tenant_id", "=", job.tenantId)
         .where("membership_id", "=", workerMembershipId).forShare().executeTakeFirst();

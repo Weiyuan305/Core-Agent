@@ -7,9 +7,10 @@ import test from "node:test";
 const repositoryDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "repositories");
 const runtimeCommandMigration = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations", "004_runtime_command_intent.sql");
 const tenantOwnedTables = new Set([
-  "tenants", "actors", "memberships", "profiles", "runtime_containers", "conversations", "sessions", "agent_runs", "messages",
+  "tenants", "memberships", "profiles", "runtime_containers", "conversations", "sessions", "agent_runs", "messages",
   "idempotency_records", "worker_jobs", "product_events", "audit_events", "outbox", "stream_sequences", "stream_cursors", "secret_references",
 ]);
+const globalAuthorityTables = new Set(["actors"]);
 
 function findRepositoryQuerySafetyViolations(file: string, source: string): string[] {
   const violations: string[] = [];
@@ -182,6 +183,16 @@ test("static gate detects unsafe inserts and throwing query terminators", () => 
     "unsafe.ts: runtime_containers insert is missing an explicit tenant_id value",
     "unsafe.ts: messages query is missing a tenant_id predicate",
   ]);
+});
+
+test("static gate distinguishes global Actor authority from tenant-owned resources", () => {
+  assert.equal(globalAuthorityTables.has("actors"), true);
+  assert.equal(tenantOwnedTables.has("actors"), false);
+  const globalActor = `
+    await db.insertInto("actors").values({ actor_id: actorId }).execute();
+    await db.selectFrom("actors").select("status").where("actor_id", "=", actorId).executeTakeFirst();
+  `;
+  assert.deepEqual(findRepositoryQuerySafetyViolations("global-actor.ts", globalActor), []);
 });
 
 test("static gate bounds each chain and rejects non-composite tenant joins", () => {

@@ -3,6 +3,8 @@ import type { Pool } from "pg";
 
 import type { AgentRunFailureCode } from "@core-agent/contracts";
 
+import type { IdentityAuthorityTables } from "./identity-tables.js";
+
 type JsonValue = unknown;
 type RuntimeBigIntInput = string | number | bigint;
 
@@ -14,11 +16,11 @@ export type NullableRuntimeBigInt = ColumnType<
   RuntimeBigIntInput | null
 >;
 
-export interface RuntimeDatabase {
+export interface RuntimeDatabase extends IdentityAuthorityTables {
   core_agent_schema_migrations: { version: number; name: string; checksum: string; applied_at: Date };
   tenants: { tenant_id: string; schema_version: number; resource_version: RuntimeBigInt; tenant_mode: string; status: string; display_name: string; created_at: Date; updated_at: Date };
-  actors: { tenant_id: string; actor_id: string; schema_version: number; resource_version: RuntimeBigInt; actor_kind: string; display_name: string | null; status: string; created_at: Date; updated_at: Date };
-  memberships: { tenant_id: string; membership_id: string; actor_id: string; schema_version: number; resource_version: RuntimeBigInt; roles: string[]; seat_ref: string | null; status: string; created_at: Date; updated_at: Date };
+  actors: { actor_id: string; schema_version: number; resource_version: RuntimeBigInt; actor_kind: string; display_name: string | null; status: "active" | "disabled" | "deletion_pending" | "deleted"; created_at: Date; updated_at: Date };
+  memberships: { tenant_id: string; membership_id: string; actor_id: string; schema_version: number; resource_version: RuntimeBigInt; roles: string[]; membership_source: "self" | "company" | "platform"; seat_ref: string | null; status: string; created_at: Date; updated_at: Date };
   profiles: { tenant_id: string; profile_id: string; schema_version: number; resource_version: RuntimeBigInt; owner_actor_id: string; profile_kind: string; hermes_profile_ref: string; description: string; status: string; provider_config_id: string; model_id: string; created_at: Date; updated_at: Date };
   runtime_containers: { tenant_id: string; container_id: string; schema_version: number; resource_version: RuntimeBigInt; command_version: ColumnType<string, RuntimeBigIntInput | undefined, RuntimeBigIntInput>; runtime_kind: string; desired_state: string; observed_state: string; image_ref: string; runtime_platform: ColumnType<string | null, string | null | undefined, string | null>; generation: number; volume_ref: string; health_status: string; last_probed_at: Date | null; failure_summary: string | null; created_at: Date; updated_at: Date };
   conversations: { tenant_id: string; conversation_id: string; profile_id: string; created_by_actor_id: string; status: string; schema_version: number; resource_version: RuntimeBigInt; student_ref: JsonValue | null; case_ref: JsonValue | null; created_at: Date; updated_at: Date };

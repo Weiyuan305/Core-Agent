@@ -86,6 +86,7 @@ export function syntheticB2BProvisioningRequest(tenantId: string) {
           tenant_id: tenantId,
           actor_id: actorId,
           roles: ["consultant" as const],
+          membership_source: "company" as const,
           status: "active" as const,
           created_at: timestamp,
           updated_at: timestamp,

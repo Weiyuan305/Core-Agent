@@ -16,6 +16,17 @@ export {
   type RuntimeBigInt,
   type RuntimeDatabase,
 } from "./db/database.js";
+export type {
+  AccountDeletionTable,
+  AuthSubjectTable,
+  CoreSessionTable,
+  IdentityAuthorityTables,
+  IdentityInvitationTable,
+  OauthTransactionTable,
+  PlatformRoleAssignmentTable,
+  PrivateIdentityPiiTable,
+  PublicRateLimitTable,
+} from "./db/identity-tables.js";
 export {
   DatabaseTransactionRetryAbortedError,
   DatabaseTransactionRetryExhaustedError,

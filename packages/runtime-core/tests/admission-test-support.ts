@@ -73,7 +73,6 @@ export async function seedReadyTenant(
     updated_at: admissionNow,
   }).execute();
   await db.insertInto("actors").values([{
-    tenant_id: tenantId,
     actor_id: ownerId,
     schema_version: 1,
     resource_version: 1,
@@ -83,7 +82,6 @@ export async function seedReadyTenant(
     created_at: admissionNow,
     updated_at: admissionNow,
   }, {
-    tenant_id: tenantId,
     actor_id: "core_agent_provisioner",
     schema_version: 1,
     resource_version: 1,
@@ -92,7 +90,7 @@ export async function seedReadyTenant(
     status: "active",
     created_at: admissionNow,
     updated_at: admissionNow,
-  }]).execute();
+  }]).onConflict((conflict) => conflict.column("actor_id").doNothing()).execute();
   await db.insertInto("memberships").values([{
     tenant_id: tenantId,
     membership_id: `membership_${tenantId}`,
@@ -100,6 +98,7 @@ export async function seedReadyTenant(
     schema_version: 1,
     resource_version: 1,
     roles: ["student"],
+    membership_source: "self",
     seat_ref: null,
     status: "active",
     created_at: admissionNow,
@@ -111,6 +110,7 @@ export async function seedReadyTenant(
     schema_version: 1,
     resource_version: 1,
     roles: ["admin"],
+    membership_source: "platform",
     seat_ref: null,
     status: "active",
     created_at: admissionNow,

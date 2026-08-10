@@ -98,6 +98,20 @@ test("repository cannot fetch a resource through another tenant", async () => {
   assert.equal(await tenantB.runtimes.find("runtime_a"), undefined);
 });
 
+test("Actor repository uses stable global identity while Memberships remain tenant scoped", async () => {
+  const tenantA = repositories.forTenant("tenant_a");
+  const tenantB = repositories.forTenant("tenant_b");
+  const actor = syntheticActor({ actor_id: "actor_global_repository" });
+  await tenantA.actors.insert(actor);
+
+  assert.deepEqual(await tenantB.actors.find(actor.actor_id), actor);
+  assert.equal(
+    await db.selectFrom("actors").select(({ fn }) => fn.countAll<string>().as("count"))
+      .where("actor_id", "=", actor.actor_id).executeTakeFirstOrThrow().then((row) => row.count),
+    "1",
+  );
+});
+
 test("repository rejects a runtime whose mapped bigint is not a safe integer", async () => {
   await db.insertInto("runtime_containers").values({
     tenant_id: "tenant_a",

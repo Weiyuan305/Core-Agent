@@ -80,7 +80,8 @@ function b2bRequest(tenantId = "tenant_provision_a") {
       memberships: [{
         schema_version: 1 as const, resource_version: 1, membership_id: `membership_${tenantId}`,
         tenant_id: tenantId, actor_id: `actor_${tenantId}`, roles: ["consultant" as const],
-        status: "active" as const, created_at: timestamp, updated_at: timestamp,
+        membership_source: "company" as const, status: "active" as const,
+        created_at: timestamp, updated_at: timestamp,
       }],
       profiles: [{
         schema_version: 1 as const, resource_version: 1, profile_id: `profile_${tenantId}`,
@@ -186,6 +187,13 @@ test("provisionTenant atomically creates one runtime and replays the completed r
   }
   assert.equal(await db.selectFrom("actors").selectAll().execute().then((rows) => rows.length), 2);
   assert.equal(await db.selectFrom("memberships").selectAll().execute().then((rows) => rows.length), 2);
+  assert.deepEqual(
+    await db.selectFrom("memberships").select(["actor_id", "membership_source"]).orderBy("actor_id").execute(),
+    [
+      { actor_id: `actor_${context.tenantId}`, membership_source: "company" },
+      { actor_id: "core_agent_provisioner", membership_source: "platform" },
+    ],
+  );
   assert.equal(await db.selectFrom("profiles").selectAll().execute().then((rows) => rows.length), 1);
   assert.equal(await db.selectFrom("secret_references").selectAll().execute().then((rows) => rows.length), 2);
   const idempotency = await db.selectFrom("idempotency_records").selectAll().executeTakeFirstOrThrow();
@@ -202,6 +210,24 @@ test("provisionTenant atomically creates one runtime and replays the completed r
       generation: 1,
     }).volume,
   });
+});
+
+test("completed provisioning replay is stable after global Actor authority changes", async () => {
+  const request = b2bRequest("tenant_provision_actor_drift");
+  const context = {
+    tenantId: request.identity_graph.tenant.tenant_id,
+    requestId: "request_provision_actor_drift",
+    traceId: "trace_provision_actor_drift",
+    actorId: "core_agent_provisioner" as const,
+    membershipId: "core_agent_provisioner_admin" as const,
+    effectiveRole: "admin" as const,
+  };
+  const dependencies = { db, providerCatalog, imageLock };
+  const first = await provisionTenant(dependencies, context, request);
+  await db.updateTable("actors").set({ status: "disabled" })
+    .where("actor_id", "=", request.identity_graph.actors[0]!.actor_id).execute();
+
+  assert.deepEqual(await provisionTenant(dependencies, context, request), first);
 });
 
 test("provisioning replays an expired tombstone and permanently rejects a changed payload", async () => {

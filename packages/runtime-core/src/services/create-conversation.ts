@@ -142,7 +142,7 @@ export async function createConversation(
       .where("container_id", "=", deriveRuntimeContainerId(tenantId))
       .forShare().executeTakeFirst();
     const actor = await trx.selectFrom("actors").select(["actor_kind", "status"])
-      .where("tenant_id", "=", tenantId).where("actor_id", "=", context.actorId).forShare().executeTakeFirst();
+      .where("actor_id", "=", context.actorId).forShare().executeTakeFirst();
     const membership = await trx.selectFrom("memberships").select(["actor_id", "roles", "status"])
       .where("tenant_id", "=", tenantId).where("membership_id", "=", context.membershipId).forShare().executeTakeFirst();
     const tenantTransaction: TenantTransaction = { tenantId, trx };

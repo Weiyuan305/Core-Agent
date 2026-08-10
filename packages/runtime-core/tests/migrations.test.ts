@@ -51,17 +51,109 @@ async function seedTenant(tenantId: string): Promise<void> {
 }
 
 async function seedActor(tenantId: string, actorId: string): Promise<void> {
-  await db.insertInto("actors").values({
-    tenant_id: tenantId,
-    actor_id: actorId,
-    schema_version: 1,
-    resource_version: 1,
-    actor_kind: "service",
-    display_name: "Synthetic service",
-    status: "active",
-    created_at: new Date("2026-01-01T00:00:00.000Z"),
-    updated_at: new Date("2026-01-01T00:00:00.000Z"),
-  }).execute();
+  const hasTenantId = (await pool.query<{ exists: boolean }>(
+    `select exists (
+      select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'actors' and column_name = 'tenant_id'
+    ) as exists`,
+  )).rows[0]?.exists === true;
+  const timestamp = new Date("2026-01-01T00:00:00.000Z");
+  if (hasTenantId) {
+    await pool.query(
+      `insert into actors (
+        tenant_id, actor_id, schema_version, resource_version, actor_kind,
+        display_name, status, created_at, updated_at
+      ) values ($1, $2, 1, 1, 'service', 'Synthetic service', 'active', $3, $3)`,
+      [tenantId, actorId, timestamp],
+    );
+    return;
+  }
+  await pool.query(
+    `insert into actors (
+      actor_id, schema_version, resource_version, actor_kind,
+      display_name, status, created_at, updated_at
+    ) values ($1, 1, 1, 'service', 'Synthetic service', 'active', $2, $2)`,
+    [actorId, timestamp],
+  );
+}
+
+async function applyThroughSchema9(): Promise<string> {
+  const v9Directory = await mkdtemp(join(tmpdir(), "core-agent-v9-migrations-"));
+  await cp(migrationsDirectory, v9Directory, { recursive: true });
+  await rm(join(v9Directory, "010_identity_authority.sql"), { force: true });
+  await applyMigrations(pool, v9Directory);
+  assert.equal(await readSchemaVersion(db), 9);
+  return v9Directory;
+}
+
+async function seedLegacyGlobalActorGraph(): Promise<void> {
+  const timestamp = new Date("2026-08-10T00:00:00.000Z");
+  await pool.query(
+    `insert into tenants (
+      tenant_id, schema_version, resource_version, tenant_mode, status,
+      display_name, created_at, updated_at
+    ) values
+      ('tenant_global_a', 1, 1, 'b2b', 'active', 'Global A', $1, $1),
+      ('tenant_global_b', 1, 1, 'b2c', 'active', 'Global B', $1, $1)`,
+    [timestamp],
+  );
+  await pool.query(
+    `insert into actors (
+      tenant_id, actor_id, schema_version, resource_version, actor_kind,
+      display_name, status, created_at, updated_at
+    ) values
+      ('tenant_global_a', 'actor_global', 1, 1, 'human', 'Stable Human', 'active', $1, $1),
+      ('tenant_global_b', 'actor_global', 1, 3, 'human', 'Stable Human', 'active', $1, $1)`,
+    [timestamp],
+  );
+  await pool.query(
+    `insert into memberships (
+      tenant_id, membership_id, actor_id, schema_version, resource_version,
+      roles, seat_ref, status, created_at, updated_at
+    ) values
+      ('tenant_global_a', 'membership_global_a', 'actor_global', 1, 1, array['consultant'], null, 'active', $1, $1),
+      ('tenant_global_b', 'membership_global_b', 'actor_global', 1, 1, array['student'], null, 'revoked', $1, $1)`,
+    [timestamp],
+  );
+  await pool.query(
+    `insert into profiles (
+      tenant_id, profile_id, schema_version, resource_version, owner_actor_id,
+      profile_kind, hermes_profile_ref, description, status, provider_config_id,
+      model_id, created_at, updated_at
+    ) values
+      ('tenant_global_a', 'profile_global_a', 1, 1, 'actor_global', 'consultant', 'profile_global_a', 'A', 'active', 'provider', 'model', $1, $1),
+      ('tenant_global_b', 'profile_global_b', 1, 1, 'actor_global', 'default', 'profile_global_b', 'B', 'active', 'provider', 'model', $1, $1)`,
+    [timestamp],
+  );
+  await pool.query(
+    `insert into conversations (
+      tenant_id, conversation_id, profile_id, created_by_actor_id, status,
+      schema_version, resource_version, student_ref, case_ref, created_at, updated_at
+    ) values
+      ('tenant_global_a', 'conversation_global_a', 'profile_global_a', 'actor_global', 'active', 1, 1, null, null, $1, $1),
+      ('tenant_global_b', 'conversation_global_b', 'profile_global_b', 'actor_global', 'active', 1, 1, null, null, $1, $1)`,
+    [timestamp],
+  );
+  await pool.query(
+    `insert into sessions (
+      tenant_id, session_id, profile_id, actor_id, conversation_id, schema_version,
+      resource_version, status, last_active_at, expires_at, hermes_session_ref,
+      created_at, updated_at
+    ) values
+      ('tenant_global_a', 'agent_session_global_a', 'profile_global_a', 'actor_global', 'conversation_global_a', 1, 1, 'active', $1, $2, 'hermes_global_a', $1, $1),
+      ('tenant_global_b', 'agent_session_global_b', 'profile_global_b', 'actor_global', 'conversation_global_b', 1, 1, 'active', $1, $2, 'hermes_global_b', $1, $1)`,
+    [timestamp, new Date("2026-09-10T00:00:00.000Z")],
+  );
+  await pool.query(
+    `insert into audit_events (
+      tenant_id, audit_event_id, schema_version, occurred_at, actor_id, membership_id,
+      effective_role, action, resource_type, resource_id, decision, outcome, request_id,
+      trace_id, reason_summary, event_json
+    ) values
+      ('tenant_global_a', 'audit_global_a', 1, $1, 'actor_global', 'membership_global_a', 'consultant', 'test', 'actor', 'actor_global', 'allowed', 'succeeded', 'request_a', 'trace_a', 'test', '{}'::jsonb),
+      ('tenant_global_b', 'audit_global_b', 1, $1, 'actor_global', 'membership_global_b', 'student', 'test', 'actor', 'actor_global', 'allowed', 'succeeded', 'request_b', 'trace_b', 'test', '{}'::jsonb)`,
+    [timestamp],
+  );
 }
 
 async function seedProfile(tenantId: string, profileId: string): Promise<void> {
@@ -90,14 +182,14 @@ test.after(async () => {
   await db.destroy();
 });
 
-test("empty database migrates exactly to schema version 9 with Agent Run failure codes", async () => {
+test("empty database migrates exactly to schema version 10 with identity authority", async () => {
   await applyMigrations(pool, migrationsDirectory);
 
-  assert.equal(EXPECTED_SCHEMA_VERSION, 9);
+  assert.equal(EXPECTED_SCHEMA_VERSION, 10);
   assert.equal(await readSchemaVersion(db), EXPECTED_SCHEMA_VERSION);
   await assert.doesNotReject(assertSchemaVersion(db, EXPECTED_SCHEMA_VERSION));
   await assert.rejects(assertSchemaVersion(db, 3), /ahead/);
-  await assert.rejects(assertSchemaVersion(db, 10), /behind/);
+  await assert.rejects(assertSchemaVersion(db, 11), /behind/);
   const runtimeCommandColumn = await sql<{ column_name: string }>`
     select column_name from information_schema.columns
     where table_schema = 'public' and table_name = 'worker_jobs' and column_name = 'runtime_command'
@@ -137,16 +229,194 @@ test("empty database migrates exactly to schema version 9 with Agent Run failure
   ]);
 });
 
-test("version 9 upgrades a genuine v7 database and supports Worker claim plans", { timeout: 10_000 }, async () => {
+test("schema 10 fails closed for every contradictory legacy global Actor fact", async () => {
+  const contradictions = [
+    ["actor_kind", "human"],
+    ["status", "disabled"],
+    ["display_name", "Different Human"],
+  ] as const;
+  for (const [column, value] of contradictions) {
+    await resetDatabase();
+    const v9Directory = await applyThroughSchema9();
+    try {
+      await seedTenant(`tenant_conflict_${column}_a`);
+      await seedTenant(`tenant_conflict_${column}_b`);
+      await seedActor(`tenant_conflict_${column}_a`, "actor_conflict");
+      await seedActor(`tenant_conflict_${column}_b`, "actor_conflict");
+      await pool.query(
+        `update actors set ${column} = $1 where tenant_id = $2 and actor_id = 'actor_conflict'`,
+        [value, `tenant_conflict_${column}_b`],
+      );
+
+      await assert.rejects(applyMigrations(pool, migrationsDirectory), /contradictory legacy Actor facts/);
+      assert.equal(await readSchemaVersion(db), 9);
+      assert.equal((await pool.query("select count(*)::int as count from actors where actor_id = 'actor_conflict'")).rows[0]?.count, 2);
+    } finally {
+      await rm(v9Directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test("schema 10 collapses consistent Actors and preserves every legacy Actor foreign key", async () => {
+  const v9Directory = await applyThroughSchema9();
+  try {
+    await seedLegacyGlobalActorGraph();
+
+    await applyMigrations(pool, migrationsDirectory);
+
+    assert.equal(await readSchemaVersion(db), 10);
+    const actors = await pool.query("select * from actors where actor_id = 'actor_global'");
+    assert.equal(actors.rowCount, 1);
+    assert.equal("tenant_id" in actors.rows[0], false);
+    assert.equal(actors.rows[0]?.resource_version, "3");
+    const preserved = await pool.query<{ relation: string; count: number }>(
+      `select 'memberships' as relation, count(*)::int as count from memberships where actor_id = 'actor_global'
+       union all select 'profiles', count(*)::int from profiles where owner_actor_id = 'actor_global'
+       union all select 'conversations', count(*)::int from conversations where created_by_actor_id = 'actor_global'
+       union all select 'sessions', count(*)::int from sessions where actor_id = 'actor_global'
+       union all select 'audit_events', count(*)::int from audit_events where actor_id = 'actor_global'
+       order by relation`,
+    );
+    assert.deepEqual(preserved.rows, [
+      { relation: "audit_events", count: 2 },
+      { relation: "conversations", count: 2 },
+      { relation: "memberships", count: 2 },
+      { relation: "profiles", count: 2 },
+      { relation: "sessions", count: 2 },
+    ]);
+    const sources = await pool.query("select tenant_id, membership_source from memberships order by tenant_id");
+    assert.deepEqual(sources.rows, [
+      { tenant_id: "tenant_global_a", membership_source: "company" },
+      { tenant_id: "tenant_global_b", membership_source: "self" },
+    ]);
+    const sourceColumn = await pool.query(
+      `select is_nullable, column_default from information_schema.columns
+       where table_schema = 'public' and table_name = 'memberships' and column_name = 'membership_source'`,
+    );
+    assert.deepEqual(sourceColumn.rows, [{ is_nullable: "NO", column_default: null }]);
+  } finally {
+    await rm(v9Directory, { recursive: true, force: true });
+  }
+});
+
+test("schema 10 creates private authority tables without PUBLIC read grants and admits future jobs", async () => {
+  const v9Directory = await applyThroughSchema9();
+  try {
+    await seedTenant("tenant_identity_tables");
+    await applyMigrations(pool, migrationsDirectory);
+    const expectedTables = [
+      "account_deletions",
+      "auth_subjects",
+      "core_sessions",
+      "identity_invitations",
+      "oauth_transactions",
+      "platform_role_assignments",
+      "private_identity_pii",
+      "public_rate_limits",
+    ];
+    const tables = await pool.query<{ table_name: string }>(
+      `select table_name from information_schema.tables
+       where table_schema = 'public' and table_name = any($1::text[]) order by table_name`,
+      [expectedTables],
+    );
+    assert.deepEqual(tables.rows.map((row) => row.table_name), expectedTables);
+    const publicReads = await pool.query(
+      `select table_name, privilege_type from information_schema.role_table_grants
+       where table_schema = 'public' and grantee = 'PUBLIC'
+         and table_name = any($1::text[]) and privilege_type = 'SELECT'`,
+      [expectedTables],
+    );
+    assert.deepEqual(publicReads.rows, []);
+    const timestamp = new Date("2026-08-10T00:00:00.000Z");
+    for (const jobKind of ["project_platform_memberships", "finalize_account_deletion"]) {
+      await pool.query(
+        `insert into worker_jobs (
+          tenant_id, job_id, job_kind, status, attempt_count, max_attempts,
+          lease_owner, lease_expires_at, next_attempt_at, payload_ref,
+          runtime_command, target_command_version, effect_state, last_error_summary,
+          run_id, container_id, created_at, updated_at
+        ) values ($1, $2, $3, 'queued', 0, 5, null, null, $4, $5, null, null, 'pre_effect', null, null, null, $4, $4)`,
+        ["tenant_identity_tables", `job_${jobKind}`, jobKind, timestamp, `payload_${jobKind}`],
+      );
+    }
+  } finally {
+    await rm(v9Directory, { recursive: true, force: true });
+  }
+});
+
+test("deferred ordinary Membership authority serializes concurrent cross-Tenant invitations", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  const timestamp = new Date("2026-08-10T00:00:00.000Z");
+  await pool.query(
+    `insert into tenants (tenant_id, schema_version, resource_version, tenant_mode, status, display_name, created_at, updated_at)
+     values ('tenant_race_a', 1, 1, 'b2b', 'active', 'Race A', $1, $1),
+            ('tenant_race_b', 1, 1, 'b2b', 'active', 'Race B', $1, $1)`,
+    [timestamp],
+  );
+  await pool.query(
+    `insert into actors (actor_id, schema_version, resource_version, actor_kind, display_name, status, created_at, updated_at)
+     values ('actor_race', 1, 1, 'human', 'Race', 'active', $1, $1)`,
+    [timestamp],
+  );
+  const clients = [await pool.connect(), await pool.connect()];
+  try {
+    await Promise.all(clients.map((client) => client.query("begin")));
+    await Promise.all(clients.map((client, index) => client.query(
+      `insert into memberships (
+        tenant_id, membership_id, actor_id, schema_version, resource_version, roles,
+        membership_source, seat_ref, status, created_at, updated_at
+      ) values ($1, $2, 'actor_race', 1, 1, array['consultant'], 'company', null, 'invited', $3, $3)`,
+      [`tenant_race_${index === 0 ? "a" : "b"}`, `membership_race_${index}`, timestamp],
+    )));
+    const commits = await Promise.allSettled(clients.map((client) => client.query("commit")));
+    assert.equal(commits.filter((result) => result.status === "fulfilled").length, 1);
+    assert.equal(commits.filter((result) => result.status === "rejected").length, 1);
+    assert.match(String(commits.find((result) => result.status === "rejected")?.reason), /ordinary Membership authority conflict/);
+    assert.equal((await pool.query(
+      "select count(*)::int as count from memberships where actor_id = 'actor_race' and status in ('active', 'invited')",
+    )).rows[0]?.count, 1);
+  } finally {
+    await Promise.allSettled(clients.map((client) => client.query("rollback")));
+    clients.forEach((client) => client.release());
+  }
+});
+
+test("platform Memberships may span multiple B2B Tenants", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  const timestamp = new Date("2026-08-10T00:00:00.000Z");
+  await pool.query(
+    `insert into tenants (tenant_id, schema_version, resource_version, tenant_mode, status, display_name, created_at, updated_at)
+     values ('tenant_platform_a', 1, 1, 'b2b', 'active', 'Platform A', $1, $1),
+            ('tenant_platform_b', 1, 1, 'b2b', 'active', 'Platform B', $1, $1)`,
+    [timestamp],
+  );
+  await pool.query(
+    `insert into actors (actor_id, schema_version, resource_version, actor_kind, display_name, status, created_at, updated_at)
+     values ('actor_platform', 1, 1, 'human', 'Platform', 'active', $1, $1)`,
+    [timestamp],
+  );
+  await assert.doesNotReject(pool.query(
+    `insert into memberships (
+      tenant_id, membership_id, actor_id, schema_version, resource_version, roles,
+      membership_source, seat_ref, status, created_at, updated_at
+    ) values
+      ('tenant_platform_a', 'membership_platform_a', 'actor_platform', 1, 1, array['admin'], 'platform', null, 'active', $1, $1),
+      ('tenant_platform_b', 'membership_platform_b', 'actor_platform', 1, 1, array['admin'], 'platform', null, 'active', $1, $1)`,
+    [timestamp],
+  ));
+});
+
+test("schema 10 upgrades a genuine v7 database and supports Worker claim plans", { timeout: 10_000 }, async () => {
   const v7Directory = await mkdtemp(join(tmpdir(), "core-agent-v7-migrations-"));
   await cp(migrationsDirectory, v7Directory, { recursive: true });
   await rm(join(v7Directory, "008_outbox_exhausted_recovery_index.sql"));
   await rm(join(v7Directory, "009_agent_run_failure_code.sql"));
+  await rm(join(v7Directory, "010_identity_authority.sql"));
   try {
     await applyMigrations(pool, v7Directory);
     assert.equal(await readSchemaVersion(db), 7);
     await applyMigrations(pool, migrationsDirectory);
-    assert.equal(await readSchemaVersion(db), 9);
+    assert.equal(await readSchemaVersion(db), 10);
 
     const plans = await db.connection().execute(async (connection) => {
       await sql`set enable_seqscan = off`.execute(connection);
@@ -187,10 +457,11 @@ test("version 9 upgrades a genuine v7 database and supports Worker claim plans",
   }
 });
 
-test("version 9 backfills failed Runs and enforces failure code state", async () => {
+test("schema 10 backfills failed Runs and enforces failure code state", async () => {
   const v8Directory = await mkdtemp(join(tmpdir(), "core-agent-v8-migrations-"));
   await cp(migrationsDirectory, v8Directory, { recursive: true });
   await rm(join(v8Directory, "009_agent_run_failure_code.sql"));
+  await rm(join(v8Directory, "010_identity_authority.sql"));
   try {
     await applyMigrations(pool, v8Directory);
     assert.equal(await readSchemaVersion(db), 8);
@@ -270,6 +541,7 @@ test("version 4 terminalizes ambiguous legacy reconcile jobs and enforces the jo
   await rm(join(legacyDirectory, "007_agent_run_claim_indexes.sql"));
   await rm(join(legacyDirectory, "008_outbox_exhausted_recovery_index.sql"));
   await rm(join(legacyDirectory, "009_agent_run_failure_code.sql"));
+  await rm(join(legacyDirectory, "010_identity_authority.sql"));
   try {
     await applyMigrations(pool, legacyDirectory);
     await seedTenant("tenant_upgrade");
@@ -384,6 +656,7 @@ test("version 5 fails genuine active v4 command intent closed and preserves term
   await rm(join(v4Directory, "007_agent_run_claim_indexes.sql"));
   await rm(join(v4Directory, "008_outbox_exhausted_recovery_index.sql"));
   await rm(join(v4Directory, "009_agent_run_failure_code.sql"));
+  await rm(join(v4Directory, "010_identity_authority.sql"));
   try {
     await applyMigrations(pool, v4Directory);
     await seedTenant("tenant_v4_worker_upgrade");
@@ -416,6 +689,7 @@ test("latest schema upgrades a genuine v5 database through the version 6 Worker 
   await rm(join(v5Directory, "007_agent_run_claim_indexes.sql"));
   await rm(join(v5Directory, "008_outbox_exhausted_recovery_index.sql"));
   await rm(join(v5Directory, "009_agent_run_failure_code.sql"));
+  await rm(join(v5Directory, "010_identity_authority.sql"));
   try {
     await applyMigrations(pool, v5Directory);
     assert.equal(await readSchemaVersion(db), 5);
@@ -447,6 +721,7 @@ test("version 6 fails closed when genuine v5 storage already exceeds the Worker 
   await rm(join(v5Directory, "007_agent_run_claim_indexes.sql"));
   await rm(join(v5Directory, "008_outbox_exhausted_recovery_index.sql"));
   await rm(join(v5Directory, "009_agent_run_failure_code.sql"));
+  await rm(join(v5Directory, "010_identity_authority.sql"));
   try {
     await applyMigrations(pool, v5Directory);
     await seedTenant("tenant_v5_invalid_attempt");
