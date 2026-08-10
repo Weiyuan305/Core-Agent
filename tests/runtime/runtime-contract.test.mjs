@@ -4,11 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import {
-  buildDockerArgs,
-  runBuild
-} from "../../scripts/build-hermes-image.mjs";
-import { resolveHermesImage } from "../../scripts/resolve-hermes-image.mjs";
 import * as smokeModule from "../../scripts/smoke-control-plane.mjs";
 import {
   SMOKE_OUTPUT_KEYS,
@@ -714,8 +709,12 @@ const dockerfile = await readFile(
   new URL("../../infra/hermes/Dockerfile", import.meta.url),
   "utf8"
 );
-const sourceDockerfile = await readFile(
-  new URL("../../infra/hermes/Dockerfile.source", import.meta.url),
+const historicalDockerfile = await readFile(
+  new URL("../../infra/hermes/Dockerfile.upstream-image", import.meta.url),
+  "utf8",
+);
+const canonicalBuildAdapter = await readFile(
+  new URL("../../scripts/build-hermes-image.mjs", import.meta.url),
   "utf8",
 );
 const upstreamSourceDockerfile = await readFile(
@@ -731,9 +730,14 @@ const managedConfig = await readFile(
   "utf8"
 );
 
-test("Dockerfile requires an externally resolved immutable base image", () => {
-  assert.match(dockerfile, /^ARG HERMES_BASE_IMAGE$/m);
-  assert.match(dockerfile, /^FROM \$\{HERMES_BASE_IMAGE\}$/m);
+test("canonical Dockerfile requires the verified local source image and both revisions", () => {
+  assert.match(dockerfile, /^ARG HERMES_SOURCE_IMAGE$/m);
+  assert.match(dockerfile, /^FROM \$\{HERMES_SOURCE_IMAGE\}$/m);
+  assert.match(dockerfile, /^ARG CORE_AGENT_GIT_SHA$/m);
+  assert.match(dockerfile, /^ARG HERMES_GIT_SHA$/m);
+  assert.match(dockerfile, /org\.opencontainers\.image\.revision="\$\{CORE_AGENT_GIT_SHA\}"/u);
+  assert.match(dockerfile, /io\.core-agent\.hermes\.upstream\.revision="\$\{HERMES_GIT_SHA\}"/u);
+  assert.doesNotMatch(dockerfile, /HERMES_BASE_IMAGE/u);
   assert.doesNotMatch(dockerfile, /FROM\s+nousresearch\/hermes-agent:latest/);
   assert.match(
     dockerfile,
@@ -741,7 +745,7 @@ test("Dockerfile requires an externally resolved immutable base image", () => {
   );
   assert.match(
     dockerfile,
-    /^LABEL org\.opencontainers\.image\.description="Pinned Hermes runtime distribution for Core-Agent"$/m
+    /^LABEL org\.opencontainers\.image\.description="Source-built managed Hermes runtime for Core-Agent"/m
   );
   assert.match(
     dockerfile,
@@ -779,15 +783,15 @@ test("source-built product preserves the accepted runtime security boundary", ()
     ["/opt/data"],
   );
 
-  assert.match(sourceDockerfile, /^USER hermes$/mu);
+  assert.match(dockerfile, /^USER hermes$/mu);
   assert.match(
-    sourceDockerfile,
+    dockerfile,
     /^ENTRYPOINT \["\/opt\/core-agent\/gateway-entrypoint\.sh"\]$/mu,
   );
-  assert.match(sourceDockerfile, /install -d -m 01777 -o root -g root \/opt\/data/u);
-  assert.doesNotMatch(sourceDockerfile, /^VOLUME\b/mu);
+  assert.match(dockerfile, /install -d -m 01777 -o root -g root \/opt\/data/u);
+  assert.doesNotMatch(dockerfile, /^VOLUME\b/mu);
   assert.doesNotMatch(
-    `${upstreamSourceDockerfile}\n${sourceDockerfile}`,
+    `${upstreamSourceDockerfile}\n${dockerfile}`,
     /(?:API_SERVER_KEY|PROVIDER_(?:KEY|TOKEN)|BOOTSTRAP_(?:KEY|TOKEN)|CONTROL_PLANE_(?:KEY|TOKEN|SECRET))=/u,
   );
   assert.match(
@@ -796,6 +800,15 @@ test("source-built product preserves the accepted runtime security boundary", ()
   );
   assert.match(vendoredApiServer, /finish_chunk = project_terminal_failure\(failure, partial=is_partial\)/u);
   assert.match(vendoredApiServer, /error_chunk = project_terminal_failure\(_exc, partial=True\)/u);
+});
+
+test("historical official-image overlay remains diagnostics-only", () => {
+  assert.match(historicalDockerfile, /^ARG HERMES_BASE_IMAGE$/mu);
+  assert.match(historicalDockerfile, /^FROM \$\{HERMES_BASE_IMAGE\}$/mu);
+  assert.match(historicalDockerfile, /install_error_projection\.py/u);
+  assert.match(historicalDockerfile, /gateway-error-projection\.patch/u);
+  assert.doesNotMatch(canonicalBuildAdapter, /(?:resolveHermesImage|base-images\.lock\.json|HERMES_BASE_IMAGE|Dockerfile\.upstream-image)/u);
+  assert.match(canonicalBuildAdapter, /build-hermes-source-image\.mjs/u);
 });
 
 test("managed config starts with a deliberately narrow tool surface", () => {
@@ -823,74 +836,6 @@ memory:
   assert.doesNotMatch(
     managedConfig,
     /(?:^|\n)\s*(?:-\s+)?(?:terminal|file|browser|code_execution)\s*(?::|$)/m
-  );
-});
-
-test("build command includes the resolved base reference and product tag", () => {
-  const args = buildDockerArgs({
-    baseImage: "nousresearch/hermes-agent:v1@sha256:abc",
-    platform: "linux/arm64",
-    productTag: "core-agent/hermes-runtime:test"
-  });
-
-  assert.deepEqual(args, [
-    "build",
-    "--platform",
-    "linux/arm64",
-    "--build-arg",
-    "HERMES_BASE_IMAGE=nousresearch/hermes-agent:v1@sha256:abc",
-    "--tag",
-    "core-agent/hermes-runtime:test",
-    "--file",
-    "infra/hermes/Dockerfile",
-    "."
-  ]);
-});
-
-test("build runner resolves the locked base image before invoking Docker", async () => {
-  const lock = JSON.parse(await readFile(
-    new URL("../../infra/hermes/base-images.lock.json", import.meta.url),
-    "utf8"
-  ));
-  const baseImage = resolveHermesImage(lock, "linux/arm64");
-  let invocation;
-
-  await runBuild({
-    argv: ["node", "build-hermes-image.mjs", "--platform", "linux/arm64", "--tag", "core-agent/hermes-runtime:test"],
-    runDocker(command, args, options) {
-      invocation = { args, command, options };
-      return { status: 0 };
-    }
-  });
-
-  assert.equal(invocation.command, "docker");
-  assert.deepEqual(invocation.args, buildDockerArgs({
-    baseImage,
-    platform: "linux/arm64",
-    productTag: "core-agent/hermes-runtime:test"
-  }));
-  assert.equal(invocation.options.cwd, new URL("../..", import.meta.url).pathname);
-  assert.equal(invocation.options.stdio, "inherit");
-});
-
-test("build runner reports Docker spawn and nonzero failures", async () => {
-  const options = {
-    argv: ["node", "build-hermes-image.mjs", "--platform", "linux/arm64"]
-  };
-
-  await assert.rejects(
-    runBuild({
-      ...options,
-      runDocker: () => ({ error: new Error("Docker unavailable") })
-    }),
-    /Docker unavailable/
-  );
-  await assert.rejects(
-    runBuild({
-      ...options,
-      runDocker: () => ({ status: 17 })
-    }),
-    /docker build failed with exit code 17/
   );
 });
 

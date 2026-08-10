@@ -1,6 +1,6 @@
 # ADR 0008: Vendored Hermes Source and Controlled Upstream Sync
 
-Status: Accepted; implementation gated on live-provider acceptance
+Status: Accepted; source build canonical, release cutover pending
 
 Date: 2026-08-07
 
@@ -28,8 +28,8 @@ updates ambiguous.
 
 ## Decision
 
-After the current managed image completes the mandatory live-provider acceptance,
-Core-Agent will import the exact accepted Hermes upstream source into
+After the managed image completed mandatory live-provider acceptance, Core-Agent
+imported the exact accepted Hermes upstream source into
 `third_party/hermes-agent` using `git subtree --squash`.
 
 The import is governed by these rules:
@@ -89,22 +89,28 @@ Product modifications and upstream intake remain separate commits. This keeps re
 clear: one commit describes what Nous Research changed; later commits describe what
 Core-Agent intentionally carries downstream.
 
-## Migration gate
+## Migration gate outcome
 
-This decision does not authorize immediate source import. Execution begins only
-after the current Conversation Reliability live-provider criterion is recorded as
-passed using the existing reviewed product image.
+The Conversation Reliability and source-candidate live-provider criteria are
+recorded as passed. The verified two-stage source build is therefore the canonical
+local and CI build path. `npm run hermes:build` verifies the source lock, builds the
+vendored Hermes tree for the selected platform, and then builds the Core-Agent
+product layer from that local source image.
 
-The first source-built candidate must intentionally add no new product behavior. It
-must reproduce the accepted managed gateway, Profile, provider, streaming, error
-projection, cleanup, and Web conversation behavior. Product Identity and memory or
-Policy changes start only after that equivalence candidate passes and becomes a
-reviewed, rollback-safe image.
+The former official-image overlay is retained at
+`infra/hermes/Dockerfile.upstream-image` as historical migration and diagnostic
+evidence only. Default scripts and release workflows never select it. Its
+`base-images.lock.json` remains reviewable without acting as current build
+authority.
 
-Until that cutover succeeds, ADR 0001 remains the operational distribution path.
-After cutover, this record supersedes only ADR 0001's decision to consume Hermes
-solely through the official prebuilt image. ADR 0001's digest pinning, persistent
-state, tenant isolation, and rollback requirements remain in force.
+Canonical build selection does not itself authorize publication or runtime cutover.
+The accepted `product-images.lock.json` remains unchanged until the separately
+approved manual workflow publishes and an operator reviews both platform digests.
+Until that cutover succeeds, ADR 0001's accepted product digest remains operational
+and rollback authority. After cutover, this record supersedes only ADR 0001's
+decision to consume Hermes solely through the official prebuilt image; digest
+pinning, persistent state, tenant isolation, and rollback requirements remain in
+force.
 
 ## Alternatives considered
 

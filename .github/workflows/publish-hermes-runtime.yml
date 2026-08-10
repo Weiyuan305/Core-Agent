@@ -90,6 +90,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Verify vendored Hermes source
+        run: |
+          set -euo pipefail
+          npm run hermes:source:verify
+
       - name: Resolve exact platform build inputs
         id: prepare
         env:
@@ -101,9 +106,42 @@ jobs:
             linux/arm64) PLATFORM_SLUG=linux-arm64 ;;
             *) exit 1 ;;
           esac
-          BASE_IMAGE="$(node scripts/resolve-hermes-image.mjs --platform "$TARGET_PLATFORM")"
+          UPSTREAM_COMMIT="$(node -e "const fs=require('node:fs');const lock=JSON.parse(fs.readFileSync('infra/hermes/upstream-source.lock.json','utf8'));process.stdout.write(lock.upstream_commit)")"
+          [[ "$UPSTREAM_COMMIT" =~ ^[a-f0-9]{40}$ ]]
+          SOURCE_TAG="core-agent/hermes-source:${UPSTREAM_COMMIT:0:12}-${PLATFORM_SLUG}"
           printf 'platform_slug=%s\n' "$PLATFORM_SLUG" >> "$GITHUB_OUTPUT"
-          printf 'base_image=%s\n' "$BASE_IMAGE" >> "$GITHUB_OUTPUT"
+          printf 'upstream_commit=%s\n' "$UPSTREAM_COMMIT" >> "$GITHUB_OUTPUT"
+          printf 'source_tag=%s\n' "$SOURCE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build verified Hermes source image
+        id: source
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: third_party/hermes-agent
+          file: third_party/hermes-agent/Dockerfile
+          platforms: ${{ matrix.platform }}
+          build-args: HERMES_GIT_SHA=${{ steps.prepare.outputs.upstream_commit }}
+          tags: ${{ steps.prepare.outputs.source_tag }}
+          provenance: false
+          sbom: false
+          outputs: type=oci,dest=${{ runner.temp }}/hermes-source-${{ steps.prepare.outputs.platform_slug }}.tar
+
+      - name: Validate and unpack verified Hermes source image
+        id: source-layout
+        env:
+          SOURCE_DIGEST: ${{ steps.source.outputs.digest }}
+          PLATFORM_SLUG: ${{ steps.prepare.outputs.platform_slug }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          SOURCE_ARCHIVE="$RUNNER_TEMP/hermes-source-${PLATFORM_SLUG}.tar"
+          SOURCE_LAYOUT="$RUNNER_TEMP/hermes-source-${PLATFORM_SLUG}"
+          test -f "$SOURCE_ARCHIVE"
+          mkdir -p "$SOURCE_LAYOUT"
+          tar -xf "$SOURCE_ARCHIVE" -C "$SOURCE_LAYOUT"
+          test -f "$SOURCE_LAYOUT/oci-layout"
+          test -f "$SOURCE_LAYOUT/index.json"
+          test -f "$SOURCE_LAYOUT/blobs/sha256/${SOURCE_DIGEST#sha256:}"
 
       - name: Build and push platform image by digest
         id: build
@@ -112,9 +150,15 @@ jobs:
           context: .
           file: infra/hermes/Dockerfile
           platforms: ${{ matrix.platform }}
-          build-args: HERMES_BASE_IMAGE=${{ steps.prepare.outputs.base_image }}
+          build-args: |
+            HERMES_SOURCE_IMAGE=hermes_source
+            CORE_AGENT_GIT_SHA=${{ inputs.source_commit }}
+            HERMES_GIT_SHA=${{ steps.prepare.outputs.upstream_commit }}
+          build-contexts: |
+            hermes_source=oci-layout://${{ runner.temp }}/hermes-source-${{ steps.prepare.outputs.platform_slug }}@${{ steps.source.outputs.digest }}
           labels: |
             org.opencontainers.image.revision=${{ inputs.source_commit }}
+            io.core-agent.hermes.upstream.revision=${{ steps.prepare.outputs.upstream_commit }}
             org.opencontainers.image.version=${{ inputs.version }}
           provenance: false
           sbom: false

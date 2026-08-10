@@ -54,6 +54,31 @@ function validateSourceCommit(commit) {
   return commit;
 }
 
+function validateCoreAgentCommit(commit) {
+  if (typeof commit !== "string" || !sourceCommitPattern.test(commit)) {
+    throw buildError("HERMES_SOURCE_BUILD_CORE_COMMIT_INVALID");
+  }
+  return commit;
+}
+
+function readCoreAgentCommit() {
+  let result;
+  try {
+    result = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: repositoryRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      maxBuffer: 1_024,
+    });
+  } catch {
+    throw buildError("HERMES_SOURCE_BUILD_CORE_COMMIT_INVALID");
+  }
+  if (result?.error || result?.status !== 0) {
+    throw buildError("HERMES_SOURCE_BUILD_CORE_COMMIT_INVALID");
+  }
+  return validateCoreAgentCommit(result.stdout?.trim());
+}
+
 function parseArguments(argv) {
   if (!Array.isArray(argv)) {
     throw buildError("HERMES_SOURCE_BUILD_ARGUMENT_INVALID");
@@ -111,9 +136,17 @@ export function buildSourceImageArgs({ platform, sourceCommit, sourceTag }) {
   ];
 }
 
-export function buildProductImageArgs({ platform, productTag, sourceTag }) {
+export function buildProductImageArgs({
+  platform,
+  productTag,
+  sourceTag,
+  coreAgentCommit,
+  sourceCommit,
+}) {
   const selectedPlatform = validatePlatform(platform);
   const selectedProductTag = validateProductTag(productTag);
+  const selectedCoreAgentCommit = validateCoreAgentCommit(coreAgentCommit);
+  const selectedSourceCommit = validateSourceCommit(sourceCommit);
   if (
     typeof sourceTag !== "string"
     || !/^core-agent\/hermes-source:[a-f0-9]{12}-linux-(?:amd64|arm64)$/u.test(sourceTag)
@@ -129,10 +162,14 @@ export function buildProductImageArgs({ platform, productTag, sourceTag }) {
     "--load",
     "--build-arg",
     `HERMES_SOURCE_IMAGE=${sourceTag}`,
+    "--build-arg",
+    `CORE_AGENT_GIT_SHA=${selectedCoreAgentCommit}`,
+    "--build-arg",
+    `HERMES_GIT_SHA=${selectedSourceCommit}`,
     "--tag",
     selectedProductTag,
     "--file",
-    "infra/hermes/Dockerfile.source",
+    "infra/hermes/Dockerfile",
     ".",
   ];
 }
@@ -171,6 +208,7 @@ export async function runBuild({
   hostArchitecture = process.arch,
   hostPlatform = process.platform,
   verifySource = () => verifyHermesSource(),
+  resolveCoreAgentCommit = () => readCoreAgentCommit(),
   runDocker = (command, args, options) => spawnSync(command, args, options),
 } = {}) {
   const options = parseArguments(argv);
@@ -184,11 +222,21 @@ export async function runBuild({
   }
   platform = validatePlatform(platform);
   const productTag = validateProductTag(options["--tag"]);
-  if (typeof verifySource !== "function" || typeof runDocker !== "function") {
+  if (
+    typeof verifySource !== "function"
+    || typeof resolveCoreAgentCommit !== "function"
+    || typeof runDocker !== "function"
+  ) {
     throw buildError("HERMES_SOURCE_BUILD_ARGUMENT_INVALID");
   }
 
   const lock = await verifiedSourceLock(verifySource);
+  let coreAgentCommit;
+  try {
+    coreAgentCommit = validateCoreAgentCommit(await resolveCoreAgentCommit());
+  } catch {
+    throw buildError("HERMES_SOURCE_BUILD_CORE_COMMIT_INVALID");
+  }
   const sourceTag = deriveSourceImageTag(lock.upstream_commit, platform);
   runDockerBuild(runDocker, buildSourceImageArgs({
     platform,
@@ -199,15 +247,23 @@ export async function runBuild({
     platform,
     productTag,
     sourceTag,
+    coreAgentCommit,
+    sourceCommit: lock.upstream_commit,
   }));
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  runBuild().catch((error) => {
+export async function runBuildCli() {
+  try {
+    await runBuild();
+  } catch (error) {
     const code = error instanceof HermesSourceBuildError
       ? error.message
       : "HERMES_SOURCE_BUILD_FAILED";
     process.stderr.write(`${code}\n`);
     process.exitCode = 1;
-  });
+  }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  runBuildCli();
 }

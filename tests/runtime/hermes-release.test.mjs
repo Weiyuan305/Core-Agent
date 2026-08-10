@@ -368,11 +368,66 @@ test("Hermes runtime publishing is manual, private, pinned, and multi-platform",
   assert.equal(publishUpload.with["if-no-files-found"], "error");
   assert.equal(publishUpload.with["retention-days"], 7);
 
-  const buildStep = workflow.jobs.build.steps.find(
+  const buildSteps = workflow.jobs.build.steps.filter(
     (step) => typeof step.uses === "string" && step.uses.startsWith("docker/build-push-action@"),
   );
-  assert.equal(buildStep.with.provenance, false);
-  assert.equal(buildStep.with.sbom, false);
+  assert.equal(buildSteps.length, 2);
+  const sourceBuild = buildSteps.find((step) => step.id === "source");
+  const productBuild = buildSteps.find((step) => step.id === "build");
+  assert.ok(sourceBuild);
+  assert.ok(productBuild);
+  assert.equal(sourceBuild.with.context, "third_party/hermes-agent");
+  assert.equal(sourceBuild.with.file, "third_party/hermes-agent/Dockerfile");
+  assert.equal(sourceBuild.with.platforms, "${{ matrix.platform }}");
+  assert.equal(sourceBuild.with.load, undefined);
+  assert.equal(sourceBuild.with.push, undefined);
+  assert.match(
+    sourceBuild.with.outputs,
+    /type=oci,dest=\$\{\{ runner\.temp \}\}\/hermes-source-\$\{\{ steps\.prepare\.outputs\.platform_slug \}\}\.tar/u,
+  );
+  assert.match(sourceBuild.with["build-args"], /HERMES_GIT_SHA=\$\{\{ steps\.prepare\.outputs\.upstream_commit \}\}/u);
+  assert.match(sourceBuild.with.tags, /\$\{\{ steps\.prepare\.outputs\.source_tag \}\}/u);
+  assert.equal(productBuild.with.context, ".");
+  assert.equal(productBuild.with.file, "infra/hermes/Dockerfile");
+  assert.equal(productBuild.with.platforms, "${{ matrix.platform }}");
+  assert.match(productBuild.with["build-args"], /HERMES_SOURCE_IMAGE=hermes_source/u);
+  assert.match(
+    productBuild.with["build-contexts"],
+    /hermes_source=oci-layout:\/\/\$\{\{ runner\.temp \}\}\/hermes-source-\$\{\{ steps\.prepare\.outputs\.platform_slug \}\}@\$\{\{ steps\.source\.outputs\.digest \}\}/u,
+  );
+  assert.match(productBuild.with["build-args"], /CORE_AGENT_GIT_SHA=\$\{\{ inputs\.source_commit \}\}/u);
+  assert.match(productBuild.with["build-args"], /HERMES_GIT_SHA=\$\{\{ steps\.prepare\.outputs\.upstream_commit \}\}/u);
+  assert.match(productBuild.with.labels, /org\.opencontainers\.image\.revision=\$\{\{ inputs\.source_commit \}\}/u);
+  assert.match(productBuild.with.labels, /io\.core-agent\.hermes\.upstream\.revision=\$\{\{ steps\.prepare\.outputs\.upstream_commit \}\}/u);
+  for (const buildStep of buildSteps) {
+    assert.equal(buildStep.with.provenance, false);
+    assert.equal(buildStep.with.sbom, false);
+  }
+
+  const buildJobSteps = workflow.jobs.build.steps;
+  const verifyIndex = buildJobSteps.findIndex(
+    (step) => typeof step.run === "string" && step.run.includes("npm run hermes:source:verify"),
+  );
+  const prepareIndex = buildJobSteps.findIndex((step) => step.id === "prepare");
+  const sourceIndex = buildJobSteps.indexOf(sourceBuild);
+  const sourceLayoutIndex = buildJobSteps.findIndex((step) => step.id === "source-layout");
+  const productIndex = buildJobSteps.indexOf(productBuild);
+  assert.ok(verifyIndex >= 0);
+  assert.ok(prepareIndex > verifyIndex);
+  assert.ok(sourceIndex > prepareIndex);
+  assert.ok(sourceLayoutIndex > sourceIndex);
+  assert.ok(productIndex > sourceLayoutIndex);
+  const sourceLayoutStep = buildJobSteps[sourceLayoutIndex];
+  assert.equal(sourceLayoutStep.env.SOURCE_DIGEST, "${{ steps.source.outputs.digest }}");
+  assert.equal(sourceLayoutStep.env.PLATFORM_SLUG, "${{ steps.prepare.outputs.platform_slug }}");
+  assert.match(sourceLayoutStep.run, /\[\[ "\$SOURCE_DIGEST" =~ \^sha256:/u);
+  assert.match(sourceLayoutStep.run, /tar -xf "\$SOURCE_ARCHIVE" -C "\$SOURCE_LAYOUT"/u);
+  assert.match(sourceLayoutStep.run, /test -f "\$SOURCE_LAYOUT\/oci-layout"/u);
+  assert.match(sourceLayoutStep.run, /test -f "\$SOURCE_LAYOUT\/blobs\/sha256\/\$\{SOURCE_DIGEST#sha256:\}"/u);
+  const prepareStep = buildJobSteps[prepareIndex];
+  assert.match(prepareStep.run, /infra\/hermes\/upstream-source\.lock\.json/u);
+  assert.match(prepareStep.run, /upstream_commit/u);
+  assert.match(prepareStep.run, /source_tag/u);
 
   for (const step of workflow.jobs.publish.steps) {
     if (typeof step.run === "string" && step.run.includes("$SOURCE_COMMIT")) {
@@ -381,6 +436,7 @@ test("Hermes runtime publishing is manual, private, pinned, and multi-platform",
   }
 
   assert.doesNotMatch(workflowSource, /(?:pull_request_target|repository_dispatch|:latest\b)/u);
+  assert.doesNotMatch(workflowSource, /(?:resolve-hermes-image\.mjs|HERMES_BASE_IMAGE|Dockerfile\.upstream-image)/u);
   assert.match(workflowSource, /push-by-digest=true/u);
   assert.match(workflowSource, /name-canonical=true/u);
   assert.match(workflowSource, /git merge-base --is-ancestor/u);

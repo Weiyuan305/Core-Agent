@@ -25,9 +25,10 @@ digest; the bounded evidence is recorded in the
 [Runtime v1 acceptance record](docs/operations/runtime-v1-acceptance-evidence.md)
 and [Conversation Reliability record](docs/testing/conversation-reliability-v1.md).
 
-The active runtime-distribution migration vendors the reviewed Hermes source into
-this monorepo and builds the same isolated company runtime from source. The accepted
-decision and controlled execution steps are recorded in
+The runtime distribution vendors the reviewed Hermes source into this monorepo.
+Local and release builds now build that locked source first and then create the
+same isolated company runtime product image. The accepted decision and controlled
+execution steps are recorded in
 [ADR 0008](docs/architecture/0008-vendored-hermes-source-and-upstream-sync.md) and
 the [Hermes source vendoring plan](docs/superpowers/plans/2026-08-07-hermes-source-vendoring.md).
 
@@ -71,6 +72,23 @@ compare its two platform digests with GHCR and then commit the bytes unchanged
 as `infra/hermes/product-images.lock.json`. See the
 [local smoke guide](docs/operations/runtime-v1-local-smoke.md#publish-and-review-the-private-hermes-runtime)
 for the exact private pull and review procedure.
+
+## Build Hermes Runtime locally
+
+The canonical local build verifies the source lock, builds
+`third_party/hermes-agent`, and then builds the Core-Agent product layer with both
+the Core-Agent and upstream Hermes revisions recorded in image labels:
+
+```bash
+npm run hermes:source:verify
+npm run hermes:build -- --tag core-agent/hermes-runtime:dev
+```
+
+`infra/hermes/Dockerfile.upstream-image` and
+`infra/hermes/base-images.lock.json` are retained as historical migration and
+diagnostic evidence only; no default local or CI build selects them. The accepted
+`infra/hermes/product-images.lock.json` remains unchanged until a separately
+approved manual release is built, reviewed on both platforms, and cut over.
 
 ## Strict smoke, terminal chat, and consultant Web
 
