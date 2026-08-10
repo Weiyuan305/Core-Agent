@@ -14,7 +14,7 @@ the alternatives considered, and the consequences accepted at the time.
 | [0005](0005-hermes-profile-bootstrap-without-container-exec.md) | Accepted | Fixed no-network Profile initializer and file-backed Hermes ingress secret |
 | [0006](0006-idempotent-provisioning-and-runtime-command-intent.md) | Accepted | Atomic tenant provisioning, truthful runtime commands, and durable restart intent |
 | [0007](0007-managed-hermes-error-projection.md) | Accepted | Exact, non-reflective terminal failure projection in the pinned managed Hermes image |
-| [0008](0008-vendored-hermes-source-and-upstream-sync.md) | Accepted; gated | Vendored Hermes source, source-built runtime, and controlled upstream synchronization |
+| [0008](0008-vendored-hermes-source-and-upstream-sync.md) | Accepted; cut over | Vendored Hermes source, source-built runtime, and controlled upstream synchronization |
 
 ## Change policy
 

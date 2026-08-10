@@ -1,6 +1,6 @@
 # ADR 0008: Vendored Hermes Source and Controlled Upstream Sync
 
-Status: Accepted; source build canonical, release cutover pending
+Status: Accepted; source-built `v0.1.4` is release authority
 
 Date: 2026-08-07
 
@@ -103,14 +103,20 @@ evidence only. Default scripts and release workflows never select it. Its
 `base-images.lock.json` remains reviewable without acting as current build
 authority.
 
-Canonical build selection does not itself authorize publication or runtime cutover.
-The accepted `product-images.lock.json` remains unchanged until the separately
-approved manual workflow publishes and an operator reviews both platform digests.
-Until that cutover succeeds, ADR 0001's accepted product digest remains operational
-and rollback authority. After cutover, this record supersedes only ADR 0001's
-decision to consume Hermes solely through the official prebuilt image; digest
-pinning, persistent state, tenant isolation, and rollback requirements remain in
-force.
+The separately approved manual workflow published private source-built `v0.1.4`
+manifests for `linux/amd64` and `linux/arm64` from Core-Agent commit
+`efbe21450b3dd4947eb2653797886a3939857663`. Registry visibility, immutable
+version/SHA tags, Core-Agent and upstream revision labels, platform digests, and
+the generated candidate lock were independently reviewed. The workflow artifact
+was then copied byte-for-byte into `product-images.lock.json` and passed strict
+target-platform and local Web canaries.
+
+This cutover supersedes only ADR 0001's decision to consume Hermes solely through
+the official prebuilt image. Digest pinning, persistent state, tenant isolation,
+and rollback requirements remain in force. The exact `v0.1.3` product references
+remain rollback authority; rollback selects the previous platform digest through
+the normal Runtime lifecycle and increments Runtime generation. ADR 0007 remains
+unchanged as the accepted historical official-image error-projection record.
 
 ## Alternatives considered
 

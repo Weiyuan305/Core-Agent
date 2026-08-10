@@ -96,29 +96,29 @@ platform from `infra/hermes/product-images.lock.json`.
 
 The only release path is the manual **Publish Hermes Runtime** workflow at
 `.github/workflows/publish-hermes-runtime.yml`. Merge the workflow and image
-source to `main` before dispatch. Select `v0.1.3` and one full lowercase source
+source to `main` before dispatch. Select `v0.1.4` and one full lowercase source
 commit that is already reachable from `origin/main`; the workflow independently
 checks that ancestry before authenticating to GHCR or building.
 
 The workflow publishes exactly these private tags, without `latest`:
 
 ```text
-ghcr.io/weiyuan305/core-agent-hermes-runtime:v0.1.3
+ghcr.io/weiyuan305/core-agent-hermes-runtime:v0.1.4
 ghcr.io/weiyuan305/core-agent-hermes-runtime:sha-<first-12-source-commit-characters>
 ```
 
 Review the successful Actions run and confirm its source commit, both build
 jobs, package visibility `private`, and artifact name
-`hermes-product-image-lock-v0.1.3`. Download the artifact into a fresh private
+`hermes-product-image-lock-v0.1.4`. Download the artifact into a fresh private
 temporary directory. Compare both GHCR platform digests against the candidate:
 
 ```bash
-docker buildx imagetools inspect --raw ghcr.io/weiyuan305/core-agent-hermes-runtime:v0.1.3
+docker buildx imagetools inspect --raw ghcr.io/weiyuan305/core-agent-hermes-runtime:v0.1.4
 ```
 
 The candidate must contain only the approved repository, tag, and two immutable
 references beginning with
-`ghcr.io/weiyuan305/core-agent-hermes-runtime:v0.1.3@sha256:`. Stop on any
+`ghcr.io/weiyuan305/core-agent-hermes-runtime:v0.1.4@sha256:`. Stop on any
 source, visibility, repository, tag, amd64 digest, or arm64 digest mismatch.
 After checking both GHCR platform digests, commit the candidate lock unchanged
 as `infra/hermes/product-images.lock.json`; do not regenerate or hand-edit it.

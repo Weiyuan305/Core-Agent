@@ -1,6 +1,6 @@
 # Hermes Source Vendoring Equivalence
 
-Status: Passed for local `linux/arm64` equivalence; release cutover not authorized
+Status: Passed for local `linux/arm64` equivalence; source-built `v0.1.4` cutover accepted
 
 Date: 2026-08-10
 
@@ -11,10 +11,11 @@ outcomes, counts, fixed states, and allowlisted event families. Conversation
 content, provider bodies, headers, credentials, internal endpoints, customer
 data, and student data are excluded.
 
-The accepted runtime remains release authority until every gate below passes
-and the later manual cutover is separately approved. A local candidate image is
-development evidence only and does not modify
-`infra/hermes/product-images.lock.json`.
+The machine-readable block below remains the historical equivalence comparison
+between the accepted official-image runtime and its source-built candidate. A
+local candidate image is development evidence only. The separately approved
+private release and product-lock cutover are recorded after that immutable
+comparison.
 
 <!-- hermes-source-evidence:start -->
 ```json
@@ -124,7 +125,30 @@ development evidence only and does not modify
   volume. Persistent runtime data volumes remain subject to the existing
   non-destructive retention policy.
 
-This evidence accepts local functional and security equivalence only for the
-recorded `linux/arm64` candidate. It does not authorize publication, change the
-accepted product-image lock, claim `linux/amd64` coverage, or perform release
-cutover.
+## Accepted source-built release
+
+- Release workflow: [GitHub Actions run 31362734548](https://github.com/Weiyuan305/Core-Agent/actions/runs/31362734548)
+- Core-Agent source commit: `efbe21450b3dd4947eb2653797886a3939857663`
+- Upstream Hermes commit: `cc4cab2f592e60a197e796506de9168f74baf3ea`
+- Private release: `v0.1.4`; immutable companion tag:
+  `sha-efbe21450b3d`
+- Multi-platform index: `sha256:dd8f3e83cdc22778c023dfea3cb7d216b7d7eed9ece46d671561060a7b61a0c8`
+- `linux/amd64`: `sha256:5197bf0afa7e9b5e95dd46d186f2ac4d657e23eac16e31f3bba89cda64d2aa6a`
+- `linux/arm64`: `sha256:4fe870e2fb174726cb43994433b5b9b171d2ffd4cb05121c9a00e7b4b133e646`
+- Package visibility, both source labels, both immutable tags, both platform
+  descriptors, and the candidate-lock bytes were independently rechecked.
+- The accepted lock differs from `v0.1.3` only by the version and the two
+  immutable platform references. Focused product-lock/runtime tests passed
+  `61_of_61`.
+- A target-platform strict smoke reached Runtime `ready` and Run `succeeded`
+  with one completed output. Local Web acceptance passed streaming, two Runs
+  in one Conversation, a distinct new Conversation, API/Worker restart,
+  post-restart execution, and the `390x844` viewport with zero browser-console
+  errors.
+- Final cleanup left no smoke Compose container or managed runtime-v1
+  container. The prior `v0.1.3` lock remains the exact rollback authority.
+
+This release accepts both published platforms as product distribution
+authority. The local equivalence block remains bounded to `linux/arm64`; the
+successful release workflow supplies the independent `linux/amd64` build and
+manifest evidence rather than retroactively changing that local record.

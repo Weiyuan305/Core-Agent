@@ -379,7 +379,8 @@ test("canonical source build and rollback boundary are documented", async () => 
   assert.match(combined, /npm run hermes:build/u);
   assert.match(combined, /infra\/hermes\/Dockerfile\.upstream-image/u);
   assert.match(combined, /historical[^\n]+diagnostic/iu);
-  assert.match(combined, /product-images\.lock\.json[^\n]+unchanged/iu);
-  assert.match(adr, /Status: Accepted; source build canonical, release cutover pending/u);
+  assert.match(combined, /product-images\.lock\.json[\s\S]{0,160}source-built `v0\.1\.4`/u);
+  assert.match(combined, /prior[\s\S]{0,80}`v0\.1\.3`[\s\S]{0,80}rollback authority/iu);
+  assert.match(adr, /Status: Accepted; source-built `v0\.1\.4` is release authority/u);
   assert.doesNotMatch(combined, /(?:Dockerfile\.upstream-image[^\n]+default|automatic[^\n]+product-images\.lock\.json)/iu);
 });

@@ -659,8 +659,8 @@ test("runtime operating evidence distinguishes socket platforms and records only
   for (const criterion of ["AC1", "AC2", "AC3", "AC4", "AC5", "AC6", "AC7", "AC8", "AC9", "AC10"]) {
     assert.match(evidence, new RegExp(`\\| ${criterion} [^\\n]+\\| \\*\\*Pass\\*\\* \\|`, "u"), criterion);
   }
-  assert.match(evidence, /GitHub Actions run 31089294718/u);
-  assert.match(evidence, /GitHub Actions run 31091492854/u);
+  assert.match(evidence, /GitHub Actions run 31362734548/u);
+  assert.match(evidence, /GitHub Actions run 31361949133/u);
   assert.doesNotMatch(evidence, /prompt or assistant text:[^\n]+/iu);
 });
 

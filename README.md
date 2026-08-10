@@ -19,9 +19,10 @@ Runtime v1 now implements the internal single-node Control Plane: PostgreSQL
 migrations and repositories, the private Fastify API, durable Worker jobs and
 SSE, the Docker-owning Runtime Supervisor, and a loopback consultant Web client.
 Deterministic unit, browser, PostgreSQL, fake-integration, Compose, and security
-gates are implemented. AC10 and the Conversation Reliability live-provider gate
-passed on the target platform with the reviewed `v0.1.3` Core-Agent product-image
-digest; the bounded evidence is recorded in the
+gates are implemented. AC10, source-vendoring equivalence, and the local Web
+live-provider gate passed on the target platform with the reviewed private
+source-built `v0.1.4` Core-Agent product-image digest; the bounded evidence is
+recorded in the
 [Runtime v1 acceptance record](docs/operations/runtime-v1-acceptance-evidence.md)
 and [Conversation Reliability record](docs/testing/conversation-reliability-v1.md).
 
@@ -87,8 +88,9 @@ npm run hermes:build -- --tag core-agent/hermes-runtime:dev
 `infra/hermes/Dockerfile.upstream-image` and
 `infra/hermes/base-images.lock.json` are retained as historical migration and
 diagnostic evidence only; no default local or CI build selects them. The accepted
-`infra/hermes/product-images.lock.json` remains unchanged until a separately
-approved manual release is built, reviewed on both platforms, and cut over.
+`infra/hermes/product-images.lock.json` now selects the reviewed private
+source-built `v0.1.4` manifests for `linux/amd64` and `linux/arm64`. The prior
+`v0.1.3` references remain version-controlled rollback authority.
 
 ## Update vendored Hermes
 
