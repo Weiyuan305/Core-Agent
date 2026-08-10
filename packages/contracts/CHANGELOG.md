@@ -18,6 +18,9 @@
 - Make invitation-acceptance responses role-discriminated, add the safe paginated
   company-member view/list needed for current Membership versions, and scope every
   public mutation reason to the command the caller is authorized to request.
+- Make company-member views source/status/roles-discriminated with canonical role
+  ordering, and close membership-change event reasons to the planned lifecycle
+  vocabulary.
 - Preserve the released Actor status vocabulary while defining identity-authority
   deletion lifecycle separately, and enforce B2B/B2C authority-mode boundaries.
 - Add the immutable 0.5.0 schema release while keeping accepted historical release

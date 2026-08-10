@@ -46,6 +46,7 @@ const {
   InvitationRoleSchema,
   InvitationSchema,
   InvitationStatusSchema,
+  MembershipEventReasonCodeSchema,
   PasswordResetRequestSchema,
   PasswordResetResponseSchema,
   PlatformRoleAssignmentSchema,
@@ -181,7 +182,7 @@ test("every public auth response is closed and provider-neutral", () => {
     ["invitation revoke", InvitationRevokeResponseSchema, { schema_version: 1, invitation_id: "invitation_01", status: "revoked", resource_version: 2 }],
     ["company creation", CompanyCreateResponseSchema, { schema_version: 1, tenant_id: "tenant_01", tenant_resource_version: 1, administrator_invitation_id: "invitation_01", administrator_invitation_resource_version: 1, administrator_invitation_secret: invitationSecret }],
     ["company member invite", CompanyMemberInviteResponseSchema, { schema_version: 1, membership_id: "membership_01", membership_resource_version: 1, invitation_id: "invitation_01", invitation_resource_version: 1, invitation_secret: invitationSecret }],
-    ["company member list", CompanyMemberListResponseSchema, { schema_version: 1, tenant_id: "tenant_01", members: [{ schema_version: 1, membership_id: "membership_01", actor_id: "actor_01", role: "consultant", status: "active", source: "company", membership_resource_version: 2, profile_id: "profile_01", profile_resource_version: 1 }], page_info: { schema_version: 1, has_more: false } }],
+    ["company member list", CompanyMemberListResponseSchema, { schema_version: 1, tenant_id: "tenant_01", members: [{ schema_version: 1, membership_id: "membership_01", actor_id: "actor_01", roles: ["consultant"], status: "active", source: "company", membership_resource_version: 2, profile_id: "profile_01", profile_resource_version: 1 }], page_info: { schema_version: 1, has_more: false } }],
     ["company member suspend", CompanyMemberSuspendResponseSchema, { schema_version: 1, membership_id: "membership_01", status: "suspended", resource_version: 2 }],
     ["company member revoke", CompanyMemberRevokeResponseSchema, { schema_version: 1, membership_id: "membership_01", status: "revoked", resource_version: 2 }],
     ["account deletion", AccountDeletionResponseSchema, { schema_version: 1, account_deletion_id: "deletion_01", status: "deletion_pending", scheduled_for: timestamp, resource_version: 1 }],
@@ -315,31 +316,45 @@ test("company member list exposes safe role-coherent versions for follow-up writ
   const view = compileRequired("CompanyMemberViewSchema", CompanyMemberViewSchema);
   const listRequest = compileRequired("CompanyMemberListRequestSchema", CompanyMemberListRequestSchema);
   const listResponse = compileRequired("CompanyMemberListResponseSchema", CompanyMemberListResponseSchema);
-  const admin = {
+  const common = {
     schema_version: 1,
-    membership_id: "membership_admin",
-    actor_id: "actor_admin",
-    role: "admin",
-    status: "active",
-    source: "company",
+    membership_id: "membership_01",
+    actor_id: "actor_01",
     membership_resource_version: 4,
   };
+  const platformAdmin = {
+    ...common,
+    roles: ["admin"],
+    status: "active",
+    source: "platform",
+  };
   const consultant = {
-    schema_version: 1,
-    membership_id: "membership_consultant",
-    actor_id: "actor_consultant",
-    role: "consultant",
+    ...common,
+    roles: ["consultant"],
     status: "active",
     source: "company",
-    membership_resource_version: 6,
     profile_id: "profile_01",
     profile_resource_version: 3,
   };
-  assert.equal(view.Check(admin), true);
-  assert.equal(view.Check({ ...admin, source: "self" }), false);
-  assert.equal(view.Check({ ...admin, profile_id: "profile_forbidden", profile_resource_version: 1 }), false);
-  assert.equal(view.Check(consultant), true);
+  assert.equal(view.Check(platformAdmin), true);
+  for (const roles of [["admin"], ["consultant"]]) {
+    assert.equal(view.Check({ ...common, source: "company", status: "invited", roles }), true, `invited ${roles[0]}`);
+  }
+  for (const status of ["active", "suspended", "revoked"]) {
+    assert.equal(view.Check({ ...common, source: "company", status, roles: ["admin"] }), true, `${status} admin`);
+    assert.equal(view.Check({ ...consultant, status }), true, `${status} consultant`);
+    assert.equal(view.Check({ ...consultant, status, roles: ["admin", "consultant"] }), true, `${status} dual-role`);
+    assert.equal(view.Check({ ...consultant, status, roles: ["consultant", "admin"] }), false, `${status} reverse dual-role`);
+  }
+  assert.equal(view.Check({ ...platformAdmin, source: "self" }), false);
+  assert.equal(view.Check({ ...platformAdmin, roles: ["consultant"] }), false);
+  assert.equal(view.Check({ ...platformAdmin, profile_id: "profile_forbidden", profile_resource_version: 1 }), false);
+  assert.equal(view.Check({ ...platformAdmin, status: "suspended" }), false);
+  assert.equal(view.Check({ ...common, source: "company", status: "invited", roles: ["admin", "consultant"] }), false);
+  assert.equal(view.Check({ ...common, source: "company", status: "invited", roles: ["consultant"], profile_id: "profile_forbidden", profile_resource_version: 1 }), false);
+  assert.equal(view.Check({ ...common, source: "company", status: "active", roles: ["admin"], profile_id: "profile_forbidden", profile_resource_version: 1 }), false);
   assert.equal(view.Check({ ...consultant, profile_id: undefined, profile_resource_version: undefined }), false);
+  assert.equal(view.Check({ ...common, source: "company", status: "active", roles: ["student"] }), false);
   for (const forbidden of ["email", "provider_subject", "access_token"]) {
     assert.equal(view.Check({ ...consultant, [forbidden]: "sentinel" }), false, forbidden);
   }
@@ -348,13 +363,67 @@ test("company member list exposes safe role-coherent versions for follow-up writ
   const response = {
     schema_version: 1,
     tenant_id: "tenant_01",
-    members: [admin, consultant],
+    members: [platformAdmin, consultant],
     page_info: { schema_version: 1, next_cursor: "cursor_02", has_more: true },
   };
   assert.equal(listRequest.Check(request), true);
   assert.equal(listResponse.Check(response), true);
   assert.equal(compileRequired("CompanyMemberSuspendRequestSchema", CompanyMemberSuspendRequestSchema).Check({ ...idem, membership_id: consultant.membership_id, expected_resource_version: consultant.membership_resource_version, reason_code: "administrator_suspended" }), true);
   assert.equal(compileRequired("CompanyMemberRevokeRequestSchema", CompanyMemberRevokeRequestSchema).Check({ ...idem, membership_id: consultant.membership_id, expected_resource_version: consultant.membership_resource_version, reason_code: "administrator_revoked" }), true);
+});
+
+test("membership event reasons publish the complete closed lifecycle vocabulary", () => {
+  const reason = compileRequired("MembershipEventReasonCodeSchema", MembershipEventReasonCodeSchema);
+  const identityEvent = compileRequired("IdentityEventSchema", IdentityEventSchema);
+  const base = {
+    schema_version: 1,
+    event_id: "event_membership",
+    occurred_at: timestamp,
+    sequence: 1,
+    tenant_id: "tenant_01",
+    request_id: "request_01",
+    trace_id: "trace_01",
+    correlation_id: "correlation_01",
+    causation_id: "causation_01",
+    event_type: "membership.changed",
+  };
+  const reasons = [
+    "invitation_accepted",
+    "administrator_suspended",
+    "administrator_revoked",
+    "consultant_role_granted",
+    "consultant_role_revoked",
+    "platform_role_projected",
+    "platform_role_revoked",
+    "account_deletion_requested",
+    "account_deletion_cancelled",
+    "actor_disabled",
+    "tenant_closed",
+  ];
+  for (const reason_code of reasons) {
+    assert.equal(reason.Check(reason_code), true, reason_code);
+    assert.equal(identityEvent.Check({
+      ...base,
+      payload: {
+        membership_id: "membership_01",
+        actor_id: "actor_01",
+        status: "active",
+        reason_code,
+        resource_version: 2,
+      },
+    }), true, reason_code);
+  }
+  assert.equal(reason.Check("unknown_membership_reason"), false);
+  assert.equal(identityEvent.Check({
+    ...base,
+    payload: {
+      membership_id: "membership_01",
+      actor_id: "actor_01",
+      status: "active",
+      reason_code: "unknown_membership_reason",
+      resource_version: 2,
+    },
+  }), false);
 });
 
 test("public mutation reasons are scoped to caller-authorized commands", () => {

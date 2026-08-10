@@ -5551,10 +5551,52 @@
                   "type": "string"
                 },
                 "reason_code": {
-                  "maxLength": 80,
-                  "minLength": 1,
-                  "pattern": "^[a-z0-9_]+$",
-                  "type": "string"
+                  "anyOf": [
+                    {
+                      "const": "invitation_accepted",
+                      "type": "string"
+                    },
+                    {
+                      "const": "administrator_suspended",
+                      "type": "string"
+                    },
+                    {
+                      "const": "administrator_revoked",
+                      "type": "string"
+                    },
+                    {
+                      "const": "consultant_role_granted",
+                      "type": "string"
+                    },
+                    {
+                      "const": "consultant_role_revoked",
+                      "type": "string"
+                    },
+                    {
+                      "const": "platform_role_projected",
+                      "type": "string"
+                    },
+                    {
+                      "const": "platform_role_revoked",
+                      "type": "string"
+                    },
+                    {
+                      "const": "account_deletion_requested",
+                      "type": "string"
+                    },
+                    {
+                      "const": "account_deletion_cancelled",
+                      "type": "string"
+                    },
+                    {
+                      "const": "actor_disabled",
+                      "type": "string"
+                    },
+                    {
+                      "const": "tenant_closed",
+                      "type": "string"
+                    }
+                  ]
                 },
                 "resource_version": {
                   "minimum": 1,

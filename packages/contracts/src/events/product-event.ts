@@ -310,7 +310,19 @@ export const ErrorReportedEventSchema = Type.Union(
   { $id: "core-agent://v1/error-reported-event", "x-extensible-union": true },
 );
 
-const SafeReasonCodeSchema = Type.String({ minLength: 1, maxLength: 80, pattern: "^[a-z0-9_]+$" });
+export const MembershipEventReasonCodeSchema = Type.Union([
+  Type.Literal("invitation_accepted"),
+  Type.Literal("administrator_suspended"),
+  Type.Literal("administrator_revoked"),
+  Type.Literal("consultant_role_granted"),
+  Type.Literal("consultant_role_revoked"),
+  Type.Literal("platform_role_projected"),
+  Type.Literal("platform_role_revoked"),
+  Type.Literal("account_deletion_requested"),
+  Type.Literal("account_deletion_cancelled"),
+  Type.Literal("actor_disabled"),
+  Type.Literal("tenant_closed"),
+]);
 const IdentityRegisteredEventSchema = createEventBranch("identity.registered", {
   actor_id: OpaqueIdSchema,
   tenant_id: OpaqueIdSchema,
@@ -335,7 +347,7 @@ const MembershipChangedEventSchema = createEventBranch("membership.changed", {
   membership_id: OpaqueIdSchema,
   actor_id: OpaqueIdSchema,
   status: MembershipStatusSchema,
-  reason_code: Type.Optional(SafeReasonCodeSchema),
+  reason_code: Type.Optional(MembershipEventReasonCodeSchema),
   resource_version: ResourceVersionSchema,
 });
 const SessionRevokedEventSchema = createEventBranch("session.revoked", {

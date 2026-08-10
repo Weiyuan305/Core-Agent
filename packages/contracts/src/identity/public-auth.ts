@@ -14,7 +14,6 @@ import {
   InvitationRoleSchema,
   InvitationStatusSchema,
 } from "./authority.js";
-import { MembershipStatusSchema } from "../tenant/identity.js";
 
 const EmailSchema = Type.String({ minLength: 3, maxLength: 320, format: "email" });
 const PasswordSchema = Type.String({ minLength: 8, maxLength: 1_024 });
@@ -33,10 +32,6 @@ const InvitationRevocationReasonSchema = Type.Literal("administrator_revoked");
 const MemberSuspensionReasonSchema = Type.Literal("administrator_suspended");
 const MemberRevocationReasonSchema = Type.Literal("administrator_revoked");
 const AccountDeletionRequestReasonSchema = Type.Literal("user_requested");
-const CompanyMemberSourceSchema = Type.Union([
-  Type.Literal("company"),
-  Type.Literal("platform"),
-]);
 const NativeClientKindSchema = Type.Union([Type.Literal("iphone"), Type.Literal("macos")]);
 const IdempotencyRequestProperties = IdempotencyRequestSchema.properties;
 const VersionedWriteProperties = {
@@ -342,20 +337,76 @@ const CompanyMemberViewCommonFields = {
   schema_version: SchemaVersionSchema,
   membership_id: OpaqueIdSchema,
   actor_id: OpaqueIdSchema,
-  status: MembershipStatusSchema,
-  source: CompanyMemberSourceSchema,
   membership_resource_version: ResourceVersionSchema,
+} as const;
+const CompanyMemberEffectiveStatusSchema = Type.Union([
+  Type.Literal("active"),
+  Type.Literal("suspended"),
+  Type.Literal("revoked"),
+]);
+const CompanyMemberAdminRolesSchema = Type.Unsafe<["admin"]>({
+  type: "array",
+  prefixItems: [Type.Literal("admin")],
+  items: false,
+  minItems: 1,
+  maxItems: 1,
+});
+const CompanyMemberConsultantRolesSchema = Type.Unsafe<["consultant"]>({
+  type: "array",
+  prefixItems: [Type.Literal("consultant")],
+  items: false,
+  minItems: 1,
+  maxItems: 1,
+});
+const CompanyMemberAdminConsultantRolesSchema = Type.Unsafe<["admin", "consultant"]>({
+  type: "array",
+  prefixItems: [Type.Literal("admin"), Type.Literal("consultant")],
+  items: false,
+  minItems: 2,
+  maxItems: 2,
+});
+const CompanyMemberProfileFields = {
+  profile_id: OpaqueIdSchema,
+  profile_resource_version: ResourceVersionSchema,
 } as const;
 export const CompanyMemberViewSchema = Type.Union([
   Type.Object({
     ...CompanyMemberViewCommonFields,
-    role: Type.Literal("admin"),
+    source: Type.Literal("platform"),
+    status: Type.Literal("active"),
+    roles: CompanyMemberAdminRolesSchema,
   }, { additionalProperties: false }),
   Type.Object({
     ...CompanyMemberViewCommonFields,
-    role: Type.Literal("consultant"),
-    profile_id: OpaqueIdSchema,
-    profile_resource_version: ResourceVersionSchema,
+    source: Type.Literal("company"),
+    status: Type.Literal("invited"),
+    roles: CompanyMemberAdminRolesSchema,
+  }, { additionalProperties: false }),
+  Type.Object({
+    ...CompanyMemberViewCommonFields,
+    source: Type.Literal("company"),
+    status: Type.Literal("invited"),
+    roles: CompanyMemberConsultantRolesSchema,
+  }, { additionalProperties: false }),
+  Type.Object({
+    ...CompanyMemberViewCommonFields,
+    source: Type.Literal("company"),
+    status: CompanyMemberEffectiveStatusSchema,
+    roles: CompanyMemberAdminRolesSchema,
+  }, { additionalProperties: false }),
+  Type.Object({
+    ...CompanyMemberViewCommonFields,
+    source: Type.Literal("company"),
+    status: CompanyMemberEffectiveStatusSchema,
+    roles: CompanyMemberConsultantRolesSchema,
+    ...CompanyMemberProfileFields,
+  }, { additionalProperties: false }),
+  Type.Object({
+    ...CompanyMemberViewCommonFields,
+    source: Type.Literal("company"),
+    status: CompanyMemberEffectiveStatusSchema,
+    roles: CompanyMemberAdminConsultantRolesSchema,
+    ...CompanyMemberProfileFields,
   }, { additionalProperties: false }),
 ], { $id: "core-agent://v1/company-member-view" });
 export const CompanyMemberListRequestSchema = request("company-member-list-request", {
