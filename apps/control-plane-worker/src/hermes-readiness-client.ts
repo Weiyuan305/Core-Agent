@@ -1,4 +1,8 @@
+import { setTimeout as delay } from "node:timers/promises";
+
 import type { HermesReadinessClient } from "./main.js";
+
+const transportRetryDelayMs = 250;
 
 export class HermesReadinessError extends Error {
   public constructor(message: string, public readonly retryable: boolean) { super(message); }
@@ -12,16 +16,26 @@ export class HttpHermesReadinessClient implements HermesReadinessClient {
   public async probe(input: { origin: string; profileRef: string; sessionId: string; ingressKey: string; modelId: string }, signal: AbortSignal): Promise<void> {
     const timeout = AbortSignal.timeout(this.timeoutMs);
     const combined = AbortSignal.any([signal, timeout]);
+    const deadline = Date.now() + this.timeoutMs;
     const url = new URL(`/p/${encodeURIComponent(input.profileRef)}/v1/chat/completions`, input.origin);
     let response: Response;
-    try {
-      response = await this.fetchImpl(url, {
-        method: "POST", signal: combined,
-        headers: { authorization: `Bearer ${input.ingressKey}`, "content-type": "application/json", "x-hermes-session-id": input.sessionId },
-        body: JSON.stringify({ model: input.modelId, messages: [{ role: "user", content: "Reply with exactly READY." }], stream: false, max_tokens: 8 }),
-      });
-    } catch {
-      throw new HermesReadinessError("Hermes readiness dependency is unavailable", true);
+    while (true) {
+      try {
+        response = await this.fetchImpl(url, {
+          method: "POST", signal: combined,
+          headers: { authorization: `Bearer ${input.ingressKey}`, "content-type": "application/json", "x-hermes-session-id": input.sessionId },
+          body: JSON.stringify({ model: input.modelId, messages: [{ role: "user", content: "Reply with exactly READY." }], stream: false, max_tokens: 8 }),
+        });
+        break;
+      } catch {
+        const remainingMs = deadline - Date.now();
+        if (combined.aborted || remainingMs <= 0) throw new HermesReadinessError("Hermes readiness dependency is unavailable", true);
+        try {
+          await delay(Math.min(transportRetryDelayMs, remainingMs), undefined, { signal: combined });
+        } catch {
+          throw new HermesReadinessError("Hermes readiness dependency is unavailable", true);
+        }
+      }
     }
     if (!response.ok) throw new HermesReadinessError(
       `Hermes readiness request was rejected (HTTP ${response.status})`,
