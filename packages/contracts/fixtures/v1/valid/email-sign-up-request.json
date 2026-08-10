@@ -1,0 +1,1 @@
+{"schema_key":"email-sign-up-request","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"idempotency_key":"idem_01","payload_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","email":"synthetic@auth.invalid","password":"synthetic-placeholder","client_kind":"web"}}

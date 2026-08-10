@@ -1,0 +1,1 @@
+{"schema_key":"reauthentication-response","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"reauthenticated_at":"2026-08-10T01:02:03Z","valid_until":"2026-08-10T01:12:03Z"}}

@@ -1,0 +1,27 @@
+{
+  "$id": "core-agent://v1/account-deletion-cancel-response",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "account_deletion_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "status": {
+      "const": "cancelled",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "account_deletion_id",
+    "status"
+  ],
+  "type": "object"
+}

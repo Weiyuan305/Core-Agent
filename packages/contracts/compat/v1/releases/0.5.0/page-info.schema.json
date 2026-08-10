@@ -1,0 +1,25 @@
+{
+  "$id": "core-agent://v1/page-info",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "has_more": {
+      "type": "boolean"
+    },
+    "next_cursor": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    }
+  },
+  "required": [
+    "schema_version",
+    "has_more"
+  ],
+  "type": "object"
+}

@@ -1,0 +1,1 @@
+{"schema_key":"company-membership-request","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"idempotency_key":"idem_07","payload_hash":"sha256:1111111111111111111111111111111111111111111111111111111111111111","tenant_id":"tenant_01","role":"consultant","invitation_ref":"invitation_ref_02"}}

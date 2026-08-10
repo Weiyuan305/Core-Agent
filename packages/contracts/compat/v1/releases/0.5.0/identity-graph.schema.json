@@ -1,0 +1,393 @@
+{
+  "$id": "core-agent://v1/identity-graph",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "actors": {
+      "items": {
+        "$id": "core-agent://v1/actor",
+        "additionalProperties": false,
+        "properties": {
+          "actor_id": {
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "actor_kind": {
+            "anyOf": [
+              {
+                "const": "human",
+                "type": "string"
+              },
+              {
+                "const": "service",
+                "type": "string"
+              }
+            ]
+          },
+          "created_at": {
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+            "type": "string"
+          },
+          "display_name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "resource_version": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "schema_version": {
+            "const": 1,
+            "title": "SchemaVersion",
+            "type": "number"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "const": "active",
+                "type": "string"
+              },
+              {
+                "const": "disabled",
+                "type": "string"
+              },
+              {
+                "const": "deletion_pending",
+                "type": "string"
+              },
+              {
+                "const": "deleted",
+                "type": "string"
+              }
+            ],
+            "x-extensible-union": true
+          },
+          "updated_at": {
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "resource_version",
+          "created_at",
+          "updated_at",
+          "actor_id",
+          "actor_kind",
+          "status"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "memberships": {
+      "items": {
+        "$id": "core-agent://v1/membership",
+        "additionalProperties": false,
+        "properties": {
+          "actor_id": {
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+            "type": "string"
+          },
+          "membership_id": {
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "membership_source": {
+            "anyOf": [
+              {
+                "const": "self",
+                "type": "string"
+              },
+              {
+                "const": "company",
+                "type": "string"
+              },
+              {
+                "const": "platform",
+                "type": "string"
+              }
+            ]
+          },
+          "resource_version": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "roles": {
+            "items": {
+              "anyOf": [
+                {
+                  "const": "admin",
+                  "type": "string"
+                },
+                {
+                  "const": "consultant",
+                  "type": "string"
+                },
+                {
+                  "const": "student",
+                  "type": "string"
+                }
+              ]
+            },
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "schema_version": {
+            "const": 1,
+            "title": "SchemaVersion",
+            "type": "number"
+          },
+          "seat_ref": {
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "const": "invited",
+                "type": "string"
+              },
+              {
+                "const": "active",
+                "type": "string"
+              },
+              {
+                "const": "suspended",
+                "type": "string"
+              },
+              {
+                "const": "revoked",
+                "type": "string"
+              }
+            ]
+          },
+          "tenant_id": {
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "resource_version",
+          "created_at",
+          "updated_at",
+          "membership_id",
+          "tenant_id",
+          "actor_id",
+          "roles",
+          "status"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "profiles": {
+      "items": {
+        "$id": "core-agent://v1/profile",
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+            "type": "string"
+          },
+          "hermes_profile_ref": {
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "owner_actor_id": {
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "profile_id": {
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "profile_kind": {
+            "anyOf": [
+              {
+                "const": "default",
+                "type": "string"
+              },
+              {
+                "const": "consultant",
+                "type": "string"
+              }
+            ]
+          },
+          "resource_version": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "schema_version": {
+            "const": 1,
+            "title": "SchemaVersion",
+            "type": "number"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "const": "provisioning",
+                "type": "string"
+              },
+              {
+                "const": "active",
+                "type": "string"
+              },
+              {
+                "const": "suspended",
+                "type": "string"
+              },
+              {
+                "const": "archived",
+                "type": "string"
+              }
+            ]
+          },
+          "tenant_id": {
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "resource_version",
+          "created_at",
+          "updated_at",
+          "profile_id",
+          "tenant_id",
+          "owner_actor_id",
+          "profile_kind",
+          "status",
+          "hermes_profile_ref"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "tenant": {
+      "$id": "core-agent://v1/tenant",
+      "additionalProperties": false,
+      "properties": {
+        "created_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+          "type": "string"
+        },
+        "display_name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "resource_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "schema_version": {
+          "const": 1,
+          "title": "SchemaVersion",
+          "type": "number"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "const": "provisioning",
+              "type": "string"
+            },
+            {
+              "const": "active",
+              "type": "string"
+            },
+            {
+              "const": "suspended",
+              "type": "string"
+            },
+            {
+              "const": "closing",
+              "type": "string"
+            },
+            {
+              "const": "closed",
+              "type": "string"
+            }
+          ]
+        },
+        "tenant_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "tenant_mode": {
+          "anyOf": [
+            {
+              "const": "b2b",
+              "type": "string"
+            },
+            {
+              "const": "b2c",
+              "type": "string"
+            }
+          ]
+        },
+        "updated_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "resource_version",
+        "created_at",
+        "updated_at",
+        "tenant_id",
+        "tenant_mode",
+        "display_name",
+        "status"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "tenant",
+    "actors",
+    "memberships",
+    "profiles"
+  ],
+  "type": "object"
+}

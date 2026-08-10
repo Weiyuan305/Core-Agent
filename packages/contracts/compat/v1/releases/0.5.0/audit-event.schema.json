@@ -1,0 +1,225 @@
+{
+  "$id": "core-agent://v1/audit-event",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "actor_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "approval_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "audit_event_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "change_summary": {
+      "maxLength": 2000,
+      "type": "string"
+    },
+    "consent_snapshot_ref": {
+      "$id": "core-agent://v1/consent-snapshot-ref",
+      "additionalProperties": false,
+      "properties": {
+        "evaluated_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+          "type": "string"
+        },
+        "snapshot_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "version": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "snapshot_id",
+        "version",
+        "evaluated_at"
+      ],
+      "type": "object"
+    },
+    "decision": {
+      "anyOf": [
+        {
+          "const": "allowed",
+          "type": "string"
+        },
+        {
+          "const": "denied",
+          "type": "string"
+        },
+        {
+          "const": "not_applicable",
+          "type": "string"
+        }
+      ]
+    },
+    "delegation_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "delegation_reason": {
+      "maxLength": 2000,
+      "type": "string"
+    },
+    "effective_role": {
+      "anyOf": [
+        {
+          "const": "admin",
+          "type": "string"
+        },
+        {
+          "const": "consultant",
+          "type": "string"
+        },
+        {
+          "const": "student",
+          "type": "string"
+        }
+      ]
+    },
+    "entitlement_snapshot_ref": {
+      "$id": "core-agent://v1/entitlement-snapshot-ref",
+      "additionalProperties": false,
+      "properties": {
+        "evaluated_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+          "type": "string"
+        },
+        "snapshot_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "version": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "snapshot_id",
+        "version",
+        "evaluated_at"
+      ],
+      "type": "object"
+    },
+    "membership_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "occurred_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "outcome": {
+      "anyOf": [
+        {
+          "const": "succeeded",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "type": "string"
+        },
+        {
+          "const": "cancelled",
+          "type": "string"
+        },
+        {
+          "const": "pending",
+          "type": "string"
+        }
+      ]
+    },
+    "policy_version": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "reason_summary": {
+      "maxLength": 2000,
+      "type": "string"
+    },
+    "request_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "resource_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "resource_type": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "run_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "task_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "tenant_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "trace_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "audit_event_id",
+    "occurred_at",
+    "tenant_id",
+    "actor_id",
+    "membership_id",
+    "effective_role",
+    "action",
+    "resource_type",
+    "resource_id",
+    "decision",
+    "outcome",
+    "request_id",
+    "trace_id",
+    "reason_summary"
+  ],
+  "type": "object"
+}

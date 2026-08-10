@@ -48,8 +48,17 @@
         {
           "const": "disabled",
           "type": "string"
+        },
+        {
+          "const": "deletion_pending",
+          "type": "string"
+        },
+        {
+          "const": "deleted",
+          "type": "string"
         }
-      ]
+      ],
+      "x-extensible-union": true
     },
     "updated_at": {
       "format": "date-time",

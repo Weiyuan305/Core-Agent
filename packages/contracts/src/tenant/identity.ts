@@ -8,7 +8,12 @@ export const TenantStatusSchema = Type.Union([
   Type.Literal("closing"), Type.Literal("closed"),
 ]);
 export const ActorKindSchema = Type.Union([Type.Literal("human"), Type.Literal("service")]);
-export const ActorStatusSchema = Type.Union([Type.Literal("active"), Type.Literal("disabled")]);
+export const ActorStatusSchema = Type.Union([
+  Type.Literal("active"), Type.Literal("disabled"), Type.Literal("deletion_pending"), Type.Literal("deleted"),
+], { "x-extensible-union": true });
+export const MembershipSourceSchema = Type.Union([
+  Type.Literal("self"), Type.Literal("company"), Type.Literal("platform"),
+]);
 export const MembershipRoleSchema = Type.Union([
   Type.Literal("admin"), Type.Literal("consultant"), Type.Literal("student"),
 ]);
@@ -45,6 +50,7 @@ export const MembershipSchema = Type.Object(
     tenant_id: OpaqueIdSchema,
     actor_id: OpaqueIdSchema,
     roles: Type.Array(MembershipRoleSchema, { minItems: 1, uniqueItems: true }),
+    membership_source: Type.Optional(MembershipSourceSchema),
     seat_ref: Type.Optional(OpaqueIdSchema),
     status: MembershipStatusSchema,
   },

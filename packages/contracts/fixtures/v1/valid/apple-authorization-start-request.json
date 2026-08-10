@@ -1,0 +1,1 @@
+{"schema_key":"apple-authorization-start-request","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"client_kind":"web","redirect_uri":"https://auth.invalid/callback"}}

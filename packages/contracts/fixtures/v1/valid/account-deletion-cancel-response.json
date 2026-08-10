@@ -1,0 +1,1 @@
+{"schema_key":"account-deletion-cancel-response","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"account_deletion_id":"deletion_01","status":"cancelled"}}

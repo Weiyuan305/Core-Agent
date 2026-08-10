@@ -1,0 +1,101 @@
+{
+  "$id": "core-agent://v1/session",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "actor_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "conversation_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "expires_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "hermes_session_ref": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "last_active_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "profile_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "session_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "status": {
+      "anyOf": [
+        {
+          "const": "active",
+          "type": "string"
+        },
+        {
+          "const": "idle",
+          "type": "string"
+        },
+        {
+          "const": "expired",
+          "type": "string"
+        },
+        {
+          "const": "closed",
+          "type": "string"
+        }
+      ]
+    },
+    "tenant_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "resource_version",
+    "created_at",
+    "updated_at",
+    "session_id",
+    "tenant_id",
+    "profile_id",
+    "actor_id",
+    "conversation_id",
+    "status",
+    "last_active_at",
+    "expires_at"
+  ],
+  "type": "object"
+}

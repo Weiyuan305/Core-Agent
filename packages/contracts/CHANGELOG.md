@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.0 - 2026-08-10
+
+- Add provider-neutral identity authority resources, public `/auth/v1` request and
+  response schemas, approved Membership and Actor vocabulary, and bounded identity
+  ProductEvent branches.
+- Add the immutable 0.5.0 schema release while keeping accepted historical release
+  inventories unchanged. Provider tokens and authentication PII are explicitly
+  excluded from public responses, events, and business identity resources.
+
 ## 0.4.0 - 2026-08-07
 
 - Add the closed `AgentRunFailureCode` vocabulary and expose it on Agent Run

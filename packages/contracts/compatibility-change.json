@@ -1,6 +1,6 @@
 {
-  "package_version": "0.4.0",
+  "package_version": "0.5.0",
   "wire_schema_version": 1,
   "change_level": "minor",
-  "reason": "Add structured Agent Run failure codes and an optional run.failed event code"
+  "reason": "Add provider-neutral public identity authority, auth routes, and safe identity events"
 }

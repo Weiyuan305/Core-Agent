@@ -1,0 +1,1 @@
+{"schema_key":"apple-authorization-callback-request","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"idempotency_key":"idem_02","payload_hash":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","transaction_id":"oauth_01","authorization_code":"synthetic-code","state":"synthetic-state"}}

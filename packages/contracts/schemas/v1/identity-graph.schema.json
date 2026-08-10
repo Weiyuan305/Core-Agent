@@ -53,8 +53,17 @@
               {
                 "const": "disabled",
                 "type": "string"
+              },
+              {
+                "const": "deletion_pending",
+                "type": "string"
+              },
+              {
+                "const": "deleted",
+                "type": "string"
               }
-            ]
+            ],
+            "x-extensible-union": true
           },
           "updated_at": {
             "format": "date-time",
@@ -94,6 +103,22 @@
             "maxLength": 255,
             "minLength": 1,
             "type": "string"
+          },
+          "membership_source": {
+            "anyOf": [
+              {
+                "const": "self",
+                "type": "string"
+              },
+              {
+                "const": "company",
+                "type": "string"
+              },
+              {
+                "const": "platform",
+                "type": "string"
+              }
+            ]
           },
           "resource_version": {
             "minimum": 1,

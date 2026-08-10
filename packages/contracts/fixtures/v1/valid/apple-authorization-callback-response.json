@@ -1,0 +1,1 @@
+{"schema_key":"apple-authorization-callback-response","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"session":{"schema_version":1,"actor_id":"actor_01","session_id":"session_01","client_kind":"web","idle_expires_at":"2026-08-17T01:02:03Z","absolute_expires_at":"2026-09-09T01:02:03Z","reauthentication_required":false}}}

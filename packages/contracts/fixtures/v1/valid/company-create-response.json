@@ -1,0 +1,1 @@
+{"schema_key":"company-create-response","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"tenant_id":"tenant_01","administrator_invitation_id":"invitation_01"}}

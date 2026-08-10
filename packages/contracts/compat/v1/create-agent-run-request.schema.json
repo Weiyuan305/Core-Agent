@@ -1,0 +1,59 @@
+{
+  "$id": "core-agent://v1/create-agent-run-request",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "client_request_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "idempotency_key": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "input_message": {
+      "additionalProperties": false,
+      "properties": {
+        "client_message_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "content": {
+          "maxLength": 64000,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "client_message_id",
+        "content"
+      ],
+      "type": "object"
+    },
+    "parent_run_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "payload_hash": {
+      "pattern": "^sha256:[a-f0-9]{64}$",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    }
+  },
+  "required": [
+    "schema_version",
+    "idempotency_key",
+    "payload_hash",
+    "client_request_id",
+    "input_message"
+  ],
+  "type": "object"
+}

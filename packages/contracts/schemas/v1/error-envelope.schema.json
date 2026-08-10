@@ -108,6 +108,34 @@
         {
           "const": "INTERNAL_ERROR",
           "type": "string"
+        },
+        {
+          "const": "AUTH_INVALID",
+          "type": "string"
+        },
+        {
+          "const": "AUTH_EMAIL_UNVERIFIED",
+          "type": "string"
+        },
+        {
+          "const": "AUTH_RATE_LIMITED",
+          "type": "string"
+        },
+        {
+          "const": "AUTH_PROVIDER_UNAVAILABLE",
+          "type": "string"
+        },
+        {
+          "const": "AUTH_CALLBACK_INVALID",
+          "type": "string"
+        },
+        {
+          "const": "AUTH_CONFLICT",
+          "type": "string"
+        },
+        {
+          "const": "REAUTHENTICATION_REQUIRED",
+          "type": "string"
         }
       ],
       "x-extensible-union": true

@@ -1,0 +1,1 @@
+{"schema_key":"apple-authorization-start-response","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"transaction_id":"oauth_01","authorization_url":"https://appleid.apple.com/auth/authorize","expires_at":"2026-08-10T01:12:03Z"}}

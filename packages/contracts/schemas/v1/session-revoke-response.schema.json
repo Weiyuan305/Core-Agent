@@ -1,0 +1,27 @@
+{
+  "$id": "core-agent://v1/session-revoke-response",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "session_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "status": {
+      "const": "revoked",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "session_id",
+    "status"
+  ],
+  "type": "object"
+}

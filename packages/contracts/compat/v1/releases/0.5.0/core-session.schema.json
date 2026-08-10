@@ -1,0 +1,118 @@
+{
+  "$id": "core-agent://v1/core-session",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "absolute_expires_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "actor_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "auth_subject_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "client_kind": {
+      "anyOf": [
+        {
+          "const": "web",
+          "type": "string"
+        },
+        {
+          "const": "iphone",
+          "type": "string"
+        },
+        {
+          "const": "macos",
+          "type": "string"
+        }
+      ]
+    },
+    "created_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "device_label": {
+      "maxLength": 80,
+      "minLength": 1,
+      "type": "string"
+    },
+    "idle_expires_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "last_seen_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "reauthenticated_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "revocation_reason_code": {
+      "maxLength": 80,
+      "minLength": 1,
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "session_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "status": {
+      "anyOf": [
+        {
+          "const": "active",
+          "type": "string"
+        },
+        {
+          "const": "revoked",
+          "type": "string"
+        },
+        {
+          "const": "expired",
+          "type": "string"
+        }
+      ]
+    },
+    "updated_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "resource_version",
+    "created_at",
+    "updated_at",
+    "session_id",
+    "actor_id",
+    "auth_subject_id",
+    "client_kind",
+    "last_seen_at",
+    "idle_expires_at",
+    "absolute_expires_at",
+    "status"
+  ],
+  "type": "object"
+}

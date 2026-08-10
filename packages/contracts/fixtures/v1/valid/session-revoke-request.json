@@ -1,0 +1,1 @@
+{"schema_key":"session-revoke-request","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"idempotency_key":"idem_04","payload_hash":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","session_id":"session_01","reason_code":"user_sign_out"}}

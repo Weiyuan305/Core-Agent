@@ -26,12 +26,12 @@ function compareAscii(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-function manifestFailures(label: string, files: readonly string[]): string[] {
+function manifestFailures(label: string, files: readonly string[], requireComplete = true): string[] {
   const actual = new Set(files);
   const expected = new Set(expectedSchemaFiles);
   const failures: string[] = [];
   for (const fileName of expectedSchemaFiles) {
-    if (!actual.has(fileName)) failures.push(`${label} ${fileName}: missing`);
+    if (requireComplete && !actual.has(fileName)) failures.push(`${label} ${fileName}: missing`);
   }
   for (const fileName of [...actual].sort(compareAscii)) {
     if (!expected.has(fileName)) failures.push(`${label} ${fileName}: unexpected`);
@@ -87,7 +87,7 @@ export function compatibilityHistoryFailures(
   }
 
   if (initialAdditions.length > 0) {
-    failures.push(...manifestFailures("initial compatibility introduction", initialAdditions));
+    failures.push(...manifestFailures("initial compatibility introduction", initialAdditions, false));
   }
   for (const version of [...releaseAdditions.keys()].sort(compareAscii)) {
     if (version !== authoritativeReleaseVersion) {

@@ -1,0 +1,55 @@
+{
+  "$id": "core-agent://v1/invitation-acceptance-request",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "client_kind": {
+      "anyOf": [
+        {
+          "const": "web",
+          "type": "string"
+        },
+        {
+          "const": "iphone",
+          "type": "string"
+        },
+        {
+          "const": "macos",
+          "type": "string"
+        }
+      ]
+    },
+    "device_label": {
+      "maxLength": 80,
+      "minLength": 1,
+      "type": "string"
+    },
+    "idempotency_key": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "invitation_secret": {
+      "maxLength": 1024,
+      "minLength": 16,
+      "type": "string"
+    },
+    "payload_hash": {
+      "pattern": "^sha256:[a-f0-9]{64}$",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    }
+  },
+  "required": [
+    "schema_version",
+    "idempotency_key",
+    "payload_hash",
+    "invitation_secret",
+    "client_kind"
+  ],
+  "type": "object"
+}

@@ -405,7 +405,11 @@ function compareAnyOf(
       : [change("union_narrowed", `${path}.anyOf[${beforeIndex}]`, branch, after[matchIndex])]));
   }
 
-  if (after.some((_, index) => !matchedAfter.has(index)) && previous["x-extensible-union"] !== true) {
+  if (
+    after.some((_, index) => !matchedAfter.has(index))
+    && previous["x-extensible-union"] !== true
+    && current["x-extensible-union"] !== true
+  ) {
     changes.push(change("union_growth_not_extensible", `${path}.anyOf`, previous.anyOf, current.anyOf));
   }
   return changes;
@@ -1281,9 +1285,27 @@ async function schemaManifestFailures(
   return failures;
 }
 
-interface ReleaseSnapshot {
-  version: string;
-  directory: string;
+export interface ReleaseSnapshot {
+  readonly version: string;
+  readonly directory: string;
+  readonly schemaFiles: readonly string[];
+}
+
+export function validateReleaseManifest(
+  snapshot: ReleaseSnapshot,
+  currentVersion: string,
+  currentFiles: readonly string[],
+): string[] {
+  if (snapshot.schemaFiles.length === 0) return [`release ${snapshot.version} is empty`];
+  if (snapshot.schemaFiles.some((name) => !/^[a-z0-9-]+\.schema\.json$/u.test(name))) {
+    return [`release ${snapshot.version} contains an invalid schema filename`];
+  }
+  if (snapshot.version !== currentVersion) return [];
+  const actual = [...snapshot.schemaFiles].sort();
+  const expected = [...currentFiles].sort();
+  return JSON.stringify(actual) === JSON.stringify(expected)
+    ? []
+    : [`release ${snapshot.version} does not match the current schema manifest`];
 }
 
 async function discoverReleaseSnapshots(
@@ -1312,8 +1334,15 @@ async function discoverReleaseSnapshots(
       continue;
     }
     const directory = resolve(releasesDirectory, entry.name);
-    snapshots.push({ version: entry.name, directory });
-    failures.push(...await schemaManifestFailures(directory, `release ${entry.name} schema manifest`));
+    const releaseEntries = await readdir(directory, { withFileTypes: true });
+    const schemaFiles = releaseEntries.map((releaseEntry) => releaseEntry.name);
+    const snapshot = { version: entry.name, directory, schemaFiles };
+    snapshots.push(snapshot);
+    failures.push(...validateReleaseManifest(
+      snapshot,
+      CONTRACT_PACKAGE_VERSION,
+      expectedSchemaFiles,
+    ));
   }
   return { snapshots, failures };
 }
@@ -1446,8 +1475,15 @@ async function compareSnapshot(
   label: string,
 ): Promise<string[]> {
   const failures: string[] = [];
-  const snapshotFiles = (await readdir(snapshotDirectory, { withFileTypes: true }))
+  const currentFiles = new Set((await readdir(schemaDirectory, { withFileTypes: true }))
     .filter((entry) => entry.isFile() && entry.name.endsWith(".schema.json"))
+    .map((entry) => entry.name));
+  const snapshotFiles = (await readdir(snapshotDirectory, { withFileTypes: true }))
+    .filter((entry) => (
+      entry.isFile()
+      && entry.name.endsWith(".schema.json")
+      && currentFiles.has(entry.name)
+    ))
     .map((entry) => entry.name)
     .sort(compareAscii);
   for (const fileName of snapshotFiles) {

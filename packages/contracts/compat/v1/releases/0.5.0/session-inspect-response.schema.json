@@ -1,0 +1,76 @@
+{
+  "$id": "core-agent://v1/session-inspect-response",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "session": {
+      "additionalProperties": false,
+      "properties": {
+        "absolute_expires_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+          "type": "string"
+        },
+        "actor_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "client_kind": {
+          "anyOf": [
+            {
+              "const": "web",
+              "type": "string"
+            },
+            {
+              "const": "iphone",
+              "type": "string"
+            },
+            {
+              "const": "macos",
+              "type": "string"
+            }
+          ]
+        },
+        "idle_expires_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+          "type": "string"
+        },
+        "reauthentication_required": {
+          "type": "boolean"
+        },
+        "schema_version": {
+          "const": 1,
+          "title": "SchemaVersion",
+          "type": "number"
+        },
+        "session_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "actor_id",
+        "session_id",
+        "client_kind",
+        "idle_expires_at",
+        "absolute_expires_at",
+        "reauthentication_required"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "session"
+  ],
+  "type": "object"
+}

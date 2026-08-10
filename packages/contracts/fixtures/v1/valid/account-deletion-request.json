@@ -1,0 +1,1 @@
+{"schema_key":"account-deletion-request","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"idempotency_key":"idem_08","payload_hash":"sha256:2222222222222222222222222222222222222222222222222222222222222222","reason_code":"user_requested"}}

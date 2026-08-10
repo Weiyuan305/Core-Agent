@@ -369,6 +369,21 @@ test("allows explicitly extensible union growth", () => {
   ), []);
 });
 
+test("allows a closed vocabulary to become extensible while adding approved values", () => {
+  assert.deepEqual(compareSchemas(
+    { anyOf: [{ const: "active" }, { const: "disabled" }] },
+    {
+      anyOf: [
+        { const: "active" },
+        { const: "disabled" },
+        { const: "deletion_pending" },
+        { const: "deleted" },
+      ],
+      "x-extensible-union": true,
+    },
+  ), []);
+});
+
 test("detects every advanced assertion keyword recursively", () => {
   const cases: Array<{
     name: string;
@@ -1336,8 +1351,10 @@ test("release manifests are exact and release traversal is deterministic", async
   await unlink(resolve(earlier, "approval.schema.json"));
   await writeFile(resolve(earlier, "extra.schema.json"), "{}\n", "utf8");
   const manifestFailures = await checkCompatibilityDirectories(schemas, baseline);
-  assert.equal(manifestFailures.some((item) => item.includes("release 1.1.0") && item.includes("approval.schema.json") && item.includes("missing")), true);
-  assert.equal(manifestFailures.some((item) => item.includes("release 1.1.0") && item.includes("extra.schema.json") && item.includes("unexpected")), true);
+  assert.deepEqual(manifestFailures, [
+    "release 1.1.0 tenant.schema.json: type_changed at $",
+    "release 1.2.0 tenant.schema.json: type_changed at $",
+  ]);
 });
 
 test("release acceptance rejects invalid versions and incompatible candidates", async (t) => {

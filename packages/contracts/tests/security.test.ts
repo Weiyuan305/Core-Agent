@@ -10,13 +10,17 @@ const credentialOrPersonalDataPatterns = [
   /sk-[A-Za-z0-9_-]{16,}/,
   /Bearer\s+[A-Za-z0-9._-]+/i,
   /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,
-  /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/,
+  /[A-Za-z0-9._%+-]+@(?![A-Za-z0-9.-]+\.invalid\b)[A-Za-z0-9.-]+\.[A-Za-z]{2,}/,
   /"(?:api_key|access_token|refresh_token|authorization)"\s*:/i,
   /"(?:phone|mobile|passport|credit_card|bank_account)"\s*:/i,
 ];
 
 const forbiddenPublicSchemaFields = [
   "hidden_reasoning", "chain_of_thought", "raw_input", "raw_output", "api_key", "access_token", "stack",
+];
+const forbiddenAuthResponseFields = [
+  "password", "email", "provider_subject", "access_token", "refresh_token",
+  "authorization", "raw_claims", "key_id", "provider_error_body",
 ];
 
 function matchingCredentialOrPersonalDataPattern(content: string): RegExp | undefined {
@@ -64,6 +68,7 @@ test("credential and personal-data scans allow lookalike JSON keys", () => {
     '{"automobile": "synthetic"}',
     "phone: synthetic",
     "mobile=synthetic",
+    "synthetic@auth.invalid",
   ];
   for (const content of allowed) {
     assert.equal(matchingCredentialOrPersonalDataPattern(content), undefined, content);
@@ -160,4 +165,36 @@ test("public runtime schemas reject secrets and client-forged tenant scope", () 
     tenant_id: "tenant_forged",
     input_message: { client_message_id: "client_message_01", content: "Synthetic hello" },
   }), false);
+});
+
+test("public auth response schemas expose no authentication PII, tokens, claims, or key ids", () => {
+  const responseKeys = Object.keys(ContractSchemas).filter((key) => (
+    key === "auth-session-view" || key.endsWith("-response")
+  ));
+  assert.equal(responseKeys.length > 0, true);
+  for (const key of responseKeys) {
+    const document = ContractSchemas[key as keyof typeof ContractSchemas] as unknown;
+    const visit = (value: unknown): string | undefined => {
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          const field = visit(item);
+          if (field !== undefined) return field;
+        }
+        return undefined;
+      }
+      if (value === null || typeof value !== "object") return undefined;
+      const record = value as Record<string, unknown>;
+      if (record.properties !== null && typeof record.properties === "object") {
+        for (const field of forbiddenAuthResponseFields) {
+          if (Object.hasOwn(record.properties as object, field)) return field;
+        }
+      }
+      for (const item of Object.values(record)) {
+        const field = visit(item);
+        if (field !== undefined) return field;
+      }
+      return undefined;
+    };
+    assert.equal(visit(document), undefined, key);
+  }
 });

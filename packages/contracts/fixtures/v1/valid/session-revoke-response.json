@@ -1,0 +1,1 @@
+{"schema_key":"session-revoke-response","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"session_id":"session_01","status":"revoked"}}

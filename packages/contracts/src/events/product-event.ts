@@ -3,6 +3,7 @@ import Schema from "typebox/schema";
 
 import {
   OpaqueIdSchema,
+  ResourceVersionSchema,
   SchemaVersionSchema,
   SequenceSchema,
   UtcTimestampSchema,
@@ -18,6 +19,7 @@ import {
   ContainerObservedStateSchema,
   TaskStatusSchema,
 } from "../runtime/resources.js";
+import { MembershipStatusSchema } from "../tenant/identity.js";
 
 const EmbeddedStudentRefSchema = Type.Omit(
   StudentRefSchema,
@@ -307,6 +309,76 @@ export const ErrorReportedEventSchema = Type.Union(
   { $id: "core-agent://v1/error-reported-event", "x-extensible-union": true },
 );
 
+const SafeReasonCodeSchema = Type.String({ minLength: 1, maxLength: 80, pattern: "^[a-z0-9_]+$" });
+const IdentityRegisteredEventSchema = createEventBranch("identity.registered", {
+  actor_id: OpaqueIdSchema,
+  tenant_id: OpaqueIdSchema,
+  membership_id: OpaqueIdSchema,
+  profile_id: OpaqueIdSchema,
+  resource_version: ResourceVersionSchema,
+});
+const InvitationCreatedEventSchema = createEventBranch("invitation.created", {
+  invitation_id: OpaqueIdSchema,
+  membership_id: OpaqueIdSchema,
+  status: Type.Literal("pending"),
+  resource_version: ResourceVersionSchema,
+});
+const InvitationAcceptedEventSchema = createEventBranch("invitation.accepted", {
+  invitation_id: OpaqueIdSchema,
+  membership_id: OpaqueIdSchema,
+  actor_id: OpaqueIdSchema,
+  status: Type.Literal("accepted"),
+  resource_version: ResourceVersionSchema,
+});
+const MembershipChangedEventSchema = createEventBranch("membership.changed", {
+  membership_id: OpaqueIdSchema,
+  actor_id: OpaqueIdSchema,
+  status: MembershipStatusSchema,
+  reason_code: Type.Optional(SafeReasonCodeSchema),
+  resource_version: ResourceVersionSchema,
+});
+const SessionRevokedEventSchema = createEventBranch("session.revoked", {
+  session_id: OpaqueIdSchema,
+  actor_id: OpaqueIdSchema,
+  status: Type.Literal("revoked"),
+  reason_code: Type.Optional(SafeReasonCodeSchema),
+  resource_version: ResourceVersionSchema,
+});
+const AccountDeletionRequestedEventSchema = createEventBranch("account.deletion_requested", {
+  account_deletion_id: OpaqueIdSchema,
+  actor_id: OpaqueIdSchema,
+  status: Type.Literal("deletion_pending"),
+  resource_version: ResourceVersionSchema,
+});
+const AccountDeletionCancelledEventSchema = createEventBranch("account.deletion_cancelled", {
+  account_deletion_id: OpaqueIdSchema,
+  actor_id: OpaqueIdSchema,
+  status: Type.Literal("cancelled"),
+  resource_version: ResourceVersionSchema,
+});
+const AccountDeletedEventSchema = createEventBranch("account.deleted", {
+  account_deletion_id: OpaqueIdSchema,
+  actor_id: OpaqueIdSchema,
+  status: Type.Literal("deleted"),
+  resource_version: ResourceVersionSchema,
+});
+
+const IdentityEventBranchSchemas = [
+  IdentityRegisteredEventSchema,
+  InvitationCreatedEventSchema,
+  InvitationAcceptedEventSchema,
+  MembershipChangedEventSchema,
+  SessionRevokedEventSchema,
+  AccountDeletionRequestedEventSchema,
+  AccountDeletionCancelledEventSchema,
+  AccountDeletedEventSchema,
+] as const;
+
+export const IdentityEventSchema = Type.Union(
+  [...IdentityEventBranchSchemas],
+  { $id: "core-agent://v1/identity-event", "x-extensible-union": true },
+);
+
 const ProductEventBranchSchemas = [
   ConversationCreatedEventSchema,
   ConversationArchivedEventSchema,
@@ -330,6 +402,7 @@ const ProductEventBranchSchemas = [
   ...RuntimeCommandAcceptedEventBranches,
   ErrorReportedEventBranchSchema,
   MessageCreatedEventBranchSchema,
+  ...IdentityEventBranchSchemas,
 ] as const;
 
 const ProductEventFamilySchemas = [
@@ -343,6 +416,7 @@ const ProductEventFamilySchemas = [
   RuntimeEventSchema,
   ErrorReportedEventSchema,
   MessageCreatedEventSchema,
+  IdentityEventSchema,
 ] as const;
 
 export const ProductEventSchema = Type.Union(

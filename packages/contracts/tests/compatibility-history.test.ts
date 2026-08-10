@@ -10,6 +10,7 @@ import {
   compatibilityHistoryFailures,
   type CompatibilityHistoryChange,
 } from "../scripts/check-compatibility-history.js";
+import * as Compatibility from "../scripts/check-compatibility.js";
 import { CONTRACT_PACKAGE_VERSION, ContractSchemas } from "../src/index.js";
 
 const execFile = promisify(execFileCallback);
@@ -66,6 +67,44 @@ test("history policy allows only exact initial introduction and exact new releas
     ...release,
     { status: "A", path: releasePath(CONTRACT_PACKAGE_VERSION, "extra.schema.json") },
   ]), []);
+});
+
+test("history policy allows additive top-level schema baselines", () => {
+  assert.deepEqual(compatibilityHistoryFailures([
+    { status: "A", path: initialPath(schemaFiles.at(-1)!) },
+  ]), []);
+  assert.notDeepEqual(compatibilityHistoryFailures([
+    { status: "A", path: initialPath("unexpected.schema.json") },
+  ]), []);
+});
+
+test("historical release manifests retain their own inventory while current release is exact", () => {
+  const validateReleaseManifest = (Compatibility as unknown as Record<string, any>)
+    .validateReleaseManifest as (...args: any[]) => string[];
+  assert.equal(typeof validateReleaseManifest, "function");
+  const historicalFiles = ["actor.schema.json", "tenant.schema.json"];
+  for (const version of ["0.2.0", "0.3.0", "0.4.0"]) {
+    assert.deepEqual(validateReleaseManifest({
+      version,
+      directory: `/compat/releases/${version}`,
+      schemaFiles: historicalFiles,
+    }, "0.5.0", schemaFiles), []);
+  }
+  assert.deepEqual(validateReleaseManifest({
+    version: "0.5.0",
+    directory: "/compat/releases/0.5.0",
+    schemaFiles,
+  }, "0.5.0", schemaFiles), []);
+  assert.deepEqual(validateReleaseManifest({
+    version: "0.5.0",
+    directory: "/compat/releases/0.5.0",
+    schemaFiles: schemaFiles.slice(1),
+  }, "0.5.0", schemaFiles), ["release 0.5.0 does not match the current schema manifest"]);
+  assert.deepEqual(validateReleaseManifest({
+    version: "0.4.0",
+    directory: "/compat/releases/0.4.0",
+    schemaFiles: [],
+  }, "0.5.0", schemaFiles), ["release 0.4.0 is empty"]);
 });
 
 test("history policy binds complete release additions to the authoritative package version", () => {

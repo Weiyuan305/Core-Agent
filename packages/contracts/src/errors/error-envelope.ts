@@ -35,6 +35,13 @@ export const StableErrorCodeSchema = Type.Union([
   Type.Literal("DEPENDENCY_UNAVAILABLE"),
   Type.Literal("DEPENDENCY_TIMEOUT"),
   Type.Literal("INTERNAL_ERROR"),
+  Type.Literal("AUTH_INVALID"),
+  Type.Literal("AUTH_EMAIL_UNVERIFIED"),
+  Type.Literal("AUTH_RATE_LIMITED"),
+  Type.Literal("AUTH_PROVIDER_UNAVAILABLE"),
+  Type.Literal("AUTH_CALLBACK_INVALID"),
+  Type.Literal("AUTH_CONFLICT"),
+  Type.Literal("REAUTHENTICATION_REQUIRED"),
 ], { "x-extensible-union": true });
 
 const FieldErrorSchema = Type.Object(

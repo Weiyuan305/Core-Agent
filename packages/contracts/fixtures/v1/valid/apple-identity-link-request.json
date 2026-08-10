@@ -1,0 +1,1 @@
+{"schema_key":"apple-identity-link-request","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"idempotency_key":"idem_03","payload_hash":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","transaction_id":"oauth_02","authorization_code":"synthetic-code","state":"synthetic-state"}}

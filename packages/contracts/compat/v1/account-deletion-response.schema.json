@@ -1,0 +1,33 @@
+{
+  "$id": "core-agent://v1/account-deletion-response",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "account_deletion_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "scheduled_for": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "status": {
+      "const": "deletion_pending",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "account_deletion_id",
+    "status",
+    "scheduled_for"
+  ],
+  "type": "object"
+}

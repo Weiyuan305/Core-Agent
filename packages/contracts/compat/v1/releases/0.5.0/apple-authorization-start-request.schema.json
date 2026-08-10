@@ -1,0 +1,45 @@
+{
+  "$id": "core-agent://v1/apple-authorization-start-request",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "client_kind": {
+      "anyOf": [
+        {
+          "const": "web",
+          "type": "string"
+        },
+        {
+          "const": "iphone",
+          "type": "string"
+        },
+        {
+          "const": "macos",
+          "type": "string"
+        }
+      ]
+    },
+    "device_label": {
+      "maxLength": 80,
+      "minLength": 1,
+      "type": "string"
+    },
+    "redirect_uri": {
+      "format": "uri",
+      "maxLength": 2048,
+      "minLength": 1,
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    }
+  },
+  "required": [
+    "schema_version",
+    "client_kind",
+    "redirect_uri"
+  ],
+  "type": "object"
+}
