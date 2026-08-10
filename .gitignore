@@ -6,4 +6,5 @@ node_modules/
 coverage/
 dist/
 apps/control-plane-web/output/
+.superpowers/
 *.log

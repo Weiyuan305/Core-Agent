@@ -15,6 +15,7 @@ the alternatives considered, and the consequences accepted at the time.
 | [0006](0006-idempotent-provisioning-and-runtime-command-intent.md) | Accepted | Atomic tenant provisioning, truthful runtime commands, and durable restart intent |
 | [0007](0007-managed-hermes-error-projection.md) | Accepted | Exact, non-reflective terminal failure projection in the pinned managed Hermes image |
 | [0008](0008-vendored-hermes-source-and-upstream-sync.md) | Accepted; cut over | Vendored Hermes source, source-built runtime, and controlled upstream synchronization |
+| [0009](0009-shared-identity-gateway-and-provider-independent-authority.md) | Accepted for implementation | Shared public Identity Gateway with provider-independent Core-Agent authority |
 
 ## Change policy
 
