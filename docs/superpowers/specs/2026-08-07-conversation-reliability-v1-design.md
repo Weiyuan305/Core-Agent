@@ -1,6 +1,6 @@
 # Conversation Reliability v1 Design
 
-**Status:** Implemented; deterministic verification passed; real-provider acceptance pending
+**Status:** Accepted; deterministic and real-provider verification passed
 **Date:** 2026-08-07  
 **Primary surface:** B2B consultant Web workspace  
 **Future surfaces:** student Web, iPhone, and macOS clients
@@ -441,6 +441,6 @@ capabilities.
 
 Implementation and verification evidence is recorded in
 [Conversation Reliability v1 evidence](../../testing/conversation-reliability-v1.md).
-The implementation status does not mean the product milestone is accepted: criterion
-12 remains pending until the configured real provider completes one non-sensitive
-happy-path acceptance through the managed product image.
+Criterion 12 later passed through the reviewed source-built managed product image; the
+bounded live result and immutable image identity are recorded in the
+[Runtime v1 acceptance evidence](../../operations/runtime-v1-acceptance-evidence.md).

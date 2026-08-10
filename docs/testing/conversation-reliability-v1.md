@@ -110,5 +110,6 @@ this implementation.
 
 This milestone is suitable for continued local and internal synthetic evaluation. It
 does not authorize public consultant or student data. Identity, Consent, Retention,
-Data Governance, operational support routing, and the mandatory real-provider happy
-path remain release gates.
+Data Governance, and operational support routing remain release gates. The mandatory
+non-sensitive real-provider happy path later passed through the reviewed source-built
+managed product image and is recorded in the Runtime v1 acceptance evidence.
