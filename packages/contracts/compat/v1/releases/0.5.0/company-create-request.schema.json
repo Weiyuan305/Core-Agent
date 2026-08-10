@@ -3,9 +3,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
-    "administrator_invitation_ref": {
-      "maxLength": 255,
-      "minLength": 1,
+    "administrator_email": {
+      "format": "email",
+      "maxLength": 320,
+      "minLength": 3,
       "type": "string"
     },
     "display_name": {
@@ -33,7 +34,7 @@
     "idempotency_key",
     "payload_hash",
     "display_name",
-    "administrator_invitation_ref"
+    "administrator_email"
   ],
   "type": "object"
 }

@@ -1,6 +1,7 @@
 import Type, { type Static } from "typebox";
 
 import { OpaqueIdSchema, ResourceMetadataFields, UtcTimestampSchema } from "../common/primitives.js";
+import { type ContractViolation, violation } from "../common/validation.js";
 
 export const AuthProviderSchema = Type.Union([Type.Literal("supabase")]);
 export const IdentityAuthorityActorStatusSchema = Type.Union([
@@ -130,6 +131,95 @@ export const AccountDeletionSchema = Type.Object(
   },
   { additionalProperties: false, $id: "core-agent://v1/account-deletion" },
 );
+
+export function validateInvitation(invitation: Invitation): ContractViolation[] {
+  if (invitation.status === "accepted" && invitation.accepted_actor_id === undefined) {
+    return [violation(
+      "INVITATION_ACCEPTED_ACTOR_REQUIRED",
+      "accepted_actor_id",
+      "Accepted Invitation requires the accepting Actor",
+    )];
+  }
+  if (invitation.status !== "accepted" && invitation.accepted_actor_id !== undefined) {
+    return [violation(
+      "INVITATION_ACCEPTED_ACTOR_FORBIDDEN",
+      "accepted_actor_id",
+      "Only an accepted Invitation may carry the accepting Actor",
+    )];
+  }
+  return [];
+}
+
+export function validateCoreSession(session: CoreSession): ContractViolation[] {
+  if (session.status === "revoked" && session.revocation_reason_code === undefined) {
+    return [violation(
+      "CORE_SESSION_REVOCATION_REASON_REQUIRED",
+      "revocation_reason_code",
+      "Revoked Core Session requires a revocation reason",
+    )];
+  }
+  if (session.status !== "revoked" && session.revocation_reason_code !== undefined) {
+    return [violation(
+      "CORE_SESSION_REVOCATION_REASON_FORBIDDEN",
+      "revocation_reason_code",
+      "Only a revoked Core Session may carry a revocation reason",
+    )];
+  }
+  return [];
+}
+
+export function validateAccountDeletion(deletion: AccountDeletion): ContractViolation[] {
+  const violations: ContractViolation[] = [];
+  if (deletion.status === "deletion_pending") {
+    if (deletion.cancelled_at !== undefined) {
+      violations.push(violation(
+        "ACCOUNT_DELETION_CANCELLED_AT_FORBIDDEN",
+        "cancelled_at",
+        "Pending Account Deletion cannot be cancelled",
+      ));
+    }
+    if (deletion.deleted_at !== undefined) {
+      violations.push(violation(
+        "ACCOUNT_DELETION_DELETED_AT_FORBIDDEN",
+        "deleted_at",
+        "Pending Account Deletion cannot be completed",
+      ));
+    }
+  }
+  if (deletion.status === "cancelled") {
+    if (deletion.cancelled_at === undefined) {
+      violations.push(violation(
+        "ACCOUNT_DELETION_CANCELLED_AT_REQUIRED",
+        "cancelled_at",
+        "Cancelled Account Deletion requires its cancellation time",
+      ));
+    }
+    if (deletion.deleted_at !== undefined) {
+      violations.push(violation(
+        "ACCOUNT_DELETION_DELETED_AT_FORBIDDEN",
+        "deleted_at",
+        "Cancelled Account Deletion cannot be completed",
+      ));
+    }
+  }
+  if (deletion.status === "deleted") {
+    if (deletion.deleted_at === undefined) {
+      violations.push(violation(
+        "ACCOUNT_DELETION_DELETED_AT_REQUIRED",
+        "deleted_at",
+        "Completed Account Deletion requires its deletion time",
+      ));
+    }
+    if (deletion.cancelled_at !== undefined) {
+      violations.push(violation(
+        "ACCOUNT_DELETION_CANCELLED_AT_FORBIDDEN",
+        "cancelled_at",
+        "Completed Account Deletion cannot be cancelled",
+      ));
+    }
+  }
+  return violations;
+}
 
 export type AuthSubject = Static<typeof AuthSubjectSchema>;
 export type PlatformRoleAssignment = Static<typeof PlatformRoleAssignmentSchema>;

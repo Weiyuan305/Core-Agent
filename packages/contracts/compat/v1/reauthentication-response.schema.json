@@ -13,6 +13,10 @@
       "title": "SchemaVersion",
       "type": "number"
     },
+    "session_resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
     "valid_until": {
       "format": "date-time",
       "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
@@ -22,7 +26,8 @@
   "required": [
     "schema_version",
     "reauthenticated_at",
-    "valid_until"
+    "valid_until",
+    "session_resource_version"
   ],
   "type": "object"
 }

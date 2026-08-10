@@ -159,6 +159,61 @@ test("rejects student authority in B2B and platform authority in B2C", () => {
   );
 });
 
+test("membership sources follow tenant mode while undefined remains legacy-readable", () => {
+  const b2b = structuredClone(b2bGraph);
+  b2b.profiles = [];
+  b2b.memberships[0]!.membership_source = "self";
+  assert.equal(
+    validateIdentityGraph(b2b).some((item) => item.code === "B2B_MEMBERSHIP_SOURCE_INVALID"),
+    true,
+  );
+  delete b2b.memberships[0]!.membership_source;
+  assert.equal(
+    validateIdentityGraph(b2b).some((item) => item.code === "B2B_MEMBERSHIP_SOURCE_INVALID"),
+    false,
+  );
+
+  const b2c = structuredClone(b2bGraph);
+  b2c.tenant.tenant_mode = "b2c";
+  b2c.memberships[0]!.roles = ["student"];
+  b2c.memberships[0]!.membership_source = "company";
+  b2c.profiles[0]!.profile_kind = "default";
+  assert.equal(
+    validateIdentityGraph(b2c).some((item) => item.code === "B2C_MEMBERSHIP_SOURCE_INVALID"),
+    true,
+  );
+  delete b2c.memberships[0]!.membership_source;
+  assert.equal(
+    validateIdentityGraph(b2c).some((item) => item.code === "B2C_MEMBERSHIP_SOURCE_INVALID"),
+    false,
+  );
+});
+
+test("an ordinary actor cannot have multiple active or invited rows in one tenant", () => {
+  const graph = structuredClone(b2bGraph);
+  graph.memberships.push({
+    ...graph.memberships[0]!,
+    membership_id: "membership_duplicate",
+    membership_source: "company",
+    status: "invited",
+  });
+  assert.deepEqual(
+    validateIdentityGraph(graph).map((item) => item.code),
+    ["ACTOR_AUTHORITY_MEMBERSHIP_CONFLICT"],
+  );
+  assert.deepEqual(
+    validateIdentityGraphs([graph]).map((item) => item.code),
+    ["ACTOR_AUTHORITY_MEMBERSHIP_CONFLICT"],
+  );
+
+  graph.memberships[0]!.roles = ["admin"];
+  graph.memberships[0]!.membership_source = "platform";
+  graph.memberships[1]!.roles = ["admin"];
+  graph.memberships[1]!.membership_source = "platform";
+  graph.profiles = [];
+  assert.deepEqual(validateIdentityGraph(graph), []);
+});
+
 test("rejects B2C default profiles without an active student membership", () => {
   const baseGraph = structuredClone(b2bGraph);
   baseGraph.tenant.tenant_mode = "b2c";

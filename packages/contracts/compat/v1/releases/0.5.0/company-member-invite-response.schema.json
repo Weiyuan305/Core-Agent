@@ -8,10 +8,22 @@
       "minLength": 1,
       "type": "string"
     },
+    "invitation_resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "invitation_secret": {
+      "pattern": "^[A-Za-z0-9_-]{43}$",
+      "type": "string"
+    },
     "membership_id": {
       "maxLength": 255,
       "minLength": 1,
       "type": "string"
+    },
+    "membership_resource_version": {
+      "minimum": 1,
+      "type": "integer"
     },
     "schema_version": {
       "const": 1,
@@ -22,7 +34,10 @@
   "required": [
     "schema_version",
     "membership_id",
-    "invitation_id"
+    "membership_resource_version",
+    "invitation_id",
+    "invitation_resource_version",
+    "invitation_secret"
   ],
   "type": "object"
 }

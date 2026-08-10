@@ -21,6 +21,10 @@
           "minLength": 1,
           "type": "string"
         },
+        "actor_resource_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
         "client_kind": {
           "anyOf": [
             {
@@ -54,12 +58,18 @@
           "maxLength": 255,
           "minLength": 1,
           "type": "string"
+        },
+        "session_resource_version": {
+          "minimum": 1,
+          "type": "integer"
         }
       },
       "required": [
         "schema_version",
         "actor_id",
+        "actor_resource_version",
         "session_id",
+        "session_resource_version",
         "client_kind",
         "idle_expires_at",
         "absolute_expires_at",

@@ -8,6 +8,14 @@
       "minLength": 1,
       "type": "string"
     },
+    "administrator_invitation_resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "administrator_invitation_secret": {
+      "pattern": "^[A-Za-z0-9_-]{43}$",
+      "type": "string"
+    },
     "schema_version": {
       "const": 1,
       "title": "SchemaVersion",
@@ -17,12 +25,19 @@
       "maxLength": 255,
       "minLength": 1,
       "type": "string"
+    },
+    "tenant_resource_version": {
+      "minimum": 1,
+      "type": "integer"
     }
   },
   "required": [
     "schema_version",
     "tenant_id",
-    "administrator_invitation_id"
+    "tenant_resource_version",
+    "administrator_invitation_id",
+    "administrator_invitation_resource_version",
+    "administrator_invitation_secret"
   ],
   "type": "object"
 }

@@ -34,6 +34,8 @@ const {
   EmailVerificationResponseSchema,
   InvitationAcceptanceRequestSchema,
   InvitationAcceptanceResponseSchema,
+  InvitationEmailRegistrationRequestSchema,
+  InvitationEmailRegistrationResponseSchema,
   InvitationInspectRequestSchema,
   InvitationInspectResponseSchema,
   InvitationRevokeRequestSchema,
@@ -58,6 +60,9 @@ const {
   AccountDeletionCancelResponseSchema,
   StableErrorCodeSchema,
   IdentityEventSchema,
+  validateAccountDeletion,
+  validateCoreSession,
+  validateInvitation,
 } = Contracts as unknown as Record<string, any>;
 
 const timestamp = "2026-08-10T01:02:03Z";
@@ -68,6 +73,7 @@ const coreSessionClients = ["web", "iphone", "macos"] as const;
 const coreSessionStatuses = ["active", "revoked", "expired"] as const;
 const invitationStatuses = ["pending", "accepted", "revoked", "expired", "replaced"] as const;
 const platformRoles = ["platform_super_admin"] as const;
+const invitationSecret = "i".repeat(43);
 const compileRequired = (name: string, schema: unknown) => {
   assert.notEqual(schema, undefined, `${name} must be exported`);
   return Schema.Compile(schema as never);
@@ -128,14 +134,15 @@ const requestCases: Array<[string, unknown, unknown]> = [
   ["Apple native start", AppleAuthorizationStartRequestSchema, { ...idem, client_kind: "iphone", redirect_uri: "coreagent://auth/callback", nonce: "opaque_native_nonce", pkce_code_challenge: "a".repeat(43), pkce_code_challenge_method: "S256" }],
   ["Apple Web callback", AppleAuthorizationCallbackRequestSchema, { ...idem, client_kind: "web", transaction_id: "oauth_01", authorization_code: "opaque_code", state: "opaque_state" }],
   ["Apple native callback", AppleAuthorizationCallbackRequestSchema, { ...idem, client_kind: "macos", transaction_id: "oauth_02", authorization_code: "opaque_code", state: "opaque_state", nonce: "opaque_native_nonce", pkce_code_verifier: "b".repeat(43) }],
-  ["Apple link", AppleIdentityLinkRequestSchema, { ...idem, expected_resource_version: 1, client_kind: "web", transaction_id: "oauth_03", authorization_code: "opaque_code", state: "opaque_state" }],
+  ["Apple link", AppleIdentityLinkRequestSchema, { ...idem, client_kind: "web", transaction_id: "oauth_03", authorization_code: "opaque_code", state: "opaque_state" }],
   ["session inspect", SessionInspectRequestSchema, { schema_version: 1, session_id: "session_01" }],
   ["session revoke", SessionRevokeRequestSchema, { ...idem, expected_resource_version: 1, session_id: "session_01", reason_code: "user_sign_out" }],
   ["reauthentication", ReauthenticationRequestSchema, { ...idem, expected_resource_version: 1, password: "correct-horse" }],
-  ["invitation inspect", InvitationInspectRequestSchema, { schema_version: 1, invitation_secret: "opaque_invitation_secret" }],
-  ["invitation acceptance", InvitationAcceptanceRequestSchema, { ...idem, expected_resource_version: 1, invitation_secret: "opaque_invitation_secret", authentication_proof: { kind: "email_password", client_kind: "web", email: "invitee@example.test", password: "correct-horse" } }],
+  ["invitation inspect", InvitationInspectRequestSchema, { schema_version: 1, invitation_secret: invitationSecret }],
+  ["invitation email registration", InvitationEmailRegistrationRequestSchema, { ...idem, invitation_secret: invitationSecret, email: "invitee@example.test", password: "correct-horse", client_kind: "web" }],
+  ["invitation acceptance", InvitationAcceptanceRequestSchema, { ...idem, expected_resource_version: 1, invitation_secret: invitationSecret, authentication_proof: { kind: "email_password", client_kind: "web", verification_proof: "opaque_verified_email_proof" } }],
   ["invitation revoke", InvitationRevokeRequestSchema, { ...idem, expected_resource_version: 1, invitation_id: "invitation_01", reason_code: "administrator_revoked" }],
-  ["company creation", CompanyCreateRequestSchema, { ...idem, display_name: "Synthetic Company", administrator_invitation_ref: "invite_ref_01" }],
+  ["company creation", CompanyCreateRequestSchema, { ...idem, display_name: "Synthetic Company", administrator_email: "admin@example.test" }],
   ["company member invite", CompanyMemberInviteRequestSchema, { ...idem, tenant_id: "tenant_01", email: "invitee@example.test", role: "consultant" }],
   ["company member suspend", CompanyMemberSuspendRequestSchema, { ...idem, expected_resource_version: 1, membership_id: "membership_01", reason_code: "administrator_suspended" }],
   ["company member revoke", CompanyMemberRevokeRequestSchema, { ...idem, expected_resource_version: 1, membership_id: "membership_01", reason_code: "administrator_revoked" }],
@@ -152,7 +159,7 @@ test("every public auth request has an exact closed shape", () => {
 });
 
 test("every public auth response is closed and provider-neutral", () => {
-  const sessionView = { schema_version: 1, actor_id: "actor_01", session_id: "session_01", client_kind: "web", idle_expires_at: timestamp, absolute_expires_at: timestamp, reauthentication_required: false };
+  const sessionView = { schema_version: 1, actor_id: "actor_01", actor_resource_version: 4, session_id: "session_01", session_resource_version: 7, client_kind: "web", idle_expires_at: timestamp, absolute_expires_at: timestamp, reauthentication_required: false };
   const responseCases: Array<[string, unknown, unknown]> = [
     ["email sign-up", EmailSignUpResponseSchema, { schema_version: 1, verification_id: "verification_01", status: "verification_pending" }],
     ["email verification", EmailVerificationResponseSchema, { schema_version: 1, transport: "web_cookie", session: sessionView }],
@@ -162,17 +169,18 @@ test("every public auth response is closed and provider-neutral", () => {
     ["Apple callback", AppleAuthorizationCallbackResponseSchema, { schema_version: 1, transport: "web_cookie", session: sessionView }],
     ["Apple link", AppleIdentityLinkResponseSchema, { schema_version: 1, auth_subject_id: "auth_01", linked: true }],
     ["session inspect", SessionInspectResponseSchema, { schema_version: 1, session: sessionView }],
-    ["session revoke", SessionRevokeResponseSchema, { schema_version: 1, session_id: "session_01", status: "revoked" }],
-    ["reauthentication", ReauthenticationResponseSchema, { schema_version: 1, reauthenticated_at: timestamp, valid_until: timestamp }],
+    ["session revoke", SessionRevokeResponseSchema, { schema_version: 1, session_id: "session_01", status: "revoked", resource_version: 8 }],
+    ["reauthentication", ReauthenticationResponseSchema, { schema_version: 1, reauthenticated_at: timestamp, valid_until: timestamp, session_resource_version: 8 }],
     ["invitation inspect", InvitationInspectResponseSchema, { schema_version: 1, invitation_id: "invitation_01", tenant_id: "tenant_01", role: "consultant", status: "pending", expires_at: timestamp, resource_version: 1 }],
-    ["invitation acceptance", InvitationAcceptanceResponseSchema, { schema_version: 1, transport: "web_cookie", tenant_id: "tenant_01", membership_id: "membership_01", profile_id: "profile_01", session: sessionView }],
+    ["invitation email registration", InvitationEmailRegistrationResponseSchema, { schema_version: 1, status: "verification_pending" }],
+    ["invitation acceptance", InvitationAcceptanceResponseSchema, { schema_version: 1, transport: "web_cookie", tenant_id: "tenant_01", invitation_resource_version: 2, membership_id: "membership_01", membership_resource_version: 2, profile_id: "profile_01", profile_resource_version: 1, session: sessionView }],
     ["invitation revoke", InvitationRevokeResponseSchema, { schema_version: 1, invitation_id: "invitation_01", status: "revoked", resource_version: 2 }],
-    ["company creation", CompanyCreateResponseSchema, { schema_version: 1, tenant_id: "tenant_01", administrator_invitation_id: "invitation_01" }],
-    ["company member invite", CompanyMemberInviteResponseSchema, { schema_version: 1, membership_id: "membership_01", invitation_id: "invitation_01" }],
+    ["company creation", CompanyCreateResponseSchema, { schema_version: 1, tenant_id: "tenant_01", tenant_resource_version: 1, administrator_invitation_id: "invitation_01", administrator_invitation_resource_version: 1, administrator_invitation_secret: invitationSecret }],
+    ["company member invite", CompanyMemberInviteResponseSchema, { schema_version: 1, membership_id: "membership_01", membership_resource_version: 1, invitation_id: "invitation_01", invitation_resource_version: 1, invitation_secret: invitationSecret }],
     ["company member suspend", CompanyMemberSuspendResponseSchema, { schema_version: 1, membership_id: "membership_01", status: "suspended", resource_version: 2 }],
     ["company member revoke", CompanyMemberRevokeResponseSchema, { schema_version: 1, membership_id: "membership_01", status: "revoked", resource_version: 2 }],
-    ["account deletion", AccountDeletionResponseSchema, { schema_version: 1, account_deletion_id: "deletion_01", status: "deletion_pending", scheduled_for: timestamp }],
-    ["account deletion cancel", AccountDeletionCancelResponseSchema, { schema_version: 1, account_deletion_id: "deletion_01", status: "cancelled" }],
+    ["account deletion", AccountDeletionResponseSchema, { schema_version: 1, account_deletion_id: "deletion_01", status: "deletion_pending", scheduled_for: timestamp, resource_version: 1 }],
+    ["account deletion cancel", AccountDeletionCancelResponseSchema, { schema_version: 1, account_deletion_id: "deletion_01", status: "cancelled", resource_version: 2 }],
   ];
   for (const [name, schema, value] of responseCases) {
     const validator = compileRequired(name, schema);
@@ -192,7 +200,9 @@ test("sign-up stays verification-pending and Session delivery is transport-speci
   const nativeSession = {
     schema_version: 1,
     actor_id: "actor_01",
+    actor_resource_version: 4,
     session_id: "session_native",
+    session_resource_version: 7,
     client_kind: "iphone",
     idle_expires_at: timestamp,
     absolute_expires_at: timestamp,
@@ -213,14 +223,17 @@ test("Apple and invitation proofs use closed Web and native PKCE variants", () =
   assert.equal(start.Check(webStart), true);
   assert.equal(start.Check({ ...webStart, nonce: "forbidden" }), false);
   assert.equal(start.Check(nativeStart), true);
+  assert.equal(start.Check({ ...nativeStart, pkce_code_challenge: "a".repeat(44) }), false);
+  assert.equal(start.Check({ ...nativeStart, pkce_code_challenge: `${"a".repeat(42)}.` }), false);
   assert.equal(start.Check({ ...nativeStart, pkce_code_challenge_method: "plain" }), false);
   assert.equal(callback.Check({ ...idem, client_kind: "web", transaction_id: "oauth_01", authorization_code: "opaque_code", state: "opaque_state" }), true);
   assert.equal(callback.Check({ ...idem, client_kind: "iphone", transaction_id: "oauth_01", authorization_code: "opaque_code", state: "opaque_state" }), false);
   assert.equal(callback.Check({ ...idem, client_kind: "iphone", transaction_id: "oauth_01", authorization_code: "opaque_code", state: "opaque_state", nonce: "opaque_native_nonce", pkce_code_verifier: "b".repeat(43) }), true);
 
   const accept = compileRequired("InvitationAcceptanceRequestSchema", InvitationAcceptanceRequestSchema);
-  const common = { ...idem, expected_resource_version: 1, invitation_secret: "opaque_invitation_secret" };
-  assert.equal(accept.Check({ ...common, authentication_proof: { kind: "email_password", client_kind: "web", email: "invitee@example.test", password: "correct-horse" } }), true);
+  const common = { ...idem, expected_resource_version: 1, invitation_secret: invitationSecret };
+  assert.equal(accept.Check({ ...common, authentication_proof: { kind: "email_password", client_kind: "web", verification_proof: "opaque_verified_email_proof" } }), true);
+  assert.equal(accept.Check({ ...common, authentication_proof: { kind: "email_password", client_kind: "web", email: "invitee@example.test", password: "correct-horse" } }), false);
   assert.equal(accept.Check({ ...common, authentication_proof: { kind: "apple", client_kind: "web", transaction_id: "oauth_01", authorization_code: "opaque_code", state: "opaque_state" } }), true);
   assert.equal(accept.Check({ ...common, authentication_proof: { kind: "apple", client_kind: "macos", transaction_id: "oauth_01", authorization_code: "opaque_code", state: "opaque_state", nonce: "opaque_native_nonce", pkce_code_verifier: "b".repeat(43) } }), true);
 });
@@ -228,7 +241,6 @@ test("Apple and invitation proofs use closed Web and native PKCE variants", () =
 test("every durable public mutation is idempotent and existing-resource writes are versioned", () => {
   const readSchemas = new Set([SessionInspectRequestSchema, InvitationInspectRequestSchema]);
   const existingResourceMutations = new Set([
-    AppleIdentityLinkRequestSchema,
     SessionRevokeRequestSchema,
     ReauthenticationRequestSchema,
     InvitationAcceptanceRequestSchema,
@@ -249,6 +261,80 @@ test("every durable public mutation is idempotent and existing-resource writes a
       assert.equal(validator.Check(withoutVersion), false, `${name}: expected_resource_version`);
     }
   }
+});
+
+test("invitation registration stays pending until final verified-email acceptance", () => {
+  const register = compileRequired("InvitationEmailRegistrationRequestSchema", InvitationEmailRegistrationRequestSchema);
+  const pending = compileRequired("InvitationEmailRegistrationResponseSchema", InvitationEmailRegistrationResponseSchema);
+  const accept = compileRequired("InvitationAcceptanceRequestSchema", InvitationAcceptanceRequestSchema);
+  const registration = {
+    ...idem,
+    invitation_secret: invitationSecret,
+    email: "invitee@example.test",
+    password: "correct-horse",
+    client_kind: "web",
+  };
+  assert.equal(register.Check(registration), true);
+  assert.equal(pending.Check({ schema_version: 1, status: "verification_pending" }), true);
+  assert.equal(pending.Check({ schema_version: 1, status: "verification_pending", session: {} }), false);
+  assert.equal(pending.Check({ schema_version: 1, status: "verification_pending", tenant_id: "tenant_01" }), false);
+  assert.equal(accept.Check({
+    ...idem,
+    expected_resource_version: 1,
+    invitation_secret: invitationSecret,
+    authentication_proof: {
+      kind: "email_password",
+      client_kind: "web",
+      verification_proof: "opaque_verified_email_proof",
+    },
+  }), true);
+});
+
+test("public views return every resource version required by the next mutation", () => {
+  const sessionView = {
+    schema_version: 1,
+    actor_id: "actor_01",
+    actor_resource_version: 4,
+    session_id: "session_01",
+    session_resource_version: 7,
+    client_kind: "web",
+    idle_expires_at: timestamp,
+    absolute_expires_at: timestamp,
+    reauthentication_required: false,
+  };
+  assert.equal(compileRequired("SessionInspectResponseSchema", SessionInspectResponseSchema).Check({ schema_version: 1, session: sessionView }), true);
+  assert.equal(compileRequired("SessionRevokeRequestSchema", SessionRevokeRequestSchema).Check({ ...idem, session_id: sessionView.session_id, expected_resource_version: sessionView.session_resource_version, reason_code: "user_sign_out" }), true);
+  assert.equal(compileRequired("ReauthenticationRequestSchema", ReauthenticationRequestSchema).Check({ ...idem, expected_resource_version: sessionView.session_resource_version, password: "correct-horse" }), true);
+  assert.equal(compileRequired("AccountDeletionRequestSchema", AccountDeletionRequestSchema).Check({ ...idem, expected_resource_version: sessionView.actor_resource_version, reason_code: "user_requested" }), true);
+
+  const deletion = { schema_version: 1, account_deletion_id: "deletion_01", status: "deletion_pending", scheduled_for: timestamp, resource_version: 3 };
+  assert.equal(compileRequired("AccountDeletionResponseSchema", AccountDeletionResponseSchema).Check(deletion), true);
+  assert.equal(compileRequired("AccountDeletionCancelRequestSchema", AccountDeletionCancelRequestSchema).Check({ ...idem, account_deletion_id: deletion.account_deletion_id, expected_resource_version: deletion.resource_version }), true);
+
+  const invitation = { schema_version: 1, invitation_id: "invitation_01", tenant_id: "tenant_01", role: "consultant", status: "pending", expires_at: timestamp, resource_version: 5 };
+  assert.equal(compileRequired("InvitationInspectResponseSchema", InvitationInspectResponseSchema).Check(invitation), true);
+  assert.equal(compileRequired("InvitationRevokeRequestSchema", InvitationRevokeRequestSchema).Check({ ...idem, invitation_id: invitation.invitation_id, expected_resource_version: invitation.resource_version, reason_code: "administrator_revoked" }), true);
+
+  const createdMember = { schema_version: 1, membership_id: "membership_01", membership_resource_version: 1, invitation_id: "invitation_01", invitation_resource_version: 1, invitation_secret: invitationSecret };
+  assert.equal(compileRequired("CompanyMemberInviteResponseSchema", CompanyMemberInviteResponseSchema).Check(createdMember), true);
+  assert.equal(compileRequired("CompanyMemberSuspendRequestSchema", CompanyMemberSuspendRequestSchema).Check({ ...idem, membership_id: createdMember.membership_id, expected_resource_version: createdMember.membership_resource_version, reason_code: "administrator_suspended" }), true);
+});
+
+test("invitation, Session, and deletion semantic validators reject contradictory states", () => {
+  assert.equal(typeof validateInvitation, "function");
+  assert.equal(typeof validateCoreSession, "function");
+  assert.equal(typeof validateAccountDeletion, "function");
+  const invitation = { ...resource, invitation_id: "invitation_01", tenant_id: "tenant_01", membership_id: "membership_01", invited_by_actor_id: "actor_admin", role: "consultant", status: "accepted", expires_at: timestamp };
+  assert.deepEqual(validateInvitation(invitation).map((item: { code: string }) => item.code), ["INVITATION_ACCEPTED_ACTOR_REQUIRED"]);
+  assert.deepEqual(validateInvitation({ ...invitation, accepted_actor_id: "actor_01" }), []);
+
+  const session = { ...resource, session_id: "session_01", actor_id: "actor_01", auth_subject_id: "auth_01", client_kind: "web", last_seen_at: timestamp, idle_expires_at: timestamp, absolute_expires_at: timestamp, status: "revoked" };
+  assert.deepEqual(validateCoreSession(session).map((item: { code: string }) => item.code), ["CORE_SESSION_REVOCATION_REASON_REQUIRED"]);
+  assert.deepEqual(validateCoreSession({ ...session, status: "active", revocation_reason_code: "user_sign_out" }).map((item: { code: string }) => item.code), ["CORE_SESSION_REVOCATION_REASON_FORBIDDEN"]);
+
+  const deletion = { ...resource, account_deletion_id: "deletion_01", actor_id: "actor_01", status: "cancelled", requested_at: timestamp, scheduled_for: timestamp };
+  assert.deepEqual(validateAccountDeletion(deletion).map((item: { code: string }) => item.code), ["ACCOUNT_DELETION_CANCELLED_AT_REQUIRED"]);
+  assert.deepEqual(validateAccountDeletion({ ...deletion, cancelled_at: timestamp, deleted_at: timestamp }).map((item: { code: string }) => item.code), ["ACCOUNT_DELETION_DELETED_AT_FORBIDDEN"]);
 });
 
 test("Core Session revocation reasons use only the approved safe vocabulary", () => {

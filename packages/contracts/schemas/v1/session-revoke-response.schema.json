@@ -3,6 +3,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
     "schema_version": {
       "const": 1,
       "title": "SchemaVersion",
@@ -21,7 +25,8 @@
   "required": [
     "schema_version",
     "session_id",
-    "status"
+    "status",
+    "resource_version"
   ],
   "type": "object"
 }

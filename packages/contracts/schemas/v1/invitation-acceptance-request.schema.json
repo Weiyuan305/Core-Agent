@@ -24,18 +24,12 @@
                 }
               ]
             },
-            "email": {
-              "format": "email",
-              "maxLength": 320,
-              "minLength": 3,
-              "type": "string"
-            },
             "kind": {
               "const": "email_password",
               "type": "string"
             },
-            "password": {
-              "maxLength": 1024,
+            "verification_proof": {
+              "maxLength": 4096,
               "minLength": 8,
               "type": "string"
             }
@@ -43,8 +37,7 @@
           "required": [
             "kind",
             "client_kind",
-            "email",
-            "password"
+            "verification_proof"
           ],
           "type": "object"
         },
@@ -158,8 +151,7 @@
       "type": "string"
     },
     "invitation_secret": {
-      "maxLength": 1024,
-      "minLength": 16,
+      "pattern": "^[A-Za-z0-9_-]{43}$",
       "type": "string"
     },
     "payload_hash": {

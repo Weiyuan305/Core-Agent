@@ -61,13 +61,37 @@ export function validateIdentityGraph(graph: IdentityGraph): ContractViolation[]
     if (graph.tenant.tenant_mode === "b2b" && membership.roles.includes("student")) {
       violations.push(violation("B2B_MEMBERSHIP_ROLE_INVALID", "memberships.roles", "B2B tenant does not allow student authority"));
     }
+    if (graph.tenant.tenant_mode === "b2b" && membership.membership_source === "self") {
+      violations.push(violation("B2B_MEMBERSHIP_SOURCE_INVALID", "memberships.membership_source", "B2B tenant does not allow self authority"));
+    }
     if (graph.tenant.tenant_mode === "b2c") {
-      if (membership.membership_source === "platform") {
-        violations.push(violation("B2C_MEMBERSHIP_SOURCE_INVALID", "memberships.membership_source", "B2C tenant does not allow platform authority"));
+      if (["company", "platform"].includes(membership.membership_source ?? "")) {
+        violations.push(violation("B2C_MEMBERSHIP_SOURCE_INVALID", "memberships.membership_source", "B2C tenant allows only self authority"));
       }
       if (membership.roles.length !== 1 || membership.roles[0] !== "student") {
         violations.push(violation("B2C_MEMBERSHIP_ROLE_INVALID", "memberships.roles", "B2C tenant requires only student authority"));
       }
+    }
+  }
+
+  const ordinaryAuthorityCounts = new Map<string, number>();
+  for (const membership of tenantMemberships) {
+    if (
+      membership.membership_source === "platform"
+      || !["active", "invited"].includes(membership.status)
+    ) continue;
+    ordinaryAuthorityCounts.set(
+      membership.actor_id,
+      (ordinaryAuthorityCounts.get(membership.actor_id) ?? 0) + 1,
+    );
+  }
+  for (const count of ordinaryAuthorityCounts.values()) {
+    if (count > 1) {
+      violations.push(violation(
+        "ACTOR_AUTHORITY_MEMBERSHIP_CONFLICT",
+        "memberships.actor_id",
+        "Actor has more than one active or invited ordinary Membership in the Tenant",
+      ));
     }
   }
 
@@ -124,6 +148,7 @@ export function validateIdentityGraph(graph: IdentityGraph): ContractViolation[]
 
 export function validateIdentityGraphs(graphs: readonly IdentityGraph[]): ContractViolation[] {
   const tenantsByOrdinaryActor = new Map<string, Set<string>>();
+  const membershipCountsByActor = new Map<string, Map<string, number>>();
   for (const graph of graphs) {
     for (const membership of graph.memberships) {
       if (
@@ -133,13 +158,25 @@ export function validateIdentityGraphs(graphs: readonly IdentityGraph[]): Contra
       const tenants = tenantsByOrdinaryActor.get(membership.actor_id) ?? new Set<string>();
       tenants.add(membership.tenant_id);
       tenantsByOrdinaryActor.set(membership.actor_id, tenants);
+      const counts = membershipCountsByActor.get(membership.actor_id) ?? new Map<string, number>();
+      counts.set(membership.tenant_id, (counts.get(membership.tenant_id) ?? 0) + 1);
+      membershipCountsByActor.set(membership.actor_id, counts);
     }
   }
-  return [...tenantsByOrdinaryActor.entries()]
+  const violations = [...membershipCountsByActor.values()]
+    .flatMap((counts) => [...counts.values()])
+    .filter((count) => count > 1)
+    .map(() => violation(
+      "ACTOR_AUTHORITY_MEMBERSHIP_CONFLICT",
+      "memberships.actor_id",
+      "Actor has more than one active or invited ordinary Membership in the Tenant",
+    ));
+  violations.push(...[...tenantsByOrdinaryActor.entries()]
     .filter(([, tenants]) => tenants.size > 1)
     .map(([actorId]) => violation(
       "ACTOR_AUTHORITY_TENANT_CONFLICT",
       "memberships.actor_id",
       `Actor ${actorId} has authority in more than one tenant`,
-    ));
+    )));
+  return violations;
 }

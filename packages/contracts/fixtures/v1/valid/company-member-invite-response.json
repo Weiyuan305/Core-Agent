@@ -1,1 +1,1 @@
-{"schema_key":"company-member-invite-response","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"membership_id":"membership_01","invitation_id":"invitation_01"}}
+{"schema_key":"company-member-invite-response","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"membership_id":"membership_01","membership_resource_version":1,"invitation_id":"invitation_01","invitation_resource_version":1,"invitation_secret":"iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii"}}

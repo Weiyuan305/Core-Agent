@@ -5,15 +5,27 @@
     {
       "additionalProperties": false,
       "properties": {
+        "invitation_resource_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
         "membership_id": {
           "maxLength": 255,
           "minLength": 1,
           "type": "string"
         },
+        "membership_resource_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
         "profile_id": {
           "maxLength": 255,
           "minLength": 1,
           "type": "string"
+        },
+        "profile_resource_version": {
+          "minimum": 1,
+          "type": "integer"
         },
         "schema_version": {
           "const": 1,
@@ -32,6 +44,10 @@
               "maxLength": 255,
               "minLength": 1,
               "type": "string"
+            },
+            "actor_resource_version": {
+              "minimum": 1,
+              "type": "integer"
             },
             "client_kind": {
               "const": "web",
@@ -54,12 +70,18 @@
               "maxLength": 255,
               "minLength": 1,
               "type": "string"
+            },
+            "session_resource_version": {
+              "minimum": 1,
+              "type": "integer"
             }
           },
           "required": [
             "schema_version",
             "actor_id",
+            "actor_resource_version",
             "session_id",
+            "session_resource_version",
             "client_kind",
             "idle_expires_at",
             "absolute_expires_at",
@@ -81,7 +103,9 @@
         "schema_version",
         "transport",
         "tenant_id",
+        "invitation_resource_version",
         "membership_id",
+        "membership_resource_version",
         "session"
       ],
       "type": "object"
@@ -89,15 +113,27 @@
     {
       "additionalProperties": false,
       "properties": {
+        "invitation_resource_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
         "membership_id": {
           "maxLength": 255,
           "minLength": 1,
           "type": "string"
         },
+        "membership_resource_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
         "profile_id": {
           "maxLength": 255,
           "minLength": 1,
           "type": "string"
+        },
+        "profile_resource_version": {
+          "minimum": 1,
+          "type": "integer"
         },
         "schema_version": {
           "const": 1,
@@ -116,6 +152,10 @@
               "maxLength": 255,
               "minLength": 1,
               "type": "string"
+            },
+            "actor_resource_version": {
+              "minimum": 1,
+              "type": "integer"
             },
             "client_kind": {
               "anyOf": [
@@ -146,12 +186,18 @@
               "maxLength": 255,
               "minLength": 1,
               "type": "string"
+            },
+            "session_resource_version": {
+              "minimum": 1,
+              "type": "integer"
             }
           },
           "required": [
             "schema_version",
             "actor_id",
+            "actor_resource_version",
             "session_id",
+            "session_resource_version",
             "client_kind",
             "idle_expires_at",
             "absolute_expires_at",
@@ -177,7 +223,9 @@
         "schema_version",
         "transport",
         "tenant_id",
+        "invitation_resource_version",
         "membership_id",
+        "membership_resource_version",
         "session",
         "session_secret"
       ],

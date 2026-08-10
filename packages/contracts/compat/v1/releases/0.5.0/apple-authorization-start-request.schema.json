@@ -79,9 +79,7 @@
           "type": "string"
         },
         "pkce_code_challenge": {
-          "maxLength": 128,
-          "minLength": 43,
-          "pattern": "^[A-Za-z0-9._~-]+$",
+          "pattern": "^[A-Za-z0-9_-]{43}$",
           "type": "string"
         },
         "pkce_code_challenge_method": {

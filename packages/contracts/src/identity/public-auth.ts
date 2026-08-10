@@ -19,9 +19,10 @@ const PasswordSchema = Type.String({ minLength: 8, maxLength: 1_024 });
 const DeviceLabelSchema = Type.String({ minLength: 1, maxLength: 80 });
 const OAuthProofSchema = Type.String({ minLength: 8, maxLength: 4_096 });
 const SessionSecretSchema = Type.String({ pattern: "^[A-Za-z0-9_-]{43}$" });
-const PkceValueSchema = Type.String({ minLength: 43, maxLength: 128, pattern: "^[A-Za-z0-9._~-]+$" });
+const PkceChallengeSchema = Type.String({ pattern: "^[A-Za-z0-9_-]{43}$" });
+const PkceVerifierSchema = Type.String({ minLength: 43, maxLength: 128, pattern: "^[A-Za-z0-9._~-]+$" });
 const RedirectUriSchema = Type.String({ minLength: 1, maxLength: 2_048, format: "uri" });
-const InvitationSecretSchema = Type.String({ minLength: 16, maxLength: 1_024 });
+const InvitationSecretSchema = Type.String({ pattern: "^[A-Za-z0-9_-]{43}$" });
 const ManagementReasonCodeSchema = Type.Union([
   Type.Literal("administrator_suspended"),
   Type.Literal("administrator_revoked"),
@@ -45,7 +46,9 @@ function response<const Properties extends TProperties>(id: string, properties: 
 const AuthSessionViewFields = {
   schema_version: SchemaVersionSchema,
   actor_id: OpaqueIdSchema,
+  actor_resource_version: ResourceVersionSchema,
   session_id: OpaqueIdSchema,
+  session_resource_version: ResourceVersionSchema,
   client_kind: CoreSessionClientKindSchema,
   idle_expires_at: UtcTimestampSchema,
   absolute_expires_at: UtcTimestampSchema,
@@ -90,7 +93,7 @@ const NativeAppleCallbackFields = {
   authorization_code: OAuthProofSchema,
   state: OAuthProofSchema,
   nonce: OAuthProofSchema,
-  pkce_code_verifier: PkceValueSchema,
+  pkce_code_verifier: PkceVerifierSchema,
 } as const;
 
 export const AuthSessionViewSchema = response("auth-session-view", AuthSessionViewFields);
@@ -144,7 +147,7 @@ export const AppleAuthorizationStartRequestSchema = Type.Union([
     client_kind: NativeClientKindSchema,
     redirect_uri: RedirectUriSchema,
     nonce: OAuthProofSchema,
-    pkce_code_challenge: PkceValueSchema,
+    pkce_code_challenge: PkceChallengeSchema,
     pkce_code_challenge_method: Type.Literal("S256"),
     device_label: Type.Optional(DeviceLabelSchema),
   }, { additionalProperties: false }),
@@ -165,8 +168,8 @@ export const AppleAuthorizationCallbackResponseSchema = sessionDelivery(
   {},
 );
 export const AppleIdentityLinkRequestSchema = Type.Union([
-  Type.Object({ ...VersionedWriteProperties, ...WebAppleCallbackFields }, { additionalProperties: false }),
-  Type.Object({ ...VersionedWriteProperties, ...NativeAppleCallbackFields }, { additionalProperties: false }),
+  Type.Object({ ...IdempotencyRequestProperties, ...WebAppleCallbackFields }, { additionalProperties: false }),
+  Type.Object({ ...IdempotencyRequestProperties, ...NativeAppleCallbackFields }, { additionalProperties: false }),
 ], { $id: "core-agent://v1/apple-identity-link-request" });
 export const AppleIdentityLinkResponseSchema = response("apple-identity-link-response", {
   schema_version: SchemaVersionSchema,
@@ -191,6 +194,7 @@ export const SessionRevokeResponseSchema = response("session-revoke-response", {
   schema_version: SchemaVersionSchema,
   session_id: OpaqueIdSchema,
   status: Type.Literal("revoked"),
+  resource_version: ResourceVersionSchema,
 });
 
 export const ReauthenticationRequestSchema = request("reauthentication-request", {
@@ -201,6 +205,7 @@ export const ReauthenticationResponseSchema = response("reauthentication-respons
   schema_version: SchemaVersionSchema,
   reauthenticated_at: UtcTimestampSchema,
   valid_until: UtcTimestampSchema,
+  session_resource_version: ResourceVersionSchema,
 });
 
 export const InvitationInspectRequestSchema = request("invitation-inspect-request", {
@@ -217,11 +222,23 @@ export const InvitationInspectResponseSchema = response("invitation-inspect-resp
   resource_version: ResourceVersionSchema,
 });
 
+export const InvitationEmailRegistrationRequestSchema = request("invitation-email-registration-request", {
+  ...IdempotencyRequestProperties,
+  invitation_secret: InvitationSecretSchema,
+  email: EmailSchema,
+  password: PasswordSchema,
+  client_kind: CoreSessionClientKindSchema,
+  device_label: Type.Optional(DeviceLabelSchema),
+});
+export const InvitationEmailRegistrationResponseSchema = response("invitation-email-registration-response", {
+  schema_version: SchemaVersionSchema,
+  status: Type.Literal("verification_pending"),
+});
+
 const InvitationEmailPasswordProofSchema = Type.Object({
   kind: Type.Literal("email_password"),
   client_kind: CoreSessionClientKindSchema,
-  email: EmailSchema,
-  password: PasswordSchema,
+  verification_proof: OAuthProofSchema,
 }, { additionalProperties: false });
 const InvitationAppleWebProofSchema = Type.Object({
   kind: Type.Literal("apple"),
@@ -245,8 +262,11 @@ export const InvitationAcceptanceRequestSchema = request("invitation-acceptance-
 });
 export const InvitationAcceptanceResponseSchema = sessionDelivery("invitation-acceptance-response", {
   tenant_id: OpaqueIdSchema,
+  invitation_resource_version: ResourceVersionSchema,
   membership_id: OpaqueIdSchema,
+  membership_resource_version: ResourceVersionSchema,
   profile_id: Type.Optional(OpaqueIdSchema),
+  profile_resource_version: Type.Optional(ResourceVersionSchema),
 });
 export const InvitationRevokeRequestSchema = request("invitation-revoke-request", {
   ...VersionedWriteProperties,
@@ -263,12 +283,15 @@ export const InvitationRevokeResponseSchema = response("invitation-revoke-respon
 export const CompanyCreateRequestSchema = request("company-create-request", {
   ...IdempotencyRequestProperties,
   display_name: Type.String({ minLength: 1, maxLength: 200 }),
-  administrator_invitation_ref: OpaqueIdSchema,
+  administrator_email: EmailSchema,
 });
 export const CompanyCreateResponseSchema = response("company-create-response", {
   schema_version: SchemaVersionSchema,
   tenant_id: OpaqueIdSchema,
+  tenant_resource_version: ResourceVersionSchema,
   administrator_invitation_id: OpaqueIdSchema,
+  administrator_invitation_resource_version: ResourceVersionSchema,
+  administrator_invitation_secret: InvitationSecretSchema,
 });
 export const CompanyMemberInviteRequestSchema = request("company-member-invite-request", {
   ...IdempotencyRequestProperties,
@@ -279,7 +302,10 @@ export const CompanyMemberInviteRequestSchema = request("company-member-invite-r
 export const CompanyMemberInviteResponseSchema = response("company-member-invite-response", {
   schema_version: SchemaVersionSchema,
   membership_id: OpaqueIdSchema,
+  membership_resource_version: ResourceVersionSchema,
   invitation_id: OpaqueIdSchema,
+  invitation_resource_version: ResourceVersionSchema,
+  invitation_secret: InvitationSecretSchema,
 });
 export const CompanyMemberSuspendRequestSchema = request("company-member-suspend-request", {
   ...VersionedWriteProperties,
@@ -313,6 +339,7 @@ export const AccountDeletionResponseSchema = response("account-deletion-response
   account_deletion_id: OpaqueIdSchema,
   status: Type.Literal("deletion_pending"),
   scheduled_for: UtcTimestampSchema,
+  resource_version: ResourceVersionSchema,
 });
 export const AccountDeletionCancelRequestSchema = request("account-deletion-cancel-request", {
   ...VersionedWriteProperties,
@@ -322,6 +349,7 @@ export const AccountDeletionCancelResponseSchema = response("account-deletion-ca
   schema_version: SchemaVersionSchema,
   account_deletion_id: OpaqueIdSchema,
   status: Type.Literal("cancelled"),
+  resource_version: ResourceVersionSchema,
 });
 
 export type AuthSessionView = Static<typeof AuthSessionViewSchema>;
@@ -347,6 +375,8 @@ export type ReauthenticationRequest = Static<typeof ReauthenticationRequestSchem
 export type ReauthenticationResponse = Static<typeof ReauthenticationResponseSchema>;
 export type InvitationInspectRequest = Static<typeof InvitationInspectRequestSchema>;
 export type InvitationInspectResponse = Static<typeof InvitationInspectResponseSchema>;
+export type InvitationEmailRegistrationRequest = Static<typeof InvitationEmailRegistrationRequestSchema>;
+export type InvitationEmailRegistrationResponse = Static<typeof InvitationEmailRegistrationResponseSchema>;
 export type InvitationAcceptanceRequest = Static<typeof InvitationAcceptanceRequestSchema>;
 export type InvitationAcceptanceResponse = Static<typeof InvitationAcceptanceResponseSchema>;
 export type InvitationRevokeRequest = Static<typeof InvitationRevokeRequestSchema>;

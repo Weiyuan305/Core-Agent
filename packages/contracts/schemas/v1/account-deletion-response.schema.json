@@ -8,6 +8,10 @@
       "minLength": 1,
       "type": "string"
     },
+    "resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
     "scheduled_for": {
       "format": "date-time",
       "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
@@ -27,7 +31,8 @@
     "schema_version",
     "account_deletion_id",
     "status",
-    "scheduled_for"
+    "scheduled_for",
+    "resource_version"
   ],
   "type": "object"
 }

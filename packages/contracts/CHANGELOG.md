@@ -9,6 +9,12 @@
 - Keep email sign-up verification-pending, model browser Sessions as Cookie-only,
   and permit one-time opaque Session-secret delivery only for native clients with
   nonce and PKCE proof.
+- Add invitation-bound email registration and verified-email acceptance, expose the
+  exact optimistic-concurrency versions required by follow-up mutations, and return
+  newly issued invitation secrets exactly once from company/member creation.
+- Enforce Tenant-mode Membership sources, duplicate ordinary-authority rejection,
+  exact S256 challenge encoding, and semantic lifecycle validation for Invitations,
+  Core Sessions, and Account Deletions.
 - Preserve the released Actor status vocabulary while defining identity-authority
   deletion lifecycle separately, and enforce B2B/B2C authority-mode boundaries.
 - Add the immutable 0.5.0 schema release while keeping accepted historical release

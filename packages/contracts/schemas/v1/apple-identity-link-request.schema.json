@@ -14,10 +14,6 @@
           "const": "web",
           "type": "string"
         },
-        "expected_resource_version": {
-          "minimum": 1,
-          "type": "integer"
-        },
         "idempotency_key": {
           "maxLength": 255,
           "minLength": 1,
@@ -47,7 +43,6 @@
         "schema_version",
         "idempotency_key",
         "payload_hash",
-        "expected_resource_version",
         "client_kind",
         "transaction_id",
         "authorization_code",
@@ -74,10 +69,6 @@
               "type": "string"
             }
           ]
-        },
-        "expected_resource_version": {
-          "minimum": 1,
-          "type": "integer"
         },
         "idempotency_key": {
           "maxLength": 255,
@@ -119,7 +110,6 @@
         "schema_version",
         "idempotency_key",
         "payload_hash",
-        "expected_resource_version",
         "client_kind",
         "transaction_id",
         "authorization_code",

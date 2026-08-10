@@ -75,6 +75,8 @@ test("registry publishes exactly the planned v1 contracts", () => {
     "reauthentication-response",
     "invitation-acceptance-request",
     "invitation-acceptance-response",
+    "invitation-email-registration-request",
+    "invitation-email-registration-response",
     "invitation-inspect-request",
     "invitation-inspect-response",
     "invitation-revoke-request",

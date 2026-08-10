@@ -1,1 +1,1 @@
-{"schema_key":"account-deletion-response","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"account_deletion_id":"deletion_01","status":"deletion_pending","scheduled_for":"2026-09-09T01:02:03Z"}}
+{"schema_key":"account-deletion-response","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"account_deletion_id":"deletion_01","status":"deletion_pending","scheduled_for":"2026-09-09T01:02:03Z","resource_version":1}}

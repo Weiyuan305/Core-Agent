@@ -4,8 +4,7 @@
   "additionalProperties": false,
   "properties": {
     "invitation_secret": {
-      "maxLength": 1024,
-      "minLength": 16,
+      "pattern": "^[A-Za-z0-9_-]{43}$",
       "type": "string"
     },
     "schema_version": {
