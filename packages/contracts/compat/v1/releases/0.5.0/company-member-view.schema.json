@@ -1,0 +1,157 @@
+{
+  "$id": "core-agent://v1/company-member-view",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "actor_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "membership_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "membership_resource_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "role": {
+          "const": "admin",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "title": "SchemaVersion",
+          "type": "number"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "const": "company",
+              "type": "string"
+            },
+            {
+              "const": "platform",
+              "type": "string"
+            }
+          ]
+        },
+        "status": {
+          "anyOf": [
+            {
+              "const": "invited",
+              "type": "string"
+            },
+            {
+              "const": "active",
+              "type": "string"
+            },
+            {
+              "const": "suspended",
+              "type": "string"
+            },
+            {
+              "const": "revoked",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "membership_id",
+        "actor_id",
+        "status",
+        "source",
+        "membership_resource_version",
+        "role"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "actor_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "membership_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "membership_resource_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "profile_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "profile_resource_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "role": {
+          "const": "consultant",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "title": "SchemaVersion",
+          "type": "number"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "const": "company",
+              "type": "string"
+            },
+            {
+              "const": "platform",
+              "type": "string"
+            }
+          ]
+        },
+        "status": {
+          "anyOf": [
+            {
+              "const": "invited",
+              "type": "string"
+            },
+            {
+              "const": "active",
+              "type": "string"
+            },
+            {
+              "const": "suspended",
+              "type": "string"
+            },
+            {
+              "const": "revoked",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "membership_id",
+        "actor_id",
+        "status",
+        "source",
+        "membership_resource_version",
+        "role",
+        "profile_id",
+        "profile_resource_version"
+      ],
+      "type": "object"
+    }
+  ]
+}

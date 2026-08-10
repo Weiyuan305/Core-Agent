@@ -2,6 +2,8 @@ import Type, { type Static, type TProperties } from "typebox";
 
 import {
   OpaqueIdSchema,
+  PageInfoSchema,
+  PageRequestSchema,
   ResourceVersionSchema,
   SchemaVersionSchema,
   UtcTimestampSchema,
@@ -9,10 +11,10 @@ import {
 import { IdempotencyRequestSchema } from "../runtime/idempotency.js";
 import {
   CoreSessionClientKindSchema,
-  CoreSessionRevocationReasonCodeSchema,
   InvitationRoleSchema,
   InvitationStatusSchema,
 } from "./authority.js";
+import { MembershipStatusSchema } from "../tenant/identity.js";
 
 const EmailSchema = Type.String({ minLength: 3, maxLength: 320, format: "email" });
 const PasswordSchema = Type.String({ minLength: 8, maxLength: 1_024 });
@@ -23,10 +25,17 @@ const PkceChallengeSchema = Type.String({ pattern: "^[A-Za-z0-9_-]{43}$" });
 const PkceVerifierSchema = Type.String({ minLength: 43, maxLength: 128, pattern: "^[A-Za-z0-9._~-]+$" });
 const RedirectUriSchema = Type.String({ minLength: 1, maxLength: 2_048, format: "uri" });
 const InvitationSecretSchema = Type.String({ pattern: "^[A-Za-z0-9_-]{43}$" });
-const ManagementReasonCodeSchema = Type.Union([
-  Type.Literal("administrator_suspended"),
+const PublicSessionRevocationReasonSchema = Type.Union([
+  Type.Literal("user_sign_out"),
   Type.Literal("administrator_revoked"),
-  Type.Literal("user_requested"),
+]);
+const InvitationRevocationReasonSchema = Type.Literal("administrator_revoked");
+const MemberSuspensionReasonSchema = Type.Literal("administrator_suspended");
+const MemberRevocationReasonSchema = Type.Literal("administrator_revoked");
+const AccountDeletionRequestReasonSchema = Type.Literal("user_requested");
+const CompanyMemberSourceSchema = Type.Union([
+  Type.Literal("company"),
+  Type.Literal("platform"),
 ]);
 const NativeClientKindSchema = Type.Union([Type.Literal("iphone"), Type.Literal("macos")]);
 const IdempotencyRequestProperties = IdempotencyRequestSchema.properties;
@@ -63,21 +72,29 @@ const NativeAuthSessionViewSchema = Type.Object(
   { additionalProperties: false },
 );
 
+function webSessionDelivery<const Extra extends TProperties>(extra: Extra) {
+  return Type.Object({
+    schema_version: SchemaVersionSchema,
+    transport: Type.Literal("web_cookie"),
+    ...extra,
+    session: WebAuthSessionViewSchema,
+  }, { additionalProperties: false });
+}
+
+function nativeSessionDelivery<const Extra extends TProperties>(extra: Extra) {
+  return Type.Object({
+    schema_version: SchemaVersionSchema,
+    transport: Type.Literal("native"),
+    ...extra,
+    session: NativeAuthSessionViewSchema,
+    session_secret: SessionSecretSchema,
+  }, { additionalProperties: false });
+}
+
 function sessionDelivery<const Extra extends TProperties>(id: string, extra: Extra) {
   return Type.Union([
-    Type.Object({
-      schema_version: SchemaVersionSchema,
-      transport: Type.Literal("web_cookie"),
-      ...extra,
-      session: WebAuthSessionViewSchema,
-    }, { additionalProperties: false }),
-    Type.Object({
-      schema_version: SchemaVersionSchema,
-      transport: Type.Literal("native"),
-      ...extra,
-      session: NativeAuthSessionViewSchema,
-      session_secret: SessionSecretSchema,
-    }, { additionalProperties: false }),
+    webSessionDelivery(extra),
+    nativeSessionDelivery(extra),
   ], { $id: `core-agent://v1/${id}` });
 }
 
@@ -188,7 +205,7 @@ export const SessionInspectResponseSchema = response("session-inspect-response",
 export const SessionRevokeRequestSchema = request("session-revoke-request", {
   ...VersionedWriteProperties,
   session_id: OpaqueIdSchema,
-  reason_code: CoreSessionRevocationReasonCodeSchema,
+  reason_code: PublicSessionRevocationReasonSchema,
 });
 export const SessionRevokeResponseSchema = response("session-revoke-response", {
   schema_version: SchemaVersionSchema,
@@ -260,18 +277,32 @@ export const InvitationAcceptanceRequestSchema = request("invitation-acceptance-
   authentication_proof: InvitationAuthenticationProofSchema,
   device_label: Type.Optional(DeviceLabelSchema),
 });
-export const InvitationAcceptanceResponseSchema = sessionDelivery("invitation-acceptance-response", {
+const InvitationAcceptanceCommonFields = {
   tenant_id: OpaqueIdSchema,
   invitation_resource_version: ResourceVersionSchema,
   membership_id: OpaqueIdSchema,
   membership_resource_version: ResourceVersionSchema,
-  profile_id: Type.Optional(OpaqueIdSchema),
-  profile_resource_version: Type.Optional(ResourceVersionSchema),
-});
+} as const;
+const InvitationAcceptanceAdminFields = {
+  ...InvitationAcceptanceCommonFields,
+  role: Type.Literal("admin"),
+} as const;
+const InvitationAcceptanceConsultantFields = {
+  ...InvitationAcceptanceCommonFields,
+  role: Type.Literal("consultant"),
+  profile_id: OpaqueIdSchema,
+  profile_resource_version: ResourceVersionSchema,
+} as const;
+export const InvitationAcceptanceResponseSchema = Type.Union([
+  webSessionDelivery(InvitationAcceptanceAdminFields),
+  nativeSessionDelivery(InvitationAcceptanceAdminFields),
+  webSessionDelivery(InvitationAcceptanceConsultantFields),
+  nativeSessionDelivery(InvitationAcceptanceConsultantFields),
+], { $id: "core-agent://v1/invitation-acceptance-response" });
 export const InvitationRevokeRequestSchema = request("invitation-revoke-request", {
   ...VersionedWriteProperties,
   invitation_id: OpaqueIdSchema,
-  reason_code: ManagementReasonCodeSchema,
+  reason_code: InvitationRevocationReasonSchema,
 });
 export const InvitationRevokeResponseSchema = response("invitation-revoke-response", {
   schema_version: SchemaVersionSchema,
@@ -307,10 +338,40 @@ export const CompanyMemberInviteResponseSchema = response("company-member-invite
   invitation_resource_version: ResourceVersionSchema,
   invitation_secret: InvitationSecretSchema,
 });
+const CompanyMemberViewCommonFields = {
+  schema_version: SchemaVersionSchema,
+  membership_id: OpaqueIdSchema,
+  actor_id: OpaqueIdSchema,
+  status: MembershipStatusSchema,
+  source: CompanyMemberSourceSchema,
+  membership_resource_version: ResourceVersionSchema,
+} as const;
+export const CompanyMemberViewSchema = Type.Union([
+  Type.Object({
+    ...CompanyMemberViewCommonFields,
+    role: Type.Literal("admin"),
+  }, { additionalProperties: false }),
+  Type.Object({
+    ...CompanyMemberViewCommonFields,
+    role: Type.Literal("consultant"),
+    profile_id: OpaqueIdSchema,
+    profile_resource_version: ResourceVersionSchema,
+  }, { additionalProperties: false }),
+], { $id: "core-agent://v1/company-member-view" });
+export const CompanyMemberListRequestSchema = request("company-member-list-request", {
+  ...PageRequestSchema.properties,
+  tenant_id: OpaqueIdSchema,
+});
+export const CompanyMemberListResponseSchema = response("company-member-list-response", {
+  schema_version: SchemaVersionSchema,
+  tenant_id: OpaqueIdSchema,
+  members: Type.Array(CompanyMemberViewSchema, { maxItems: 200 }),
+  page_info: PageInfoSchema,
+});
 export const CompanyMemberSuspendRequestSchema = request("company-member-suspend-request", {
   ...VersionedWriteProperties,
   membership_id: OpaqueIdSchema,
-  reason_code: ManagementReasonCodeSchema,
+  reason_code: MemberSuspensionReasonSchema,
 });
 export const CompanyMemberSuspendResponseSchema = response("company-member-suspend-response", {
   schema_version: SchemaVersionSchema,
@@ -321,7 +382,7 @@ export const CompanyMemberSuspendResponseSchema = response("company-member-suspe
 export const CompanyMemberRevokeRequestSchema = request("company-member-revoke-request", {
   ...VersionedWriteProperties,
   membership_id: OpaqueIdSchema,
-  reason_code: ManagementReasonCodeSchema,
+  reason_code: MemberRevocationReasonSchema,
 });
 export const CompanyMemberRevokeResponseSchema = response("company-member-revoke-response", {
   schema_version: SchemaVersionSchema,
@@ -332,7 +393,7 @@ export const CompanyMemberRevokeResponseSchema = response("company-member-revoke
 
 export const AccountDeletionRequestSchema = request("account-deletion-request", {
   ...VersionedWriteProperties,
-  reason_code: ManagementReasonCodeSchema,
+  reason_code: AccountDeletionRequestReasonSchema,
 });
 export const AccountDeletionResponseSchema = response("account-deletion-response", {
   schema_version: SchemaVersionSchema,
@@ -385,6 +446,9 @@ export type CompanyCreateRequest = Static<typeof CompanyCreateRequestSchema>;
 export type CompanyCreateResponse = Static<typeof CompanyCreateResponseSchema>;
 export type CompanyMemberInviteRequest = Static<typeof CompanyMemberInviteRequestSchema>;
 export type CompanyMemberInviteResponse = Static<typeof CompanyMemberInviteResponseSchema>;
+export type CompanyMemberView = Static<typeof CompanyMemberViewSchema>;
+export type CompanyMemberListRequest = Static<typeof CompanyMemberListRequestSchema>;
+export type CompanyMemberListResponse = Static<typeof CompanyMemberListResponseSchema>;
 export type CompanyMemberSuspendRequest = Static<typeof CompanyMemberSuspendRequestSchema>;
 export type CompanyMemberSuspendResponse = Static<typeof CompanyMemberSuspendResponseSchema>;
 export type CompanyMemberRevokeRequest = Static<typeof CompanyMemberRevokeRequestSchema>;

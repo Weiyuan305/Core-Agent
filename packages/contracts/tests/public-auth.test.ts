@@ -18,6 +18,9 @@ const {
   CompanyCreateResponseSchema,
   CompanyMemberInviteRequestSchema,
   CompanyMemberInviteResponseSchema,
+  CompanyMemberListRequestSchema,
+  CompanyMemberListResponseSchema,
+  CompanyMemberViewSchema,
   CompanyMemberSuspendRequestSchema,
   CompanyMemberSuspendResponseSchema,
   CompanyMemberRevokeRequestSchema,
@@ -144,6 +147,7 @@ const requestCases: Array<[string, unknown, unknown]> = [
   ["invitation revoke", InvitationRevokeRequestSchema, { ...idem, expected_resource_version: 1, invitation_id: "invitation_01", reason_code: "administrator_revoked" }],
   ["company creation", CompanyCreateRequestSchema, { ...idem, display_name: "Synthetic Company", administrator_email: "admin@example.test" }],
   ["company member invite", CompanyMemberInviteRequestSchema, { ...idem, tenant_id: "tenant_01", email: "invitee@example.test", role: "consultant" }],
+  ["company member list", CompanyMemberListRequestSchema, { schema_version: 1, tenant_id: "tenant_01", limit: 50 }],
   ["company member suspend", CompanyMemberSuspendRequestSchema, { ...idem, expected_resource_version: 1, membership_id: "membership_01", reason_code: "administrator_suspended" }],
   ["company member revoke", CompanyMemberRevokeRequestSchema, { ...idem, expected_resource_version: 1, membership_id: "membership_01", reason_code: "administrator_revoked" }],
   ["account deletion", AccountDeletionRequestSchema, { ...idem, expected_resource_version: 1, reason_code: "user_requested" }],
@@ -173,10 +177,11 @@ test("every public auth response is closed and provider-neutral", () => {
     ["reauthentication", ReauthenticationResponseSchema, { schema_version: 1, reauthenticated_at: timestamp, valid_until: timestamp, session_resource_version: 8 }],
     ["invitation inspect", InvitationInspectResponseSchema, { schema_version: 1, invitation_id: "invitation_01", tenant_id: "tenant_01", role: "consultant", status: "pending", expires_at: timestamp, resource_version: 1 }],
     ["invitation email registration", InvitationEmailRegistrationResponseSchema, { schema_version: 1, status: "verification_pending" }],
-    ["invitation acceptance", InvitationAcceptanceResponseSchema, { schema_version: 1, transport: "web_cookie", tenant_id: "tenant_01", invitation_resource_version: 2, membership_id: "membership_01", membership_resource_version: 2, profile_id: "profile_01", profile_resource_version: 1, session: sessionView }],
+    ["invitation acceptance", InvitationAcceptanceResponseSchema, { schema_version: 1, transport: "web_cookie", role: "consultant", tenant_id: "tenant_01", invitation_resource_version: 2, membership_id: "membership_01", membership_resource_version: 2, profile_id: "profile_01", profile_resource_version: 1, session: sessionView }],
     ["invitation revoke", InvitationRevokeResponseSchema, { schema_version: 1, invitation_id: "invitation_01", status: "revoked", resource_version: 2 }],
     ["company creation", CompanyCreateResponseSchema, { schema_version: 1, tenant_id: "tenant_01", tenant_resource_version: 1, administrator_invitation_id: "invitation_01", administrator_invitation_resource_version: 1, administrator_invitation_secret: invitationSecret }],
     ["company member invite", CompanyMemberInviteResponseSchema, { schema_version: 1, membership_id: "membership_01", membership_resource_version: 1, invitation_id: "invitation_01", invitation_resource_version: 1, invitation_secret: invitationSecret }],
+    ["company member list", CompanyMemberListResponseSchema, { schema_version: 1, tenant_id: "tenant_01", members: [{ schema_version: 1, membership_id: "membership_01", actor_id: "actor_01", role: "consultant", status: "active", source: "company", membership_resource_version: 2, profile_id: "profile_01", profile_resource_version: 1 }], page_info: { schema_version: 1, has_more: false } }],
     ["company member suspend", CompanyMemberSuspendResponseSchema, { schema_version: 1, membership_id: "membership_01", status: "suspended", resource_version: 2 }],
     ["company member revoke", CompanyMemberRevokeResponseSchema, { schema_version: 1, membership_id: "membership_01", status: "revoked", resource_version: 2 }],
     ["account deletion", AccountDeletionResponseSchema, { schema_version: 1, account_deletion_id: "deletion_01", status: "deletion_pending", scheduled_for: timestamp, resource_version: 1 }],
@@ -239,7 +244,11 @@ test("Apple and invitation proofs use closed Web and native PKCE variants", () =
 });
 
 test("every durable public mutation is idempotent and existing-resource writes are versioned", () => {
-  const readSchemas = new Set([SessionInspectRequestSchema, InvitationInspectRequestSchema]);
+  const readSchemas = new Set([
+    SessionInspectRequestSchema,
+    InvitationInspectRequestSchema,
+    CompanyMemberListRequestSchema,
+  ]);
   const existingResourceMutations = new Set([
     SessionRevokeRequestSchema,
     ReauthenticationRequestSchema,
@@ -259,6 +268,118 @@ test("every durable public mutation is idempotent and existing-resource writes a
     if (existingResourceMutations.has(schema)) {
       const { expected_resource_version: _version, ...withoutVersion } = value as Record<string, unknown>;
       assert.equal(validator.Check(withoutVersion), false, `${name}: expected_resource_version`);
+    }
+  }
+});
+
+test("invitation acceptance returns role-coherent authority for Web and native transports", () => {
+  const validator = compileRequired("InvitationAcceptanceResponseSchema", InvitationAcceptanceResponseSchema);
+  const webSession = {
+    schema_version: 1,
+    actor_id: "actor_01",
+    actor_resource_version: 4,
+    session_id: "session_01",
+    session_resource_version: 7,
+    client_kind: "web",
+    idle_expires_at: timestamp,
+    absolute_expires_at: timestamp,
+    reauthentication_required: false,
+  };
+  const common = {
+    schema_version: 1,
+    transport: "web_cookie",
+    tenant_id: "tenant_01",
+    invitation_resource_version: 2,
+    membership_id: "membership_01",
+    membership_resource_version: 2,
+    session: webSession,
+  };
+  assert.equal(validator.Check({ ...common, role: "admin" }), true);
+  assert.equal(validator.Check({ ...common, role: "admin", profile_id: "profile_01", profile_resource_version: 1 }), false);
+  assert.equal(validator.Check({ ...common, role: "consultant" }), false);
+  assert.equal(validator.Check({ ...common, role: "consultant", profile_id: "profile_01", profile_resource_version: 1 }), true);
+
+  const native = {
+    ...common,
+    transport: "native",
+    role: "consultant",
+    profile_id: "profile_01",
+    profile_resource_version: 1,
+    session: { ...webSession, client_kind: "iphone" },
+    session_secret: "s".repeat(43),
+  };
+  assert.equal(validator.Check(native), true);
+});
+
+test("company member list exposes safe role-coherent versions for follow-up writes", () => {
+  const view = compileRequired("CompanyMemberViewSchema", CompanyMemberViewSchema);
+  const listRequest = compileRequired("CompanyMemberListRequestSchema", CompanyMemberListRequestSchema);
+  const listResponse = compileRequired("CompanyMemberListResponseSchema", CompanyMemberListResponseSchema);
+  const admin = {
+    schema_version: 1,
+    membership_id: "membership_admin",
+    actor_id: "actor_admin",
+    role: "admin",
+    status: "active",
+    source: "company",
+    membership_resource_version: 4,
+  };
+  const consultant = {
+    schema_version: 1,
+    membership_id: "membership_consultant",
+    actor_id: "actor_consultant",
+    role: "consultant",
+    status: "active",
+    source: "company",
+    membership_resource_version: 6,
+    profile_id: "profile_01",
+    profile_resource_version: 3,
+  };
+  assert.equal(view.Check(admin), true);
+  assert.equal(view.Check({ ...admin, source: "self" }), false);
+  assert.equal(view.Check({ ...admin, profile_id: "profile_forbidden", profile_resource_version: 1 }), false);
+  assert.equal(view.Check(consultant), true);
+  assert.equal(view.Check({ ...consultant, profile_id: undefined, profile_resource_version: undefined }), false);
+  for (const forbidden of ["email", "provider_subject", "access_token"]) {
+    assert.equal(view.Check({ ...consultant, [forbidden]: "sentinel" }), false, forbidden);
+  }
+
+  const request = { schema_version: 1, tenant_id: "tenant_01", cursor: "cursor_01", limit: 50 };
+  const response = {
+    schema_version: 1,
+    tenant_id: "tenant_01",
+    members: [admin, consultant],
+    page_info: { schema_version: 1, next_cursor: "cursor_02", has_more: true },
+  };
+  assert.equal(listRequest.Check(request), true);
+  assert.equal(listResponse.Check(response), true);
+  assert.equal(compileRequired("CompanyMemberSuspendRequestSchema", CompanyMemberSuspendRequestSchema).Check({ ...idem, membership_id: consultant.membership_id, expected_resource_version: consultant.membership_resource_version, reason_code: "administrator_suspended" }), true);
+  assert.equal(compileRequired("CompanyMemberRevokeRequestSchema", CompanyMemberRevokeRequestSchema).Check({ ...idem, membership_id: consultant.membership_id, expected_resource_version: consultant.membership_resource_version, reason_code: "administrator_revoked" }), true);
+});
+
+test("public mutation reasons are scoped to caller-authorized commands", () => {
+  const cases: Array<[string, unknown, unknown, readonly string[]]> = [
+    ["Session revoke", SessionRevokeRequestSchema, { ...idem, expected_resource_version: 1, session_id: "session_01" }, ["user_sign_out", "administrator_revoked"]],
+    ["invitation revoke", InvitationRevokeRequestSchema, { ...idem, expected_resource_version: 1, invitation_id: "invitation_01" }, ["administrator_revoked"]],
+    ["member suspend", CompanyMemberSuspendRequestSchema, { ...idem, expected_resource_version: 1, membership_id: "membership_01" }, ["administrator_suspended"]],
+    ["member revoke", CompanyMemberRevokeRequestSchema, { ...idem, expected_resource_version: 1, membership_id: "membership_01" }, ["administrator_revoked"]],
+    ["account deletion", AccountDeletionRequestSchema, { ...idem, expected_resource_version: 1 }, ["user_requested"]],
+  ];
+  const allReasons = [
+    "user_sign_out",
+    "administrator_suspended",
+    "administrator_revoked",
+    "user_requested",
+    "password_reset",
+    "provider_unlinked",
+    "actor_disabled",
+    "account_deletion_requested",
+    "expired",
+  ];
+  for (const [name, schema, base, allowed] of cases) {
+    const validator = compileRequired(name, schema);
+    for (const reason_code of allReasons) {
+      assert.equal(validator.Check({ ...(base as object), reason_code }), allowed.includes(reason_code), `${name}: ${reason_code}`);
     }
   }
 });

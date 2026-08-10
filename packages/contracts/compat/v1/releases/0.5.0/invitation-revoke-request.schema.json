@@ -22,20 +22,8 @@
       "type": "string"
     },
     "reason_code": {
-      "anyOf": [
-        {
-          "const": "administrator_suspended",
-          "type": "string"
-        },
-        {
-          "const": "administrator_revoked",
-          "type": "string"
-        },
-        {
-          "const": "user_requested",
-          "type": "string"
-        }
-      ]
+      "const": "administrator_revoked",
+      "type": "string"
     },
     "schema_version": {
       "const": 1,

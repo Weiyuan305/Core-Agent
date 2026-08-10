@@ -1,0 +1,1 @@
+{"schema_key":"company-member-list-request","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"tenant_id":"tenant_01","cursor":"cursor_01","limit":50}}

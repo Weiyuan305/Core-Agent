@@ -2,5 +2,5 @@
   "package_version": "0.5.0",
   "wire_schema_version": 1,
   "change_level": "minor",
-  "reason": "Add executable provider-neutral identity onboarding, verified invitation acceptance, version-complete mutations, one-time invitation delivery, and safe identity events"
+  "reason": "Add executable identity onboarding, role-coherent acceptance and member views, command-scoped mutation reasons, version-complete writes, and safe identity events"
 }
