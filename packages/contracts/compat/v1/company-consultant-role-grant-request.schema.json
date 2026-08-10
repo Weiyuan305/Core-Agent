@@ -1,38 +1,99 @@
 {
   "$id": "core-agent://v1/company-consultant-role-grant-request",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "additionalProperties": false,
-  "properties": {
-    "expected_membership_resource_version": {
-      "minimum": 1,
-      "type": "integer"
+  "anyOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "expected_membership_resource_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "grant_mode": {
+          "const": "create_profile",
+          "type": "string"
+        },
+        "idempotency_key": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "membership_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "payload_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "title": "SchemaVersion",
+          "type": "number"
+        }
+      },
+      "required": [
+        "schema_version",
+        "idempotency_key",
+        "payload_hash",
+        "membership_id",
+        "expected_membership_resource_version",
+        "grant_mode"
+      ],
+      "type": "object"
     },
-    "idempotency_key": {
-      "maxLength": 255,
-      "minLength": 1,
-      "type": "string"
-    },
-    "membership_id": {
-      "maxLength": 255,
-      "minLength": 1,
-      "type": "string"
-    },
-    "payload_hash": {
-      "pattern": "^sha256:[a-f0-9]{64}$",
-      "type": "string"
-    },
-    "schema_version": {
-      "const": 1,
-      "title": "SchemaVersion",
-      "type": "number"
+    {
+      "additionalProperties": false,
+      "properties": {
+        "expected_membership_resource_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "expected_profile_resource_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "grant_mode": {
+          "const": "reactivate_profile",
+          "type": "string"
+        },
+        "idempotency_key": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "membership_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "payload_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "profile_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "title": "SchemaVersion",
+          "type": "number"
+        }
+      },
+      "required": [
+        "schema_version",
+        "idempotency_key",
+        "payload_hash",
+        "membership_id",
+        "expected_membership_resource_version",
+        "grant_mode",
+        "profile_id",
+        "expected_profile_resource_version"
+      ],
+      "type": "object"
     }
-  },
-  "required": [
-    "schema_version",
-    "idempotency_key",
-    "payload_hash",
-    "membership_id",
-    "expected_membership_resource_version"
-  ],
-  "type": "object"
+  ]
 }

@@ -153,7 +153,7 @@ const requestCases: Array<[string, unknown, unknown]> = [
   ["company creation", CompanyCreateRequestSchema, { ...idem, display_name: "Synthetic Company", administrator_email: "admin@example.test" }],
   ["company member invite", CompanyMemberInviteRequestSchema, { ...idem, tenant_id: "tenant_01", email: "invitee@example.test", role: "consultant" }],
   ["company member list", CompanyMemberListRequestSchema, { schema_version: 1, tenant_id: "tenant_01", limit: 50 }],
-  ["company consultant role grant", CompanyConsultantRoleGrantRequestSchema, { ...idem, membership_id: "membership_01", expected_membership_resource_version: 4 }],
+  ["company consultant role grant", CompanyConsultantRoleGrantRequestSchema, { ...idem, grant_mode: "create_profile", membership_id: "membership_01", expected_membership_resource_version: 4 }],
   ["company consultant role remove", CompanyConsultantRoleRemoveRequestSchema, { ...idem, membership_id: "membership_01", expected_membership_resource_version: 5, profile_id: "profile_01", expected_profile_resource_version: 1 }],
   ["company member suspend", CompanyMemberSuspendRequestSchema, { ...idem, expected_resource_version: 1, membership_id: "membership_01", reason_code: "administrator_suspended" }],
   ["company member revoke", CompanyMemberRevokeRequestSchema, { ...idem, expected_resource_version: 1, membership_id: "membership_01", reason_code: "administrator_revoked" }],
@@ -469,11 +469,14 @@ test("consultant role commands expose closed canonical Membership and Profile ve
   };
   const grant = {
     ...idem,
+    grant_mode: "create_profile",
     membership_id: admin.membership_id,
     expected_membership_resource_version: admin.membership_resource_version,
   };
   assert.equal(memberView.Check(admin), true);
   assert.equal(grantRequest.Check(grant), true);
+  assert.equal(grantRequest.Check({ ...grant, grant_mode: undefined }), false);
+  assert.equal(grantRequest.Check({ ...grant, profile_id: "profile_forged", expected_profile_resource_version: 1 }), false);
   for (const field of ["roles", "action", "profile_status"]) {
     assert.equal(grantRequest.Check({ ...grant, [field]: field === "roles" ? ["consultant"] : "client_forged" }), false, field);
   }
@@ -513,7 +516,46 @@ test("consultant role commands expose closed canonical Membership and Profile ve
   };
   assert.equal(removeResponse.Check(removed), true);
   assert.equal(removeResponse.Check({ ...removed, profile_status: "active" }), false);
-  assert.equal(memberView.Check({ ...admin, membership_resource_version: removed.membership_resource_version, profile_id: removed.profile_id, profile_resource_version: removed.profile_resource_version, profile_status: removed.profile_status }), true);
+  const retained = {
+    ...admin,
+    membership_resource_version: removed.membership_resource_version,
+    profile_id: removed.profile_id,
+    profile_resource_version: removed.profile_resource_version,
+    profile_status: removed.profile_status,
+  };
+  assert.equal(memberView.Check(retained), true);
+
+  const regrant = {
+    schema_version: 1,
+    idempotency_key: "idem_regrant",
+    payload_hash: `sha256:${"b".repeat(64)}`,
+    grant_mode: "reactivate_profile",
+    membership_id: retained.membership_id,
+    expected_membership_resource_version: retained.membership_resource_version,
+    profile_id: retained.profile_id,
+    expected_profile_resource_version: retained.profile_resource_version,
+  };
+  assert.equal(grantRequest.Check(regrant), true);
+  assert.equal(grantRequest.Check({ ...regrant, profile_id: undefined }), false);
+  assert.equal(grantRequest.Check({ ...regrant, expected_profile_resource_version: undefined }), false);
+  assert.equal(grantRequest.Check({ ...regrant, expected_profile_resource_version: 0 }), false);
+  assert.equal(grantRequest.Check({ ...regrant, profile_resource_version: regrant.expected_profile_resource_version }), false);
+  assert.equal(grantRequest.Check({ ...regrant, grant_mode: "reuse_profile" }), false);
+
+  const regranted = {
+    ...granted,
+    membership_resource_version: 7,
+    profile_resource_version: 3,
+  };
+  assert.equal(grantResponse.Check(regranted), true);
+  assert.equal(memberView.Check({
+    ...admin,
+    roles: regranted.roles,
+    membership_resource_version: regranted.membership_resource_version,
+    profile_id: regranted.profile_id,
+    profile_resource_version: regranted.profile_resource_version,
+    profile_status: regranted.profile_status,
+  }), true);
 });
 
 test("public mutation reasons are scoped to caller-authorized commands", () => {

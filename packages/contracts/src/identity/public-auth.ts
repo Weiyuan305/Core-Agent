@@ -481,11 +481,23 @@ export const CompanyMemberListResponseSchema = response("company-member-list-res
   members: Type.Array(CompanyMemberViewSchema, { maxItems: 200 }),
   page_info: PageInfoSchema,
 });
-export const CompanyConsultantRoleGrantRequestSchema = request("company-consultant-role-grant-request", {
+const CompanyConsultantRoleGrantCommonFields = {
   ...IdempotencyRequestProperties,
   membership_id: OpaqueIdSchema,
   expected_membership_resource_version: ResourceVersionSchema,
-});
+} as const;
+export const CompanyConsultantRoleGrantRequestSchema = Type.Union([
+  Type.Object({
+    ...CompanyConsultantRoleGrantCommonFields,
+    grant_mode: Type.Literal("create_profile"),
+  }, { additionalProperties: false }),
+  Type.Object({
+    ...CompanyConsultantRoleGrantCommonFields,
+    grant_mode: Type.Literal("reactivate_profile"),
+    profile_id: OpaqueIdSchema,
+    expected_profile_resource_version: ResourceVersionSchema,
+  }, { additionalProperties: false }),
+], { $id: "core-agent://v1/company-consultant-role-grant-request" });
 export const CompanyConsultantRoleGrantResponseSchema = response("company-consultant-role-grant-response", {
   schema_version: SchemaVersionSchema,
   membership_id: OpaqueIdSchema,

@@ -26,6 +26,9 @@
   role removal.
 - Require singular lifecycle-matched Profiles for consultant-bearing Memberships,
   and publish explicit versioned consultant-role grant/remove command contracts.
+- Enforce exact canonical company Membership role arrays for each lifecycle state,
+  and discriminate first-time consultant Profile creation from retained-Profile
+  reactivation with both Membership and Profile optimistic-concurrency versions.
 - Preserve the released Actor status vocabulary while defining identity-authority
   deletion lifecycle separately, and enforce B2B/B2C authority-mode boundaries.
 - Add the immutable 0.5.0 schema release while keeping accepted historical release

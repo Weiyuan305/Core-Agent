@@ -48,6 +48,62 @@ test("membership roles are non-empty and unique", () => {
   assert.equal(Schema.Compile(MembershipSchema).Check({ ...b2bGraph.memberships[0], roles: ["consultant", "consultant"] }), false);
 });
 
+test("company Membership roles use exact canonical arrays for every lifecycle state", () => {
+  const validCases = [
+    { status: "invited", roles: ["admin"] },
+    { status: "invited", roles: ["consultant"] },
+    { status: "active", roles: ["admin"] },
+    { status: "active", roles: ["consultant"] },
+    { status: "active", roles: ["admin", "consultant"] },
+    { status: "suspended", roles: ["admin"] },
+    { status: "suspended", roles: ["consultant"] },
+    { status: "suspended", roles: ["admin", "consultant"] },
+    { status: "revoked", roles: ["admin"] },
+    { status: "revoked", roles: ["consultant"] },
+    { status: "revoked", roles: ["admin", "consultant"] },
+  ] as const;
+  for (const { status, roles } of validCases) {
+    const graph = structuredClone(b2bGraph);
+    graph.memberships[0]!.membership_source = "company";
+    graph.memberships[0]!.status = status;
+    graph.memberships[0]!.roles = [...roles];
+    if (status === "invited" || (roles.length === 1 && roles[0] === "admin")) {
+      graph.profiles = [];
+    } else {
+      graph.profiles[0]!.status = status === "active" ? "active" : status === "suspended" ? "suspended" : "archived";
+    }
+    assert.equal(
+      validateIdentityGraph(graph).some((item) => item.code === "B2B_MEMBERSHIP_ROLE_INVALID"),
+      false,
+      `${status}/${roles.join("+")}`,
+    );
+  }
+
+  const invalidCases = [
+    { status: "invited", roles: ["admin", "consultant"] },
+    { status: "invited", roles: ["consultant", "admin"] },
+    { status: "active", roles: ["consultant", "admin"] },
+    { status: "suspended", roles: ["admin", "admin"] },
+    { status: "revoked", roles: ["consultant", "consultant"] },
+    { status: "active", roles: [] },
+    { status: "active", roles: ["student"] },
+    { status: "active", roles: ["admin", "student"] },
+    { status: "active", roles: ["admin", "consultant", "student"] },
+  ] as const;
+  for (const { status, roles } of invalidCases) {
+    const graph = structuredClone(b2bGraph);
+    graph.memberships[0]!.membership_source = "company";
+    graph.memberships[0]!.status = status;
+    graph.memberships[0]!.roles = [...roles] as typeof graph.memberships[0]["roles"];
+    graph.profiles = [];
+    assert.equal(
+      validateIdentityGraph(graph).some((item) => item.code === "B2B_MEMBERSHIP_ROLE_INVALID"),
+      true,
+      `${status}/${roles.join("+")}`,
+    );
+  }
+});
+
 test("identity vocabulary accepts exactly the approved membership sources and actor states", () => {
   const membershipSource = compileRequired("MembershipSourceSchema", MembershipSourceSchema);
   const actorStatus = compileRequired("IdentityAuthorityActorStatusSchema", IdentityAuthorityActorStatusSchema);

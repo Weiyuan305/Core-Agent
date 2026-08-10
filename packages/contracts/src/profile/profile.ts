@@ -36,6 +36,10 @@ export const IdentityGraphSchema = Type.Object(
 export type Profile = Static<typeof ProfileSchema>;
 export type IdentityGraph = Static<typeof IdentityGraphSchema>;
 
+function hasExactRoles(actual: readonly string[], expected: readonly string[]): boolean {
+  return actual.length === expected.length && actual.every((role, index) => role === expected[index]);
+}
+
 export function validateIdentityGraph(graph: IdentityGraph): ContractViolation[] {
   const violations: ContractViolation[] = [];
   const actorIds = new Set(graph.actors.map((actor) => actor.actor_id));
@@ -58,8 +62,20 @@ export function validateIdentityGraph(graph: IdentityGraph): ContractViolation[]
         violations.push(violation("PLATFORM_MEMBERSHIP_SEAT_FORBIDDEN", "memberships.seat_ref", "Platform Membership cannot consume a seat"));
       }
     }
-    if (graph.tenant.tenant_mode === "b2b" && membership.roles.includes("student")) {
-      violations.push(violation("B2B_MEMBERSHIP_ROLE_INVALID", "memberships.roles", "B2B tenant does not allow student authority"));
+    if (graph.tenant.tenant_mode === "b2b") {
+      if (membership.membership_source === "company") {
+        const isAdmin = hasExactRoles(membership.roles, ["admin"]);
+        const isConsultant = hasExactRoles(membership.roles, ["consultant"]);
+        const isCanonicalDual = hasExactRoles(membership.roles, ["admin", "consultant"]);
+        const rolesAreValid = membership.status === "invited"
+          ? isAdmin || isConsultant
+          : isAdmin || isConsultant || isCanonicalDual;
+        if (!rolesAreValid) {
+          violations.push(violation("B2B_MEMBERSHIP_ROLE_INVALID", "memberships.roles", "Company Membership roles must use an allowed canonical role array for its lifecycle state"));
+        }
+      } else if (membership.roles.includes("student")) {
+        violations.push(violation("B2B_MEMBERSHIP_ROLE_INVALID", "memberships.roles", "B2B tenant does not allow student authority"));
+      }
     }
     if (graph.tenant.tenant_mode === "b2b" && membership.membership_source === "self") {
       violations.push(violation("B2B_MEMBERSHIP_SOURCE_INVALID", "memberships.membership_source", "B2B tenant does not allow self authority"));
