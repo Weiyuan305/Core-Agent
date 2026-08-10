@@ -123,10 +123,73 @@ test("rejects B2C consultant profiles and multiple defaults", () => {
   );
 });
 
-test("rejects a consultant profile without an active consultant membership", () => {
-  const graph = structuredClone(b2bGraph);
-  graph.memberships[0]!.status = "suspended";
-  assert.deepEqual(validateIdentityGraph(graph).map((item) => item.code), ["PROFILE_OWNER_NOT_ACTIVE_CONSULTANT"]);
+test("B2B consultant Profiles follow Membership lifecycle and retain inactive state after role removal", () => {
+  const validCases = [
+    { membershipStatus: "active", roles: ["consultant"], profileStatus: "active" },
+    { membershipStatus: "active", roles: ["admin", "consultant"], profileStatus: "active" },
+    { membershipStatus: "suspended", roles: ["consultant"], profileStatus: "suspended" },
+    { membershipStatus: "suspended", roles: ["admin", "consultant"], profileStatus: "suspended" },
+    { membershipStatus: "revoked", roles: ["consultant"], profileStatus: "archived" },
+    { membershipStatus: "revoked", roles: ["admin", "consultant"], profileStatus: "archived" },
+    { membershipStatus: "active", roles: ["admin"], profileStatus: "suspended" },
+    { membershipStatus: "active", roles: ["admin"], profileStatus: "archived" },
+    { membershipStatus: "suspended", roles: ["admin"], profileStatus: "suspended" },
+    { membershipStatus: "revoked", roles: ["admin"], profileStatus: "archived" },
+  ] as const;
+  for (const { membershipStatus, roles, profileStatus } of validCases) {
+    const graph = structuredClone(b2bGraph);
+    graph.memberships[0]!.membership_source = "company";
+    graph.memberships[0]!.status = membershipStatus;
+    graph.memberships[0]!.roles = [...roles];
+    graph.profiles[0]!.status = profileStatus;
+    assert.deepEqual(validateIdentityGraph(graph), [], `${membershipStatus}/${roles.join("+")}/${profileStatus}`);
+  }
+
+  for (const membershipStatus of ["active", "suspended", "revoked"] as const) {
+    const graph = structuredClone(b2bGraph);
+    graph.memberships[0]!.membership_source = "company";
+    graph.memberships[0]!.status = membershipStatus;
+    graph.memberships[0]!.roles = ["admin"];
+    graph.profiles = [];
+    assert.deepEqual(validateIdentityGraph(graph), [], `${membershipStatus} admin without Profile`);
+  }
+});
+
+test("B2B consultant Profiles reject every Membership/Profile cross-state mismatch", () => {
+  const invalidCases = [
+    { membershipStatus: "active", roles: ["consultant"], profileStatus: "suspended" },
+    { membershipStatus: "active", roles: ["consultant"], profileStatus: "archived" },
+    { membershipStatus: "suspended", roles: ["consultant"], profileStatus: "active" },
+    { membershipStatus: "suspended", roles: ["consultant"], profileStatus: "archived" },
+    { membershipStatus: "revoked", roles: ["consultant"], profileStatus: "active" },
+    { membershipStatus: "revoked", roles: ["consultant"], profileStatus: "suspended" },
+    { membershipStatus: "active", roles: ["admin", "consultant"], profileStatus: "suspended" },
+    { membershipStatus: "active", roles: ["admin", "consultant"], profileStatus: "archived" },
+    { membershipStatus: "suspended", roles: ["admin", "consultant"], profileStatus: "active" },
+    { membershipStatus: "suspended", roles: ["admin", "consultant"], profileStatus: "archived" },
+    { membershipStatus: "revoked", roles: ["admin", "consultant"], profileStatus: "active" },
+    { membershipStatus: "revoked", roles: ["admin", "consultant"], profileStatus: "suspended" },
+    { membershipStatus: "active", roles: ["admin"], profileStatus: "active" },
+    { membershipStatus: "suspended", roles: ["admin"], profileStatus: "active" },
+    { membershipStatus: "suspended", roles: ["admin"], profileStatus: "archived" },
+    { membershipStatus: "revoked", roles: ["admin"], profileStatus: "active" },
+    { membershipStatus: "revoked", roles: ["admin"], profileStatus: "suspended" },
+    { membershipStatus: "active", roles: ["consultant"], profileStatus: "provisioning" },
+  ] as const;
+  for (const { membershipStatus, roles, profileStatus } of invalidCases) {
+    const graph = structuredClone(b2bGraph);
+    graph.memberships[0]!.membership_source = "company";
+    graph.memberships[0]!.status = membershipStatus;
+    graph.memberships[0]!.roles = [...roles];
+    graph.profiles[0]!.status = profileStatus;
+    assert.equal(validateIdentityGraph(graph).length > 0, true, `${membershipStatus}/${roles.join("+")}/${profileStatus}`);
+  }
+
+  const retainedWithoutCompanyMembership = structuredClone(b2bGraph);
+  retainedWithoutCompanyMembership.memberships[0]!.status = "suspended";
+  retainedWithoutCompanyMembership.profiles[0]!.status = "suspended";
+  delete retainedWithoutCompanyMembership.memberships[0]!.membership_source;
+  assert.equal(validateIdentityGraph(retainedWithoutCompanyMembership).length > 0, true);
 });
 
 test("rejects B2B default profiles owned by student memberships", () => {

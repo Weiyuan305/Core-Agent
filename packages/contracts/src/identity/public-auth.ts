@@ -369,6 +369,12 @@ const CompanyMemberProfileFields = {
   profile_id: OpaqueIdSchema,
   profile_resource_version: ResourceVersionSchema,
 } as const;
+function companyMemberProfileFields<const Status extends "active" | "suspended" | "archived">(status: Status) {
+  return {
+    ...CompanyMemberProfileFields,
+    profile_status: Type.Literal(status),
+  } as const;
+}
 export const CompanyMemberViewSchema = Type.Union([
   Type.Object({
     ...CompanyMemberViewCommonFields,
@@ -397,16 +403,72 @@ export const CompanyMemberViewSchema = Type.Union([
   Type.Object({
     ...CompanyMemberViewCommonFields,
     source: Type.Literal("company"),
-    status: CompanyMemberEffectiveStatusSchema,
-    roles: CompanyMemberConsultantRolesSchema,
-    ...CompanyMemberProfileFields,
+    status: Type.Literal("active"),
+    roles: CompanyMemberAdminRolesSchema,
+    ...companyMemberProfileFields("suspended"),
   }, { additionalProperties: false }),
   Type.Object({
     ...CompanyMemberViewCommonFields,
     source: Type.Literal("company"),
-    status: CompanyMemberEffectiveStatusSchema,
+    status: Type.Literal("active"),
+    roles: CompanyMemberAdminRolesSchema,
+    ...companyMemberProfileFields("archived"),
+  }, { additionalProperties: false }),
+  Type.Object({
+    ...CompanyMemberViewCommonFields,
+    source: Type.Literal("company"),
+    status: Type.Literal("suspended"),
+    roles: CompanyMemberAdminRolesSchema,
+    ...companyMemberProfileFields("suspended"),
+  }, { additionalProperties: false }),
+  Type.Object({
+    ...CompanyMemberViewCommonFields,
+    source: Type.Literal("company"),
+    status: Type.Literal("revoked"),
+    roles: CompanyMemberAdminRolesSchema,
+    ...companyMemberProfileFields("archived"),
+  }, { additionalProperties: false }),
+  Type.Object({
+    ...CompanyMemberViewCommonFields,
+    source: Type.Literal("company"),
+    status: Type.Literal("active"),
+    roles: CompanyMemberConsultantRolesSchema,
+    ...companyMemberProfileFields("active"),
+  }, { additionalProperties: false }),
+  Type.Object({
+    ...CompanyMemberViewCommonFields,
+    source: Type.Literal("company"),
+    status: Type.Literal("suspended"),
+    roles: CompanyMemberConsultantRolesSchema,
+    ...companyMemberProfileFields("suspended"),
+  }, { additionalProperties: false }),
+  Type.Object({
+    ...CompanyMemberViewCommonFields,
+    source: Type.Literal("company"),
+    status: Type.Literal("revoked"),
+    roles: CompanyMemberConsultantRolesSchema,
+    ...companyMemberProfileFields("archived"),
+  }, { additionalProperties: false }),
+  Type.Object({
+    ...CompanyMemberViewCommonFields,
+    source: Type.Literal("company"),
+    status: Type.Literal("active"),
     roles: CompanyMemberAdminConsultantRolesSchema,
-    ...CompanyMemberProfileFields,
+    ...companyMemberProfileFields("active"),
+  }, { additionalProperties: false }),
+  Type.Object({
+    ...CompanyMemberViewCommonFields,
+    source: Type.Literal("company"),
+    status: Type.Literal("suspended"),
+    roles: CompanyMemberAdminConsultantRolesSchema,
+    ...companyMemberProfileFields("suspended"),
+  }, { additionalProperties: false }),
+  Type.Object({
+    ...CompanyMemberViewCommonFields,
+    source: Type.Literal("company"),
+    status: Type.Literal("revoked"),
+    roles: CompanyMemberAdminConsultantRolesSchema,
+    ...companyMemberProfileFields("archived"),
   }, { additionalProperties: false }),
 ], { $id: "core-agent://v1/company-member-view" });
 export const CompanyMemberListRequestSchema = request("company-member-list-request", {

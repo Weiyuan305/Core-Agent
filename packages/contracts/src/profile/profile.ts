@@ -108,12 +108,26 @@ export function validateIdentityGraph(graph: IdentityGraph): ContractViolation[]
     }
     if (graph.tenant.tenant_mode === "b2b" && profile.profile_kind === "consultant") {
       const membership = tenantMemberships.find(
-        (item) => item.actor_id === profile.owner_actor_id
-          && item.status === "active"
-          && item.roles.includes("consultant"),
+        (item) => {
+          if (item.actor_id !== profile.owner_actor_id) return false;
+          if (profile.status === "active") {
+            return item.status === "active" && item.roles.includes("consultant");
+          }
+          if (item.membership_source !== "company") return false;
+          const retainedAfterRoleRemoval = item.status === "active"
+            && item.roles.length === 1
+            && item.roles[0] === "admin";
+          if (profile.status === "suspended") {
+            return item.status === "suspended" || retainedAfterRoleRemoval;
+          }
+          if (profile.status === "archived") {
+            return item.status === "revoked" || retainedAfterRoleRemoval;
+          }
+          return false;
+        },
       );
       if (membership === undefined) {
-        violations.push(violation("PROFILE_OWNER_NOT_ACTIVE_CONSULTANT", "profiles.owner_actor_id", "Consultant profile requires an active consultant membership"));
+        violations.push(violation("PROFILE_OWNER_NOT_ACTIVE_CONSULTANT", "profiles.owner_actor_id", "Consultant Profile lifecycle must match same-Tenant Membership authority"));
       }
     }
     if (graph.tenant.tenant_mode === "b2c" && profile.profile_kind === "default") {

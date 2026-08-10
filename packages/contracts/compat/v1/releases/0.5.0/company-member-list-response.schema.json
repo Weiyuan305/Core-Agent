@@ -261,13 +261,17 @@
                 "minimum": 1,
                 "type": "integer"
               },
+              "profile_status": {
+                "const": "suspended",
+                "type": "string"
+              },
               "roles": {
                 "items": false,
                 "maxItems": 1,
                 "minItems": 1,
                 "prefixItems": [
                   {
-                    "const": "consultant",
+                    "const": "admin",
                     "type": "string"
                   }
                 ],
@@ -283,20 +287,8 @@
                 "type": "string"
               },
               "status": {
-                "anyOf": [
-                  {
-                    "const": "active",
-                    "type": "string"
-                  },
-                  {
-                    "const": "suspended",
-                    "type": "string"
-                  },
-                  {
-                    "const": "revoked",
-                    "type": "string"
-                  }
-                ]
+                "const": "active",
+                "type": "string"
               }
             },
             "required": [
@@ -308,7 +300,8 @@
               "status",
               "roles",
               "profile_id",
-              "profile_resource_version"
+              "profile_resource_version",
+              "profile_status"
             ],
             "type": "object"
           },
@@ -338,6 +331,430 @@
                 "minimum": 1,
                 "type": "integer"
               },
+              "profile_status": {
+                "const": "archived",
+                "type": "string"
+              },
+              "roles": {
+                "items": false,
+                "maxItems": 1,
+                "minItems": 1,
+                "prefixItems": [
+                  {
+                    "const": "admin",
+                    "type": "string"
+                  }
+                ],
+                "type": "array"
+              },
+              "schema_version": {
+                "const": 1,
+                "title": "SchemaVersion",
+                "type": "number"
+              },
+              "source": {
+                "const": "company",
+                "type": "string"
+              },
+              "status": {
+                "const": "active",
+                "type": "string"
+              }
+            },
+            "required": [
+              "schema_version",
+              "membership_id",
+              "actor_id",
+              "membership_resource_version",
+              "source",
+              "status",
+              "roles",
+              "profile_id",
+              "profile_resource_version",
+              "profile_status"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "actor_id": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "membership_id": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "membership_resource_version": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "profile_id": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "profile_resource_version": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "profile_status": {
+                "const": "suspended",
+                "type": "string"
+              },
+              "roles": {
+                "items": false,
+                "maxItems": 1,
+                "minItems": 1,
+                "prefixItems": [
+                  {
+                    "const": "admin",
+                    "type": "string"
+                  }
+                ],
+                "type": "array"
+              },
+              "schema_version": {
+                "const": 1,
+                "title": "SchemaVersion",
+                "type": "number"
+              },
+              "source": {
+                "const": "company",
+                "type": "string"
+              },
+              "status": {
+                "const": "suspended",
+                "type": "string"
+              }
+            },
+            "required": [
+              "schema_version",
+              "membership_id",
+              "actor_id",
+              "membership_resource_version",
+              "source",
+              "status",
+              "roles",
+              "profile_id",
+              "profile_resource_version",
+              "profile_status"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "actor_id": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "membership_id": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "membership_resource_version": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "profile_id": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "profile_resource_version": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "profile_status": {
+                "const": "archived",
+                "type": "string"
+              },
+              "roles": {
+                "items": false,
+                "maxItems": 1,
+                "minItems": 1,
+                "prefixItems": [
+                  {
+                    "const": "admin",
+                    "type": "string"
+                  }
+                ],
+                "type": "array"
+              },
+              "schema_version": {
+                "const": 1,
+                "title": "SchemaVersion",
+                "type": "number"
+              },
+              "source": {
+                "const": "company",
+                "type": "string"
+              },
+              "status": {
+                "const": "revoked",
+                "type": "string"
+              }
+            },
+            "required": [
+              "schema_version",
+              "membership_id",
+              "actor_id",
+              "membership_resource_version",
+              "source",
+              "status",
+              "roles",
+              "profile_id",
+              "profile_resource_version",
+              "profile_status"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "actor_id": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "membership_id": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "membership_resource_version": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "profile_id": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "profile_resource_version": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "profile_status": {
+                "const": "active",
+                "type": "string"
+              },
+              "roles": {
+                "items": false,
+                "maxItems": 1,
+                "minItems": 1,
+                "prefixItems": [
+                  {
+                    "const": "consultant",
+                    "type": "string"
+                  }
+                ],
+                "type": "array"
+              },
+              "schema_version": {
+                "const": 1,
+                "title": "SchemaVersion",
+                "type": "number"
+              },
+              "source": {
+                "const": "company",
+                "type": "string"
+              },
+              "status": {
+                "const": "active",
+                "type": "string"
+              }
+            },
+            "required": [
+              "schema_version",
+              "membership_id",
+              "actor_id",
+              "membership_resource_version",
+              "source",
+              "status",
+              "roles",
+              "profile_id",
+              "profile_resource_version",
+              "profile_status"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "actor_id": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "membership_id": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "membership_resource_version": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "profile_id": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "profile_resource_version": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "profile_status": {
+                "const": "suspended",
+                "type": "string"
+              },
+              "roles": {
+                "items": false,
+                "maxItems": 1,
+                "minItems": 1,
+                "prefixItems": [
+                  {
+                    "const": "consultant",
+                    "type": "string"
+                  }
+                ],
+                "type": "array"
+              },
+              "schema_version": {
+                "const": 1,
+                "title": "SchemaVersion",
+                "type": "number"
+              },
+              "source": {
+                "const": "company",
+                "type": "string"
+              },
+              "status": {
+                "const": "suspended",
+                "type": "string"
+              }
+            },
+            "required": [
+              "schema_version",
+              "membership_id",
+              "actor_id",
+              "membership_resource_version",
+              "source",
+              "status",
+              "roles",
+              "profile_id",
+              "profile_resource_version",
+              "profile_status"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "actor_id": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "membership_id": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "membership_resource_version": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "profile_id": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "profile_resource_version": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "profile_status": {
+                "const": "archived",
+                "type": "string"
+              },
+              "roles": {
+                "items": false,
+                "maxItems": 1,
+                "minItems": 1,
+                "prefixItems": [
+                  {
+                    "const": "consultant",
+                    "type": "string"
+                  }
+                ],
+                "type": "array"
+              },
+              "schema_version": {
+                "const": 1,
+                "title": "SchemaVersion",
+                "type": "number"
+              },
+              "source": {
+                "const": "company",
+                "type": "string"
+              },
+              "status": {
+                "const": "revoked",
+                "type": "string"
+              }
+            },
+            "required": [
+              "schema_version",
+              "membership_id",
+              "actor_id",
+              "membership_resource_version",
+              "source",
+              "status",
+              "roles",
+              "profile_id",
+              "profile_resource_version",
+              "profile_status"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "actor_id": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "membership_id": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "membership_resource_version": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "profile_id": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "profile_resource_version": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "profile_status": {
+                "const": "active",
+                "type": "string"
+              },
               "roles": {
                 "items": false,
                 "maxItems": 2,
@@ -364,20 +781,8 @@
                 "type": "string"
               },
               "status": {
-                "anyOf": [
-                  {
-                    "const": "active",
-                    "type": "string"
-                  },
-                  {
-                    "const": "suspended",
-                    "type": "string"
-                  },
-                  {
-                    "const": "revoked",
-                    "type": "string"
-                  }
-                ]
+                "const": "active",
+                "type": "string"
               }
             },
             "required": [
@@ -389,7 +794,156 @@
               "status",
               "roles",
               "profile_id",
-              "profile_resource_version"
+              "profile_resource_version",
+              "profile_status"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "actor_id": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "membership_id": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "membership_resource_version": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "profile_id": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "profile_resource_version": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "profile_status": {
+                "const": "suspended",
+                "type": "string"
+              },
+              "roles": {
+                "items": false,
+                "maxItems": 2,
+                "minItems": 2,
+                "prefixItems": [
+                  {
+                    "const": "admin",
+                    "type": "string"
+                  },
+                  {
+                    "const": "consultant",
+                    "type": "string"
+                  }
+                ],
+                "type": "array"
+              },
+              "schema_version": {
+                "const": 1,
+                "title": "SchemaVersion",
+                "type": "number"
+              },
+              "source": {
+                "const": "company",
+                "type": "string"
+              },
+              "status": {
+                "const": "suspended",
+                "type": "string"
+              }
+            },
+            "required": [
+              "schema_version",
+              "membership_id",
+              "actor_id",
+              "membership_resource_version",
+              "source",
+              "status",
+              "roles",
+              "profile_id",
+              "profile_resource_version",
+              "profile_status"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "actor_id": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "membership_id": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "membership_resource_version": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "profile_id": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "profile_resource_version": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "profile_status": {
+                "const": "archived",
+                "type": "string"
+              },
+              "roles": {
+                "items": false,
+                "maxItems": 2,
+                "minItems": 2,
+                "prefixItems": [
+                  {
+                    "const": "admin",
+                    "type": "string"
+                  },
+                  {
+                    "const": "consultant",
+                    "type": "string"
+                  }
+                ],
+                "type": "array"
+              },
+              "schema_version": {
+                "const": 1,
+                "title": "SchemaVersion",
+                "type": "number"
+              },
+              "source": {
+                "const": "company",
+                "type": "string"
+              },
+              "status": {
+                "const": "revoked",
+                "type": "string"
+              }
+            },
+            "required": [
+              "schema_version",
+              "membership_id",
+              "actor_id",
+              "membership_resource_version",
+              "source",
+              "status",
+              "roles",
+              "profile_id",
+              "profile_resource_version",
+              "profile_status"
             ],
             "type": "object"
           }

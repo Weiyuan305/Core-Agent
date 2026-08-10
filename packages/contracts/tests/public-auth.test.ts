@@ -182,7 +182,7 @@ test("every public auth response is closed and provider-neutral", () => {
     ["invitation revoke", InvitationRevokeResponseSchema, { schema_version: 1, invitation_id: "invitation_01", status: "revoked", resource_version: 2 }],
     ["company creation", CompanyCreateResponseSchema, { schema_version: 1, tenant_id: "tenant_01", tenant_resource_version: 1, administrator_invitation_id: "invitation_01", administrator_invitation_resource_version: 1, administrator_invitation_secret: invitationSecret }],
     ["company member invite", CompanyMemberInviteResponseSchema, { schema_version: 1, membership_id: "membership_01", membership_resource_version: 1, invitation_id: "invitation_01", invitation_resource_version: 1, invitation_secret: invitationSecret }],
-    ["company member list", CompanyMemberListResponseSchema, { schema_version: 1, tenant_id: "tenant_01", members: [{ schema_version: 1, membership_id: "membership_01", actor_id: "actor_01", roles: ["consultant"], status: "active", source: "company", membership_resource_version: 2, profile_id: "profile_01", profile_resource_version: 1 }], page_info: { schema_version: 1, has_more: false } }],
+    ["company member list", CompanyMemberListResponseSchema, { schema_version: 1, tenant_id: "tenant_01", members: [{ schema_version: 1, membership_id: "membership_01", actor_id: "actor_01", roles: ["consultant"], status: "active", source: "company", membership_resource_version: 2, profile_id: "profile_01", profile_resource_version: 1, profile_status: "active" }], page_info: { schema_version: 1, has_more: false } }],
     ["company member suspend", CompanyMemberSuspendResponseSchema, { schema_version: 1, membership_id: "membership_01", status: "suspended", resource_version: 2 }],
     ["company member revoke", CompanyMemberRevokeResponseSchema, { schema_version: 1, membership_id: "membership_01", status: "revoked", resource_version: 2 }],
     ["account deletion", AccountDeletionResponseSchema, { schema_version: 1, account_deletion_id: "deletion_01", status: "deletion_pending", scheduled_for: timestamp, resource_version: 1 }],
@@ -335,25 +335,43 @@ test("company member list exposes safe role-coherent versions for follow-up writ
     source: "company",
     profile_id: "profile_01",
     profile_resource_version: 3,
+    profile_status: "active",
   };
   assert.equal(view.Check(platformAdmin), true);
   for (const roles of [["admin"], ["consultant"]]) {
     assert.equal(view.Check({ ...common, source: "company", status: "invited", roles }), true, `invited ${roles[0]}`);
   }
-  for (const status of ["active", "suspended", "revoked"]) {
+  for (const [status, profile_status] of [["active", "active"], ["suspended", "suspended"], ["revoked", "archived"]]) {
     assert.equal(view.Check({ ...common, source: "company", status, roles: ["admin"] }), true, `${status} admin`);
-    assert.equal(view.Check({ ...consultant, status }), true, `${status} consultant`);
-    assert.equal(view.Check({ ...consultant, status, roles: ["admin", "consultant"] }), true, `${status} dual-role`);
-    assert.equal(view.Check({ ...consultant, status, roles: ["consultant", "admin"] }), false, `${status} reverse dual-role`);
+    assert.equal(view.Check({ ...consultant, status, profile_status }), true, `${status} consultant`);
+    assert.equal(view.Check({ ...consultant, status, profile_status, roles: ["admin", "consultant"] }), true, `${status} dual-role`);
+    assert.equal(view.Check({ ...consultant, status, profile_status, roles: ["consultant", "admin"] }), false, `${status} reverse dual-role`);
   }
+  for (const profile_status of ["suspended", "archived"]) {
+    assert.equal(view.Check({ ...consultant, roles: ["admin"], profile_status }), true, `active admin retained ${profile_status}`);
+  }
+  assert.equal(view.Check({ ...consultant, roles: ["admin"], status: "suspended", profile_status: "suspended" }), true);
+  assert.equal(view.Check({ ...consultant, roles: ["admin"], status: "revoked", profile_status: "archived" }), true);
   assert.equal(view.Check({ ...platformAdmin, source: "self" }), false);
   assert.equal(view.Check({ ...platformAdmin, roles: ["consultant"] }), false);
   assert.equal(view.Check({ ...platformAdmin, profile_id: "profile_forbidden", profile_resource_version: 1 }), false);
   assert.equal(view.Check({ ...platformAdmin, status: "suspended" }), false);
   assert.equal(view.Check({ ...common, source: "company", status: "invited", roles: ["admin", "consultant"] }), false);
-  assert.equal(view.Check({ ...common, source: "company", status: "invited", roles: ["consultant"], profile_id: "profile_forbidden", profile_resource_version: 1 }), false);
-  assert.equal(view.Check({ ...common, source: "company", status: "active", roles: ["admin"], profile_id: "profile_forbidden", profile_resource_version: 1 }), false);
-  assert.equal(view.Check({ ...consultant, profile_id: undefined, profile_resource_version: undefined }), false);
+  assert.equal(view.Check({ ...common, source: "company", status: "invited", roles: ["consultant"], profile_id: "profile_forbidden", profile_resource_version: 1, profile_status: "active" }), false);
+  assert.equal(view.Check({ ...consultant, roles: ["admin"], profile_status: "active" }), false);
+  assert.equal(view.Check({ ...consultant, status: "suspended", profile_status: "active" }), false);
+  assert.equal(view.Check({ ...consultant, status: "suspended", profile_status: "archived" }), false);
+  assert.equal(view.Check({ ...consultant, status: "revoked", profile_status: "active" }), false);
+  assert.equal(view.Check({ ...consultant, status: "revoked", profile_status: "suspended" }), false);
+  assert.equal(view.Check({ ...consultant, roles: ["admin", "consultant"], status: "active", profile_status: "suspended" }), false);
+  assert.equal(view.Check({ ...consultant, roles: ["admin", "consultant"], status: "active", profile_status: "archived" }), false);
+  assert.equal(view.Check({ ...consultant, roles: ["admin", "consultant"], status: "suspended", profile_status: "active" }), false);
+  assert.equal(view.Check({ ...consultant, roles: ["admin", "consultant"], status: "suspended", profile_status: "archived" }), false);
+  assert.equal(view.Check({ ...consultant, roles: ["admin", "consultant"], status: "revoked", profile_status: "active" }), false);
+  assert.equal(view.Check({ ...consultant, roles: ["admin", "consultant"], status: "revoked", profile_status: "suspended" }), false);
+  assert.equal(view.Check({ ...consultant, roles: ["admin"], status: "suspended", profile_status: "archived" }), false);
+  assert.equal(view.Check({ ...consultant, roles: ["admin"], status: "revoked", profile_status: "suspended" }), false);
+  assert.equal(view.Check({ ...consultant, profile_id: undefined, profile_resource_version: undefined, profile_status: undefined }), false);
   assert.equal(view.Check({ ...common, source: "company", status: "active", roles: ["student"] }), false);
   for (const forbidden of ["email", "provider_subject", "access_token"]) {
     assert.equal(view.Check({ ...consultant, [forbidden]: "sentinel" }), false, forbidden);

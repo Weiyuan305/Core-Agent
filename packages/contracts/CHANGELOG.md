@@ -21,6 +21,9 @@
 - Make company-member views source/status/roles-discriminated with canonical role
   ordering, and close membership-change event reasons to the planned lifecycle
   vocabulary.
+- Correlate B2B Membership and consultant Profile lifecycles across public member
+  views and graph validation, including inactive Profiles retained after consultant
+  role removal.
 - Preserve the released Actor status vocabulary while defining identity-authority
   deletion lifecycle separately, and enforce B2B/B2C authority-mode boundaries.
 - Add the immutable 0.5.0 schema release while keeping accepted historical release
