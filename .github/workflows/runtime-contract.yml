@@ -55,6 +55,9 @@ jobs:
       - name: Install pinned dependencies
         run: npm ci
 
+      - name: Verify Hermes source provenance
+        run: npm run hermes:source:verify
+
       - name: Run unit builds and tests
         run: npm run check
 

@@ -31,6 +31,8 @@
     "chat:control-plane": "node scripts/chat-control-plane.mjs",
     "chat:cleanup": "node scripts/cleanup-control-plane-chat.mjs",
     "hermes:product-lock": "node scripts/generate-hermes-product-lock.mjs",
+    "hermes:source:lock": "node scripts/generate-hermes-source-lock.mjs",
+    "hermes:source:verify": "node scripts/verify-hermes-source.mjs",
     "hermes:image-ref": "node scripts/resolve-hermes-image.mjs",
     "hermes:build": "node scripts/build-hermes-image.mjs",
     "hermes:bootstrap": "node scripts/bootstrap-demo-company.mjs",
