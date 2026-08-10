@@ -30,9 +30,18 @@
       "minLength": 3,
       "type": "string"
     },
+    "idempotency_key": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
     "password": {
       "maxLength": 1024,
       "minLength": 8,
+      "type": "string"
+    },
+    "payload_hash": {
+      "pattern": "^sha256:[a-f0-9]{64}$",
       "type": "string"
     },
     "schema_version": {
@@ -43,6 +52,8 @@
   },
   "required": [
     "schema_version",
+    "idempotency_key",
+    "payload_hash",
     "email",
     "password",
     "client_kind"

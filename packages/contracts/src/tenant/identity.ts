@@ -9,8 +9,8 @@ export const TenantStatusSchema = Type.Union([
 ]);
 export const ActorKindSchema = Type.Union([Type.Literal("human"), Type.Literal("service")]);
 export const ActorStatusSchema = Type.Union([
-  Type.Literal("active"), Type.Literal("disabled"), Type.Literal("deletion_pending"), Type.Literal("deleted"),
-], { "x-extensible-union": true });
+  Type.Literal("active"), Type.Literal("disabled"),
+]);
 export const MembershipSourceSchema = Type.Union([
   Type.Literal("self"), Type.Literal("company"), Type.Literal("platform"),
 ]);

@@ -1,28 +1,32 @@
 {
-  "$id": "core-agent://v1/company-membership-response",
+  "$id": "core-agent://v1/company-member-revoke-response",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
-    "invitation_id": {
-      "maxLength": 255,
-      "minLength": 1,
-      "type": "string"
-    },
     "membership_id": {
       "maxLength": 255,
       "minLength": 1,
       "type": "string"
     },
+    "resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
     "schema_version": {
       "const": 1,
       "title": "SchemaVersion",
       "type": "number"
+    },
+    "status": {
+      "const": "revoked",
+      "type": "string"
     }
   },
   "required": [
     "schema_version",
     "membership_id",
-    "invitation_id"
+    "status",
+    "resource_version"
   ],
   "type": "object"
 }

@@ -1,0 +1,1 @@
+{"schema_key":"invitation-inspect-request","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"invitation_secret":"synthetic-invitation-secret"}}

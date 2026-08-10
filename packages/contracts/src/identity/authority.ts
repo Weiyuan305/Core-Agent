@@ -3,6 +3,12 @@ import Type, { type Static } from "typebox";
 import { OpaqueIdSchema, ResourceMetadataFields, UtcTimestampSchema } from "../common/primitives.js";
 
 export const AuthProviderSchema = Type.Union([Type.Literal("supabase")]);
+export const IdentityAuthorityActorStatusSchema = Type.Union([
+  Type.Literal("active"),
+  Type.Literal("disabled"),
+  Type.Literal("deletion_pending"),
+  Type.Literal("deleted"),
+]);
 export const ProviderIdentityKindSchema = Type.Union([
   Type.Literal("email_password"),
   Type.Literal("apple"),
@@ -36,6 +42,15 @@ export const CoreSessionClientKindSchema = Type.Union([
 export const CoreSessionStatusSchema = Type.Union([
   Type.Literal("active"),
   Type.Literal("revoked"),
+  Type.Literal("expired"),
+]);
+export const CoreSessionRevocationReasonCodeSchema = Type.Union([
+  Type.Literal("user_sign_out"),
+  Type.Literal("administrator_revoked"),
+  Type.Literal("password_reset"),
+  Type.Literal("provider_unlinked"),
+  Type.Literal("actor_disabled"),
+  Type.Literal("account_deletion_requested"),
   Type.Literal("expired"),
 ]);
 export const AccountDeletionStatusSchema = Type.Union([
@@ -97,7 +112,7 @@ export const CoreSessionSchema = Type.Object(
     absolute_expires_at: UtcTimestampSchema,
     reauthenticated_at: Type.Optional(UtcTimestampSchema),
     status: CoreSessionStatusSchema,
-    revocation_reason_code: Type.Optional(Type.String({ minLength: 1, maxLength: 80 })),
+    revocation_reason_code: Type.Optional(CoreSessionRevocationReasonCodeSchema),
   },
   { additionalProperties: false, $id: "core-agent://v1/core-session" },
 );

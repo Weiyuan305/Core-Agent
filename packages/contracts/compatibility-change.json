@@ -2,5 +2,5 @@
   "package_version": "0.5.0",
   "wire_schema_version": 1,
   "change_level": "minor",
-  "reason": "Add provider-neutral public identity authority, auth routes, and safe identity events"
+  "reason": "Add closed provider-neutral identity authority, verification, transport-specific auth, invitation and member lifecycle contracts, and safe identity events"
 }

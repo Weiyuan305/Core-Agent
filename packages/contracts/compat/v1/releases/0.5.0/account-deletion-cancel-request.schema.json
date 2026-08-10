@@ -8,6 +8,10 @@
       "minLength": 1,
       "type": "string"
     },
+    "expected_resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
     "idempotency_key": {
       "maxLength": 255,
       "minLength": 1,
@@ -27,6 +31,7 @@
     "schema_version",
     "idempotency_key",
     "payload_hash",
+    "expected_resource_version",
     "account_deletion_id"
   ],
   "type": "object"

@@ -3,6 +3,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "expected_resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
     "idempotency_key": {
       "maxLength": 255,
       "minLength": 1,
@@ -13,10 +17,20 @@
       "type": "string"
     },
     "reason_code": {
-      "maxLength": 80,
-      "minLength": 1,
-      "pattern": "^[a-z0-9_]+$",
-      "type": "string"
+      "anyOf": [
+        {
+          "const": "administrator_suspended",
+          "type": "string"
+        },
+        {
+          "const": "administrator_revoked",
+          "type": "string"
+        },
+        {
+          "const": "user_requested",
+          "type": "string"
+        }
+      ]
     },
     "schema_version": {
       "const": 1,
@@ -28,6 +42,7 @@
     "schema_version",
     "idempotency_key",
     "payload_hash",
+    "expected_resource_version",
     "reason_code"
   ],
   "type": "object"

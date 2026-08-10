@@ -20,6 +20,7 @@ import {
   TaskStatusSchema,
 } from "../runtime/resources.js";
 import { MembershipStatusSchema } from "../tenant/identity.js";
+import { CoreSessionRevocationReasonCodeSchema } from "../identity/authority.js";
 
 const EmbeddedStudentRefSchema = Type.Omit(
   StudentRefSchema,
@@ -341,7 +342,7 @@ const SessionRevokedEventSchema = createEventBranch("session.revoked", {
   session_id: OpaqueIdSchema,
   actor_id: OpaqueIdSchema,
   status: Type.Literal("revoked"),
-  reason_code: Type.Optional(SafeReasonCodeSchema),
+  reason_code: Type.Optional(CoreSessionRevocationReasonCodeSchema),
   resource_version: ResourceVersionSchema,
 });
 const AccountDeletionRequestedEventSchema = createEventBranch("account.deletion_requested", {
@@ -440,6 +441,7 @@ export function classifyProductEvent(value: unknown): "known" | "unknown" | "inv
 }
 
 const associationIdChecks = [
+  ["tenant_id", "EVENT_TENANT_ID_MISMATCH"],
   ["conversation_id", "EVENT_CONVERSATION_ID_MISMATCH"],
   ["run_id", "EVENT_RUN_ID_MISMATCH"],
   ["task_id", "EVENT_TASK_ID_MISMATCH"],

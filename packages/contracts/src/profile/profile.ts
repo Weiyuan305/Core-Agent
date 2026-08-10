@@ -58,6 +58,17 @@ export function validateIdentityGraph(graph: IdentityGraph): ContractViolation[]
         violations.push(violation("PLATFORM_MEMBERSHIP_SEAT_FORBIDDEN", "memberships.seat_ref", "Platform Membership cannot consume a seat"));
       }
     }
+    if (graph.tenant.tenant_mode === "b2b" && membership.roles.includes("student")) {
+      violations.push(violation("B2B_MEMBERSHIP_ROLE_INVALID", "memberships.roles", "B2B tenant does not allow student authority"));
+    }
+    if (graph.tenant.tenant_mode === "b2c") {
+      if (membership.membership_source === "platform") {
+        violations.push(violation("B2C_MEMBERSHIP_SOURCE_INVALID", "memberships.membership_source", "B2C tenant does not allow platform authority"));
+      }
+      if (membership.roles.length !== 1 || membership.roles[0] !== "student") {
+        violations.push(violation("B2C_MEMBERSHIP_ROLE_INVALID", "memberships.roles", "B2C tenant requires only student authority"));
+      }
+    }
   }
 
   for (const profile of graph.profiles) {

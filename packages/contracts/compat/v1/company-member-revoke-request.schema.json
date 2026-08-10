@@ -1,0 +1,55 @@
+{
+  "$id": "core-agent://v1/company-member-revoke-request",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "expected_resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "idempotency_key": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "membership_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "payload_hash": {
+      "pattern": "^sha256:[a-f0-9]{64}$",
+      "type": "string"
+    },
+    "reason_code": {
+      "anyOf": [
+        {
+          "const": "administrator_suspended",
+          "type": "string"
+        },
+        {
+          "const": "administrator_revoked",
+          "type": "string"
+        },
+        {
+          "const": "user_requested",
+          "type": "string"
+        }
+      ]
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    }
+  },
+  "required": [
+    "schema_version",
+    "idempotency_key",
+    "payload_hash",
+    "expected_resource_version",
+    "membership_id",
+    "reason_code"
+  ],
+  "type": "object"
+}

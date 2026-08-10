@@ -1,0 +1,153 @@
+{
+  "$id": "core-agent://v1/email-verification-response",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1,
+          "title": "SchemaVersion",
+          "type": "number"
+        },
+        "session": {
+          "additionalProperties": false,
+          "properties": {
+            "absolute_expires_at": {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+              "type": "string"
+            },
+            "actor_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "client_kind": {
+              "const": "web",
+              "type": "string"
+            },
+            "idle_expires_at": {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+              "type": "string"
+            },
+            "reauthentication_required": {
+              "type": "boolean"
+            },
+            "schema_version": {
+              "const": 1,
+              "title": "SchemaVersion",
+              "type": "number"
+            },
+            "session_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema_version",
+            "actor_id",
+            "session_id",
+            "client_kind",
+            "idle_expires_at",
+            "absolute_expires_at",
+            "reauthentication_required"
+          ],
+          "type": "object"
+        },
+        "transport": {
+          "const": "web_cookie",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "transport",
+        "session"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1,
+          "title": "SchemaVersion",
+          "type": "number"
+        },
+        "session": {
+          "additionalProperties": false,
+          "properties": {
+            "absolute_expires_at": {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+              "type": "string"
+            },
+            "actor_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "client_kind": {
+              "anyOf": [
+                {
+                  "const": "iphone",
+                  "type": "string"
+                },
+                {
+                  "const": "macos",
+                  "type": "string"
+                }
+              ]
+            },
+            "idle_expires_at": {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+              "type": "string"
+            },
+            "reauthentication_required": {
+              "type": "boolean"
+            },
+            "schema_version": {
+              "const": 1,
+              "title": "SchemaVersion",
+              "type": "number"
+            },
+            "session_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema_version",
+            "actor_id",
+            "session_id",
+            "client_kind",
+            "idle_expires_at",
+            "absolute_expires_at",
+            "reauthentication_required"
+          ],
+          "type": "object"
+        },
+        "session_secret": {
+          "pattern": "^[A-Za-z0-9_-]{43}$",
+          "type": "string"
+        },
+        "transport": {
+          "const": "native",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "transport",
+        "session",
+        "session_secret"
+      ],
+      "type": "object"
+    }
+  ]
+}

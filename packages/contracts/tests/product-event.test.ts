@@ -217,6 +217,21 @@ test("producer consistency gate reports stable association mismatches", () => {
     {
       event: {
         ...base,
+        event_type: "identity.registered",
+        payload: {
+          actor_id: "actor_demo",
+          tenant_id: "tenant_other",
+          membership_id: "membership_demo",
+          profile_id: "profile_demo",
+          resource_version: 1,
+        },
+      },
+      code: "EVENT_TENANT_ID_MISMATCH",
+      path: "payload.tenant_id",
+    },
+    {
+      event: {
+        ...base,
         event_type: "conversation.created",
         payload: { conversation_id: "conversation_other", status: "active" },
       },

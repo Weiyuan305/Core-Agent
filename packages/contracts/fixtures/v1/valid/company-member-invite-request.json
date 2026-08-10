@@ -1,0 +1,1 @@
+{"schema_key":"company-member-invite-request","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"idempotency_key":"idem_member_invite","payload_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tenant_id":"tenant_01","email":"synthetic@auth.invalid","role":"consultant"}}

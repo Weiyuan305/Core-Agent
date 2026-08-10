@@ -1,0 +1,1 @@
+{"schema_key":"company-member-revoke-response","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"membership_id":"membership_01","status":"revoked","resource_version":2}}

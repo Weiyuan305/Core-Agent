@@ -5757,10 +5757,36 @@
                   "type": "string"
                 },
                 "reason_code": {
-                  "maxLength": 80,
-                  "minLength": 1,
-                  "pattern": "^[a-z0-9_]+$",
-                  "type": "string"
+                  "anyOf": [
+                    {
+                      "const": "user_sign_out",
+                      "type": "string"
+                    },
+                    {
+                      "const": "administrator_revoked",
+                      "type": "string"
+                    },
+                    {
+                      "const": "password_reset",
+                      "type": "string"
+                    },
+                    {
+                      "const": "provider_unlinked",
+                      "type": "string"
+                    },
+                    {
+                      "const": "actor_disabled",
+                      "type": "string"
+                    },
+                    {
+                      "const": "account_deletion_requested",
+                      "type": "string"
+                    },
+                    {
+                      "const": "expired",
+                      "type": "string"
+                    }
+                  ]
                 },
                 "resource_version": {
                   "minimum": 1,

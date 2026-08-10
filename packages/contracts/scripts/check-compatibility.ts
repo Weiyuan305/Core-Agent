@@ -408,7 +408,6 @@ function compareAnyOf(
   if (
     after.some((_, index) => !matchedAfter.has(index))
     && previous["x-extensible-union"] !== true
-    && current["x-extensible-union"] !== true
   ) {
     changes.push(change("union_growth_not_extensible", `${path}.anyOf`, previous.anyOf, current.anyOf));
   }

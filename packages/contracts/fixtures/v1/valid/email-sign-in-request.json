@@ -1,1 +1,1 @@
-{"schema_key":"email-sign-in-request","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"email":"synthetic@auth.invalid","password":"synthetic-placeholder","client_kind":"iphone"}}
+{"schema_key":"email-sign-in-request","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"idempotency_key":"idem_signin","payload_hash":"sha256:4444444444444444444444444444444444444444444444444444444444444444","email":"synthetic@auth.invalid","password":"synthetic-placeholder","client_kind":"iphone"}}

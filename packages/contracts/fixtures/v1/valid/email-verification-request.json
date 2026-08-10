@@ -1,0 +1,1 @@
+{"schema_key":"email-verification-request","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"idempotency_key":"idem_verify","payload_hash":"sha256:8888888888888888888888888888888888888888888888888888888888888888","verification_id":"verification_01","verification_code":"synthetic-verification-code"}}

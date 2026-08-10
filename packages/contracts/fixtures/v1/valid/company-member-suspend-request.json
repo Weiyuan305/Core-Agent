@@ -1,0 +1,1 @@
+{"schema_key":"company-member-suspend-request","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"idempotency_key":"idem_member_suspend","payload_hash":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","expected_resource_version":1,"membership_id":"membership_01","reason_code":"administrator_suspended"}}

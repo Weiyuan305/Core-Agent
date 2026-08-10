@@ -1,0 +1,1 @@
+{"schema_key":"invitation-revoke-request","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"idempotency_key":"idem_invite_revoke","payload_hash":"sha256:9999999999999999999999999999999999999999999999999999999999999999","expected_resource_version":1,"invitation_id":"invitation_01","reason_code":"administrator_revoked"}}

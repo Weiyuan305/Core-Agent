@@ -69,7 +69,11 @@ const invalidFixtureContracts = {
     schemaKey: "identity-graph",
     semanticValidator: "identity_graph",
     structurallyValid: true,
-    violationCodes: ["B2C_ACTIVE_STUDENT_COUNT_INVALID", "B2C_PROFILE_KIND_INVALID"],
+    violationCodes: [
+      "B2C_ACTIVE_STUDENT_COUNT_INVALID",
+      "B2C_MEMBERSHIP_ROLE_INVALID",
+      "B2C_PROFILE_KIND_INVALID",
+    ],
   },
   "context-case-student-mismatch.json": {
     schemaKey: "trusted-request-context",

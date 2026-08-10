@@ -7,6 +7,7 @@ import type { IdentityGraph } from "../src/index.js";
 
 const {
   ActorStatusSchema,
+  IdentityAuthorityActorStatusSchema,
   IdentityGraphSchema,
   MembershipSourceSchema,
   MembershipSchema,
@@ -49,11 +50,16 @@ test("membership roles are non-empty and unique", () => {
 
 test("identity vocabulary accepts exactly the approved membership sources and actor states", () => {
   const membershipSource = compileRequired("MembershipSourceSchema", MembershipSourceSchema);
-  const actorStatus = compileRequired("ActorStatusSchema", ActorStatusSchema);
+  const actorStatus = compileRequired("IdentityAuthorityActorStatusSchema", IdentityAuthorityActorStatusSchema);
+  const releasedActorStatus = compileRequired("ActorStatusSchema", ActorStatusSchema);
   for (const value of membershipSources) assert.equal(membershipSource.Check(value), true, value);
   for (const value of actorStatuses) assert.equal(actorStatus.Check(value), true, value);
   assert.equal(membershipSource.Check("provider"), false);
   assert.equal(actorStatus.Check("pending"), false);
+  assert.equal(releasedActorStatus.Check("active"), true);
+  assert.equal(releasedActorStatus.Check("disabled"), true);
+  assert.equal(releasedActorStatus.Check("deletion_pending"), false);
+  assert.equal(releasedActorStatus.Check("deleted"), false);
 });
 
 test("platform memberships are permanent admin-only authority without a seat", () => {
@@ -127,7 +133,30 @@ test("rejects B2B default profiles owned by student memberships", () => {
   const graph = structuredClone(b2bGraph);
   graph.memberships[0]!.roles = ["student"];
   graph.profiles[0]!.profile_kind = "default";
-  assert.deepEqual(validateIdentityGraph(graph).map((item) => item.code), ["B2B_PROFILE_KIND_INVALID"]);
+  assert.deepEqual(
+    validateIdentityGraph(graph).map((item) => item.code),
+    ["B2B_MEMBERSHIP_ROLE_INVALID", "B2B_PROFILE_KIND_INVALID"],
+  );
+});
+
+test("rejects student authority in B2B and platform authority in B2C", () => {
+  const b2b = structuredClone(b2bGraph);
+  b2b.memberships[0]!.roles = ["student"];
+  b2b.profiles = [];
+  assert.equal(
+    validateIdentityGraph(b2b).some((item) => item.code === "B2B_MEMBERSHIP_ROLE_INVALID"),
+    true,
+  );
+
+  const b2c = structuredClone(b2bGraph);
+  b2c.tenant.tenant_mode = "b2c";
+  b2c.memberships[0]!.roles = ["admin"];
+  b2c.memberships[0]!.membership_source = "platform";
+  b2c.profiles[0]!.profile_kind = "default";
+  assert.equal(
+    validateIdentityGraph(b2c).some((item) => item.code === "B2C_MEMBERSHIP_SOURCE_INVALID"),
+    true,
+  );
 });
 
 test("rejects B2C default profiles without an active student membership", () => {
@@ -146,10 +175,12 @@ test("rejects B2C default profiles without an active student membership", () => 
   graphs[2]!.memberships[0]!.status = "suspended";
   graphs[3]!.memberships[0]!.status = "revoked";
 
-  for (const graph of graphs) {
+  for (const [index, graph] of graphs.entries()) {
     assert.deepEqual(
       validateIdentityGraph(graph).map((item) => item.code),
-      ["B2C_PROFILE_OWNER_NOT_ACTIVE_STUDENT", "B2C_ACTIVE_STUDENT_COUNT_INVALID"],
+      index === 1
+        ? ["B2C_MEMBERSHIP_ROLE_INVALID", "B2C_PROFILE_OWNER_NOT_ACTIVE_STUDENT", "B2C_ACTIVE_STUDENT_COUNT_INVALID"]
+        : ["B2C_PROFILE_OWNER_NOT_ACTIVE_STUDENT", "B2C_ACTIVE_STUDENT_COUNT_INVALID"],
     );
   }
 });

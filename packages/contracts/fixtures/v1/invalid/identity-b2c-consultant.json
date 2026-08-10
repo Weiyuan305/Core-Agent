@@ -1,7 +1,7 @@
 {
   "schema_key": "identity-graph",
   "semantic_validator": "identity_graph",
-  "expected": { "structurally_valid": true, "violation_codes": ["B2C_ACTIVE_STUDENT_COUNT_INVALID", "B2C_PROFILE_KIND_INVALID"] },
+  "expected": { "structurally_valid": true, "violation_codes": ["B2C_ACTIVE_STUDENT_COUNT_INVALID", "B2C_MEMBERSHIP_ROLE_INVALID", "B2C_PROFILE_KIND_INVALID"] },
   "value": {
     "schema_version": 1,
     "tenant": {

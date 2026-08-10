@@ -369,7 +369,7 @@ test("allows explicitly extensible union growth", () => {
   ), []);
 });
 
-test("allows a closed vocabulary to become extensible while adding approved values", () => {
+test("rejects growth when only the current vocabulary declares extensibility", () => {
   assert.deepEqual(compareSchemas(
     { anyOf: [{ const: "active" }, { const: "disabled" }] },
     {
@@ -381,7 +381,7 @@ test("allows a closed vocabulary to become extensible while adding approved valu
       ],
       "x-extensible-union": true,
     },
-  ), []);
+  ).map((item) => item.kind), ["union_growth_not_extensible"]);
 });
 
 test("detects every advanced assertion keyword recursively", () => {

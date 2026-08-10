@@ -1,1 +1,1 @@
-{"schema_key":"apple-authorization-start-request","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"client_kind":"web","redirect_uri":"https://auth.invalid/callback"}}
+{"schema_key":"apple-authorization-start-request","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"idempotency_key":"idem_apple_start","payload_hash":"sha256:6666666666666666666666666666666666666666666666666666666666666666","client_kind":"web","redirect_uri":"https://auth.invalid/callback"}}

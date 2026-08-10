@@ -2,9 +2,15 @@
 
 ## 0.5.0 - 2026-08-10
 
-- Add provider-neutral identity authority resources, public `/auth/v1` request and
-  response schemas, approved Membership and Actor vocabulary, and bounded identity
-  ProductEvent branches.
+- Add provider-neutral identity authority resources, bounded identity ProductEvent
+  branches, and the complete closed `/auth/v1` contract inventory for verification,
+  Apple authentication, invitations, company-member lifecycle, Sessions, and account
+  deletion.
+- Keep email sign-up verification-pending, model browser Sessions as Cookie-only,
+  and permit one-time opaque Session-secret delivery only for native clients with
+  nonce and PKCE proof.
+- Preserve the released Actor status vocabulary while defining identity-authority
+  deletion lifecycle separately, and enforce B2B/B2C authority-mode boundaries.
 - Add the immutable 0.5.0 schema release while keeping accepted historical release
   inventories unchanged. Provider tokens and authentication PII are explicitly
   excluded from public responses, events, and business identity resources.
