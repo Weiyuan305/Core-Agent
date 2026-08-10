@@ -27,6 +27,16 @@ async function start(): Promise<void> {
           failureCode: "MODEL_BUSY",
         } as const;
       }
+      if (content === "匿名部分失败界面测试" && options === undefined) {
+        await delay(12);
+        sink.onDelta("已经生成的匿名内容。");
+        await delay(12);
+        return {
+          status: "failed",
+          runId: "synthetic_run_interrupted",
+          failureCode: "MODEL_STREAM_INTERRUPTED",
+        } as const;
+      }
       await delay(12);
       if (content === "匿名长回复界面测试" && options === undefined) {
         sink.onDelta("这是一段用于验证长对话滚动区域的匿名合成内容。".repeat(80));

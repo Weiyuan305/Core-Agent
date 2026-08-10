@@ -14,22 +14,53 @@ Generated Hermes runtime resources are owned by the Supervisor.
 
 ## Product-image prerequisite
 
-`npm run hermes:build` checks the product Dockerfile and creates the local tag
+The accepted product-image lock remains runtime authority during the source
+vendoring equivalence phase. Do not edit
+`infra/hermes/product-images.lock.json` to point at a local candidate.
+
+Build the source candidate from the verified vendored tree with two isolated
+Buildx contexts:
+
+```bash
+npm run hermes:source:verify
+npm run hermes:source:build -- --tag core-agent/hermes-runtime:source-candidate
+docker image inspect core-agent/hermes-runtime:source-candidate
+```
+
+The selected local image must report the expected host Linux architecture,
+runtime user `hermes`, entrypoint
+`/opt/core-agent/gateway-entrypoint.sh`, and no credential-bearing environment
+variable. The source stage receives only `third_party/hermes-agent`; the product
+stage receives the root context filtered by `.dockerignore`. Neither stage may
+receive local secrets, runtime state, Git metadata, dependency directories,
+screenshots, or dumps.
+
+The earlier official-image development path remains available for baseline and
+rollback comparison: `npm run hermes:build` creates
 `core-agent/hermes-runtime:dev`. That mutable local tag is not AC10 evidence.
 
-### Managed terminal error overlay
+### Managed terminal error projection
 
-The product Dockerfile installs the narrow error projection described by
+The source candidate carries the accepted projection directly in the reviewed
+vendored source. Its build must not copy or execute
+`install_error_projection.py`; source verification and the downstream Python
+contract test are authoritative for this candidate.
+
+ADR 0007 and the historical installer/patch remain unchanged as evidence for
+the accepted official-image baseline. That baseline product Dockerfile installs
+the narrow error projection described by
 [ADR 0007](../architecture/0007-managed-hermes-error-projection.md). For the
-locked `v2026.7.30` base, the target is
+locked `v2026.7.30` base, the historical target is
 `/opt/hermes/gateway/platforms/api_server.py` with SHA-256
 `2d5526cd830e6aebcaecc0d9083cfd3aa63bdcfacc2389b7beec6ca32ae99dd8`.
-The build must stop with a fixed `HERMES_PATCH_*` code if the target, hash, or
-exact context differs. Do not bypass that gate, apply the patch fuzzily, or
-copy code from a local Hermes checkout.
+The baseline build must still stop with a fixed `HERMES_PATCH_*` code if the
+target, hash, or exact context differs.
+
+Do not bypass either gate, apply the historical patch fuzzily, or copy code from
+an unrelated local Hermes checkout.
 
 Before publishing, run the deterministic runtime tests and build a disposable
-local image:
+baseline image when comparison requires it:
 
 ```bash
 npm run test:runtime

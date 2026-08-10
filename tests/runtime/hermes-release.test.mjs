@@ -420,6 +420,61 @@ test("Hermes private release operations are explicit and keep credentials out of
   assert.doesNotMatch(environmentExample, /(?:ghp_|github_pat_|Bearer\s+)/iu);
 });
 
+test("Hermes source equivalence evidence has one bounded machine-readable record", async () => {
+  const evidence = await repositorySource("docs/testing/hermes-source-vendoring.md");
+  const block = evidence.match(
+    /<!-- hermes-source-evidence:start -->\n```json\n([\s\S]+?)\n```\n<!-- hermes-source-evidence:end -->/u,
+  );
+  assert.ok(block);
+  const record = JSON.parse(block[1]);
+  assert.deepEqual(Object.keys(record), [
+    "schema_version",
+    "status",
+    "candidate_source_commit",
+    "upstream_commit",
+    "upstream_tree",
+    "product_tree",
+    "accepted_image",
+    "candidate_image_id",
+    "platform",
+    "deterministic",
+    "synthetic",
+    "browser",
+    "live_provider",
+  ]);
+  assert.equal(record.schema_version, 1);
+  assert.match(record.candidate_source_commit, /^[a-f0-9]{40}$/u);
+  assert.match(record.upstream_commit, /^[a-f0-9]{40}$/u);
+  assert.match(record.upstream_tree, /^[a-f0-9]{40}$/u);
+  assert.match(record.product_tree, /^[a-f0-9]{40}$/u);
+  assert.match(record.accepted_image, /^ghcr\.io\/weiyuan305\/core-agent-hermes-runtime:v0\.1\.3@sha256:[a-f0-9]{64}$/u);
+  assert.match(record.candidate_image_id, /^sha256:[a-f0-9]{64}$/u);
+  assert.equal(record.platform, "linux/arm64");
+  for (const section of [
+    record.deterministic,
+    record.synthetic,
+    record.browser,
+    record.live_provider,
+  ]) {
+    assert.equal(Object.getPrototypeOf(section), Object.prototype);
+    for (const [key, value] of Object.entries(section)) {
+      if (key !== "secret_zeroization") {
+        assert.doesNotMatch(
+          key,
+          /(?:prompt|assistant|message|header|credential|secret|provider_response|customer|student)/iu,
+        );
+      }
+      assert.ok(
+        typeof value === "string"
+        || typeof value === "number"
+        || typeof value === "boolean"
+        || (Array.isArray(value) && value.every((item) => typeof item === "string")),
+      );
+      assert.ok(JSON.stringify(value).length <= 1_024);
+    }
+  }
+});
+
 test("Vendored Hermes source owns the exact reviewed terminal projection", async () => {
   const acceptedProjection = await repositorySource(
     "infra/hermes/runtime/error_projection.py",

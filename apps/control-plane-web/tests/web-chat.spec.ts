@@ -80,6 +80,31 @@ test("shows a calm retryable failure without technical details", async ({ page }
   expect(violations).toEqual([]);
 });
 
+test("keeps partial content and regenerates without exposing technical details", async ({ page }) => {
+  await page.addInitScript({ path: axePath });
+  await page.goto("/");
+  const composer = page.getByRole("textbox", { name: "给 Core Agent 发送任务或指令" });
+  await composer.fill("匿名部分失败界面测试");
+  await page.getByRole("button", { name: "发送" }).click();
+
+  const transcript = page.getByRole("log");
+  await expect(transcript.getByText("已经生成的匿名内容。")).toBeVisible();
+  await expect(transcript.getByText("这条回复没有完成，内容可能不完整。")).toBeVisible();
+  const regenerate = transcript.getByRole("button", { name: "重新生成" });
+  await expect(regenerate).toBeVisible();
+  await expect(transcript).not.toContainText(/(?:502|SSE|Hermes|Worker|REPLY_INTERRUPTED|tokenhub)/u);
+
+  await regenerate.click();
+  await expect(transcript.getByText("这是重新生成的匿名合成回复。")).toBeVisible();
+  await expect(regenerate).toHaveCount(0);
+
+  const violations = await page.evaluate(async () => {
+    const axe = (window as unknown as { axe: { run: () => Promise<{ violations: readonly unknown[] }> } }).axe;
+    return (await axe.run()).violations;
+  });
+  expect(violations).toEqual([]);
+});
+
 test("keeps long conversations inside a vertically scrollable transcript", async ({ page }) => {
   await page.goto("/");
   const composer = page.getByRole("textbox", { name: "给 Core Agent 发送任务或指令" });

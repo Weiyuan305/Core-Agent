@@ -714,6 +714,18 @@ const dockerfile = await readFile(
   new URL("../../infra/hermes/Dockerfile", import.meta.url),
   "utf8"
 );
+const sourceDockerfile = await readFile(
+  new URL("../../infra/hermes/Dockerfile.source", import.meta.url),
+  "utf8",
+);
+const upstreamSourceDockerfile = await readFile(
+  new URL("../../third_party/hermes-agent/Dockerfile", import.meta.url),
+  "utf8",
+);
+const vendoredApiServer = await readFile(
+  new URL("../../third_party/hermes-agent/gateway/platforms/api_server.py", import.meta.url),
+  "utf8",
+);
 const managedConfig = await readFile(
   new URL("../../infra/hermes/managed/config.yaml", import.meta.url),
   "utf8"
@@ -755,6 +767,35 @@ test("product image has fixed initializer and gateway entrypoints", () => {
   assert.match(dockerfile, /chmod 0555 \/opt\/core-agent\/initialize\.py \/opt\/core-agent\/gateway-entrypoint\.sh/);
   assert.match(dockerfile, /install -d -m 01777 -o root -g root \/opt\/data/);
   assert.doesNotMatch(dockerfile, /API_SERVER_KEY=/);
+});
+
+test("source-built product preserves the accepted runtime security boundary", () => {
+  assert.match(upstreamSourceDockerfile, /^RUN useradd -u 10000 -m -d \/opt\/data hermes$/mu);
+  assert.match(upstreamSourceDockerfile, /^ENV HERMES_HOME=\/opt\/data$/mu);
+  assert.match(upstreamSourceDockerfile, /^ENV HERMES_WRITE_SAFE_ROOT=\/opt\/data$/mu);
+  assert.deepEqual(
+    [...upstreamSourceDockerfile.matchAll(/^VOLUME\s+\[\s*"([^"]+)"\s*\]$/gmu)]
+      .map((match) => match[1]),
+    ["/opt/data"],
+  );
+
+  assert.match(sourceDockerfile, /^USER hermes$/mu);
+  assert.match(
+    sourceDockerfile,
+    /^ENTRYPOINT \["\/opt\/core-agent\/gateway-entrypoint\.sh"\]$/mu,
+  );
+  assert.match(sourceDockerfile, /install -d -m 01777 -o root -g root \/opt\/data/u);
+  assert.doesNotMatch(sourceDockerfile, /^VOLUME\b/mu);
+  assert.doesNotMatch(
+    `${upstreamSourceDockerfile}\n${sourceDockerfile}`,
+    /(?:API_SERVER_KEY|PROVIDER_(?:KEY|TOKEN)|BOOTSTRAP_(?:KEY|TOKEN)|CONTROL_PLANE_(?:KEY|TOKEN|SECRET))=/u,
+  );
+  assert.match(
+    vendoredApiServer,
+    /from core_agent_error_projection import project_terminal_failure/u,
+  );
+  assert.match(vendoredApiServer, /finish_chunk = project_terminal_failure\(failure, partial=is_partial\)/u);
+  assert.match(vendoredApiServer, /error_chunk = project_terminal_failure\(_exc, partial=True\)/u);
 });
 
 test("managed config starts with a deliberately narrow tool surface", () => {
