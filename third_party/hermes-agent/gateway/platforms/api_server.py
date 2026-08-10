@@ -91,6 +91,7 @@ from gateway.platforms.base import (
 )
 from agent.redact import redact_sensitive_text
 from gateway.readiness import collect_runtime_readiness
+from core_agent_error_projection import project_terminal_failure
 
 logger = logging.getLogger(__name__)
 
@@ -4176,7 +4177,8 @@ class APIServerAdapter(BasePlatformAdapter):
             except Exception as exc:
                 agent_error = exc
                 logger.error(
-                    "Agent task %s failed during SSE streaming: %s", completion_id, exc
+                    "Agent task %s failed during SSE streaming; failure_code=model_response_invalid",
+                    completion_id,
                 )
 
             # Inspect the result dict for a flagged (non-exception) failure.
@@ -4197,31 +4199,23 @@ class APIServerAdapter(BasePlatformAdapter):
             else:
                 finish_reason = "stop"
 
-            # Finish chunk
-            finish_chunk = {
-                "id": completion_id, "object": "chat.completion.chunk",
-                "created": created, "model": model,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
-                "usage": {
-                    "prompt_tokens": usage.get("input_tokens", 0),
-                    "completion_tokens": usage.get("output_tokens", 0),
-                    "total_tokens": usage.get("total_tokens", 0),
-                },
-            }
-            if finish_reason != "stop":
-                finish_chunk["choices"][0]["delta"] = {}
-                if err_msg:
-                    finish_chunk["error"] = {
-                        "message": err_msg,
-                        "type": type(agent_error).__name__ if agent_error else "agent_error",
-                    }
-                finish_chunk["hermes"] = {
-                    "completed": completed,
-                    "partial": is_partial,
-                    "failed": is_failed,
-                    "error": err_msg,
-                    "error_code": "output_truncated" if finish_reason == "length" else "agent_error",
+            # Successful terminals retain the upstream OpenAI shape. Failed
+            # terminals use the closed Core-Agent projection and never reflect
+            # provider text, request metadata, or credentials.
+            if finish_reason == "stop":
+                finish_chunk = {
+                    "id": completion_id, "object": "chat.completion.chunk",
+                    "created": created, "model": model,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+                    "usage": {
+                        "prompt_tokens": usage.get("input_tokens", 0),
+                        "completion_tokens": usage.get("output_tokens", 0),
+                        "total_tokens": usage.get("total_tokens", 0),
+                    },
                 }
+            else:
+                failure = err_msg if err_msg is not None else agent_error
+                finish_chunk = project_terminal_failure(failure, partial=is_partial)
             await response.write(f"data: {json.dumps(finish_chunk)}\n\n".encode())
             await response.write(b"data: [DONE]\n\n")
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
@@ -4245,14 +4239,12 @@ class APIServerAdapter(BasePlatformAdapter):
             # Agent crashed mid-stream.  Try to emit an error chunk
             # so the client gets a proper response instead of a
             # TransferEncodingError from incomplete chunked encoding.
-            import traceback as _tb
-            logger.error("Agent crashed mid-stream for %s: %s", completion_id, _tb.format_exc()[:300])
+            logger.error(
+                "Agent crashed mid-stream for %s; failure_code=model_response_invalid",
+                completion_id,
+            )
             try:
-                error_chunk = {
-                    "id": completion_id, "object": "chat.completion.chunk",
-                    "created": created, "model": model,
-                    "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
-                }
+                error_chunk = project_terminal_failure(_exc, partial=True)
                 await response.write(f"data: {json.dumps(error_chunk)}\n\n".encode())
                 await response.write(b"data: [DONE]\n\n")
             except Exception:

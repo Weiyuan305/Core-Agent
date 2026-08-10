@@ -420,41 +420,68 @@ test("Hermes private release operations are explicit and keep credentials out of
   assert.doesNotMatch(environmentExample, /(?:ghp_|github_pat_|Bearer\s+)/iu);
 });
 
-test("Hermes product image installs the exact reviewed terminal projection overlay", async () => {
-  const dockerfile = await repositorySource("infra/hermes/Dockerfile");
-  const installer = await repositorySource(
-    "infra/hermes/runtime/install_error_projection.py",
-  );
-  const projection = await repositorySource(
+test("Vendored Hermes source owns the exact reviewed terminal projection", async () => {
+  const acceptedProjection = await repositorySource(
     "infra/hermes/runtime/error_projection.py",
   );
-  const reviewPatch = await repositorySource(
+  const vendoredProjection = await repositorySource(
+    "third_party/hermes-agent/core_agent_error_projection.py",
+  );
+  const apiServer = await repositorySource(
+    "third_party/hermes-agent/gateway/platforms/api_server.py",
+  );
+  const sourceDockerfile = await repositorySource(
+    "third_party/hermes-agent/Dockerfile",
+  );
+  const historicalAdr = await repositorySource(
+    "docs/architecture/0007-managed-hermes-error-projection.md",
+  );
+  const historicalInstaller = await repositorySource(
+    "infra/hermes/runtime/install_error_projection.py",
+  );
+  const historicalPatch = await repositorySource(
     "infra/hermes/patches/v2026.7.30-gateway-error-projection.patch",
   );
 
+  assert.equal(vendoredProjection, acceptedProjection);
+  assert.match(vendoredProjection, /def project_terminal_failure\(/u);
+  assert.doesNotMatch(
+    vendoredProjection,
+    /["'](?:message|provider|model|url|traceback)["']\s*:/iu,
+  );
+
   assert.match(
-    installer,
-    /TARGET_PATH = Path\("\/opt\/hermes\/gateway\/platforms\/api_server\.py"\)/u,
+    apiServer,
+    /from core_agent_error_projection import project_terminal_failure/u,
+  );
+  const terminalStart = apiServer.indexOf("    async def _write_sse_chat_completion(");
+  const terminalEnd = apiServer.indexOf("    async def _write_sse_responses(", terminalStart);
+  assert.ok(terminalStart >= 0);
+  assert.ok(terminalEnd > terminalStart);
+  const terminalSource = apiServer.slice(terminalStart, terminalEnd);
+  assert.match(terminalSource, /finish_chunk = project_terminal_failure\(failure, partial=is_partial\)/u);
+  assert.match(terminalSource, /error_chunk = project_terminal_failure\(_exc, partial=True\)/u);
+  assert.doesNotMatch(
+    terminalSource,
+    /(?:finish_chunk\["error"\]|"message"\s*:\s*err_msg|"error"\s*:\s*err_msg|format_exc\(|completion_id,\s*exc)/u,
+  );
+
+  assert.doesNotMatch(
+    sourceDockerfile,
+    /(?:install_error_projection\.py|gateway-error-projection\.patch)/u,
+  );
+
+  assert.match(historicalAdr, /# ADR 0007: Managed Hermes Terminal Error Projection/u);
+  assert.match(
+    historicalAdr,
+    /2d5526cd830e6aebcaecc0d9083cfd3aa63bdcfacc2389b7beec6ca32ae99dd8/u,
   );
   assert.match(
-    installer,
+    historicalInstaller,
     /EXPECTED_UPSTREAM_SHA256 = "2d5526cd830e6aebcaecc0d9083cfd3aa63bdcfacc2389b7beec6ca32ae99dd8"/u,
   );
-  assert.match(projection, /def project_terminal_failure\(/u);
-  assert.doesNotMatch(projection, /["'](?:message|provider|model|url|traceback)["']\s*:/iu);
-
-  for (const marker of [
-    "COPY infra/hermes/runtime/error_projection.py /opt/hermes/core_agent_error_projection.py",
-    "COPY infra/hermes/runtime/install_error_projection.py /opt/core-agent/install_error_projection.py",
-    "COPY infra/hermes/patches/v2026.7.30-gateway-error-projection.patch /opt/core-agent/v2026.7.30-gateway-error-projection.patch",
-    "python3 /opt/core-agent/install_error_projection.py",
-  ]) {
-    assert.ok(dockerfile.includes(marker), marker);
-  }
-  assert.match(dockerfile, /chmod 0444[\s\\]+[\s\S]*\/opt\/hermes\/core_agent_error_projection\.py/u);
-  assert.match(reviewPatch, /from core_agent_error_projection import project_terminal_failure/u);
-  assert.match(reviewPatch, /finish_chunk = project_terminal_failure/u);
-  assert.doesNotMatch(reviewPatch, /^\+.*(?:format_exc|"error"\s*:)/mu);
+  assert.match(historicalPatch, /finish_chunk = project_terminal_failure/u);
+  assert.doesNotMatch(historicalPatch, /^\+.*(?:format_exc|"error"\s*:)/mu);
 });
 
 test("Hermes image resolver accepts one explicit reviewed product lock", async (context) => {
