@@ -11,3 +11,7 @@ tests
 .local-secrets
 **/*.log
 infra/runtime/postgres-data
+screenshots
+**/screenshots
+*.dump
+**/*.dump
