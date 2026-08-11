@@ -750,7 +750,8 @@ function provisioningRequest(identifiers, imageRef, platform, provider) {
       }],
       memberships: [{
         schema_version: 1, resource_version: 1, membership_id: identifiers.membershipId,
-        tenant_id: identifiers.tenantId, actor_id: identifiers.actorId, roles: ["consultant"], status: "active",
+        tenant_id: identifiers.tenantId, actor_id: identifiers.actorId, roles: ["consultant"],
+        membership_source: "company", status: "active",
         created_at: timestamp, updated_at: timestamp,
       }],
       profiles: [{
@@ -765,6 +766,34 @@ function provisioningRequest(identifiers, imageRef, platform, provider) {
     runtime: { image_ref: imageRef, platform, ingress_secret_ref: "hermes_ingress" },
     profile_runtime_config: [{ profile_id: identifiers.profileId, description: identifiers.profileDescription }],
   });
+}
+
+export async function postSyntheticProvisioningRequest(context, options) {
+  const identifiers = validateSyntheticIdentifiers(options.identifiers);
+  if (context?.tenantId !== identifiers.tenantId
+    || context.runtimeId !== deriveProvisionedRuntimeId(identifiers.tenantId)) {
+    throw smokeError("SMOKE_PROVISION_RESPONSE_INVALID");
+  }
+  const request = provisioningRequest(
+    identifiers,
+    options.imageRef,
+    options.platform,
+    options.provider,
+  );
+  const response = await (options.requestJson ?? requestJson)("/internal/v1/tenant-provisioning", {
+    method: "POST",
+    body: request,
+    bootstrapKey: options.bootstrapKey,
+    statuses: [202],
+    signal: options.signal,
+  });
+  const tenant = dataProperty(response, "tenant", "SMOKE_PROVISION_RESPONSE_INVALID");
+  const runtime = dataProperty(response, "runtime", "SMOKE_PROVISION_RESPONSE_INVALID");
+  if (dataProperty(tenant, "tenant_id", "SMOKE_PROVISION_RESPONSE_INVALID") !== identifiers.tenantId) {
+    throw smokeError("SMOKE_PROVISION_RESPONSE_INVALID");
+  }
+  const runtimeId = dataProperty(runtime, "container_id", "SMOKE_PROVISION_RESPONSE_INVALID");
+  if (runtimeId !== context.runtimeId) throw smokeError("SMOKE_PROVISION_RESPONSE_INVALID");
 }
 
 export function createSyntheticConversationRequest(
@@ -1249,21 +1278,14 @@ export function createManagedRuntimeDependencies(environment, signal) {
       return Object.freeze({ ...identifiers, runtimeId: deriveProvisionedRuntimeId(identifiers.tenantId) });
     },
     async provision(context) {
-      if (context?.tenantId !== identifiers.tenantId
-        || context.runtimeId !== deriveProvisionedRuntimeId(identifiers.tenantId)) {
-        throw smokeError("SMOKE_PROVISION_RESPONSE_INVALID");
-      }
-      const request = provisioningRequest(identifiers, state.imageRef, environment.CORE_AGENT_PLATFORM, state.provider);
-      const response = await requestJson("/internal/v1/tenant-provisioning", {
-        method: "POST", body: request, bootstrapKey: state.bootstrapKey, statuses: [202], signal,
+      await postSyntheticProvisioningRequest(context, {
+        identifiers,
+        imageRef: state.imageRef,
+        platform: environment.CORE_AGENT_PLATFORM,
+        provider: state.provider,
+        bootstrapKey: state.bootstrapKey,
+        signal,
       });
-      const tenant = dataProperty(response, "tenant", "SMOKE_PROVISION_RESPONSE_INVALID");
-      const runtime = dataProperty(response, "runtime", "SMOKE_PROVISION_RESPONSE_INVALID");
-      if (dataProperty(tenant, "tenant_id", "SMOKE_PROVISION_RESPONSE_INVALID") !== identifiers.tenantId) {
-        throw smokeError("SMOKE_PROVISION_RESPONSE_INVALID");
-      }
-      const runtimeId = dataProperty(runtime, "container_id", "SMOKE_PROVISION_RESPONSE_INVALID");
-      if (runtimeId !== context.runtimeId) throw smokeError("SMOKE_PROVISION_RESPONSE_INVALID");
     },
     async pollRuntime(context) {
       const deadline = Date.now() + maximumPollMs;

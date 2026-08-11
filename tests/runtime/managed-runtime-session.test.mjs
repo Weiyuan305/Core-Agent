@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+
+import { IdentityGraphSchema, validateIdentityGraph } from "@core-agent/contracts";
+import Schema from "typebox/schema";
 
 import {
   canonicalPayloadHash,
@@ -70,6 +74,52 @@ test("managed topology rebuilds current service images before migration and star
     ],
     { timeoutMs: 180_000, maxOutputBytes: 4 * 1024 * 1024 },
   ]]);
+});
+
+test("managed Runtime provisioning POST carries explicit company authority through the shared contract path", async () => {
+  const postProvisioning = managedRuntimeModule.postSyntheticProvisioningRequest;
+  assert.equal(typeof postProvisioning, "function");
+  const identifiers = {
+    tenantId: "synthetic-runtime-v1-0123456789abcdef",
+    tenantDisplayName: "synthetic-runtime-v1-0123456789abcdef",
+    actorId: "synthetic-runtime-v1-actor-0123456789abcdef",
+    actorDisplayName: "synthetic-runtime-v1-consultant",
+    membershipId: "synthetic-runtime-v1-member-0123456789abcdef",
+    profileId: "synthetic-runtime-v1-profile-0123456789abcdef",
+    profileDescription: "synthetic-runtime-v1-consultant",
+    hermesProfileRef: "synthetic-runtime-v1-profile-0123456789abcdef",
+    promptIdentifier: "synthetic-runtime-v1-smoke",
+  };
+  const runtimeId = `runtime_${createHash("sha256").update(identifiers.tenantId, "utf8").digest("hex").slice(0, 32)}`;
+  let captured;
+
+  await postProvisioning({ ...identifiers, runtimeId }, {
+    identifiers,
+    imageRef: `core-agent/hermes-runtime:v1@sha256:${"c".repeat(64)}`,
+    platform: "linux/amd64",
+    provider: { provider_config_id: "synthetic-provider", model_ids: ["synthetic-model"] },
+    bootstrapKey: Buffer.from("synthetic-bootstrap-key"),
+    requestJson: async (path, options) => {
+      captured = { path, options };
+      return {
+        tenant: { tenant_id: identifiers.tenantId },
+        runtime: { container_id: runtimeId },
+      };
+    },
+  });
+
+  assert.equal(captured.path, "/internal/v1/tenant-provisioning");
+  assert.equal(captured.options.method, "POST");
+  assert.deepEqual(captured.options.statuses, [202]);
+  const body = captured.options.body;
+  assert.equal(body.identity_graph.memberships[0].membership_source, "company");
+  assert.equal(Schema.Check(IdentityGraphSchema, body.identity_graph), true);
+  assert.deepEqual(validateIdentityGraph({
+    ...body.identity_graph,
+    profiles: body.identity_graph.profiles.map((profile) => ({ ...profile, status: "active" })),
+  }), []);
+  const { payload_hash: payloadHash, ...payload } = body;
+  assert.equal(payloadHash, canonicalPayloadHash(payload));
 });
 
 test("smoke public errors remain fixed and never reflect unknown failures", () => {
