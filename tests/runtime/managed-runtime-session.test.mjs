@@ -3,7 +3,12 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { IdentityGraphSchema, validateIdentityGraph } from "@core-agent/contracts";
+import {
+  canonicalPayloadHash as serverCanonicalPayloadHash,
+  loadProviderCatalog,
+  provisionTenant,
+  TenantProvisioningRequestSchema,
+} from "@core-agent/runtime-core";
 import Schema from "typebox/schema";
 
 import {
@@ -90,20 +95,64 @@ test("managed Runtime provisioning POST carries explicit company authority throu
     hermesProfileRef: "synthetic-runtime-v1-profile-0123456789abcdef",
     promptIdentifier: "synthetic-runtime-v1-smoke",
   };
+  const imageRef = `core-agent/hermes-runtime:v1@sha256:${"c".repeat(64)}`;
   const runtimeId = `runtime_${createHash("sha256").update(identifiers.tenantId, "utf8").digest("hex").slice(0, 32)}`;
+  const admissionBoundary = new Error("admission reached its transaction boundary");
+  const transaction = {
+    setIsolationLevel(level) {
+      assert.equal(level, "serializable");
+      return this;
+    },
+    async execute() {
+      throw admissionBoundary;
+    },
+  };
+  const admissionDependencies = {
+    db: { transaction: () => transaction },
+    providerCatalog: loadProviderCatalog([{
+      provider_config_id: "synthetic-provider",
+      base_url: "https://synthetic-provider.example/v1/",
+      model_ids: ["synthetic-model"],
+      credential_secret_ref: "synthetic-provider-secret",
+      timeout_ms: 1_000,
+      max_safe_retries: 0,
+    }]),
+    imageLock: {
+      schemaVersion: 1,
+      repository: "core-agent/hermes-runtime",
+      tag: "v1",
+      platforms: {
+        "linux/amd64": { reference: imageRef },
+        "linux/arm64": { reference: `core-agent/hermes-runtime:v1@sha256:${"d".repeat(64)}` },
+      },
+    },
+  };
   let captured;
 
   await postProvisioning({ ...identifiers, runtimeId }, {
     identifiers,
-    imageRef: `core-agent/hermes-runtime:v1@sha256:${"c".repeat(64)}`,
+    imageRef,
     platform: "linux/amd64",
     provider: { provider_config_id: "synthetic-provider", model_ids: ["synthetic-model"] },
     bootstrapKey: Buffer.from("synthetic-bootstrap-key"),
     requestJson: async (path, options) => {
       captured = { path, options };
+      await assert.rejects(
+        provisionTenant(admissionDependencies, {
+          tenantId: identifiers.tenantId,
+          requestId: "synthetic-request",
+          traceId: "synthetic-trace",
+          actorId: "core_agent_provisioner",
+          membershipId: "core_agent_provisioner_admin",
+          effectiveRole: "admin",
+        }, options.body),
+        (error) => error === admissionBoundary,
+      );
       return {
-        tenant: { tenant_id: identifiers.tenantId },
-        runtime: { container_id: runtimeId },
+        schema_version: 1,
+        status: "accepted",
+        tenant: { tenant_id: identifiers.tenantId, resource_version: 1 },
+        runtime: { container_id: runtimeId, resource_version: 1 },
       };
     },
   });
@@ -113,13 +162,9 @@ test("managed Runtime provisioning POST carries explicit company authority throu
   assert.deepEqual(captured.options.statuses, [202]);
   const body = captured.options.body;
   assert.equal(body.identity_graph.memberships[0].membership_source, "company");
-  assert.equal(Schema.Check(IdentityGraphSchema, body.identity_graph), true);
-  assert.deepEqual(validateIdentityGraph({
-    ...body.identity_graph,
-    profiles: body.identity_graph.profiles.map((profile) => ({ ...profile, status: "active" })),
-  }), []);
+  assert.equal(Schema.Check(TenantProvisioningRequestSchema, body), true);
   const { payload_hash: payloadHash, ...payload } = body;
-  assert.equal(payloadHash, canonicalPayloadHash(payload));
+  assert.equal(payloadHash, serverCanonicalPayloadHash(payload));
 });
 
 test("smoke public errors remain fixed and never reflect unknown failures", () => {

@@ -72,18 +72,18 @@ function parseDockerfile(text) {
 test("only the fixed API ingress publishes a loopback port and only Supervisor mounts Docker", async () => {
   const config = await yaml("infra/runtime/compose.dev.yaml");
   assert.deepEqual(Object.keys(config.services).sort(), [
-    "api", "api-ingress", "migrate", "postgres", "supervisor", "supervisor-socket-preflight",
+    "api", "api-ingress", "identity-role-bootstrap", "migrate", "postgres", "supervisor", "supervisor-socket-preflight",
     "supervisor-socket-volume-init", "worker",
   ]);
   assert.equal(config.services.api.ports, undefined);
   assert.deepEqual(config.services["api-ingress"].ports, ["127.0.0.1:8787:8787"]);
   for (const name of [
-    "postgres", "migrate", "api", "worker", "supervisor", "supervisor-socket-preflight",
+    "postgres", "identity-role-bootstrap", "migrate", "api", "worker", "supervisor", "supervisor-socket-preflight",
     "supervisor-socket-volume-init",
   ]) {
     assert.equal(config.services[name].ports, undefined);
   }
-  for (const name of ["postgres", "migrate", "api", "api-ingress", "worker"]) {
+  for (const name of ["postgres", "identity-role-bootstrap", "migrate", "api", "api-ingress", "worker"]) {
     assert(!JSON.stringify(config.services[name]).includes("docker.sock"));
   }
   for (const service of Object.values(config.services)) {
@@ -273,7 +273,7 @@ test("startup order gates applications on one successful migration", async () =>
   const config = await yaml("infra/runtime/compose.dev.yaml");
   assert.equal(config.services.migrate.restart, "no");
   assert.deepEqual(config.services.migrate.depends_on, {
-    postgres: { condition: "service_healthy" },
+    "identity-role-bootstrap": { condition: "service_completed_successfully" },
   });
   assert.deepEqual(config.services.api.depends_on, {
     migrate: { condition: "service_completed_successfully" },
@@ -290,6 +290,34 @@ test("startup order gates applications on one successful migration", async () =>
   });
   assert.equal(config.services.postgres.volumes[0].target, "/var/lib/postgresql/data");
   assert.equal(config.services.postgres.healthcheck.test[0], "CMD-SHELL");
+});
+
+test("Identity role bootstrap is bounded private and precedes migration", async () => {
+  const config = await yaml("infra/runtime/compose.dev.yaml");
+  const bootstrap = config.services["identity-role-bootstrap"];
+  assert(bootstrap, "Identity role bootstrap service must exist");
+  assert.equal(bootstrap.image, config.services.postgres.image);
+  assert.equal(bootstrap.platform, config.services.postgres.platform);
+  assert.equal(bootstrap.read_only, true);
+  assert.equal(bootstrap.privileged, false);
+  assert.deepEqual(bootstrap.cap_drop, ["ALL"]);
+  assert.deepEqual(bootstrap.security_opt, ["no-new-privileges:true"]);
+  assert.equal(bootstrap.restart, "no");
+  assert.deepEqual(bootstrap.depends_on, { postgres: { condition: "service_healthy" } });
+  assert.deepEqual(bootstrap.networks, ["core-agent-control"]);
+  assert.equal(bootstrap.ports, undefined);
+  assert.deepEqual(bootstrap.entrypoint, [
+    "psql", "--no-psqlrc", "--set", "ON_ERROR_STOP=1",
+    "--host", "postgres", "--username", "core_agent_bootstrap",
+    "--dbname", "core_agent_runtime", "--file", "/bootstrap/identity-role.sql",
+  ]);
+  assert.deepEqual(environmentMap(bootstrap), {
+    PGCONNECTTIMEOUT: "5",
+    PGOPTIONS: "-c statement_timeout=5000 -c lock_timeout=5000",
+  });
+  assert.deepEqual(volumeTargets(bootstrap), ["/bootstrap/identity-role.sql"]);
+  assert.equal(volumeAt(bootstrap, "/bootstrap/identity-role.sql").source, "./postgres/init/01-bootstrap-identity-role.sql");
+  assert.equal(volumeAt(bootstrap, "/bootstrap/identity-role.sql").read_only, true);
 });
 
 test("compose environment carries paths and public configuration but no secret values", async () => {
@@ -667,18 +695,21 @@ test("runtime operating evidence distinguishes socket platforms and records only
 
 test("runtime PostgreSQL initialization separates bootstrap migrator and application roles", async () => {
   const sql = await source("infra/runtime/postgres/init/00-create-test-database.sql");
+  const identityBootstrap = await source("infra/runtime/postgres/init/01-bootstrap-identity-role.sql");
   assert.match(sql, /CREATE ROLE core_agent_migrator LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE/u);
   assert.match(sql, /CREATE ROLE core_agent_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE/u);
-  assert.match(sql, /CREATE ROLE core_agent_identity LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT/u);
   assert.match(sql, /ALTER DATABASE core_agent_runtime OWNER TO core_agent_migrator/u);
   assert.match(sql, /CREATE DATABASE core_agent_control OWNER core_agent_migrator/u);
   assert.match(sql, /ALTER DEFAULT PRIVILEGES FOR ROLE core_agent_migrator[\s\S]+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO core_agent_app/u);
   assert.match(sql, /GRANT CONNECT ON DATABASE core_agent_runtime TO core_agent_app/u);
   assert.match(sql, /GRANT CONNECT ON DATABASE core_agent_control TO core_agent_app/u);
-  assert.match(sql, /GRANT CONNECT ON DATABASE core_agent_runtime TO core_agent_identity/u);
-  assert.match(sql, /GRANT USAGE ON SCHEMA public TO core_agent_identity/u);
   assert.doesNotMatch(sql, /GRANT CONNECT ON DATABASE core_agent_control TO core_agent_identity/u);
-  assert(!/PASSWORD|SUPERUSER(?!\s+NOCREATEDB)/u.test(sql.replaceAll("NOSUPERUSER", "")));
+  assert.match(identityBootstrap, /if not exists[\s\S]+rolname = 'core_agent_identity'[\s\S]+create role core_agent_identity login nosuperuser nocreatedb nocreaterole noinherit/iu);
+  assert.match(identityBootstrap, /alter role core_agent_identity login nosuperuser nocreatedb nocreaterole noinherit/iu);
+  assert.match(identityBootstrap, /grant connect on database core_agent_runtime to core_agent_identity/iu);
+  assert.match(identityBootstrap, /grant usage on schema public to core_agent_identity/iu);
+  assert.doesNotMatch(identityBootstrap, /core_agent_control/iu);
+  assert(!/PASSWORD|SUPERUSER(?!\s+NOCREATEDB)/u.test(`${sql}\n${identityBootstrap}`.replaceAll("NOSUPERUSER", "")));
 });
 
 test("runtime path preflight creates final-uid 0700 roots and validates bootstrap metadata without reading it", async (t) => {

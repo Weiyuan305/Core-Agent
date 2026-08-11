@@ -45,6 +45,47 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
 
+  identity-role-bootstrap:
+    image: ${CORE_AGENT_POSTGRES_IMAGE:?set CORE_AGENT_POSTGRES_IMAGE}
+    platform: ${CORE_AGENT_PLATFORM:?set CORE_AGENT_PLATFORM}
+    entrypoint:
+      - psql
+      - --no-psqlrc
+      - --set
+      - ON_ERROR_STOP=1
+      - --host
+      - postgres
+      - --username
+      - core_agent_bootstrap
+      - --dbname
+      - core_agent_runtime
+      - --file
+      - /bootstrap/identity-role.sql
+    environment:
+      PGCONNECTTIMEOUT: "5"
+      PGOPTIONS: -c statement_timeout=5000 -c lock_timeout=5000
+    volumes:
+      - type: bind
+        source: ./postgres/init/01-bootstrap-identity-role.sql
+        target: /bootstrap/identity-role.sql
+        read_only: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    privileged: false
+    pids_limit: 32
+    mem_limit: 64m
+    cpus: 0.25
+    restart: "no"
+    stop_grace_period: 10s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - core-agent-control
+
   migrate:
     image: core-agent/control-plane-api:dev
     platform: ${CORE_AGENT_PLATFORM:?set CORE_AGENT_PLATFORM}
@@ -66,8 +107,8 @@ services:
     restart: "no"
     stop_grace_period: 15s
     depends_on:
-      postgres:
-        condition: service_healthy
+      identity-role-bootstrap:
+        condition: service_completed_successfully
     networks:
       - core-agent-control
 

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -6,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { Kysely, PostgresDialect, sql } from "kysely";
-import { Pool } from "pg";
+import { Client, Pool } from "pg";
 import { ProductEventSchema } from "@core-agent/contracts";
 import Schema from "typebox/schema";
 
@@ -20,6 +21,10 @@ import {
 
 const testDatabaseUrl = process.env.CONTROL_PLANE_TEST_DATABASE_URL;
 const migrationsDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
+const identityRoleBootstrapPath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "..", "..", "..", "infra", "runtime", "postgres", "init", "01-bootstrap-identity-role.sql",
+);
 const identityTables = [
   "account_deletions",
   "auth_subjects",
@@ -324,6 +329,75 @@ test("empty database migrates exactly to schema version 10 with identity authori
     "worker_jobs_platform_recovery_idx",
     "worker_jobs_tenant_run_idx",
   ]);
+});
+
+test("Identity role bootstrap reruns and admits a real authenticated connection", async () => {
+  const bootstrapSql = await readFile(identityRoleBootstrapPath, "utf8").catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
+    throw error;
+  });
+  assert.notEqual(bootstrapSql, "", "Identity role bootstrap SQL must exist");
+  const databaseUrl = new URL(assertDisposableDatabaseUrl(testDatabaseUrl));
+  const databaseName = databaseUrl.pathname.slice(1);
+  assert.match(databaseName, /^core_agent_[a-z0-9_]+$/u);
+  const executableSql = bootstrapSql.replaceAll("core_agent_runtime", databaseName);
+
+  await pool.query("alter role core_agent_identity nologin");
+  await pool.query(executableSql);
+  await pool.query(executableSql);
+
+  const role = await pool.query<{ rolcanlogin: boolean; explicit_connect: boolean }>(
+    `select roles.rolcanlogin,
+            exists (
+              select 1
+              from pg_database database
+              cross join lateral aclexplode(coalesce(database.datacl, acldefault('d', database.datdba))) privilege
+              where database.datname = $1
+                and privilege.grantee = roles.oid
+                and privilege.privilege_type = 'CONNECT'
+            ) as explicit_connect
+     from pg_roles roles
+     where roles.rolname = 'core_agent_identity'`,
+    [databaseName],
+  );
+  assert.deepEqual(role.rows, [{ rolcanlogin: true, explicit_connect: true }]);
+
+  const authenticationPassword = randomBytes(32).toString("base64url");
+  const adminClient = await pool.connect();
+  try {
+    await adminClient.query("begin");
+    await adminClient.query(
+      "select set_config('core_agent.identity_test_password', $1, true)",
+      [authenticationPassword],
+    );
+    await adminClient.query(`do $password$
+      declare identity_password text := current_setting('core_agent.identity_test_password');
+      begin
+        execute format('alter role core_agent_identity password %L', identity_password);
+        perform set_config('core_agent.identity_test_password', '', true);
+      end
+    $password$`);
+    await adminClient.query("commit");
+  } catch (error) {
+    await adminClient.query("rollback").catch(() => undefined);
+    throw error;
+  } finally {
+    adminClient.release();
+  }
+
+  databaseUrl.username = "core_agent_identity";
+  databaseUrl.password = authenticationPassword;
+  const identityClient = new Client({ connectionString: databaseUrl.toString() });
+  try {
+    await identityClient.connect();
+    const connected = await identityClient.query<{ current_user: string; database_name: string }>(
+      "select current_user, current_database() as database_name",
+    );
+    assert.deepEqual(connected.rows, [{ current_user: "core_agent_identity", database_name: databaseName }]);
+  } finally {
+    await identityClient.end().catch(() => undefined);
+    await pool.query("alter role core_agent_identity password null");
+  }
 });
 
 test("schema 10 fails closed for every contradictory legacy global Actor fact", async () => {
