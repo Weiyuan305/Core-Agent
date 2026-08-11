@@ -1,5 +1,9 @@
 export { loadRuntimeEnvironment, type RuntimeEnvironment } from "./config/environment.js";
 export {
+  databaseConnectionOptions,
+  readProtectedDatabasePassword,
+} from "./config/database-password.js";
+export {
   deriveManagedRuntimeNames,
   type ManagedRuntimeIdentity,
   type ManagedRuntimeNames,
@@ -35,6 +39,10 @@ export {
   withDatabaseTransactionRetry,
 } from "./db/transaction-retry.js";
 export { applyMigrations } from "./db/migrate.js";
+export {
+  bootstrapRuntimeDatabaseAuth,
+  type RuntimeDatabaseAuthBootstrapInput,
+} from "./db/bootstrap-auth.js";
 export {
   assertTenantId,
   withTenantTransaction,

@@ -87,6 +87,7 @@ async function createEnvironment(): Promise<{ directory: string; environment: Ru
     directory,
     environment: {
       databaseUrl: "postgresql://synthetic.invalid/runtime",
+      databasePasswordFile: join(directory, "database-password"),
       bootstrapKeyFile,
       apiHost: "127.0.0.1",
       apiPort: 8787,

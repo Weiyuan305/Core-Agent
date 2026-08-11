@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,10 +21,6 @@ import {
 
 const testDatabaseUrl = process.env.CONTROL_PLANE_TEST_DATABASE_URL;
 const migrationsDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
-const identityRoleBootstrapPath = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "..", "..", "..", "infra", "runtime", "postgres", "init", "01-bootstrap-identity-role.sql",
-);
 const identityTables = [
   "account_deletions",
   "auth_subjects",
@@ -331,72 +327,151 @@ test("empty database migrates exactly to schema version 10 with identity authori
   ]);
 });
 
-test("Identity role bootstrap reruns and admits a real authenticated connection", async () => {
-  const bootstrapSql = await readFile(identityRoleBootstrapPath, "utf8").catch((error: unknown) => {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
-    throw error;
-  });
-  assert.notEqual(bootstrapSql, "", "Identity role bootstrap SQL must exist");
+test("database role bootstrap enforces SCRAM credentials and rotates persisted volumes", async () => {
+  const runtimeCore = await import("../src/index.js") as Record<string, unknown>;
+  assert.equal(typeof runtimeCore.bootstrapRuntimeDatabaseAuth, "function");
+  const bootstrapAuth = runtimeCore.bootstrapRuntimeDatabaseAuth as (input: {
+    databaseUrl: string;
+    bootstrapPasswordFile: string;
+    migratorPasswordFile: string;
+    applicationPasswordFile: string;
+    identityPasswordFile: string;
+  }) => Promise<void>;
+  const directory = await mkdtemp(join(tmpdir(), "core-agent-database-auth-"));
   const databaseUrl = new URL(assertDisposableDatabaseUrl(testDatabaseUrl));
   const databaseName = databaseUrl.pathname.slice(1);
   assert.match(databaseName, /^core_agent_[a-z0-9_]+$/u);
-  const executableSql = bootstrapSql.replaceAll("core_agent_runtime", databaseName);
+  const bootstrapRole = databaseUrl.username;
+  const originalBootstrapPassword = databaseUrl.password;
+  assert.match(bootstrapRole, /^core_agent_[a-z0-9_]+$/u);
+  assert(originalBootstrapPassword.length > 0);
+  const bootstrapPassword = randomBytes(32).toString("base64url");
+  databaseUrl.password = "";
 
-  await pool.query("alter role core_agent_identity nologin");
-  await pool.query(executableSql);
-  await pool.query(executableSql);
+  const rotateBootstrapPassword = async (password: string) => {
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      await client.query("set local password_encryption = 'scram-sha-256'");
+      await client.query("select set_config('core_agent.test_bootstrap_role', $1, true)", [bootstrapRole]);
+      await client.query("select set_config('core_agent.test_bootstrap_password', $1, true)", [password]);
+      await client.query(`do $password$
+        begin
+          execute format(
+            'alter role %I password %L',
+            current_setting('core_agent.test_bootstrap_role'),
+            current_setting('core_agent.test_bootstrap_password')
+          );
+          perform set_config('core_agent.test_bootstrap_password', '', true);
+        end
+      $password$`);
+      await client.query("commit");
+    } catch (error) {
+      await client.query("rollback").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  };
 
-  const role = await pool.query<{ rolcanlogin: boolean; explicit_connect: boolean }>(
-    `select roles.rolcanlogin,
-            exists (
-              select 1
-              from pg_database database
-              cross join lateral aclexplode(coalesce(database.datacl, acldefault('d', database.datdba))) privilege
-              where database.datname = $1
-                and privilege.grantee = roles.oid
-                and privilege.privilege_type = 'CONNECT'
-            ) as explicit_connect
-     from pg_roles roles
-     where roles.rolname = 'core_agent_identity'`,
-    [databaseName],
-  );
-  assert.deepEqual(role.rows, [{ rolcanlogin: true, explicit_connect: true }]);
+  const secretPaths = {
+    bootstrapPasswordFile: join(directory, "bootstrap"),
+    migratorPasswordFile: join(directory, "migrator"),
+    applicationPasswordFile: join(directory, "application"),
+    identityPasswordFile: join(directory, "identity"),
+  };
+  const writeSecrets = async (values: Record<keyof typeof secretPaths, string>) => {
+    for (const [name, path] of Object.entries(secretPaths) as [keyof typeof secretPaths, string][]) {
+      await writeFile(path, values[name], { mode: 0o600 });
+      await chmod(path, 0o600);
+    }
+  };
+  const credentials = () => ({
+    bootstrapPasswordFile: bootstrapPassword,
+    migratorPasswordFile: randomBytes(32).toString("base64url"),
+    applicationPasswordFile: randomBytes(32).toString("base64url"),
+    identityPasswordFile: randomBytes(32).toString("base64url"),
+  });
+  const connect = async (role: string, password: string | undefined) => {
+    const target = new URL(databaseUrl);
+    target.username = role;
+    target.password = password ?? "";
+    const client = new Client({ connectionString: target.toString() });
+    await client.connect();
+    return client;
+  };
+  const rejectsAuthentication = async (role: string, password: string | undefined) => {
+    const target = new URL(databaseUrl);
+    target.username = role;
+    target.password = password ?? "";
+    const client = new Client({ connectionString: target.toString() });
+    try {
+      await assert.rejects(client.connect(), (error: unknown) => {
+        assert(error instanceof Error);
+        assert.doesNotMatch(error.message, /[A-Za-z0-9_-]{32,}/u);
+        return true;
+      });
+    } finally {
+      await client.end().catch(() => undefined);
+    }
+  };
 
-  const authenticationPassword = randomBytes(32).toString("base64url");
-  const adminClient = await pool.connect();
   try {
-    await adminClient.query("begin");
-    await adminClient.query(
-      "select set_config('core_agent.identity_test_password', $1, true)",
-      [authenticationPassword],
-    );
-    await adminClient.query(`do $password$
-      declare identity_password text := current_setting('core_agent.identity_test_password');
+    await rotateBootstrapPassword(bootstrapPassword);
+    await pool.query(`do $$
       begin
-        execute format('alter role core_agent_identity password %L', identity_password);
-        perform set_config('core_agent.identity_test_password', '', true);
+        if not exists (select 1 from pg_roles where rolname = 'core_agent_migrator') then
+          create role core_agent_migrator nologin nosuperuser nocreatedb nocreaterole noinherit;
+        end if;
       end
-    $password$`);
-    await adminClient.query("commit");
-  } catch (error) {
-    await adminClient.query("rollback").catch(() => undefined);
-    throw error;
-  } finally {
-    adminClient.release();
-  }
-
-  databaseUrl.username = "core_agent_identity";
-  databaseUrl.password = authenticationPassword;
-  const identityClient = new Client({ connectionString: databaseUrl.toString() });
-  try {
-    await identityClient.connect();
-    const connected = await identityClient.query<{ current_user: string; database_name: string }>(
-      "select current_user, current_database() as database_name",
+    $$`);
+    await pool.query(
+      "alter role core_agent_migrator nologin password null; alter role core_agent_app nologin password null; alter role core_agent_identity nologin password null",
     );
-    assert.deepEqual(connected.rows, [{ current_user: "core_agent_identity", database_name: databaseName }]);
+
+    const first = credentials();
+    await writeSecrets(first);
+    await bootstrapAuth({ databaseUrl: databaseUrl.toString(), ...secretPaths });
+    await bootstrapAuth({ databaseUrl: databaseUrl.toString(), ...secretPaths });
+
+    const roles = await pool.query<{ rolname: string; scram: boolean }>(
+      `select rolname, rolpassword like 'SCRAM-SHA-256$%' as scram
+       from pg_authid
+       where rolname = any($1::text[])
+       order by rolname`,
+      [["core_agent_app", "core_agent_identity", "core_agent_migrator"]],
+    );
+    assert.deepEqual(roles.rows, [
+      { rolname: "core_agent_app", scram: true },
+      { rolname: "core_agent_identity", scram: true },
+      { rolname: "core_agent_migrator", scram: true },
+    ]);
+    for (const [role, password] of [
+      ["core_agent_app", first.applicationPasswordFile],
+      ["core_agent_identity", first.identityPasswordFile],
+      ["core_agent_migrator", first.migratorPasswordFile],
+    ] as const) {
+      const client = await connect(role, password);
+      assert.equal((await client.query<{ current_user: string }>("select current_user")).rows[0]?.current_user, role);
+      await client.end();
+    }
+    await rejectsAuthentication("core_agent_identity", undefined);
+    await rejectsAuthentication("core_agent_identity", randomBytes(32).toString("base64url"));
+    await rejectsAuthentication("core_agent_identity", first.applicationPasswordFile);
+    await rejectsAuthentication("core_agent_migrator", first.applicationPasswordFile);
+
+    const rotated = credentials();
+    await writeSecrets(rotated);
+    await bootstrapAuth({ databaseUrl: databaseUrl.toString(), ...secretPaths });
+    await rejectsAuthentication("core_agent_app", first.applicationPasswordFile);
+    const rotatedClient = await connect("core_agent_app", rotated.applicationPasswordFile);
+    await rotatedClient.end();
   } finally {
-    await identityClient.end().catch(() => undefined);
-    await pool.query("alter role core_agent_identity password null");
+    await pool.query(
+      "alter role core_agent_migrator login password null; alter role core_agent_app login password null; alter role core_agent_identity login password null",
+    ).catch(() => undefined);
+    await rotateBootstrapPassword(originalBootstrapPassword).catch(() => undefined);
+    await rm(directory, { recursive: true, force: true });
   }
 });
 

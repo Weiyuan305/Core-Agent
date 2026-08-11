@@ -24,8 +24,15 @@ services:
     platform: ${CORE_AGENT_PLATFORM:?set CORE_AGENT_PLATFORM}
     environment:
       POSTGRES_DB: core_agent_runtime
-      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=trust
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_bootstrap_password
       POSTGRES_USER: core_agent_bootstrap
+    secrets:
+      - source: postgres-bootstrap-password
+        target: postgres_bootstrap_password
+        uid: "999"
+        gid: "999"
+        mode: 0o400
     volumes:
       - type: volume
         source: postgres-data
@@ -46,29 +53,40 @@ services:
     stop_grace_period: 30s
 
   identity-role-bootstrap:
-    image: ${CORE_AGENT_POSTGRES_IMAGE:?set CORE_AGENT_POSTGRES_IMAGE}
+    image: core-agent/control-plane-api:dev
     platform: ${CORE_AGENT_PLATFORM:?set CORE_AGENT_PLATFORM}
-    entrypoint:
-      - psql
-      - --no-psqlrc
-      - --set
-      - ON_ERROR_STOP=1
-      - --host
-      - postgres
-      - --username
-      - core_agent_bootstrap
-      - --dbname
-      - core_agent_runtime
-      - --file
-      - /bootstrap/identity-role.sql
+    build:
+      <<: *service-build
+      target: api
+    user: "${CORE_AGENT_RUNTIME_UID:-12000}:${CORE_AGENT_RUNTIME_GID:-12000}"
+    entrypoint: ["node", "scripts/bootstrap-runtime-database-auth.mjs"]
     environment:
-      PGCONNECTTIMEOUT: "5"
-      PGOPTIONS: -c statement_timeout=5000 -c lock_timeout=5000
-    volumes:
-      - type: bind
-        source: ./postgres/init/01-bootstrap-identity-role.sql
-        target: /bootstrap/identity-role.sql
-        read_only: true
+      CONTROL_PLANE_DATABASE_URL: postgresql://core_agent_bootstrap@postgres:5432/core_agent_runtime
+      CONTROL_PLANE_DATABASE_PASSWORD_FILE: /run/secrets/postgres_bootstrap_password
+      CORE_AGENT_APP_DATABASE_PASSWORD_FILE: /run/secrets/database_app_password
+      CORE_AGENT_IDENTITY_DATABASE_PASSWORD_FILE: /run/secrets/database_identity_password
+      CORE_AGENT_MIGRATOR_DATABASE_PASSWORD_FILE: /run/secrets/database_migrator_password
+    secrets:
+      - source: postgres-bootstrap-password
+        target: postgres_bootstrap_password
+        uid: "${CORE_AGENT_RUNTIME_UID:-12000}"
+        gid: "${CORE_AGENT_RUNTIME_GID:-12000}"
+        mode: 0o400
+      - source: database-migrator-password
+        target: database_migrator_password
+        uid: "${CORE_AGENT_RUNTIME_UID:-12000}"
+        gid: "${CORE_AGENT_RUNTIME_GID:-12000}"
+        mode: 0o400
+      - source: database-app-password
+        target: database_app_password
+        uid: "${CORE_AGENT_RUNTIME_UID:-12000}"
+        gid: "${CORE_AGENT_RUNTIME_GID:-12000}"
+        mode: 0o400
+      - source: database-identity-password
+        target: database_identity_password
+        uid: "${CORE_AGENT_RUNTIME_UID:-12000}"
+        gid: "${CORE_AGENT_RUNTIME_GID:-12000}"
+        mode: 0o400
     read_only: true
     cap_drop:
       - ALL
@@ -96,6 +114,13 @@ services:
     entrypoint: ["node", "scripts/migrate-runtime.mjs"]
     environment:
       CONTROL_PLANE_DATABASE_URL: postgresql://core_agent_migrator@postgres:5432/core_agent_runtime
+      CONTROL_PLANE_DATABASE_PASSWORD_FILE: /run/secrets/database_migrator_password
+    secrets:
+      - source: database-migrator-password
+        target: database_migrator_password
+        uid: "${CORE_AGENT_RUNTIME_UID:-12000}"
+        gid: "${CORE_AGENT_RUNTIME_GID:-12000}"
+        mode: 0o400
     read_only: true
     cap_drop:
       - ALL
@@ -126,6 +151,7 @@ services:
       CONTROL_PLANE_API_PORT: "8787"
       CONTROL_PLANE_BOOTSTRAP_KEY_FILE: /run/secrets/bootstrap_key
       CONTROL_PLANE_DATABASE_URL: postgresql://core_agent_app@postgres:5432/core_agent_runtime
+      CONTROL_PLANE_DATABASE_PASSWORD_FILE: /run/secrets/database_app_password
       CONTROL_PLANE_IMAGE_LOCK_FILE: /run/core-agent/config/hermes-images.lock.json
       CONTROL_PLANE_PROVIDER_CATALOG_FILE: /app/infra/runtime/providers.json
       CONTROL_PLANE_SECRET_ROOT: /run/unavailable/api-secrets
@@ -137,6 +163,11 @@ services:
         uid: "${CORE_AGENT_RUNTIME_UID:-12000}"
         gid: "${CORE_AGENT_RUNTIME_GID:-12000}"
         mode: 0o600
+      - source: database-app-password
+        target: database_app_password
+        uid: "${CORE_AGENT_RUNTIME_UID:-12000}"
+        gid: "${CORE_AGENT_RUNTIME_GID:-12000}"
+        mode: 0o400
     volumes:
       - type: bind
         source: ${CORE_AGENT_HERMES_IMAGE_LOCK_FILE:?set CORE_AGENT_HERMES_IMAGE_LOCK_FILE}
@@ -193,10 +224,17 @@ services:
     environment:
       CONTROL_PLANE_BOOTSTRAP_KEY_FILE: /run/unavailable/bootstrap-key
       CONTROL_PLANE_DATABASE_URL: postgresql://core_agent_app@postgres:5432/core_agent_runtime
+      CONTROL_PLANE_DATABASE_PASSWORD_FILE: /run/secrets/database_app_password
       CONTROL_PLANE_PROVIDER_CATALOG_FILE: /app/infra/runtime/providers.json
       CONTROL_PLANE_SECRET_ROOT: /run/core-agent/ingress
       CONTROL_PLANE_SUPERVISOR_SOCKET: /run/core-agent/supervisor/runtime.sock
       CONTROL_PLANE_WORKER_ID: runtime-worker-1
+    secrets:
+      - source: database-app-password
+        target: database_app_password
+        uid: "${CORE_AGENT_RUNTIME_UID:-12002}"
+        gid: "${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}"
+        mode: 0o400
     volumes:
       - type: bind
         source: ./providers.dev.json
@@ -362,6 +400,14 @@ volumes:
 secrets:
   bootstrap-key:
     file: ${CORE_AGENT_BOOTSTRAP_KEY_FILE:?set CORE_AGENT_BOOTSTRAP_KEY_FILE}
+  postgres-bootstrap-password:
+    file: ${CORE_AGENT_POSTGRES_BOOTSTRAP_PASSWORD_FILE:?set CORE_AGENT_POSTGRES_BOOTSTRAP_PASSWORD_FILE}
+  database-migrator-password:
+    file: ${CORE_AGENT_DATABASE_MIGRATOR_PASSWORD_FILE:?set CORE_AGENT_DATABASE_MIGRATOR_PASSWORD_FILE}
+  database-app-password:
+    file: ${CORE_AGENT_DATABASE_APP_PASSWORD_FILE:?set CORE_AGENT_DATABASE_APP_PASSWORD_FILE}
+  database-identity-password:
+    file: ${CORE_AGENT_DATABASE_IDENTITY_PASSWORD_FILE:?set CORE_AGENT_DATABASE_IDENTITY_PASSWORD_FILE}
 
 networks:
   core-agent-control:

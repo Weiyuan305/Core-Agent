@@ -9,7 +9,8 @@ import {
 } from "../src/index.js";
 
 const runtimeEnvironment = {
-  CONTROL_PLANE_DATABASE_URL: "postgres://runtime:runtime@127.0.0.1/runtime",
+  CONTROL_PLANE_DATABASE_URL: "postgres://runtime@127.0.0.1/runtime",
+  CONTROL_PLANE_DATABASE_PASSWORD_FILE: "/run/secrets/database-password",
   CONTROL_PLANE_BOOTSTRAP_KEY_FILE: "/run/secrets/bootstrap-key",
   CONTROL_PLANE_SECRET_ROOT: "/run/core-agent/secrets",
   CONTROL_PLANE_SUPERVISOR_SOCKET: "/run/core-agent/supervisor.sock",
@@ -43,7 +44,8 @@ test("managed runtime naming has one deterministic producer and policy vector", 
 
 test("environment uses the managed defaults and returns a closed configuration", () => {
   assert.deepEqual(loadRuntimeEnvironment(runtimeEnvironment), {
-    databaseUrl: "postgres://runtime:runtime@127.0.0.1/runtime",
+    databaseUrl: "postgres://runtime@127.0.0.1/runtime",
+    databasePasswordFile: "/run/secrets/database-password",
     bootstrapKeyFile: "/run/secrets/bootstrap-key",
     apiHost: "127.0.0.1",
     apiPort: 8787,
@@ -90,6 +92,7 @@ test("environment permits an explicit container-only wildcard bind", () => {
 test("environment requires every server-managed value", () => {
   const requiredNames = [
     "CONTROL_PLANE_DATABASE_URL",
+    "CONTROL_PLANE_DATABASE_PASSWORD_FILE",
     "CONTROL_PLANE_BOOTSTRAP_KEY_FILE",
     "CONTROL_PLANE_SECRET_ROOT",
     "CONTROL_PLANE_SUPERVISOR_SOCKET",

@@ -99,10 +99,11 @@ jobs:
           - 5432:5432
         env:
           POSTGRES_DB: postgres
-          POSTGRES_HOST_AUTH_METHOD: trust
-          POSTGRES_USER: postgres
+          POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=trust
+          POSTGRES_PASSWORD: ${{ github.token }}
+          POSTGRES_USER: core_agent_ci
         options: >-
-          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-cmd "pg_isready -U core_agent_ci -d postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
@@ -119,10 +120,15 @@ jobs:
       - name: Install pinned dependencies
         run: npm ci
 
-      - name: Create least-privilege CI database role
+      - name: Restrict CI database role and project protected credential file
+        env:
+          CI_DATABASE_PASSWORD: ${{ github.token }}
         run: |
-          docker exec "${{ job.services.postgres.id }}" psql --username postgres --dbname postgres --set ON_ERROR_STOP=1 --command "CREATE ROLE core_agent_ci LOGIN NOSUPERUSER CREATEDB NOCREATEROLE"
-          docker exec "${{ job.services.postgres.id }}" psql --username postgres --dbname postgres --set ON_ERROR_STOP=1 --command "CREATE DATABASE core_agent_control OWNER core_agent_ci"
+          docker exec "${{ job.services.postgres.id }}" psql --username core_agent_ci --dbname postgres --set ON_ERROR_STOP=1 --command "ALTER ROLE core_agent_ci NOSUPERUSER CREATEDB NOCREATEROLE"
+          docker exec "${{ job.services.postgres.id }}" psql --username core_agent_ci --dbname postgres --set ON_ERROR_STOP=1 --command "CREATE DATABASE core_agent_control OWNER core_agent_ci"
+          install -m 0600 /dev/null "$RUNNER_TEMP/core-agent-ci.pgpass"
+          printf '127.0.0.1:5432:*:core_agent_ci:%s\n' "$CI_DATABASE_PASSWORD" > "$RUNNER_TEMP/core-agent-ci.pgpass"
+          echo "PGPASSFILE=$RUNNER_TEMP/core-agent-ci.pgpass" >> "$GITHUB_ENV"
 
       - name: Run real PostgreSQL suites
         run: npm run test:postgres
@@ -140,10 +146,11 @@ jobs:
           - 5432:5432
         env:
           POSTGRES_DB: postgres
-          POSTGRES_HOST_AUTH_METHOD: trust
-          POSTGRES_USER: postgres
+          POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=trust
+          POSTGRES_PASSWORD: ${{ github.token }}
+          POSTGRES_USER: core_agent_ci
         options: >-
-          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-cmd "pg_isready -U core_agent_ci -d postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
@@ -160,10 +167,15 @@ jobs:
       - name: Install pinned dependencies
         run: npm ci
 
-      - name: Create least-privilege CI database role
+      - name: Restrict CI database role and project protected credential file
+        env:
+          CI_DATABASE_PASSWORD: ${{ github.token }}
         run: |
-          docker exec "${{ job.services.postgres.id }}" psql --username postgres --dbname postgres --set ON_ERROR_STOP=1 --command "CREATE ROLE core_agent_ci LOGIN NOSUPERUSER CREATEDB NOCREATEROLE"
-          docker exec "${{ job.services.postgres.id }}" psql --username postgres --dbname postgres --set ON_ERROR_STOP=1 --command "CREATE DATABASE core_agent_control OWNER core_agent_ci"
+          docker exec "${{ job.services.postgres.id }}" psql --username core_agent_ci --dbname postgres --set ON_ERROR_STOP=1 --command "ALTER ROLE core_agent_ci NOSUPERUSER CREATEDB NOCREATEROLE"
+          docker exec "${{ job.services.postgres.id }}" psql --username core_agent_ci --dbname postgres --set ON_ERROR_STOP=1 --command "CREATE DATABASE core_agent_control OWNER core_agent_ci"
+          install -m 0600 /dev/null "$RUNNER_TEMP/core-agent-ci.pgpass"
+          printf '127.0.0.1:5432:*:core_agent_ci:%s\n' "$CI_DATABASE_PASSWORD" > "$RUNNER_TEMP/core-agent-ci.pgpass"
+          echo "PGPASSFILE=$RUNNER_TEMP/core-agent-ci.pgpass" >> "$GITHUB_ENV"
 
       - name: Run fake Supervisor and Hermes full slice
         run: npm run test:integration
@@ -202,6 +214,10 @@ jobs:
       - name: Validate Compose configuration
         env:
           CORE_AGENT_BOOTSTRAP_KEY_FILE: /tmp/core-agent-bootstrap-path-only
+          CORE_AGENT_POSTGRES_BOOTSTRAP_PASSWORD_FILE: /tmp/core-agent-postgres-bootstrap-password-path-only
+          CORE_AGENT_DATABASE_MIGRATOR_PASSWORD_FILE: /tmp/core-agent-database-migrator-password-path-only
+          CORE_AGENT_DATABASE_APP_PASSWORD_FILE: /tmp/core-agent-database-app-password-path-only
+          CORE_AGENT_DATABASE_IDENTITY_PASSWORD_FILE: /tmp/core-agent-database-identity-password-path-only
           CORE_AGENT_DOCKER_GID: "999"
           CORE_AGENT_DOCKER_SOCKET_SOURCE: /var/run/docker.sock
           CORE_AGENT_HERMES_IMAGE_LOCK_FILE: /tmp/core-agent-product-image-lock-path-only

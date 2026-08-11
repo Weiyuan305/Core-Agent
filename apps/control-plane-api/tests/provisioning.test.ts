@@ -69,7 +69,7 @@ test("provisioning returns one accepted runtime and replays the same direct resp
   await writeFile(bootstrapKeyFile, `${bootstrapKey}\n`, { mode: 0o600 });
   const app = await buildControlPlaneApp({
     environment: {
-      databaseUrl, bootstrapKeyFile, apiHost: "127.0.0.1", apiPort: 8787,
+      databaseUrl, databasePasswordFile: join(directory, "database-password"), bootstrapKeyFile, apiHost: "127.0.0.1", apiPort: 8787,
       secretRoot: directory, supervisorSocket: join(directory, "supervisor.sock"),
       providerCatalogFile: join(directory, "providers.json"), workerId: "worker_test",
     },

@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 
-import { assertSchemaVersion, createRedactor, createRuntimeDatabase, FileSecretStore, HermesClient, loadProviderCatalog, loadRuntimeEnvironment, RuntimeSupervisorClient } from "@core-agent/runtime-core";
+import { assertSchemaVersion, createRedactor, createRuntimeDatabase, databaseConnectionOptions, FileSecretStore, HermesClient, loadProviderCatalog, loadRuntimeEnvironment, readProtectedDatabasePassword, RuntimeSupervisorClient } from "@core-agent/runtime-core";
 import { Pool } from "pg";
 
 import { HttpHermesReadinessClient } from "./hermes-readiness-client.js";
@@ -54,7 +54,8 @@ export async function startControlPlaneWorker(environment: NodeJS.ProcessEnv = p
   let providerJson: unknown;
   try { providerJson = JSON.parse(await readFile(providerPath, "utf8")) as unknown; }
   catch { throw new Error("Control Plane Worker configuration is invalid"); }
-  const pool = new Pool({ connectionString: configuration.databaseUrl });
+  const databasePassword = await readProtectedDatabasePassword(configuration.databasePasswordFile);
+  const pool = new Pool(databaseConnectionOptions(configuration.databaseUrl, databasePassword));
   const db = createRuntimeDatabase(pool);
   const controller = new AbortController();
   const stop = () => controller.abort();

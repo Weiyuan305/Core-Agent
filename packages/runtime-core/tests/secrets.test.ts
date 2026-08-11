@@ -28,6 +28,22 @@ test.afterEach(async () => {
   await rm(temporaryDirectory, { recursive: true, force: true });
 });
 
+test("protected database password loader accepts one owner-only file and rejects unsafe projections", async () => {
+  const runtimeCore = await import("../src/index.js") as Record<string, unknown>;
+  assert.equal(typeof runtimeCore.readProtectedDatabasePassword, "function");
+  const readPassword = runtimeCore.readProtectedDatabasePassword as (path: string) => Promise<string>;
+  const passwordPath = join(temporaryDirectory, "database-password");
+  await writeFile(passwordPath, "synthetic-database-password-0123456789", { mode: 0o600 });
+  await chmod(passwordPath, 0o600);
+  assert.equal(await readPassword(passwordPath), "synthetic-database-password-0123456789");
+
+  await chmod(passwordPath, 0o640);
+  await assert.rejects(readPassword(passwordPath), /Database credential file is invalid/u);
+  await unlink(passwordPath);
+  await symlink(outsideFile, passwordPath);
+  await assert.rejects(readPassword(passwordPath), /Database credential file is invalid/u);
+});
+
 test("file secret store accepts one owner-only file beneath its canonical root", async () => {
   const canonicalRoot = join(temporaryDirectory, "canonical-root");
   const rootLink = join(temporaryDirectory, "root-link");

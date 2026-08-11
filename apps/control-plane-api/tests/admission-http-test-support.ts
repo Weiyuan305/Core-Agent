@@ -78,6 +78,7 @@ export async function buildHttpAdmissionApp(
   const app = await buildControlPlaneApp({
     environment: {
       databaseUrl,
+      databasePasswordFile: join(directory, "database-password"),
       bootstrapKeyFile,
       apiHost: "127.0.0.1",
       apiPort: 8787,

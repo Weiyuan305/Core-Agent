@@ -53,7 +53,7 @@ test("runtime routes enforce scope and expected resource versions with direct en
   const bootstrapKeyFile = join(directory, "bootstrap-key");
   await writeFile(bootstrapKeyFile, `${bootstrapKey}\n`, { mode: 0o600 });
   const app = await buildControlPlaneApp({ environment: {
-    databaseUrl, bootstrapKeyFile, apiHost: "127.0.0.1", apiPort: 8787, secretRoot: directory,
+    databaseUrl, databasePasswordFile: join(directory, "database-password"), bootstrapKeyFile, apiHost: "127.0.0.1", apiPort: 8787, secretRoot: directory,
     supervisorSocket: join(directory, "supervisor.sock"), providerCatalogFile: join(directory, "providers.json"), workerId: "worker_test",
   }, db, providerCatalog, imageLock, logger, redactor: createRedactor([bootstrapKey]) });
   try {

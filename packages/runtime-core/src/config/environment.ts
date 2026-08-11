@@ -1,5 +1,6 @@
 export interface RuntimeEnvironment {
   databaseUrl: string;
+  databasePasswordFile: string;
   bootstrapKeyFile: string;
   apiHost: string;
   apiPort: number;
@@ -40,6 +41,7 @@ export function loadRuntimeEnvironment(env: NodeJS.ProcessEnv): RuntimeEnvironme
 
   return {
     databaseUrl: required("CONTROL_PLANE_DATABASE_URL"),
+    databasePasswordFile: required("CONTROL_PLANE_DATABASE_PASSWORD_FILE"),
     bootstrapKeyFile: required("CONTROL_PLANE_BOOTSTRAP_KEY_FILE"),
     apiHost,
     apiPort,

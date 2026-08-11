@@ -6,8 +6,10 @@ import { fileURLToPath } from "node:url";
 import {
   createRedactor,
   createRuntimeDatabase,
+  databaseConnectionOptions,
   loadProviderCatalog,
   loadRuntimeEnvironment,
+  readProtectedDatabasePassword,
 } from "@core-agent/runtime-core";
 import type { FastifyBaseLogger } from "fastify";
 import type { FastifyInstance } from "fastify";
@@ -48,7 +50,8 @@ async function readJson(path: string): Promise<unknown> {
 export async function startControlPlaneServer(environment: NodeJS.ProcessEnv = process.env) {
   const configuration = loadRuntimeEnvironment(environment);
   const imageLockPath = managedAbsolutePath(environment.CONTROL_PLANE_IMAGE_LOCK_FILE);
-  const pool = new Pool({ connectionString: configuration.databaseUrl });
+  const databasePassword = await readProtectedDatabasePassword(configuration.databasePasswordFile);
+  const pool = new Pool(databaseConnectionOptions(configuration.databaseUrl, databasePassword));
   const db = createRuntimeDatabase(pool);
   const logger = createPinoLogger();
   let app: FastifyInstance | undefined;
