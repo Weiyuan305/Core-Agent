@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 env:
-  CONTROL_PLANE_TEST_DATABASE_URL: postgresql://core_agent_ci@127.0.0.1:5432/core_agent_control
+  CONTROL_PLANE_TEST_DATABASE_URL: postgresql://core_agent_ci@127.0.0.1:5432/core_agent_runtime
 
 jobs:
   contract:
@@ -98,12 +98,12 @@ jobs:
         ports:
           - 5432:5432
         env:
-          POSTGRES_DB: postgres
+          POSTGRES_DB: core_agent_runtime
           POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=trust
-          POSTGRES_PASSWORD: ${{ github.token }}
+          POSTGRES_PASSWORD: synthetic-ci-db-${{ github.run_id }}-${{ github.run_attempt }}
           POSTGRES_USER: core_agent_ci
         options: >-
-          --health-cmd "pg_isready -U core_agent_ci -d postgres"
+          --health-cmd "pg_isready -U core_agent_ci -d core_agent_runtime"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
@@ -120,21 +120,25 @@ jobs:
       - name: Install pinned dependencies
         run: npm ci
 
-      - name: Restrict CI database role and project protected credential file
+      - name: Project protected CI database credential files
         env:
-          CI_DATABASE_PASSWORD: ${{ github.token }}
+          CI_DATABASE_PASSWORD: synthetic-ci-db-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
-          docker exec "${{ job.services.postgres.id }}" psql --username core_agent_ci --dbname postgres --set ON_ERROR_STOP=1 --command "ALTER ROLE core_agent_ci NOSUPERUSER CREATEDB NOCREATEROLE"
-          docker exec "${{ job.services.postgres.id }}" psql --username core_agent_ci --dbname postgres --set ON_ERROR_STOP=1 --command "CREATE DATABASE core_agent_control OWNER core_agent_ci"
+          install -m 0600 /dev/null "$RUNNER_TEMP/core-agent-ci-db-secret"
+          printf '%s' "$CI_DATABASE_PASSWORD" > "$RUNNER_TEMP/core-agent-ci-db-secret"
           install -m 0600 /dev/null "$RUNNER_TEMP/core-agent-ci.pgpass"
           printf '127.0.0.1:5432:*:core_agent_ci:%s\n' "$CI_DATABASE_PASSWORD" > "$RUNNER_TEMP/core-agent-ci.pgpass"
           echo "PGPASSFILE=$RUNNER_TEMP/core-agent-ci.pgpass" >> "$GITHUB_ENV"
+          echo "CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE=$RUNNER_TEMP/core-agent-ci-db-secret" >> "$GITHUB_ENV"
 
       - name: Run real PostgreSQL suites
         run: npm run test:postgres
 
       - name: Scan every public database text surface for the CI sentinel
         run: node scripts/scan-runtime-database.mjs synthetic-ci-sentinel-runtime-v1
+
+      - name: Scan actual CI database credential from protected file
+        run: node scripts/verify-no-secret.mjs --secret-file "$RUNNER_TEMP/core-agent-ci-db-secret"
 
   integration:
     runs-on: ubuntu-latest
@@ -145,12 +149,12 @@ jobs:
         ports:
           - 5432:5432
         env:
-          POSTGRES_DB: postgres
+          POSTGRES_DB: core_agent_runtime
           POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=trust
-          POSTGRES_PASSWORD: ${{ github.token }}
+          POSTGRES_PASSWORD: synthetic-ci-db-${{ github.run_id }}-${{ github.run_attempt }}
           POSTGRES_USER: core_agent_ci
         options: >-
-          --health-cmd "pg_isready -U core_agent_ci -d postgres"
+          --health-cmd "pg_isready -U core_agent_ci -d core_agent_runtime"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
@@ -167,21 +171,25 @@ jobs:
       - name: Install pinned dependencies
         run: npm ci
 
-      - name: Restrict CI database role and project protected credential file
+      - name: Project protected CI database credential files
         env:
-          CI_DATABASE_PASSWORD: ${{ github.token }}
+          CI_DATABASE_PASSWORD: synthetic-ci-db-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
-          docker exec "${{ job.services.postgres.id }}" psql --username core_agent_ci --dbname postgres --set ON_ERROR_STOP=1 --command "ALTER ROLE core_agent_ci NOSUPERUSER CREATEDB NOCREATEROLE"
-          docker exec "${{ job.services.postgres.id }}" psql --username core_agent_ci --dbname postgres --set ON_ERROR_STOP=1 --command "CREATE DATABASE core_agent_control OWNER core_agent_ci"
+          install -m 0600 /dev/null "$RUNNER_TEMP/core-agent-ci-db-secret"
+          printf '%s' "$CI_DATABASE_PASSWORD" > "$RUNNER_TEMP/core-agent-ci-db-secret"
           install -m 0600 /dev/null "$RUNNER_TEMP/core-agent-ci.pgpass"
           printf '127.0.0.1:5432:*:core_agent_ci:%s\n' "$CI_DATABASE_PASSWORD" > "$RUNNER_TEMP/core-agent-ci.pgpass"
           echo "PGPASSFILE=$RUNNER_TEMP/core-agent-ci.pgpass" >> "$GITHUB_ENV"
+          echo "CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE=$RUNNER_TEMP/core-agent-ci-db-secret" >> "$GITHUB_ENV"
 
       - name: Run fake Supervisor and Hermes full slice
         run: npm run test:integration
 
       - name: Scan integration evidence for the CI sentinel
         run: node scripts/verify-no-secret.mjs synthetic-ci-sentinel-runtime-v1
+
+      - name: Scan actual CI database credential from protected file
+        run: node scripts/verify-no-secret.mjs --secret-file "$RUNNER_TEMP/core-agent-ci-db-secret"
 
   compose:
     runs-on: ubuntu-latest
@@ -218,6 +226,8 @@ jobs:
           CORE_AGENT_DATABASE_MIGRATOR_PASSWORD_FILE: /tmp/core-agent-database-migrator-password-path-only
           CORE_AGENT_DATABASE_APP_PASSWORD_FILE: /tmp/core-agent-database-app-password-path-only
           CORE_AGENT_DATABASE_IDENTITY_PASSWORD_FILE: /tmp/core-agent-database-identity-password-path-only
+          CORE_AGENT_CREDENTIAL_MOUNT_GID: "1001"
+          CORE_AGENT_CREDENTIAL_MOUNT_UID: "1001"
           CORE_AGENT_DOCKER_GID: "999"
           CORE_AGENT_DOCKER_SOCKET_SOURCE: /var/run/docker.sock
           CORE_AGENT_HERMES_IMAGE_LOCK_FILE: /tmp/core-agent-product-image-lock-path-only
@@ -229,3 +239,6 @@ jobs:
 
       - name: Run static topology assertions
         run: npm run test:runtime
+
+      - name: Run disposable PostgreSQL authentication topology
+        run: npm run test:runtime:database-auth-topology

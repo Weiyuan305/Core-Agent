@@ -13,14 +13,16 @@ export interface RuntimeDatabaseAuthBootstrapInput {
   readonly identityPasswordFile: string;
 }
 
-const roles = ["core_agent_migrator", "core_agent_app", "core_agent_identity"] as const;
-
-async function setRolePassword(client: Client, role: (typeof roles)[number], password: string): Promise<void> {
+async function setRolePassword(client: Client, role: string, password: string): Promise<void> {
+  await client.query("select set_config('core_agent.database_role_name', $1, true)", [role]);
   await client.query("select set_config('core_agent.database_role_password', $1, true)", [password]);
   await client.query(`do $password$
-    declare role_password text := current_setting('core_agent.database_role_password');
+    declare
+      role_name text := current_setting('core_agent.database_role_name');
+      role_password text := current_setting('core_agent.database_role_password');
     begin
-      execute format('alter role ${role} password %L', role_password);
+      execute format('alter role %I password %L', role_name, role_password);
+      perform set_config('core_agent.database_role_name', '', true);
       perform set_config('core_agent.database_role_password', '', true);
     end
   $password$`);
@@ -34,6 +36,15 @@ export async function bootstrapRuntimeDatabaseAuth(input: RuntimeDatabaseAuthBoo
     readProtectedDatabasePassword(input.identityPasswordFile),
   ]);
   if (new Set([bootstrapPassword, migratorPassword, applicationPassword, identityPassword]).size !== 4) {
+    throw new Error("Database authentication bootstrap failed");
+  }
+  let bootstrapRole: string;
+  try {
+    bootstrapRole = new URL(input.databaseUrl).username;
+  } catch {
+    throw new Error("Database authentication bootstrap failed");
+  }
+  if (!/^core_agent_[a-z0-9_]+$/u.test(bootstrapRole)) {
     throw new Error("Database authentication bootstrap failed");
   }
   const options = databaseConnectionOptions(input.databaseUrl, bootstrapPassword);
@@ -58,6 +69,7 @@ export async function bootstrapRuntimeDatabaseAuth(input: RuntimeDatabaseAuthBoo
     await client.query("alter role core_agent_migrator login nosuperuser nocreatedb nocreaterole noinherit");
     await client.query("alter role core_agent_app login nosuperuser nocreatedb nocreaterole noinherit");
     await client.query("alter role core_agent_identity login nosuperuser nocreatedb nocreaterole noinherit");
+    await setRolePassword(client, bootstrapRole, bootstrapPassword);
     await setRolePassword(client, "core_agent_migrator", migratorPassword);
     await setRolePassword(client, "core_agent_app", applicationPassword);
     await setRolePassword(client, "core_agent_identity", identityPassword);

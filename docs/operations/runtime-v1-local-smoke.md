@@ -314,6 +314,17 @@ identity, platform, and immutable reference. Do not put secret bytes in it.
 `CORE_AGENT_NODE_IMAGE` and `CORE_AGENT_POSTGRES_IMAGE` must equal the selected
 platform entries generated in `infra/runtime/base-images.lock.json`.
 
+Set `CORE_AGENT_CREDENTIAL_MOUNT_UID/GID` to the metadata Docker exposes for
+each protected database credential bind: the runtime UID/GID pair on native
+Linux, or `0/0` only when the selected Docker Desktop/Colima implementation
+projects those binds as root-owned. Verify all four sources report the same
+owner, group, regular-file type, safe mode, and nonzero size through the locked
+Node image using `stat`; never read or print their contents. The projector
+accepts only the runtime identity pair or `0/0`. This container-view check does
+not replace `runtime:paths`, which separately requires the actual host files to
+be canonical, regular, single-linked, nonempty, runtime-owned, and mode `0400`
+or `0600`, and rejects missing files, directories, symlinks, or unsafe owners.
+
 ## Validate and run
 
 ### Strict acceptance smoke
@@ -336,7 +347,7 @@ checks this before every Docker operation, then requires the selected context
 endpoint to be a canonical local `unix://` socket before it issues a network
 subcommand. It fails closed instead of creating or inspecting a network through
 an ambient endpoint or context override.
-`runtime:paths` enforces all four canonical host-path owner, mode,
+`runtime:paths` enforces all configured canonical host-path owner, mode,
 link-count, and non-overlap rules and creates private state-root `staging` and
 `ingress` children. On macOS/Colima, keep state below a canonical Docker-shared
 host path such as `/Users/...`; Supervisor passes those host child paths to the

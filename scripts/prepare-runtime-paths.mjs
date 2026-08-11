@@ -57,7 +57,7 @@ async function canonicalExisting(path) {
   return canonical;
 }
 
-async function inspectProjection({ path, kind, uid, gid, mode }) {
+async function inspectProjection({ path, kind, uid, gid, mode, modes, minimumSize, maximumSize }) {
   const canonical = await canonicalExisting(path);
   await requireProtectedAncestors(canonical);
   const namedBefore = await lstat(canonical);
@@ -73,7 +73,11 @@ async function inspectProjection({ path, kind, uid, gid, mode }) {
       || (kind === "file" && held.nlink !== 1)
       || held.uid !== uid
       || held.gid !== gid
-      || (held.mode & 0o7777) !== mode
+      || (modes === undefined
+        ? (held.mode & 0o7777) !== mode
+        : !modes.includes(held.mode & 0o7777))
+      || (minimumSize !== undefined && held.size < minimumSize)
+      || (maximumSize !== undefined && held.size > maximumSize)
       || !sameIdentityAndLinkCount(namedBefore, held)
       || !sameIdentityAndLinkCount(held, namedAfter)
     ) throw preparationError();
@@ -106,6 +110,12 @@ export function resolveRuntimePathPolicy(environment = process.env) {
       : identity(environment, "CORE_AGENT_RUNTIME_UID", 0);
     return {
       bootstrapPath: absolutePath(environment, "CORE_AGENT_BOOTSTRAP_KEY_FILE"),
+      databaseCredentialPaths: {
+        bootstrap: absolutePath(environment, "CORE_AGENT_POSTGRES_BOOTSTRAP_PASSWORD_FILE"),
+        migrator: absolutePath(environment, "CORE_AGENT_DATABASE_MIGRATOR_PASSWORD_FILE"),
+        application: absolutePath(environment, "CORE_AGENT_DATABASE_APP_PASSWORD_FILE"),
+        identity: absolutePath(environment, "CORE_AGENT_DATABASE_IDENTITY_PASSWORD_FILE"),
+      },
       providerRoot: absolutePath(environment, "CORE_AGENT_PROVIDER_SECRET_ROOT"),
       ingressRoot: absolutePath(environment, "CORE_AGENT_INGRESS_SECRET_ROOT"),
       stateRoot: absolutePath(environment, "CORE_AGENT_SUPERVISOR_STATE_ROOT"),
@@ -124,6 +134,16 @@ export async function prepareRuntimePaths({ environment = process.env } = {}) {
     const policy = resolveRuntimePathPolicy(environment);
     const existing = [
       { purpose: "bootstrap", path: policy.bootstrapPath, kind: "file", uid: policy.bootstrapUid, gid: policy.bootstrapGid, mode: 0o600 },
+      ...Object.entries(policy.databaseCredentialPaths).map(([purpose, path]) => ({
+        purpose: `database-${purpose}`,
+        path,
+        kind: "file",
+        uid: policy.bootstrapUid,
+        gid: policy.bootstrapGid,
+        modes: [0o400, 0o600],
+        minimumSize: 24,
+        maximumSize: 256,
+      })),
       { purpose: "provider", path: policy.providerRoot, kind: "directory", uid: policy.supervisorUid, gid: policy.supervisorGid, mode: 0o700 },
       { purpose: "ingress", path: policy.ingressRoot, kind: "directory", uid: policy.supervisorUid, gid: policy.supervisorGid, mode: 0o700 },
     ];

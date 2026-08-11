@@ -1,9 +1,12 @@
-import { createReadStream } from "node:fs";
-import { lstat, opendir } from "node:fs/promises";
+import { constants, createReadStream } from "node:fs";
+import { lstat, open, opendir } from "node:fs/promises";
 import { basename, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 
-const [sentinel, ...explicitArtifactPaths] = process.argv.slice(2);
+const arguments_ = process.argv.slice(2);
+let sentinelText;
+let sentinelBuffer;
+let explicitArtifactPaths;
 try {
   await main();
 } catch {
@@ -12,29 +15,67 @@ try {
 }
 
 async function main() {
-  if (sentinel === undefined || sentinel.length === 0 || Buffer.byteLength(sentinel) > 1024) {
-    process.exitCode = 2;
-    return;
+  if (arguments_[0] === "--secret-file") {
+    if (arguments_.length < 2) return invalid();
+    sentinelBuffer = await readProtectedSentinel(resolve(arguments_[1]));
+    explicitArtifactPaths = arguments_.slice(2);
+  } else {
+    [sentinelText, ...explicitArtifactPaths] = arguments_;
+    if (sentinelText === undefined || sentinelText.length === 0 || Buffer.byteLength(sentinelText) > 1024) return invalid();
+    sentinelBuffer = Buffer.from(sentinelText);
   }
-  const sentinelBuffer = Buffer.from(sentinel);
-  const repositoryRoot = resolve(import.meta.dirname, "..");
-  const tracked = trackedArtifactPaths(repositoryRoot);
-  const explicit = await expandExplicitArtifacts(explicitArtifactPaths);
-  const artifacts = new Map();
-  for (const path of [...tracked, ...explicit]) artifacts.set(resolve(path), path);
+  try {
+    const repositoryRoot = resolve(import.meta.dirname, "..");
+    const tracked = trackedArtifactPaths(repositoryRoot);
+    const explicit = await expandExplicitArtifacts(explicitArtifactPaths);
+    const artifacts = new Map();
+    for (const path of [...tracked, ...explicit]) artifacts.set(resolve(path), path);
 
-  const matches = [];
-  for (const [path, identifier] of artifacts) {
-    if (await containsSentinel(path, sentinelBuffer)) matches.push(identifier);
+    const matches = [];
+    for (const [path, identifier] of artifacts) {
+      if (await containsSentinel(path, sentinelBuffer)) matches.push(identifier);
+    }
+
+    if (matches.length > 0) {
+      emitIdentifiers(
+        matches.sort().map((identifier) => displayIdentifier(identifier, repositoryRoot)),
+        sentinelText,
+        sentinelBuffer,
+      );
+      process.exitCode = 1;
+    }
+  } finally {
+    if (sentinelText === undefined) sentinelBuffer.fill(0);
   }
+}
 
-  if (matches.length > 0) {
-    emitIdentifiers(
-      matches.sort().map((identifier) => displayIdentifier(identifier, repositoryRoot)),
-      sentinel,
-      sentinelBuffer,
-    );
-    process.exitCode = 1;
+function invalid() {
+  process.exitCode = 2;
+}
+
+function sameFile(left, right) {
+  return left.dev === right.dev && left.ino === right.ino && left.nlink === right.nlink
+    && left.size === right.size && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
+}
+
+async function readProtectedSentinel(path) {
+  const namedBefore = await lstat(path);
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const buffer = Buffer.alloc(1025);
+  try {
+    const before = await handle.stat();
+    if (!before.isFile() || before.nlink !== 1 || before.uid !== process.getuid?.()
+      || (before.mode & 0o7777) !== 0o600 || before.size < 1 || before.size > 1024
+      || !sameFile(namedBefore, before)) throw new Error("unsafe sentinel file");
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const [after, namedAfter] = await Promise.all([handle.stat(), lstat(path)]);
+    if (bytesRead !== before.size || !sameFile(before, after) || !sameFile(after, namedAfter)) {
+      throw new Error("unstable sentinel file");
+    }
+    return Buffer.from(buffer.subarray(0, bytesRead));
+  } finally {
+    buffer.fill(0);
+    await handle.close().catch(() => undefined);
   }
 }
 
@@ -78,11 +119,11 @@ async function collectArtifact(path, identifier, output) {
   try {
     metadata = await lstat(path);
   } catch {
-    emitIdentifiers([basename(identifier)], sentinel, Buffer.from(sentinel));
+    emitIdentifiers([basename(identifier)], sentinelText, sentinelBuffer);
     process.exit(2);
   }
   if (metadata.isSymbolicLink()) {
-    emitIdentifiers([basename(identifier)], sentinel, Buffer.from(sentinel));
+    emitIdentifiers([basename(identifier)], sentinelText, sentinelBuffer);
     process.exit(2);
   }
   if (metadata.isFile()) {
@@ -90,7 +131,7 @@ async function collectArtifact(path, identifier, output) {
     return;
   }
   if (!metadata.isDirectory()) {
-    emitIdentifiers([basename(identifier)], sentinel, Buffer.from(sentinel));
+    emitIdentifiers([basename(identifier)], sentinelText, sentinelBuffer);
     process.exit(2);
   }
 
@@ -100,7 +141,7 @@ async function collectArtifact(path, identifier, output) {
       await collectArtifact(resolve(path, entry.name), resolve(identifier, entry.name), output);
     }
   } catch {
-    emitIdentifiers([basename(identifier)], sentinel, Buffer.from(sentinel));
+    emitIdentifiers([basename(identifier)], sentinelText, sentinelBuffer);
     process.exit(2);
   }
 }
@@ -110,7 +151,7 @@ async function containsSentinel(path, sentinelBuffer) {
   try {
     const metadata = await lstat(path);
     if (!metadata.isFile() || metadata.isSymbolicLink()) {
-      emitIdentifiers([basename(path)], sentinel, sentinelBuffer);
+      emitIdentifiers([basename(path)], sentinelText, sentinelBuffer);
       process.exit(2);
     }
     for await (const chunk of createReadStream(path, { highWaterMark: 64 * 1024 })) {
@@ -122,16 +163,18 @@ async function containsSentinel(path, sentinelBuffer) {
     }
     return false;
   } catch {
-    emitIdentifiers([basename(path)], sentinel, sentinelBuffer);
+    emitIdentifiers([basename(path)], sentinelText, sentinelBuffer);
     process.exit(2);
   }
 }
 
-function emitIdentifiers(identifiers, sentinelText, sentinelBuffer) {
+function emitIdentifiers(identifiers, protectedText, protectedBuffer) {
   const output = Buffer.from(`${identifiers
-    .map((identifier) => JSON.stringify(identifier.split(sentinelText).join("[REDACTED]")))
+    .map((identifier) => JSON.stringify(
+      protectedText === undefined ? identifier : identifier.split(protectedText).join("[REDACTED]"),
+    ))
     .join("\n")}\n`);
-  if (output.includes(sentinelBuffer)) return;
+  if (output.includes(protectedBuffer)) return;
   process.stderr.write(output);
 }
 

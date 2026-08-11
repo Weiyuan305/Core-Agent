@@ -342,9 +342,12 @@ test("database role bootstrap enforces SCRAM credentials and rotates persisted v
   const databaseName = databaseUrl.pathname.slice(1);
   assert.match(databaseName, /^core_agent_[a-z0-9_]+$/u);
   const bootstrapRole = databaseUrl.username;
-  const originalBootstrapPassword = databaseUrl.password;
   assert.match(bootstrapRole, /^core_agent_[a-z0-9_]+$/u);
-  assert(originalBootstrapPassword.length > 0);
+  assert.equal(databaseUrl.password, "");
+  const protectedPasswordFile = process.env.CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE;
+  assert(protectedPasswordFile, "CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE is required for authentication tests");
+  assert.equal(typeof runtimeCore.readProtectedDatabasePassword, "function");
+  const originalBootstrapPassword = await (runtimeCore.readProtectedDatabasePassword as (path: string) => Promise<string>)(protectedPasswordFile);
   const bootstrapPassword = randomBytes(32).toString("base64url");
   databaseUrl.password = "";
 
@@ -439,13 +442,14 @@ test("database role bootstrap enforces SCRAM credentials and rotates persisted v
        from pg_authid
        where rolname = any($1::text[])
        order by rolname`,
-      [["core_agent_app", "core_agent_identity", "core_agent_migrator"]],
+      [["core_agent_app", bootstrapRole, "core_agent_identity", "core_agent_migrator"]],
     );
     assert.deepEqual(roles.rows, [
       { rolname: "core_agent_app", scram: true },
+      { rolname: bootstrapRole, scram: true },
       { rolname: "core_agent_identity", scram: true },
       { rolname: "core_agent_migrator", scram: true },
-    ]);
+    ].sort((left, right) => left.rolname.localeCompare(right.rolname)));
     for (const [role, password] of [
       ["core_agent_app", first.applicationPasswordFile],
       ["core_agent_identity", first.identityPasswordFile],

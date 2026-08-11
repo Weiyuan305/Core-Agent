@@ -374,6 +374,37 @@ test("sentinel scanner emits identifiers only when the complete output is sentin
   }
 });
 
+test("sentinel scanner reads the actual sentinel from one protected file", async () => {
+  const sentinel = "synthetic-ci-db-runtime-private-000001";
+  const sentinelFile = join(temporaryDirectory, "ci-database-secret");
+  const cleanArtifact = join(temporaryDirectory, "clean-ci-output.log");
+  const leakedArtifact = join(temporaryDirectory, "leaked-ci-output.log");
+  await writeFile(sentinelFile, sentinel, { mode: 0o600 });
+  await chmod(sentinelFile, 0o600);
+  await writeFile(cleanArtifact, "clean output", { mode: 0o600 });
+  await writeFile(leakedArtifact, sentinel, { mode: 0o600 });
+
+  const clean = spawnSync(process.execPath, [scannerPath, "--secret-file", sentinelFile, cleanArtifact], {
+    cwd: repositoryRoot,
+  });
+  assert.equal(clean.status, 0, clean.stderr.toString("utf8"));
+  assert.equal(Buffer.concat([clean.stdout, clean.stderr]).length, 0);
+
+  const leaked = spawnSync(process.execPath, [scannerPath, "--secret-file", sentinelFile, leakedArtifact], {
+    cwd: repositoryRoot,
+  });
+  assert.equal(leaked.status, 1);
+  const output = Buffer.concat([leaked.stdout, leaked.stderr]);
+  assert.equal(output.includes(Buffer.from(sentinel)), false);
+
+  await chmod(sentinelFile, 0o640);
+  const unsafe = spawnSync(process.execPath, [scannerPath, "--secret-file", sentinelFile, cleanArtifact], {
+    cwd: repositoryRoot,
+  });
+  assert.equal(unsafe.status, 2);
+  assert.equal(Buffer.concat([unsafe.stdout, unsafe.stderr]).includes(Buffer.from(sentinel)), false);
+});
+
 test("sentinel scanner contains unreadable-directory errors without uncaught output", async () => {
   const sentinel = "scanner-error-sentinel";
   const controlByte = "\u001b";

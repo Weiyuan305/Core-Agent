@@ -19,6 +19,7 @@
     "test:postgres": "npm run build:runtime-deps && npm run test:postgres -w @core-agent/runtime-core && npm run test:postgres -w @core-agent/control-plane-api",
     "test:integration": "npm run build:runtime-deps && node --import tsx --test --test-concurrency=1 tests/integration/provisioning.test.ts tests/integration/agent-run.test.ts tests/integration/recovery.test.ts tests/integration/security.test.ts tests/integration/conversation-reliability.test.ts",
     "test:runtime": "node --test tests/runtime/*.test.mjs",
+    "test:runtime:database-auth-topology": "node --test --test-concurrency=1 tests/runtime/database-auth-topology.integration.mjs",
     "contracts:build": "npm run build -w @core-agent/contracts",
     "contracts:test": "npm run test -w @core-agent/contracts",
     "contracts:schemas": "npm run schemas -w @core-agent/contracts",

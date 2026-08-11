@@ -72,18 +72,19 @@ function parseDockerfile(text) {
 test("only the fixed API ingress publishes a loopback port and only Supervisor mounts Docker", async () => {
   const config = await yaml("infra/runtime/compose.dev.yaml");
   assert.deepEqual(Object.keys(config.services).sort(), [
-    "api", "api-ingress", "identity-role-bootstrap", "migrate", "postgres", "supervisor", "supervisor-socket-preflight",
+    "api", "api-ingress", "database-credential-projector", "identity-role-bootstrap", "migrate", "postgres",
+    "postgres-auth-convergence", "supervisor", "supervisor-socket-preflight",
     "supervisor-socket-volume-init", "worker",
   ]);
   assert.equal(config.services.api.ports, undefined);
   assert.deepEqual(config.services["api-ingress"].ports, ["127.0.0.1:8787:8787"]);
   for (const name of [
-    "postgres", "identity-role-bootstrap", "migrate", "api", "worker", "supervisor", "supervisor-socket-preflight",
+    "postgres", "database-credential-projector", "identity-role-bootstrap", "postgres-auth-convergence", "migrate", "api", "worker", "supervisor", "supervisor-socket-preflight",
     "supervisor-socket-volume-init",
   ]) {
     assert.equal(config.services[name].ports, undefined);
   }
-  for (const name of ["postgres", "identity-role-bootstrap", "migrate", "api", "api-ingress", "worker"]) {
+  for (const name of ["postgres", "database-credential-projector", "identity-role-bootstrap", "postgres-auth-convergence", "migrate", "api", "api-ingress", "worker"]) {
     assert(!JSON.stringify(config.services[name]).includes("docker.sock"));
   }
   for (const service of Object.values(config.services)) {
@@ -138,8 +139,9 @@ test("service mounts and networks preserve each process boundary", async () => {
   assert.deepEqual(volumeTargets(api), [
     "/run/core-agent/config/hermes-images.lock.json",
     "/app/infra/runtime/providers.json",
+    "/run/core-agent/database-credentials",
   ]);
-  assert.deepEqual(secretTargets(api).sort(), ["/run/secrets/bootstrap_key", "/run/secrets/database_app_password"]);
+  assert.deepEqual(secretTargets(api), ["/run/secrets/bootstrap_key"]);
   assert.deepEqual(volumeTargets(ingress), []);
   assert.deepEqual(secretTargets(ingress), []);
   assert.deepEqual(api.secrets[0], {
@@ -151,10 +153,11 @@ test("service mounts and networks preserve each process boundary", async () => {
   });
   assert.deepEqual(volumeTargets(worker).sort(), [
     "/app/infra/runtime/providers.json",
+    "/run/core-agent/database-credentials",
     "/run/core-agent/ingress",
     "/run/core-agent/supervisor",
   ]);
-  assert.deepEqual(secretTargets(worker), ["/run/secrets/database_app_password"]);
+  assert.deepEqual(secretTargets(worker), []);
   assert.deepEqual(volumeTargets(supervisor).sort(), [
     "/app/infra/runtime/providers.json",
     "/run/core-agent/config/hermes-images.lock.json",
@@ -199,14 +202,8 @@ test("service mounts and networks preserve each process boundary", async () => {
   assert(!volumeTargets(api).some((target) => /secrets\/provider|ingress|docker|supervisor/u.test(target)));
   assert(!volumeTargets(worker).some((target) => /secrets\/provider|docker/u.test(target)));
   assert(![...volumeTargets(supervisor), ...secretTargets(supervisor)].some((target) => /bootstrap/u.test(target)));
-  assert.deepEqual(Object.keys(config.volumes).sort(), ["postgres-data", "supervisor-socket"]);
-  assert.deepEqual(Object.keys(config.secrets).sort(), [
-    "bootstrap-key",
-    "database-app-password",
-    "database-identity-password",
-    "database-migrator-password",
-    "postgres-bootstrap-password",
-  ]);
+  assert.deepEqual(Object.keys(config.volumes).sort(), ["database-credentials", "postgres-data", "supervisor-socket"]);
+  assert.deepEqual(Object.keys(config.secrets), ["bootstrap-key"]);
   assert.deepEqual(config.secrets["bootstrap-key"], {
     file: "${CORE_AGENT_BOOTSTRAP_KEY_FILE:?set CORE_AGENT_BOOTSTRAP_KEY_FILE}",
   });
@@ -214,7 +211,7 @@ test("service mounts and networks preserve each process boundary", async () => {
 
 test("application services use least privilege and bounded resources", async () => {
   const config = await yaml("infra/runtime/compose.dev.yaml");
-  assert.equal(config.services.migrate.user, "${CORE_AGENT_RUNTIME_UID:-12000}:${CORE_AGENT_RUNTIME_GID:-12000}");
+  assert.equal(config.services.migrate.user, "12004:12004");
   assert.notEqual(config.services.migrate.user, "0:0");
   assert.equal(config.services.migrate.read_only, true);
   assert.deepEqual(config.services.migrate.cap_drop, ["ALL"]);
@@ -277,9 +274,20 @@ test("API ingress is a fixed credential-free TCP boundary", async () => {
 
 test("startup order gates applications on one successful migration", async () => {
   const config = await yaml("infra/runtime/compose.dev.yaml");
+  assert.deepEqual(config.services.postgres.depends_on, {
+    "database-credential-projector": { condition: "service_completed_successfully" },
+  });
+  assert.deepEqual(config.services["identity-role-bootstrap"].depends_on, {
+    "database-credential-projector": { condition: "service_completed_successfully" },
+    postgres: { condition: "service_healthy" },
+  });
+  assert.deepEqual(config.services["postgres-auth-convergence"].depends_on, {
+    "identity-role-bootstrap": { condition: "service_completed_successfully" },
+    postgres: { condition: "service_healthy" },
+  });
   assert.equal(config.services.migrate.restart, "no");
   assert.deepEqual(config.services.migrate.depends_on, {
-    "identity-role-bootstrap": { condition: "service_completed_successfully" },
+    "postgres-auth-convergence": { condition: "service_completed_successfully" },
   });
   assert.deepEqual(config.services.api.depends_on, {
     migrate: { condition: "service_completed_successfully" },
@@ -305,24 +313,28 @@ test("Identity role bootstrap is bounded private and precedes migration", async 
   assert.equal(bootstrap.image, config.services.api.image);
   assert.deepEqual(bootstrap.build, config.services.api.build);
   assert.equal(bootstrap.platform, config.services.api.platform);
-  assert.equal(bootstrap.user, "${CORE_AGENT_RUNTIME_UID:-12000}:${CORE_AGENT_RUNTIME_GID:-12000}");
+  assert.equal(bootstrap.user, "12003:12003");
   assert.equal(bootstrap.read_only, true);
   assert.equal(bootstrap.privileged, false);
   assert.deepEqual(bootstrap.cap_drop, ["ALL"]);
   assert.deepEqual(bootstrap.security_opt, ["no-new-privileges:true"]);
   assert.equal(bootstrap.restart, "no");
-  assert.deepEqual(bootstrap.depends_on, { postgres: { condition: "service_healthy" } });
+  assert.deepEqual(bootstrap.depends_on, {
+    "database-credential-projector": { condition: "service_completed_successfully" },
+    postgres: { condition: "service_healthy" },
+  });
   assert.deepEqual(bootstrap.networks, ["core-agent-control"]);
   assert.equal(bootstrap.ports, undefined);
   assert.deepEqual(bootstrap.entrypoint, ["node", "scripts/bootstrap-runtime-database-auth.mjs"]);
   assert.deepEqual(environmentMap(bootstrap), {
-    CONTROL_PLANE_DATABASE_PASSWORD_FILE: "/run/secrets/postgres_bootstrap_password",
+    CONTROL_PLANE_DATABASE_PASSWORD_FILE: "/run/core-agent/database-credentials/runtime-bootstrap-password",
     CONTROL_PLANE_DATABASE_URL: "postgresql://core_agent_bootstrap@postgres:5432/core_agent_runtime",
-    CORE_AGENT_APP_DATABASE_PASSWORD_FILE: "/run/secrets/database_app_password",
-    CORE_AGENT_IDENTITY_DATABASE_PASSWORD_FILE: "/run/secrets/database_identity_password",
-    CORE_AGENT_MIGRATOR_DATABASE_PASSWORD_FILE: "/run/secrets/database_migrator_password",
+    CORE_AGENT_APP_DATABASE_PASSWORD_FILE: "/run/core-agent/database-credentials/runtime-application-password",
+    CORE_AGENT_IDENTITY_DATABASE_PASSWORD_FILE: "/run/core-agent/database-credentials/identity-password",
+    CORE_AGENT_MIGRATOR_DATABASE_PASSWORD_FILE: "/run/core-agent/database-credentials/runtime-migrator-password",
   });
-  assert.deepEqual(volumeTargets(bootstrap), []);
+  assert.deepEqual(volumeTargets(bootstrap), ["/run/core-agent/database-credentials"]);
+  assert.equal(volumeAt(bootstrap, "/run/core-agent/database-credentials").read_only, true);
 });
 
 test("PostgreSQL host authentication uses isolated protected SCRAM role secrets", async () => {
@@ -331,47 +343,97 @@ test("PostgreSQL host authentication uses isolated protected SCRAM role secrets"
   assert.deepEqual(environmentMap(config.services.postgres), {
     POSTGRES_DB: "core_agent_runtime",
     POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=trust",
-    POSTGRES_PASSWORD_FILE: "/run/secrets/postgres_bootstrap_password",
+    POSTGRES_PASSWORD_FILE: "/run/core-agent/database-credentials/postgres-bootstrap-password",
     POSTGRES_USER: "core_agent_bootstrap",
   });
-  const expected = {
-    "postgres-bootstrap-password": "${CORE_AGENT_POSTGRES_BOOTSTRAP_PASSWORD_FILE:?set CORE_AGENT_POSTGRES_BOOTSTRAP_PASSWORD_FILE}",
-    "database-migrator-password": "${CORE_AGENT_DATABASE_MIGRATOR_PASSWORD_FILE:?set CORE_AGENT_DATABASE_MIGRATOR_PASSWORD_FILE}",
-    "database-app-password": "${CORE_AGENT_DATABASE_APP_PASSWORD_FILE:?set CORE_AGENT_DATABASE_APP_PASSWORD_FILE}",
-    "database-identity-password": "${CORE_AGENT_DATABASE_IDENTITY_PASSWORD_FILE:?set CORE_AGENT_DATABASE_IDENTITY_PASSWORD_FILE}",
-  };
-  for (const [name, file] of Object.entries(expected)) assert.deepEqual(config.secrets[name], { file });
-
-  assert.deepEqual(secretTargets(config.services.postgres), ["/run/secrets/postgres_bootstrap_password"]);
-  assert.deepEqual(config.services.postgres.secrets, [{
-    source: "postgres-bootstrap-password",
-    target: "postgres_bootstrap_password",
-    uid: "999",
-    gid: "999",
-    mode: 0o400,
-  }]);
-  assert.deepEqual(secretTargets(config.services.migrate), ["/run/secrets/database_migrator_password"]);
-  assert.deepEqual(secretTargets(config.services.api).sort(), [
-    "/run/secrets/bootstrap_key", "/run/secrets/database_app_password",
-  ]);
-  assert.deepEqual(secretTargets(config.services.worker), ["/run/secrets/database_app_password"]);
-  assert.deepEqual(secretTargets(config.services["identity-role-bootstrap"]).sort(), [
-    "/run/secrets/database_app_password",
-    "/run/secrets/database_identity_password",
-    "/run/secrets/database_migrator_password",
-    "/run/secrets/postgres_bootstrap_password",
-  ]);
-  assert.equal(environmentMap(config.services.migrate).CONTROL_PLANE_DATABASE_PASSWORD_FILE, "/run/secrets/database_migrator_password");
-  assert.equal(environmentMap(config.services.api).CONTROL_PLANE_DATABASE_PASSWORD_FILE, "/run/secrets/database_app_password");
-  assert.equal(environmentMap(config.services.worker).CONTROL_PLANE_DATABASE_PASSWORD_FILE, "/run/secrets/database_app_password");
+  assert.equal(config.services.postgres.secrets, undefined);
+  assert.equal(config.services.migrate.secrets, undefined);
+  assert.deepEqual(secretTargets(config.services.api), ["/run/secrets/bootstrap_key"]);
+  assert.equal(config.services.worker.secrets, undefined);
+  assert.equal(config.services["identity-role-bootstrap"].secrets, undefined);
+  for (const name of ["postgres", "identity-role-bootstrap", "postgres-auth-convergence", "migrate", "api", "worker"]) {
+    assert(volumeTargets(config.services[name]).includes("/run/core-agent/database-credentials"), name);
+    assert.equal(volumeAt(config.services[name], "/run/core-agent/database-credentials").read_only, true);
+  }
+  assert.equal(environmentMap(config.services.migrate).CONTROL_PLANE_DATABASE_PASSWORD_FILE, "/run/core-agent/database-credentials/migrator-password");
+  assert.equal(environmentMap(config.services.api).CONTROL_PLANE_DATABASE_PASSWORD_FILE, "/run/core-agent/database-credentials/api-app-password");
+  assert.equal(environmentMap(config.services.worker).CONTROL_PLANE_DATABASE_PASSWORD_FILE, "/run/core-agent/database-credentials/worker-app-password");
   assert.doesNotMatch(JSON.stringify([
     config.services.migrate,
     config.services.api,
     config.services.worker,
-  ]), /database_identity_password|postgres_bootstrap_password/iu);
+  ]), /identity-password|bootstrap-password/iu);
   for (const service of Object.values(config.services)) {
     assert.doesNotMatch(JSON.stringify(environmentMap(service)), /postgresql:\/\/[^@/:]+:[^@/]+@/iu);
   }
+});
+
+test("database credential projector is private networkless and owns the only host credential mounts", async () => {
+  const config = await yaml("infra/runtime/compose.dev.yaml");
+  const projector = config.services["database-credential-projector"];
+  assert.equal(projector.image, config.services.api.image);
+  assert.deepEqual(projector.build, config.services.api.build);
+  assert.equal(projector.user, "0:0");
+  assert.equal(projector.network_mode, "none");
+  assert.equal(projector.read_only, true);
+  assert.equal(projector.privileged, false);
+  assert.deepEqual(projector.cap_drop, ["ALL"]);
+  assert.deepEqual(projector.cap_add.sort(), ["CHOWN", "DAC_READ_SEARCH"]);
+  assert.deepEqual(projector.security_opt, ["no-new-privileges:true"]);
+  assert.equal(projector.restart, "no");
+  assert.deepEqual(projector.entrypoint, ["node", "scripts/project-runtime-database-credentials.mjs"]);
+  assert.deepEqual(environmentMap(projector), {
+    CORE_AGENT_API_GID: "${CORE_AGENT_RUNTIME_GID:-12000}",
+    CORE_AGENT_API_UID: "${CORE_AGENT_RUNTIME_UID:-12000}",
+    CORE_AGENT_CREDENTIAL_SOURCE_GID: "${CORE_AGENT_CREDENTIAL_MOUNT_GID:?set CORE_AGENT_CREDENTIAL_MOUNT_GID}",
+    CORE_AGENT_CREDENTIAL_SOURCE_UID: "${CORE_AGENT_CREDENTIAL_MOUNT_UID:?set CORE_AGENT_CREDENTIAL_MOUNT_UID}",
+    CORE_AGENT_WORKER_GID: "${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}",
+    CORE_AGENT_WORKER_UID: "${CORE_AGENT_RUNTIME_UID:-12002}",
+  });
+  const expectedSources = {
+    "/run/core-agent/credential-sources/bootstrap": "${CORE_AGENT_POSTGRES_BOOTSTRAP_PASSWORD_FILE:?set CORE_AGENT_POSTGRES_BOOTSTRAP_PASSWORD_FILE}",
+    "/run/core-agent/credential-sources/migrator": "${CORE_AGENT_DATABASE_MIGRATOR_PASSWORD_FILE:?set CORE_AGENT_DATABASE_MIGRATOR_PASSWORD_FILE}",
+    "/run/core-agent/credential-sources/application": "${CORE_AGENT_DATABASE_APP_PASSWORD_FILE:?set CORE_AGENT_DATABASE_APP_PASSWORD_FILE}",
+    "/run/core-agent/credential-sources/identity": "${CORE_AGENT_DATABASE_IDENTITY_PASSWORD_FILE:?set CORE_AGENT_DATABASE_IDENTITY_PASSWORD_FILE}",
+  };
+  for (const [target, sourcePath] of Object.entries(expectedSources)) {
+    const mount = volumeAt(projector, target);
+    assert.equal(mount.type, "bind");
+    assert.equal(mount.source, sourcePath);
+    assert.equal(mount.read_only, true);
+  }
+  const output = volumeAt(projector, "/run/core-agent/database-credentials");
+  assert.equal(output.type, "volume");
+  assert.equal(output.source, "database-credentials");
+  assert.equal(output.read_only, undefined);
+  for (const [name, service] of Object.entries(config.services)) {
+    if (name === "database-credential-projector") continue;
+    assert.doesNotMatch(JSON.stringify(service), /credential-sources|CORE_AGENT_DATABASE_(?:APP|IDENTITY|MIGRATOR)_PASSWORD_FILE|CORE_AGENT_POSTGRES_BOOTSTRAP_PASSWORD_FILE/u);
+  }
+});
+
+test("PostgreSQL authentication convergence rewrites and verifies HBA before migration", async () => {
+  const config = await yaml("infra/runtime/compose.dev.yaml");
+  const convergence = config.services["postgres-auth-convergence"];
+  assert.equal(convergence.image, config.services.api.image);
+  assert.deepEqual(convergence.build, config.services.api.build);
+  assert.equal(convergence.user, "999:999");
+  assert.equal(convergence.read_only, true);
+  assert.equal(convergence.privileged, false);
+  assert.deepEqual(convergence.cap_drop, ["ALL"]);
+  assert.deepEqual(convergence.security_opt, ["no-new-privileges:true"]);
+  assert.equal(convergence.restart, "no");
+  assert.deepEqual(convergence.entrypoint, ["node", "scripts/converge-runtime-postgres-auth.mjs"]);
+  assert.deepEqual(networkNames(convergence), ["core-agent-control"]);
+  assert.equal(convergence.ports, undefined);
+  assert.equal(volumeAt(convergence, "/var/lib/postgresql/data").source, "postgres-data");
+  assert.equal(volumeAt(convergence, "/var/lib/postgresql/data").read_only, undefined);
+  assert.equal(volumeAt(convergence, "/run/core-agent/database-credentials").read_only, true);
+  assert.deepEqual(environmentMap(convergence), {
+    CONTROL_PLANE_DATABASE_PASSWORD_FILE: "/run/core-agent/database-credentials/hba-bootstrap-password",
+    CONTROL_PLANE_DATABASE_URL: "postgresql://core_agent_bootstrap@postgres:5432/core_agent_runtime",
+    PGDATA: "/var/lib/postgresql/data",
+  });
 });
 
 test("compose environment carries paths and public configuration but no secret values", async () => {
@@ -406,7 +468,7 @@ test("compose environment carries paths and public configuration but no secret v
   assert.deepEqual(environmentMap(config.services.postgres), {
     POSTGRES_DB: "core_agent_runtime",
     POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=trust",
-    POSTGRES_PASSWORD_FILE: "/run/secrets/postgres_bootstrap_password",
+    POSTGRES_PASSWORD_FILE: "/run/core-agent/database-credentials/postgres-bootstrap-password",
     POSTGRES_USER: "core_agent_bootstrap",
   });
   const supervisorEnvironment = environmentMap(config.services.supervisor);
@@ -634,36 +696,43 @@ test("CI preserves contracts and separates deterministic runtime gates", async (
   assert.match(workflowSource, /actions\/checkout@[a-f0-9]{40}\s+# v4\.2\.2/u);
   assert.match(workflowSource, /actions\/setup-node@[a-f0-9]{40}\s+# v4\.4\.0/u);
   assert(!/secrets\./u.test(workflowSource));
+  assert.doesNotMatch(workflowSource, /github\.token|gh[opsu]_[A-Za-z0-9]/iu);
   assert(!/hermes:build|REAL_HERMES|docker compose up/u.test(workflowSource));
   const lock = JSON.parse(await source("infra/runtime/base-images.lock.json"));
+  const syntheticCiDatabaseCredential = "synthetic-ci-db-${{ github.run_id }}-${{ github.run_attempt }}";
   for (const jobName of ["postgres", "integration"]) {
     const service = workflow.jobs[jobName].services.postgres;
     assert.equal(service.image, lock.images.postgres.platforms["linux/amd64"]);
     assert.deepEqual(service.env, {
-      POSTGRES_DB: "postgres",
+      POSTGRES_DB: "core_agent_runtime",
       POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=trust",
-      POSTGRES_PASSWORD: "${{ github.token }}",
+      POSTGRES_PASSWORD: syntheticCiDatabaseCredential,
       POSTGRES_USER: "core_agent_ci",
     });
     assert.deepEqual(service.ports, ["5432:5432"]);
-    assert.match(service.options, /pg_isready -U core_agent_ci -d postgres/u);
-    const setup = workflow.jobs[jobName].steps.find((step) => step.name === "Restrict CI database role and project protected credential file");
+    assert.match(service.options, /pg_isready -U core_agent_ci -d core_agent_runtime/u);
+    const setup = workflow.jobs[jobName].steps.find((step) => step.name === "Project protected CI database credential files");
     assert(setup);
-    assert.deepEqual(setup.env, { CI_DATABASE_PASSWORD: "${{ github.token }}" });
-    assert.match(setup.run, /ALTER ROLE core_agent_ci NOSUPERUSER CREATEDB NOCREATEROLE/u);
-    assert.match(setup.run, /CREATE DATABASE core_agent_control OWNER core_agent_ci/u);
+    assert.deepEqual(setup.env, { CI_DATABASE_PASSWORD: syntheticCiDatabaseCredential });
+    assert.doesNotMatch(setup.run, /docker exec|ALTER ROLE|CREATE ROLE|CREATE DATABASE/u);
     assert.match(setup.run, /install -m 0600/u);
     assert.match(setup.run, /PGPASSFILE=/u);
     assert.doesNotMatch(setup.run, /--password|postgresql:\/\/[^@/:]+:[^@/]+@/u);
+    assert.match(setup.run, /core-agent-ci-db-secret/u);
+    const scan = workflow.jobs[jobName].steps.find((step) => step.name === "Scan actual CI database credential from protected file");
+    assert(scan);
+    assert.match(scan.run, /verify-no-secret\.mjs --secret-file/u);
+    assert.doesNotMatch(scan.run, /CI_DATABASE_PASSWORD/u);
   }
   assert.match(workflowSource, /npm run test:postgres/u);
   assert.match(workflowSource, /npm run test:integration/u);
   assert.match(workflowSource, /npm run test:runtime/u);
+  assert.match(workflowSource, /npm run test:runtime:database-auth-topology/u);
   assert.match(workflowSource, /npm run test:browser -w @core-agent\/control-plane-web/u);
   assert.match(workflowSource, /docker compose -f infra\/runtime\/compose\.dev\.yaml config --quiet/u);
   assert.match(workflowSource, /verify-no-secret\.mjs/u);
   assert.match(workflowSource, /scan-runtime-database\.mjs synthetic-ci-sentinel-runtime-v1/u);
-  assert.match(workflowSource, /postgresql:\/\/core_agent_ci@127\.0\.0\.1:5432\/core_agent_control/u);
+  assert.match(workflowSource, /postgresql:\/\/core_agent_ci@127\.0\.0\.1:5432\/core_agent_runtime/u);
   assert.equal(Object.hasOwn(workflow.jobs.compose.steps.find((step) => step.name === "Validate Compose configuration").env, "CORE_AGENT_SUPERVISOR_SOCKET_ROOT"), false);
   assert.equal(workflow.jobs.compose.steps.find((step) => step.name === "Validate Compose configuration").env.CORE_AGENT_SUPERVISOR_STATE_ROOT, "/tmp/core-agent-runtime-state-path-only");
   assert.equal(workflow.jobs.compose.steps.find((step) => step.name === "Validate Compose configuration").env.CORE_AGENT_HERMES_IMAGE_LOCK_FILE, "/tmp/core-agent-product-image-lock-path-only");
@@ -701,6 +770,8 @@ test("runtime example environment contains paths and generated references only",
   assert.match(text, /CORE_AGENT_SUPERVISOR_STATE_ROOT=\/absolute\/path\/to\/runtime-state-directory/u);
   assert.match(text, /CORE_AGENT_RUNTIME_UID=<numeric-output-of-id-u>/u);
   assert.match(text, /CORE_AGENT_RUNTIME_GID=<numeric-output-of-id-g>/u);
+  assert.match(text, /CORE_AGENT_CREDENTIAL_MOUNT_UID=<numeric-owner-visible-inside-container>/u);
+  assert.match(text, /CORE_AGENT_CREDENTIAL_MOUNT_GID=<numeric-group-visible-inside-container>/u);
   assert.match(text, /CORE_AGENT_SUPERVISOR_SOCKET_GID=<numeric-output-of-id-g>/u);
   assert.match(text, /CORE_AGENT_DOCKER_SOCKET_SOURCE=\/absolute\/daemon-side\/docker\.sock/u);
   assert.match(text, /bootstrap source must be a regular file owned by the API runtime UID with mode 0600/iu);
@@ -776,6 +847,20 @@ test("runtime PostgreSQL initialization separates bootstrap migrator and applica
   assert(!/PASSWORD|SUPERUSER(?!\s+NOCREATEDB)/u.test(`${sql}\n${identityBootstrap}`.replaceAll("NOSUPERUSER", "")));
 });
 
+async function makeDatabaseCredentialSources(root, value = "synthetic-database-credential-source-000001") {
+  const entries = {
+    CORE_AGENT_POSTGRES_BOOTSTRAP_PASSWORD_FILE: join(root, "postgres-bootstrap-password"),
+    CORE_AGENT_DATABASE_MIGRATOR_PASSWORD_FILE: join(root, "database-migrator-password"),
+    CORE_AGENT_DATABASE_APP_PASSWORD_FILE: join(root, "database-app-password"),
+    CORE_AGENT_DATABASE_IDENTITY_PASSWORD_FILE: join(root, "database-identity-password"),
+  };
+  for (const path of Object.values(entries)) {
+    await writeFile(path, value, { mode: 0o600 });
+    await chmod(path, 0o600);
+  }
+  return entries;
+}
+
 test("runtime path preflight creates final-uid 0700 roots and validates bootstrap metadata without reading it", async (t) => {
   const moduleUrl = pathToFileURL(pathFromRoot("scripts/prepare-runtime-paths.mjs")).href;
   const preflight = await import(`${moduleUrl}?red=${Date.now()}`);
@@ -785,15 +870,23 @@ test("runtime path preflight creates final-uid 0700 roots and validates bootstra
   const stateRoot = join(root, "state");
   const providerRoot = join(root, "provider");
   const ingressRoot = join(root, "ingress");
+  const databaseCredentials = await makeDatabaseCredentialSources(root);
   await mkdir(providerRoot, { mode: 0o700 });
   await mkdir(ingressRoot, { mode: 0o700 });
   assert.deepEqual(preflight.resolveRuntimePathPolicy({
     CORE_AGENT_BOOTSTRAP_KEY_FILE: bootstrap,
+    ...databaseCredentials,
     CORE_AGENT_PROVIDER_SECRET_ROOT: providerRoot,
     CORE_AGENT_INGRESS_SECRET_ROOT: ingressRoot,
     CORE_AGENT_SUPERVISOR_STATE_ROOT: stateRoot,
   }), {
     bootstrapPath: bootstrap,
+    databaseCredentialPaths: {
+      application: databaseCredentials.CORE_AGENT_DATABASE_APP_PASSWORD_FILE,
+      bootstrap: databaseCredentials.CORE_AGENT_POSTGRES_BOOTSTRAP_PASSWORD_FILE,
+      identity: databaseCredentials.CORE_AGENT_DATABASE_IDENTITY_PASSWORD_FILE,
+      migrator: databaseCredentials.CORE_AGENT_DATABASE_MIGRATOR_PASSWORD_FILE,
+    },
     providerRoot,
     ingressRoot,
     stateRoot,
@@ -807,6 +900,7 @@ test("runtime path preflight creates final-uid 0700 roots and validates bootstra
   const gid = process.getgid?.() ?? 0;
   const environment = {
     CORE_AGENT_BOOTSTRAP_KEY_FILE: bootstrap,
+    ...databaseCredentials,
     CORE_AGENT_PROVIDER_SECRET_ROOT: providerRoot,
     CORE_AGENT_INGRESS_SECRET_ROOT: ingressRoot,
     CORE_AGENT_RUNTIME_UID: String(uid),
@@ -826,6 +920,33 @@ test("runtime path preflight creates final-uid 0700 roots and validates bootstra
     assert.equal(metadata.gid, gid);
   }
   assert(!/readFile|createReadStream/u.test(await source("scripts/prepare-runtime-paths.mjs")));
+
+  for (const [name, path] of Object.entries(databaseCredentials)) {
+    await chmod(path, 0o640);
+    await assert.rejects(preflight.prepareRuntimePaths({ environment }), /runtime path preparation failed/u, name);
+    await chmod(path, 0o600);
+  }
+  const emptyCredential = databaseCredentials.CORE_AGENT_DATABASE_APP_PASSWORD_FILE;
+  await writeFile(emptyCredential, "", { mode: 0o600 });
+  await assert.rejects(preflight.prepareRuntimePaths({ environment }), /runtime path preparation failed/u);
+  await writeFile(emptyCredential, "synthetic-database-credential-source-000001", { mode: 0o600 });
+  await chmod(emptyCredential, 0o600);
+
+  const applicationCredential = databaseCredentials.CORE_AGENT_DATABASE_APP_PASSWORD_FILE;
+  const missingCredential = join(root, "missing-database-credential");
+  await assert.rejects(preflight.prepareRuntimePaths({
+    environment: { ...environment, CORE_AGENT_DATABASE_APP_PASSWORD_FILE: missingCredential },
+  }), /runtime path preparation failed/u);
+  const credentialDirectory = join(root, "database-credential-directory");
+  await mkdir(credentialDirectory, { mode: 0o700 });
+  await assert.rejects(preflight.prepareRuntimePaths({
+    environment: { ...environment, CORE_AGENT_DATABASE_APP_PASSWORD_FILE: credentialDirectory },
+  }), /runtime path preparation failed/u);
+  const linkedCredential = join(root, "database-credential-link");
+  await symlink(applicationCredential, linkedCredential);
+  await assert.rejects(preflight.prepareRuntimePaths({
+    environment: { ...environment, CORE_AGENT_DATABASE_APP_PASSWORD_FILE: linkedCredential },
+  }), /runtime path preparation failed/u);
 
   await chmod(bootstrap, 0o644);
   await assert.rejects(preflight.prepareRuntimePaths({ environment }), (error) => error?.message === "runtime path preparation failed");
@@ -862,6 +983,7 @@ test("runtime path preflight rejects symlink ancestors and every canonical cross
     CORE_AGENT_RUNTIME_GID: String(gid),
     CORE_AGENT_SUPERVISOR_SOCKET_GID: String(gid),
     CORE_AGENT_BOOTSTRAP_KEY_FILE: await makeBootstrap(join(root, "bootstrap")),
+    ...await makeDatabaseCredentialSources(root),
     CORE_AGENT_PROVIDER_SECRET_ROOT: await makeDirectory("provider"),
     CORE_AGENT_INGRESS_SECRET_ROOT: await makeDirectory("ingress"),
     CORE_AGENT_SUPERVISOR_STATE_ROOT: join(root, "state"),
@@ -933,6 +1055,7 @@ test("runtime path preflight rejects a hard-linked bootstrap purpose alias", asy
     CORE_AGENT_RUNTIME_GID: String(gid),
     CORE_AGENT_SUPERVISOR_SOCKET_GID: String(gid),
     CORE_AGENT_BOOTSTRAP_KEY_FILE: bootstrap,
+    ...await makeDatabaseCredentialSources(root),
     CORE_AGENT_PROVIDER_SECRET_ROOT: providerRoot,
     CORE_AGENT_INGRESS_SECRET_ROOT: ingressRoot,
     CORE_AGENT_SUPERVISOR_STATE_ROOT: join(root, "state"),
