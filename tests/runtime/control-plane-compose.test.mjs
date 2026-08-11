@@ -804,6 +804,17 @@ test("CI preserves contracts and separates deterministic runtime gates", async (
   assert.equal(workflow.jobs.compose.steps.find((step) => step.name === "Validate Compose configuration").env.CORE_AGENT_DOCKER_SOCKET_SOURCE, "/var/run/docker.sock");
 });
 
+test("fresh CI-equivalent owns exact resources and proves cleanup after success and injected failure", async () => {
+  const text = await source("tests/runtime/database-ci-equivalent.integration.mjs");
+  assert.match(text, /docker", \["volume", "create"/u);
+  assert.match(text, /docker", \["network", "create"/u);
+  assert.match(text, /--volume", `\$\{dataVolume\}:\/var\/lib\/postgresql\/data`/u);
+  assert.match(text, /assertResourcesAbsent/u);
+  assert.match(text, /injectedFailure/u);
+  assert.match(text, /assert\.rejects\([\s\S]*injected CI-equivalent failure/u);
+  assert.doesNotMatch(text, /docker (?:volume|network) (?:prune|rm) .*\*/u);
+});
+
 test("isolated CI consumers build shared contracts before execution", async () => {
   const workflow = await yaml(".github/workflows/runtime-contract.yml");
   for (const [jobName, consumerCommand] of [
