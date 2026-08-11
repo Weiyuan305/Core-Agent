@@ -131,6 +131,9 @@ jobs:
           echo "PGPASSFILE=$RUNNER_TEMP/core-agent-ci.pgpass" >> "$GITHUB_ENV"
           echo "CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE=$RUNNER_TEMP/core-agent-ci-db-secret" >> "$GITHUB_ENV"
 
+      - name: Bootstrap exact test database role prerequisites
+        run: node scripts/bootstrap-test-database-roles.mjs
+
       - name: Run real PostgreSQL suites
         run: npm run test:postgres
 
@@ -182,6 +185,9 @@ jobs:
           echo "PGPASSFILE=$RUNNER_TEMP/core-agent-ci.pgpass" >> "$GITHUB_ENV"
           echo "CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE=$RUNNER_TEMP/core-agent-ci-db-secret" >> "$GITHUB_ENV"
 
+      - name: Bootstrap exact test database role prerequisites
+        run: node scripts/bootstrap-test-database-roles.mjs
+
       - name: Run fake Supervisor and Hermes full slice
         run: npm run test:integration
 
@@ -228,6 +234,10 @@ jobs:
           CORE_AGENT_DATABASE_IDENTITY_PASSWORD_FILE: /tmp/core-agent-database-identity-password-path-only
           CORE_AGENT_CREDENTIAL_MOUNT_GID: "1001"
           CORE_AGENT_CREDENTIAL_MOUNT_UID: "1001"
+          CORE_AGENT_API_GID: "1001"
+          CORE_AGENT_API_UID: "1001"
+          CORE_AGENT_WORKER_GID: "1002"
+          CORE_AGENT_WORKER_UID: "1002"
           CORE_AGENT_DOCKER_GID: "999"
           CORE_AGENT_DOCKER_SOCKET_SOURCE: /var/run/docker.sock
           CORE_AGENT_HERMES_IMAGE_LOCK_FILE: /tmp/core-agent-product-image-lock-path-only
@@ -242,3 +252,6 @@ jobs:
 
       - name: Run disposable PostgreSQL authentication topology
         run: npm run test:runtime:database-auth-topology
+
+      - name: Run fresh CI-equivalent PostgreSQL and integration suites
+        run: npm run test:runtime:database-ci-equivalent

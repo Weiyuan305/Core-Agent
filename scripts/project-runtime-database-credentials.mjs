@@ -2,24 +2,28 @@
 
 import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, chown, lstat, open, rename, stat, unlink } from "node:fs/promises";
+import { chmod, chown, lstat, open, readdir, rename, stat, unlink } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const minimumCredentialBytes = 24;
 const maximumCredentialBytes = 256;
 
-export const DATABASE_CREDENTIAL_FILES = Object.freeze({
-  api: "api-app-password",
-  hbaBootstrap: "hba-bootstrap-password",
-  identity: "identity-password",
-  migrator: "migrator-password",
-  postgresBootstrap: "postgres-bootstrap-password",
-  runtimeApplication: "runtime-application-password",
-  runtimeBootstrap: "runtime-bootstrap-password",
-  runtimeMigrator: "runtime-migrator-password",
-  worker: "worker-app-password",
+export const DATABASE_CREDENTIAL_LAYOUT = Object.freeze({
+  api: Object.freeze({ application: "database-password" }),
+  auth: Object.freeze({ bootstrap: "database-password" }),
+  migrate: Object.freeze({ migrator: "database-password" }),
+  postgres: Object.freeze({ bootstrap: "database-password" }),
+  roleBootstrap: Object.freeze({
+    application: "application-password",
+    bootstrap: "bootstrap-password",
+    identity: "identity-password",
+    migrator: "migrator-password",
+  }),
+  worker: Object.freeze({ application: "database-password" }),
 });
+
+const fixedPrivilegedUids = new Set([999, 12003, 12004]);
 
 function failure() {
   return new Error("database credential projection failed");
@@ -102,25 +106,45 @@ async function projectFile(outputRoot, filename, material, identity) {
 
 export async function projectRuntimeDatabaseCredentials({
   sourcePaths,
-  outputRoot,
+  outputRoots,
   sourceUid,
   sourceGid,
   targetIdentities,
+  projectFileImplementation = projectFile,
 }) {
   const materials = [];
   try {
-    const root = absolute(outputRoot);
-    const rootMetadata = await lstat(root);
-    if (!rootMetadata.isDirectory() || rootMetadata.uid !== process.getuid?.()) throw failure();
-    await chmod(root, 0o711);
+    const roots = Object.fromEntries(Object.keys(DATABASE_CREDENTIAL_LAYOUT).map((name) => [name, absolute(outputRoots?.[name])]));
+    if (new Set(Object.values(roots)).size !== Object.keys(roots).length) throw failure();
+    const rootSnapshots = [];
+    for (const root of Object.values(roots)) {
+      const rootMetadata = await lstat(root);
+      if (!rootMetadata.isDirectory() || rootMetadata.uid !== process.getuid?.()) throw failure();
+      const entries = await readdir(root);
+      const consumer = Object.keys(roots).find((name) => roots[name] === root);
+      const approved = new Set(Object.values(DATABASE_CREDENTIAL_LAYOUT[consumer]));
+      if (entries.some((entry) => !approved.has(entry))) throw failure();
+      rootSnapshots.push(`${rootMetadata.dev}:${rootMetadata.ino}`);
+      await chmod(root, 0o711);
+    }
+    if (new Set(rootSnapshots).size !== rootSnapshots.length) throw failure();
     const expectedSourceUid = numericIdentity(sourceUid);
     const expectedSourceGid = numericIdentity(sourceGid);
-    const apiUid = numericIdentity(targetIdentities?.api?.uid);
-    const apiGid = numericIdentity(targetIdentities?.api?.gid);
+    const identities = Object.fromEntries(Object.keys(DATABASE_CREDENTIAL_LAYOUT).map((name) => [name, {
+      uid: numericIdentity(targetIdentities?.[name]?.uid),
+      gid: numericIdentity(targetIdentities?.[name]?.gid),
+    }]));
+    const apiUid = identities.api.uid;
+    const apiGid = identities.api.gid;
     if (!(
       (expectedSourceUid === 0 && expectedSourceGid === 0)
       || (expectedSourceUid === apiUid && expectedSourceGid === apiGid)
     )) throw failure();
+    if (
+      fixedPrivilegedUids.has(identities.api.uid)
+      || fixedPrivilegedUids.has(identities.worker.uid)
+      || identities.api.uid === identities.worker.uid
+    ) throw failure();
     const source = {
       bootstrap: absolute(sourcePaths?.bootstrap),
       migrator: absolute(sourcePaths?.migrator),
@@ -131,28 +155,16 @@ export async function projectRuntimeDatabaseCredentials({
       materials.push(await readCredential(path, expectedSourceUid, expectedSourceGid));
     }
     if (new Set(materials.map((material) => material.toString("base64"))).size !== materials.length) throw failure();
-    const [bootstrap, migrator, application, identity] = materials;
-    const projections = {
-      postgresBootstrap: bootstrap,
-      runtimeBootstrap: bootstrap,
-      runtimeApplication: application,
-      runtimeMigrator: migrator,
-      hbaBootstrap: bootstrap,
-      migrator,
-      api: application,
-      worker: application,
-      identity,
-    };
-    for (const purpose of Object.keys(DATABASE_CREDENTIAL_FILES)) {
-      const target = targetIdentities?.[purpose];
-      if (target === undefined) throw failure();
-      await projectFile(root, DATABASE_CREDENTIAL_FILES[purpose], projections[purpose], {
-        uid: numericIdentity(target.uid),
-        gid: numericIdentity(target.gid),
-      });
+    const materialByPurpose = Object.fromEntries(["bootstrap", "migrator", "application", "identity"].map((name, index) => [name, materials[index]]));
+    for (const [consumer, files] of Object.entries(DATABASE_CREDENTIAL_LAYOUT)) {
+      for (const [sourcePurpose, filename] of Object.entries(files)) {
+        await projectFileImplementation(roots[consumer], filename, materialByPurpose[sourcePurpose], identities[consumer]);
+      }
     }
-    const finalRoot = await stat(root);
-    if (!finalRoot.isDirectory() || (finalRoot.mode & 0o7777) !== 0o711) throw failure();
+    for (const root of Object.values(roots)) {
+      const finalRoot = await stat(root);
+      if (!finalRoot.isDirectory() || (finalRoot.mode & 0o7777) !== 0o711) throw failure();
+    }
   } catch {
     throw failure();
   } finally {
@@ -174,17 +186,21 @@ export async function runDatabaseCredentialProjector(environment = process.env) 
       application: "/run/core-agent/credential-sources/application",
       identity: "/run/core-agent/credential-sources/identity",
     },
-    outputRoot: "/run/core-agent/database-credentials",
+    outputRoots: {
+      api: "/run/core-agent/projected/api",
+      auth: "/run/core-agent/projected/auth",
+      migrate: "/run/core-agent/projected/migrate",
+      postgres: "/run/core-agent/projected/postgres",
+      roleBootstrap: "/run/core-agent/projected/role-bootstrap",
+      worker: "/run/core-agent/projected/worker",
+    },
     sourceUid: required(environment, "CORE_AGENT_CREDENTIAL_SOURCE_UID"),
     sourceGid: required(environment, "CORE_AGENT_CREDENTIAL_SOURCE_GID"),
     targetIdentities: {
-      postgresBootstrap: { uid: 999, gid: 999 },
-      hbaBootstrap: { uid: 999, gid: 999 },
-      runtimeBootstrap: { uid: 12003, gid: 12003 },
-      runtimeApplication: { uid: 12003, gid: 12003 },
-      runtimeMigrator: { uid: 12003, gid: 12003 },
-      identity: { uid: 12003, gid: 12003 },
-      migrator: { uid: 12004, gid: 12004 },
+      postgres: { uid: 999, gid: 999 },
+      auth: { uid: 999, gid: 999 },
+      roleBootstrap: { uid: 12003, gid: 12003 },
+      migrate: { uid: 12004, gid: 12004 },
       api: {
         uid: required(environment, "CORE_AGENT_API_UID"),
         gid: required(environment, "CORE_AGENT_API_GID"),

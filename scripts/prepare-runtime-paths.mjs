@@ -108,6 +108,13 @@ export function resolveRuntimePathPolicy(environment = process.env) {
     const runtimeUid = environment.CORE_AGENT_RUNTIME_UID === undefined
       ? undefined
       : identity(environment, "CORE_AGENT_RUNTIME_UID", 0);
+    const apiUid = identity(environment, "CORE_AGENT_API_UID", 12000);
+    const apiGid = identity(environment, "CORE_AGENT_API_GID", 12000);
+    const workerUid = identity(environment, "CORE_AGENT_WORKER_UID", 12002);
+    const workerGid = identity(environment, "CORE_AGENT_WORKER_GID", 12002);
+    if ([999, 12003, 12004].includes(apiUid) || [999, 12003, 12004].includes(workerUid) || apiUid === workerUid) {
+      throw preparationError();
+    }
     return {
       bootstrapPath: absolutePath(environment, "CORE_AGENT_BOOTSTRAP_KEY_FILE"),
       databaseCredentialPaths: {
@@ -119,8 +126,12 @@ export function resolveRuntimePathPolicy(environment = process.env) {
       providerRoot: absolutePath(environment, "CORE_AGENT_PROVIDER_SECRET_ROOT"),
       ingressRoot: absolutePath(environment, "CORE_AGENT_INGRESS_SECRET_ROOT"),
       stateRoot: absolutePath(environment, "CORE_AGENT_SUPERVISOR_STATE_ROOT"),
-      bootstrapUid: runtimeUid ?? 12000,
-      bootstrapGid: identity(environment, "CORE_AGENT_RUNTIME_GID", 12000),
+      bootstrapUid: apiUid,
+      bootstrapGid: apiGid,
+      apiUid,
+      apiGid,
+      workerUid,
+      workerGid,
       supervisorUid: runtimeUid ?? 12002,
       supervisorGid: identity(environment, "CORE_AGENT_SUPERVISOR_SOCKET_GID", 12002),
     };

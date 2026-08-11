@@ -315,15 +315,20 @@ identity, platform, and immutable reference. Do not put secret bytes in it.
 platform entries generated in `infra/runtime/base-images.lock.json`.
 
 Set `CORE_AGENT_CREDENTIAL_MOUNT_UID/GID` to the metadata Docker exposes for
-each protected database credential bind: the runtime UID/GID pair on native
+each protected database credential bind: the API UID/GID pair on native
 Linux, or `0/0` only when the selected Docker Desktop/Colima implementation
 projects those binds as root-owned. Verify all four sources report the same
 owner, group, regular-file type, safe mode, and nonzero size through the locked
 Node image using `stat`; never read or print their contents. The projector
-accepts only the runtime identity pair or `0/0`. This container-view check does
+accepts only the API identity pair or `0/0`, and independently rejects API or
+Worker UID collisions with `999`, `12003`, `12004`, or each other. This
+container-view check does
 not replace `runtime:paths`, which separately requires the actual host files to
-be canonical, regular, single-linked, nonempty, runtime-owned, and mode `0400`
+be canonical, regular, single-linked, nonempty, API-owned, and mode `0400`
 or `0600`, and rejects missing files, directories, symlinks, or unsafe owners.
+The projector writes six separate named volumes; PostgreSQL, role bootstrap,
+HBA convergence, migrate, API, and Worker each mount only their own approved
+material read-only.
 
 ## Validate and run
 

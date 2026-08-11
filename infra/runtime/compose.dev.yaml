@@ -28,12 +28,12 @@ services:
     user: "0:0"
     entrypoint: ["node", "scripts/project-runtime-database-credentials.mjs"]
     environment:
-      CORE_AGENT_API_GID: ${CORE_AGENT_RUNTIME_GID:-12000}
-      CORE_AGENT_API_UID: ${CORE_AGENT_RUNTIME_UID:-12000}
+      CORE_AGENT_API_GID: ${CORE_AGENT_API_GID:-12000}
+      CORE_AGENT_API_UID: ${CORE_AGENT_API_UID:-12000}
       CORE_AGENT_CREDENTIAL_SOURCE_GID: ${CORE_AGENT_CREDENTIAL_MOUNT_GID:?set CORE_AGENT_CREDENTIAL_MOUNT_GID}
       CORE_AGENT_CREDENTIAL_SOURCE_UID: ${CORE_AGENT_CREDENTIAL_MOUNT_UID:?set CORE_AGENT_CREDENTIAL_MOUNT_UID}
-      CORE_AGENT_WORKER_GID: ${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}
-      CORE_AGENT_WORKER_UID: ${CORE_AGENT_RUNTIME_UID:-12002}
+      CORE_AGENT_WORKER_GID: ${CORE_AGENT_WORKER_GID:-12002}
+      CORE_AGENT_WORKER_UID: ${CORE_AGENT_WORKER_UID:-12002}
     volumes:
       - type: bind
         source: ${CORE_AGENT_POSTGRES_BOOTSTRAP_PASSWORD_FILE:?set CORE_AGENT_POSTGRES_BOOTSTRAP_PASSWORD_FILE}
@@ -51,9 +51,12 @@ services:
         source: ${CORE_AGENT_DATABASE_IDENTITY_PASSWORD_FILE:?set CORE_AGENT_DATABASE_IDENTITY_PASSWORD_FILE}
         target: /run/core-agent/credential-sources/identity
         read_only: true
-      - type: volume
-        source: database-credentials
-        target: /run/core-agent/database-credentials
+      - { type: volume, source: postgres-credentials, target: /run/core-agent/projected/postgres }
+      - { type: volume, source: role-bootstrap-credentials, target: /run/core-agent/projected/role-bootstrap }
+      - { type: volume, source: postgres-auth-credentials, target: /run/core-agent/projected/auth }
+      - { type: volume, source: migrate-credentials, target: /run/core-agent/projected/migrate }
+      - { type: volume, source: api-credentials, target: /run/core-agent/projected/api }
+      - { type: volume, source: worker-credentials, target: /run/core-agent/projected/worker }
     read_only: true
     cap_drop:
       - ALL
@@ -76,7 +79,7 @@ services:
     environment:
       POSTGRES_DB: core_agent_runtime
       POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=trust
-      POSTGRES_PASSWORD_FILE: /run/core-agent/database-credentials/postgres-bootstrap-password
+      POSTGRES_PASSWORD_FILE: /run/core-agent/database-credentials/database-password
       POSTGRES_USER: core_agent_bootstrap
     volumes:
       - type: volume
@@ -87,7 +90,7 @@ services:
         target: /docker-entrypoint-initdb.d
         read_only: true
       - type: volume
-        source: database-credentials
+        source: postgres-credentials
         target: /run/core-agent/database-credentials
         read_only: true
     depends_on:
@@ -114,13 +117,13 @@ services:
     entrypoint: ["node", "scripts/bootstrap-runtime-database-auth.mjs"]
     environment:
       CONTROL_PLANE_DATABASE_URL: postgresql://core_agent_bootstrap@postgres:5432/core_agent_runtime
-      CONTROL_PLANE_DATABASE_PASSWORD_FILE: /run/core-agent/database-credentials/runtime-bootstrap-password
-      CORE_AGENT_APP_DATABASE_PASSWORD_FILE: /run/core-agent/database-credentials/runtime-application-password
+      CONTROL_PLANE_DATABASE_PASSWORD_FILE: /run/core-agent/database-credentials/bootstrap-password
+      CORE_AGENT_APP_DATABASE_PASSWORD_FILE: /run/core-agent/database-credentials/application-password
       CORE_AGENT_IDENTITY_DATABASE_PASSWORD_FILE: /run/core-agent/database-credentials/identity-password
-      CORE_AGENT_MIGRATOR_DATABASE_PASSWORD_FILE: /run/core-agent/database-credentials/runtime-migrator-password
+      CORE_AGENT_MIGRATOR_DATABASE_PASSWORD_FILE: /run/core-agent/database-credentials/migrator-password
     volumes:
       - type: volume
-        source: database-credentials
+        source: role-bootstrap-credentials
         target: /run/core-agent/database-credentials
         read_only: true
     read_only: true
@@ -152,14 +155,14 @@ services:
     entrypoint: ["node", "scripts/converge-runtime-postgres-auth.mjs"]
     environment:
       CONTROL_PLANE_DATABASE_URL: postgresql://core_agent_bootstrap@postgres:5432/core_agent_runtime
-      CONTROL_PLANE_DATABASE_PASSWORD_FILE: /run/core-agent/database-credentials/hba-bootstrap-password
+      CONTROL_PLANE_DATABASE_PASSWORD_FILE: /run/core-agent/database-credentials/database-password
       PGDATA: /var/lib/postgresql/data
     volumes:
       - type: volume
         source: postgres-data
         target: /var/lib/postgresql/data
       - type: volume
-        source: database-credentials
+        source: postgres-auth-credentials
         target: /run/core-agent/database-credentials
         read_only: true
     read_only: true
@@ -191,10 +194,10 @@ services:
     entrypoint: ["node", "scripts/migrate-runtime.mjs"]
     environment:
       CONTROL_PLANE_DATABASE_URL: postgresql://core_agent_migrator@postgres:5432/core_agent_runtime
-      CONTROL_PLANE_DATABASE_PASSWORD_FILE: /run/core-agent/database-credentials/migrator-password
+      CONTROL_PLANE_DATABASE_PASSWORD_FILE: /run/core-agent/database-credentials/database-password
     volumes:
       - type: volume
-        source: database-credentials
+        source: migrate-credentials
         target: /run/core-agent/database-credentials
         read_only: true
     read_only: true
@@ -220,14 +223,14 @@ services:
     build:
       <<: *service-build
       target: api
-    user: "${CORE_AGENT_RUNTIME_UID:-12000}:${CORE_AGENT_RUNTIME_GID:-12000}"
+    user: "${CORE_AGENT_API_UID:-12000}:${CORE_AGENT_API_GID:-12000}"
     environment:
       CONTROL_PLANE_API_CONTAINER_BIND: "1"
       CONTROL_PLANE_API_HOST: 0.0.0.0
       CONTROL_PLANE_API_PORT: "8787"
       CONTROL_PLANE_BOOTSTRAP_KEY_FILE: /run/secrets/bootstrap_key
       CONTROL_PLANE_DATABASE_URL: postgresql://core_agent_app@postgres:5432/core_agent_runtime
-      CONTROL_PLANE_DATABASE_PASSWORD_FILE: /run/core-agent/database-credentials/api-app-password
+      CONTROL_PLANE_DATABASE_PASSWORD_FILE: /run/core-agent/database-credentials/database-password
       CONTROL_PLANE_IMAGE_LOCK_FILE: /run/core-agent/config/hermes-images.lock.json
       CONTROL_PLANE_PROVIDER_CATALOG_FILE: /app/infra/runtime/providers.json
       CONTROL_PLANE_SECRET_ROOT: /run/unavailable/api-secrets
@@ -236,8 +239,8 @@ services:
     secrets:
       - source: bootstrap-key
         target: bootstrap_key
-        uid: "${CORE_AGENT_RUNTIME_UID:-12000}"
-        gid: "${CORE_AGENT_RUNTIME_GID:-12000}"
+        uid: "${CORE_AGENT_API_UID:-12000}"
+        gid: "${CORE_AGENT_API_GID:-12000}"
         mode: 0o600
     volumes:
       - type: bind
@@ -249,7 +252,7 @@ services:
         target: /app/infra/runtime/providers.json
         read_only: true
       - type: volume
-        source: database-credentials
+        source: api-credentials
         target: /run/core-agent/database-credentials
         read_only: true
     tmpfs:
@@ -269,7 +272,7 @@ services:
     build:
       <<: *service-build
       target: api
-    user: "${CORE_AGENT_RUNTIME_UID:-12000}:${CORE_AGENT_RUNTIME_GID:-12000}"
+    user: "${CORE_AGENT_API_UID:-12000}:${CORE_AGENT_API_GID:-12000}"
     entrypoint: ["node", "scripts/api-ingress-proxy.mjs"]
     pids_limit: 32
     mem_limit: 64m
@@ -293,13 +296,13 @@ services:
     build:
       <<: *service-build
       target: worker
-    user: "${CORE_AGENT_RUNTIME_UID:-12002}:${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}"
+    user: "${CORE_AGENT_WORKER_UID:-12002}:${CORE_AGENT_WORKER_GID:-12002}"
     group_add:
       - "${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}"
     environment:
       CONTROL_PLANE_BOOTSTRAP_KEY_FILE: /run/unavailable/bootstrap-key
       CONTROL_PLANE_DATABASE_URL: postgresql://core_agent_app@postgres:5432/core_agent_runtime
-      CONTROL_PLANE_DATABASE_PASSWORD_FILE: /run/core-agent/database-credentials/worker-app-password
+      CONTROL_PLANE_DATABASE_PASSWORD_FILE: /run/core-agent/database-credentials/database-password
       CONTROL_PLANE_PROVIDER_CATALOG_FILE: /app/infra/runtime/providers.json
       CONTROL_PLANE_SECRET_ROOT: /run/core-agent/ingress
       CONTROL_PLANE_SUPERVISOR_SOCKET: /run/core-agent/supervisor/runtime.sock
@@ -318,7 +321,7 @@ services:
         target: /run/core-agent/supervisor
         read_only: true
       - type: volume
-        source: database-credentials
+        source: worker-credentials
         target: /run/core-agent/database-credentials
         read_only: true
     tmpfs:
@@ -467,9 +470,14 @@ services:
       - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
 
 volumes:
-  database-credentials:
+  api-credentials:
+  migrate-credentials:
+  postgres-auth-credentials:
+  postgres-credentials:
   postgres-data:
+  role-bootstrap-credentials:
   supervisor-socket:
+  worker-credentials:
 
 secrets:
   bootstrap-key:

@@ -124,13 +124,19 @@ it never receives the bootstrap key. The provider catalog and image lock are
 non-secret managed configuration, not substitutes for either projection.
 
 The image targets retain dedicated non-root identities: API `12000`, Worker
-`12001`, and Supervisor `12002`. Development Compose deliberately runs Worker
-and Supervisor with the same `${CORE_AGENT_RUNTIME_UID:-12002}` effective UID
-so both can traverse one owner-only UDS root; API remains `12000` by default.
-An explicit numeric host UID override makes all three development processes
-compatible with macOS/Colima file projection, while `CORE_AGENT_RUNTIME_GID`
-controls the bootstrap projection and `CORE_AGENT_SUPERVISOR_SOCKET_GID`
-controls the private runtime roots.
+`12001`, and Supervisor `12002`. Compose has separate, collision-checked API
+and Worker UID/GID inputs; neither may collide with PostgreSQL `999`, the role
+bootstrap `12003`, or migrator `12004`, and API and Worker may not share a UID.
+The Supervisor keeps its independent runtime identity. Host projections must be
+created for these exact numeric owners, while the shared Supervisor socket GID
+provides only the intended UDS traversal.
+
+Database credentials are projected by one root, networkless one-shot into six
+consumer-specific named volumes. PostgreSQL, role bootstrap, HBA convergence,
+migrate, API, and Worker each mount only their approved volume read-only. API
+and Worker therefore cannot enumerate another database credential even under a
+container user override; file ownership is defense in depth, not the isolation
+mechanism.
 
 The Supervisor state mount is a caller-named bind root. The UDS instead uses the
 Compose-owned `supervisor-socket` named volume so Worker and Supervisor do not
@@ -313,14 +319,13 @@ deleted only after every matching helper is absent; sibling stages are never
 touched. Any drift is rejected without mutation and must be quarantined
 for operator investigation.
 
-Development PostgreSQL `trust` authentication is a development convenience,
-not a role-isolation security boundary, and is permitted only on the isolated
-internal control bridge. The official-image bootstrap superuser is not given
-to an application process: a non-superuser migrator owns the database/schema
-and grants default table/sequence privileges to a distinct non-superuser
-application role used by API and Worker. Production must replace local trust
-with TLS and managed credentials while retaining these least-privilege role
-boundaries.
+PostgreSQL startup converges both fresh volumes and the narrowly accepted legacy
+official-image `trust` shape to `scram-sha-256` host authentication before
+migration. The bootstrap superuser is confined to bootstrap/convergence
+one-shots: a non-superuser migrator owns the database/schema and a distinct
+non-superuser application role is used by API and Worker. Public exposure
+remains forbidden; production additionally requires transport protection while
+retaining these least-privilege role and credential-volume boundaries.
 
 ## Alternatives considered
 

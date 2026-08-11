@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
-import { chmod, mkdir, mkdtemp, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -20,17 +20,34 @@ function safeResult(result, credentials) {
   return output.toString("utf8");
 }
 
-function command(args, environment, credentials, expectedStatus = 0) {
+function command(args, environment, credentials, expectedStatus = 0, input) {
   const result = spawnSync("docker", args, {
     cwd: repositoryRoot,
     env: environment,
     encoding: "buffer",
     maxBuffer: 32 * 1024 * 1024,
     timeout: 8 * 60 * 1000,
+    input,
   });
   const output = safeResult(result, credentials);
   assert.equal(result.status, expectedStatus, `disposable database topology command failed\n${output.slice(-4000)}`);
   return output;
+}
+
+async function installShippedSchema9(environment, credentials, legacyContainer) {
+  const migrationRoot = join(repositoryRoot, "packages/runtime-core/migrations");
+  const files = (await readdir(migrationRoot)).filter((name) => /^00[1-9]_[a-z0-9_-]+\.sql$/u.test(name)).sort();
+  assert.equal(files.length, 9);
+  for (const filename of files) {
+    const sql = await readFile(join(migrationRoot, filename), "utf8");
+    const [, versionText, name] = /^(\d+)_(.+)\.sql$/u.exec(filename);
+    const checksum = createHash("sha256").update(sql).digest("hex");
+    const record = `\nINSERT INTO core_agent_schema_migrations (version, name, checksum, applied_at) VALUES (${Number(versionText)}, '${name}', '${checksum}', now());\n`;
+    command([
+      "exec", "--interactive", legacyContainer,
+      "psql", "-X", "--set", "ON_ERROR_STOP=1", "-U", "core_agent_migrator", "-d", "core_agent_runtime",
+    ], environment, credentials, 0, Buffer.from(sql + record));
+  }
 }
 
 function composeArguments(project, ...args) {
@@ -44,7 +61,7 @@ async function protectedFile(path, value) {
 
 async function scenario(kind) {
   const root = await mkdtemp(join(repositoryRoot, `.core-agent-auth-${kind}-`));
-  const project = `coreagentround6${kind}${process.pid}${randomBytes(4).toString("hex")}`.toLowerCase();
+  const project = `coreagentround7${kind}${process.pid}${randomBytes(4).toString("hex")}`.toLowerCase();
   const legacyContainer = `${project}-legacy-init`;
   const credentials = {
     bootstrap: randomBytes(32).toString("base64url"),
@@ -78,6 +95,10 @@ async function scenario(kind) {
     CORE_AGENT_PROVIDER_SECRET_ROOT: join(root, "provider"),
     CORE_AGENT_RUNTIME_GID: String(process.getgid?.() ?? 0),
     CORE_AGENT_RUNTIME_UID: String(process.getuid?.() ?? 0),
+    CORE_AGENT_API_GID: String(process.getgid?.() ?? 0),
+    CORE_AGENT_API_UID: String(process.getuid?.() ?? 0),
+    CORE_AGENT_WORKER_GID: String((process.getgid?.() ?? 0) + 1),
+    CORE_AGENT_WORKER_UID: String((process.getuid?.() ?? 0) + 1),
     CORE_AGENT_SUPERVISOR_SOCKET_GID: String(process.getgid?.() ?? 0),
     CORE_AGENT_SUPERVISOR_STATE_ROOT: join(root, "state"),
   };
@@ -113,59 +134,86 @@ async function scenario(kind) {
         "--env", "POSTGRES_USER=core_agent_bootstrap",
         "--env", "POSTGRES_DB=core_agent_runtime",
         "--volume", `${project}_postgres-data:/var/lib/postgresql/data`,
+        "--volume", `${join(repositoryRoot, "infra/runtime/postgres/init")}:/docker-entrypoint-initdb.d:ro`,
         "--platform", platform,
         lock.images.postgres.platforms[platform],
       );
       docker("exec", legacyContainer, "sh", "-ceu", "until pg_isready -U core_agent_bootstrap -d core_agent_runtime >/dev/null 2>&1; do sleep 1; done");
       const legacyHba = docker("exec", legacyContainer, "sh", "-ceu", "awk 'NF && $1 !~ /^#/ {print}' /var/lib/postgresql/data/pg_hba.conf");
       assert.match(legacyHba, /host all all all trust/u);
+      await installShippedSchema9(environment, credentialValues, legacyContainer);
+      assert.equal(docker("exec", legacyContainer, "psql", "-X", "-U", "core_agent_migrator", "-d", "core_agent_runtime", "-Atc", "select max(version) from core_agent_schema_migrations").trim(), "9");
       docker("rm", "--force", legacyContainer);
     }
 
-    compose("up", "--detach", "--build", "postgres-auth-convergence");
+    compose("up", "--detach", "--build", "migrate");
     try {
-      compose("wait", "postgres-auth-convergence");
+      compose("wait", "migrate");
     } catch {
       const logs = compose(
         "logs", "--no-color", "database-credential-projector",
-        "identity-role-bootstrap", "postgres-auth-convergence",
+        "identity-role-bootstrap", "postgres-auth-convergence", "migrate",
       );
       assert.fail(`database authentication startup failed\n${logs.slice(-6000)}`);
     }
+    compose("build", "api", "worker");
 
     const projected = compose(
       "run", "--rm", "--no-deps", "--entrypoint", "sh", "database-credential-projector",
-      "-ceu", "stat -c '%n|%u|%g|%a|%i' /run/core-agent/database-credentials/*",
-    ).trim().split("\n").filter((line) => line.startsWith("/run/core-agent/database-credentials/"));
+      "-ceu", "find /run/core-agent/projected -type f -maxdepth 3 -exec stat -c '%n|%u|%g|%a|%i' {} + | sort",
+    ).trim().split("\n").filter((line) => line.startsWith("/run/core-agent/projected/"));
     assert.equal(projected.length, 9);
     assert.equal(new Set(projected.map((line) => line.split("|")[4])).size, 9);
     const expectedOwners = new Map([
-      ["api-app-password", process.getuid?.() ?? 0],
-      ["hba-bootstrap-password", 999],
-      ["identity-password", 12003],
-      ["migrator-password", 12004],
-      ["postgres-bootstrap-password", 999],
-      ["runtime-application-password", 12003],
-      ["runtime-bootstrap-password", 12003],
-      ["runtime-migrator-password", 12003],
-      ["worker-app-password", process.getuid?.() ?? 0],
+      ["api/database-password", process.getuid?.() ?? 0],
+      ["auth/database-password", 999],
+      ["migrate/database-password", 12004],
+      ["postgres/database-password", 999],
+      ["role-bootstrap/application-password", 12003],
+      ["role-bootstrap/bootstrap-password", 12003],
+      ["role-bootstrap/identity-password", 12003],
+      ["role-bootstrap/migrator-password", 12003],
+      ["worker/database-password", (process.getuid?.() ?? 0) + 1],
     ]);
     for (const line of projected) {
       const [path, uid, , mode] = line.split("|");
-      assert.equal(Number(uid), expectedOwners.get(path.split("/").at(-1)), path);
+      assert.equal(Number(uid), expectedOwners.get(path.split("/projected/")[1]), path);
       assert.equal(mode, "400", path);
     }
 
-    const connect = (role, credentialPath, user = "0:0", extra = []) => compose(
+    const postgresConnect = (role, credentialPath, user = "0:0", extra = []) => compose(
       "run", "--rm", "--no-deps", "--user", user, ...extra,
       "--entrypoint", "sh", "postgres", "-ceu",
       "export PGPASSWORD=\"$(cat \"$2\")\"; exec psql -X -w -h postgres -U \"$1\" -d core_agent_runtime -Atc 'select current_user'",
       "sh", role, credentialPath,
     ).trim().split("\n").find((line) => line === role);
-    assert.equal(connect("core_agent_bootstrap", "/run/core-agent/database-credentials/hba-bootstrap-password", "999:999"), "core_agent_bootstrap");
-    assert.equal(connect("core_agent_migrator", "/run/core-agent/database-credentials/migrator-password", "12004:12004"), "core_agent_migrator");
-    assert.equal(connect("core_agent_app", "/run/core-agent/database-credentials/api-app-password", `${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`), "core_agent_app");
-    assert.equal(connect("core_agent_identity", "/run/core-agent/database-credentials/identity-password", "12003:12003"), "core_agent_identity");
+    assert.equal(postgresConnect("core_agent_bootstrap", "/run/core-agent/database-credentials/database-password", "999:999"), "core_agent_bootstrap");
+
+    const applicationProbe = `
+      import pg from "pg";
+      import { databaseConnectionOptions, readProtectedDatabasePassword } from "@core-agent/runtime-core";
+      const password = await readProtectedDatabasePassword(process.env.CONTROL_PLANE_DATABASE_PASSWORD_FILE);
+      const client = new pg.Client(databaseConnectionOptions(process.env.CONTROL_PLANE_DATABASE_URL, password));
+      try {
+        await client.connect();
+        const result = await client.query("select current_user, (select max(version) from core_agent_schema_migrations) as schema_version");
+        process.stdout.write(result.rows[0].current_user + "|" + result.rows[0].schema_version);
+      } finally { await client.end().catch(() => undefined); }
+    `;
+    for (const service of ["api", "worker"]) {
+      const result = compose("run", "--rm", "--no-deps", "--entrypoint", "node", service, "--input-type=module", "--eval", applicationProbe).trim();
+      assert.match(result, /core_agent_app\|10/u, service);
+      compose(
+        "run", "--rm", "--no-deps", "--entrypoint", "sh", service, "-ceu",
+        "test -f /run/core-agent/database-credentials/database-password; test -r /run/core-agent/database-credentials/database-password; test ! -e /run/core-agent/database-credentials/identity-password; test ! -e /run/core-agent/database-credentials/bootstrap-password; test ! -e /run/core-agent/projected",
+      );
+      for (const collision of [999, 12003, 12004]) {
+        compose(
+          "run", "--rm", "--no-deps", "--user", `${collision}:${collision}`, "--entrypoint", "sh", service, "-ceu",
+          "test ! -e /run/core-agent/database-credentials/identity-password; test ! -e /run/core-agent/database-credentials/bootstrap-password; test ! -e /run/core-agent/database-credentials/migrator-password; test ! -e /run/core-agent/projected",
+        );
+      }
+    }
 
     const reject = (...args) => {
       const result = spawnSync("docker", composeArguments(project, "run", "--rm", "--no-deps", ...args), {
@@ -181,7 +229,7 @@ async function scenario(kind) {
     );
     reject(
       "--user", "0:0", "--entrypoint", "sh", "postgres", "-ceu",
-      "export PGPASSWORD=\"$(cat /run/core-agent/database-credentials/identity-password)\"; exec psql -X -w -h postgres -U core_agent_app -d core_agent_runtime -Atc 'select current_user'",
+      "export PGPASSWORD=\"$(cat /run/core-agent/database-credentials/database-password)\"; exec psql -X -w -h postgres -U core_agent_app -d core_agent_runtime -Atc 'select current_user'",
     );
     reject(
       "--user", "0:0", "--entrypoint", "sh", "postgres", "-ceu",
@@ -190,16 +238,16 @@ async function scenario(kind) {
 
     const hba = compose(
       "run", "--rm", "--no-deps", "--user", "999:999", "--entrypoint", "sh", "postgres", "-ceu",
-      "export PGPASSWORD=\"$(cat /run/core-agent/database-credentials/hba-bootstrap-password)\"; exec psql -X -w -h postgres -U core_agent_bootstrap -d core_agent_runtime -Atc \"select type || ':' || coalesce(address, '') || ':' || auth_method from pg_hba_file_rules where error is null order by line_number\"",
+      "export PGPASSWORD=\"$(cat /run/core-agent/database-credentials/database-password)\"; exec psql -X -w -h postgres -U core_agent_bootstrap -d core_agent_runtime -Atc \"select type || ':' || coalesce(address, '') || ':' || auth_method from pg_hba_file_rules where error is null order by line_number\"",
     );
     assert.match(hba, /local::trust/u);
     assert.match(hba, /host:all:scram-sha-256/u);
     assert.doesNotMatch(hba, /host:all:trust/u);
 
-    for (const service of ["database-credential-projector", "identity-role-bootstrap", "postgres-auth-convergence"]) {
+    for (const service of ["database-credential-projector", "identity-role-bootstrap", "postgres-auth-convergence", "migrate"]) {
       compose("run", "--rm", "--no-deps", service);
     }
-    assert.equal(connect("core_agent_app", "/run/core-agent/database-credentials/api-app-password", `${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`), "core_agent_app");
+    assert.match(compose("run", "--rm", "--no-deps", "--entrypoint", "node", "api", "--input-type=module", "--eval", applicationProbe), /core_agent_app\|10/u);
   } finally {
     command(composeArguments(project, "down", "--volumes", "--remove-orphans"), environment, credentialValues);
     spawnSync("docker", ["rm", "--force", legacyContainer], { env: environment, encoding: "buffer" });
