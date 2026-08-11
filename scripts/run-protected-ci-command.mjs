@@ -63,7 +63,10 @@ export async function runProtectedCiCommand({ secretFile, command, args, environ
   const secret = await readProtectedSecret(secretFile);
   let total = 0;
   let rejected = false;
-  let globalTail = Buffer.alloc(0);
+  const tails = {
+    stdout: Buffer.alloc(0),
+    stderr: Buffer.alloc(0),
+  };
   const stdout = [];
   const stderr = [];
   let timer;
@@ -75,11 +78,11 @@ export async function runProtectedCiCommand({ secretFile, command, args, environ
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
     });
-    const inspect = (target) => (chunk) => {
+    const inspect = (stream, target) => (chunk) => {
       if (rejected) return;
       const bytes = Buffer.from(chunk);
       total += bytes.length;
-      const candidate = Buffer.concat([globalTail, bytes]);
+      const candidate = Buffer.concat([tails[stream], bytes]);
       if (total > maximumOutputBytes || candidate.includes(secret)) {
         rejected = true;
         terminate(child);
@@ -87,10 +90,10 @@ export async function runProtectedCiCommand({ secretFile, command, args, environ
       }
       target.push(bytes);
       const retained = Math.max(0, secret.length - 1);
-      globalTail = candidate.subarray(Math.max(0, candidate.length - retained));
+      tails[stream] = candidate.subarray(Math.max(0, candidate.length - retained));
     };
-    child.stdout.on("data", inspect(stdout));
-    child.stderr.on("data", inspect(stderr));
+    child.stdout.on("data", inspect("stdout", stdout));
+    child.stderr.on("data", inspect("stderr", stderr));
     timer = setTimeout(() => {
       rejected = true;
       terminate(child);
@@ -110,7 +113,8 @@ export async function runProtectedCiCommand({ secretFile, command, args, environ
   } finally {
     if (timer !== undefined) clearTimeout(timer);
     secret.fill(0);
-    globalTail.fill(0);
+    tails.stdout.fill(0);
+    tails.stderr.fill(0);
   }
 }
 

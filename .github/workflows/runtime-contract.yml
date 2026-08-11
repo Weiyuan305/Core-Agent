@@ -100,7 +100,7 @@ jobs:
         env:
           POSTGRES_DB: core_agent_runtime
           POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=trust
-          POSTGRES_PASSWORD: synthetic-ci-db-${{ github.run_id }}-${{ github.run_attempt }}
+          POSTGRES_PASSWORD: synthetic-ci-db-only-credential-${{ github.run_id }}-${{ github.run_attempt }}-fixed-v1
           POSTGRES_USER: core_agent_ci
         options: >-
           --health-cmd "pg_isready -U core_agent_ci -d core_agent_runtime"
@@ -122,7 +122,7 @@ jobs:
 
       - name: Project protected CI database credential files
         env:
-          CI_DATABASE_PASSWORD: synthetic-ci-db-${{ github.run_id }}-${{ github.run_attempt }}
+          CI_DATABASE_PASSWORD: synthetic-ci-db-only-credential-${{ github.run_id }}-${{ github.run_attempt }}-fixed-v1
         run: |
           install -m 0600 /dev/null "$RUNNER_TEMP/core-agent-ci-db-secret"
           printf '%s' "$CI_DATABASE_PASSWORD" > "$RUNNER_TEMP/core-agent-ci-db-secret"
@@ -132,16 +132,20 @@ jobs:
           echo "CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE=$RUNNER_TEMP/core-agent-ci-db-secret" >> "$GITHUB_ENV"
 
       - name: Bootstrap exact test database role prerequisites
-        run: node scripts/bootstrap-test-database-roles.mjs
+        run: node scripts/run-protected-ci-command.mjs --secret-file "$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- node scripts/bootstrap-test-database-roles.mjs
 
       - name: Run real PostgreSQL suites
-        run: npm run test:postgres
+        run: node scripts/run-protected-ci-command.mjs --secret-file "$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- npm run test:postgres
+
+      - name: Release scanned PostgreSQL service logs
+        if: always()
+        run: node scripts/run-protected-ci-command.mjs --secret-file "$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- docker logs "${{ job.services.postgres.id }}"
 
       - name: Scan every public database text surface for the CI sentinel
-        run: node scripts/scan-runtime-database.mjs synthetic-ci-sentinel-runtime-v1
+        run: node scripts/run-protected-ci-command.mjs --secret-file "$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- node scripts/scan-runtime-database.mjs synthetic-ci-sentinel-runtime-v1
 
       - name: Scan actual CI database credential from protected file
-        run: node scripts/verify-no-secret.mjs --secret-file "$RUNNER_TEMP/core-agent-ci-db-secret"
+        run: node scripts/run-protected-ci-command.mjs --secret-file "$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- node scripts/verify-no-secret.mjs --secret-file "$RUNNER_TEMP/core-agent-ci-db-secret"
 
   integration:
     runs-on: ubuntu-latest
@@ -154,7 +158,7 @@ jobs:
         env:
           POSTGRES_DB: core_agent_runtime
           POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=trust
-          POSTGRES_PASSWORD: synthetic-ci-db-${{ github.run_id }}-${{ github.run_attempt }}
+          POSTGRES_PASSWORD: synthetic-ci-db-only-credential-${{ github.run_id }}-${{ github.run_attempt }}-fixed-v1
           POSTGRES_USER: core_agent_ci
         options: >-
           --health-cmd "pg_isready -U core_agent_ci -d core_agent_runtime"
@@ -176,7 +180,7 @@ jobs:
 
       - name: Project protected CI database credential files
         env:
-          CI_DATABASE_PASSWORD: synthetic-ci-db-${{ github.run_id }}-${{ github.run_attempt }}
+          CI_DATABASE_PASSWORD: synthetic-ci-db-only-credential-${{ github.run_id }}-${{ github.run_attempt }}-fixed-v1
         run: |
           install -m 0600 /dev/null "$RUNNER_TEMP/core-agent-ci-db-secret"
           printf '%s' "$CI_DATABASE_PASSWORD" > "$RUNNER_TEMP/core-agent-ci-db-secret"
@@ -186,16 +190,20 @@ jobs:
           echo "CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE=$RUNNER_TEMP/core-agent-ci-db-secret" >> "$GITHUB_ENV"
 
       - name: Bootstrap exact test database role prerequisites
-        run: node scripts/bootstrap-test-database-roles.mjs
+        run: node scripts/run-protected-ci-command.mjs --secret-file "$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- node scripts/bootstrap-test-database-roles.mjs
 
       - name: Run fake Supervisor and Hermes full slice
-        run: npm run test:integration
+        run: node scripts/run-protected-ci-command.mjs --secret-file "$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- npm run test:integration
+
+      - name: Release scanned PostgreSQL service logs
+        if: always()
+        run: node scripts/run-protected-ci-command.mjs --secret-file "$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- docker logs "${{ job.services.postgres.id }}"
 
       - name: Scan integration evidence for the CI sentinel
-        run: node scripts/verify-no-secret.mjs synthetic-ci-sentinel-runtime-v1
+        run: node scripts/run-protected-ci-command.mjs --secret-file "$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- node scripts/verify-no-secret.mjs synthetic-ci-sentinel-runtime-v1
 
       - name: Scan actual CI database credential from protected file
-        run: node scripts/verify-no-secret.mjs --secret-file "$RUNNER_TEMP/core-agent-ci-db-secret"
+        run: node scripts/run-protected-ci-command.mjs --secret-file "$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- node scripts/verify-no-secret.mjs --secret-file "$RUNNER_TEMP/core-agent-ci-db-secret"
 
   compose:
     runs-on: ubuntu-latest

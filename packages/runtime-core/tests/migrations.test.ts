@@ -41,7 +41,7 @@ const identityPrivilegeMatrix = Object.freeze({
   platform_role_assignments: ["SELECT", "INSERT", "UPDATE"],
   identity_invitations: ["SELECT", "INSERT", "UPDATE"],
   oauth_transactions: ["SELECT", "INSERT", "UPDATE"],
-  core_sessions: ["SELECT", "INSERT", "UPDATE"],
+  core_sessions: ["SELECT", "INSERT", "UPDATE", "DELETE"],
   account_deletions: ["SELECT", "INSERT", "UPDATE"],
   public_rate_limits: ["SELECT", "INSERT", "UPDATE"],
   idempotency_records: ["SELECT", "INSERT", "UPDATE"],
@@ -821,8 +821,10 @@ test("schema 10 identity authority tables retain their compatibility and securit
     "account_deletions:p:PRIMARY KEY (account_deletion_id)",
     "auth_subjects:f:FOREIGN KEY (actor_id) REFERENCES actors(actor_id)",
     "auth_subjects:p:PRIMARY KEY (auth_subject_id)",
+    "auth_subjects:u:UNIQUE (actor_id, auth_subject_id)",
     "auth_subjects:u:UNIQUE (provider, provider_subject)",
     "core_sessions:f:FOREIGN KEY (actor_id) REFERENCES actors(actor_id)",
+    "core_sessions:f:FOREIGN KEY (actor_id, auth_subject_id) REFERENCES auth_subjects(actor_id, auth_subject_id)",
     "core_sessions:f:FOREIGN KEY (auth_subject_id) REFERENCES auth_subjects(auth_subject_id)",
     "core_sessions:p:PRIMARY KEY (session_id)",
     "core_sessions:u:UNIQUE (secret_digest)",
@@ -974,7 +976,7 @@ test("real Identity login commits and atomically rolls back the Task 3 cross-tab
     for (const table of ["runtime_containers", "conversations", "messages", "secret_references", "stream_cursors"]) {
       await assert.rejects(identity.query(`select count(*) from ${table}`), /permission denied/);
     }
-    await assert.rejects(identity.query("delete from core_sessions where false"), /permission denied/);
+    await assert.doesNotReject(identity.query("delete from core_sessions where false"));
 
     const writeGraph = async (suffix: string, injectFailure: boolean) => {
       const tenant = `tenant_identity_${suffix}`;
@@ -1037,7 +1039,7 @@ test("real Identity login commits and atomically rolls back the Task 3 cross-tab
         await identity!.query("rollback");
         throw error;
       }
-      return { tenant, actor, membership, profile };
+      return { tenant, actor, membership, profile, subject };
     };
 
     const committed = await writeGraph("1".repeat(32), false);
@@ -1064,6 +1066,92 @@ test("real Identity login commits and atomically rolls back the Task 3 cross-tab
         `event_identity_${rolledBackSuffix}`, `audit-${rolledBackSuffix}`, `outbox-${rolledBackSuffix}`,
       ],
     )).rows[0]?.count, 0);
+
+    const rolledBackFinalization = await writeGraph("3".repeat(32), false);
+    const createCoreSession = async (graph: typeof committed, suffix: string, status: "active" | "revoked" | "expired") => {
+      const timestamp = new Date("2026-08-11T00:00:00.000Z");
+      await identity!.query(
+        `insert into core_sessions (
+          session_id, secret_digest, csrf_digest, actor_id, auth_subject_id, client_kind,
+          status, device_label, created_at, last_seen_at, idle_expires_at,
+          absolute_expires_at, reauthenticated_at, revocation_reason, resource_version, updated_at
+        ) values (
+          $1, decode($2, 'hex'), null, $3, $4, 'web', $5, 'Synthetic browser',
+          $6, $6, $7, $8, null, $9, 1, $6
+        )`,
+        [
+          `session_identity_${suffix}`, suffix.padEnd(64, "f").slice(0, 64), graph.actor,
+          graph.subject, status, timestamp, new Date("2026-08-11T01:00:00.000Z"),
+          new Date("2026-08-12T00:00:00.000Z"), status === "revoked" ? "account_deletion" : null,
+        ],
+      );
+    };
+    await createCoreSession(committed, "4".repeat(32), "active");
+    await createCoreSession(committed, "5".repeat(32), "revoked");
+    await createCoreSession(committed, "7".repeat(32), "expired");
+    await assert.rejects(
+      identity.query(
+        `insert into core_sessions (
+          session_id, secret_digest, csrf_digest, actor_id, auth_subject_id, client_kind,
+          status, device_label, created_at, last_seen_at, idle_expires_at,
+          absolute_expires_at, reauthenticated_at, revocation_reason, resource_version, updated_at
+        ) values (
+          $1, decode(repeat('88', 32), 'hex'), null, $2, $3, 'web', 'revoked', null,
+          $4, $4, $5, $6, null, 'account_deletion', 1, $4
+        )`,
+        [
+          "session_identity_mismatched_subject", committed.actor, rolledBackFinalization.subject,
+          new Date("2026-08-11T00:00:00.000Z"), new Date("2026-08-11T01:00:00.000Z"),
+          new Date("2026-08-12T00:00:00.000Z"),
+        ],
+      ),
+      /foreign key constraint/,
+    );
+    await assert.rejects(
+      identity.query("delete from core_sessions where session_id = $1", [`session_identity_${"4".repeat(32)}`]),
+      /only revoked Core Sessions may be deleted/,
+    );
+    assert.equal((await identity.query<{ count: number }>(
+      "select count(*)::int as count from core_sessions where actor_id = $1",
+      [committed.actor],
+    )).rows[0]?.count, 3);
+    await assert.rejects(
+      identity.query("delete from core_sessions where session_id = $1", [`session_identity_${"7".repeat(32)}`]),
+      /only revoked Core Sessions may be deleted/,
+    );
+    await identity.query(
+      "update core_sessions set status = 'revoked', revocation_reason = 'account_deletion', resource_version = resource_version + 1 where actor_id = $1",
+      [committed.actor],
+    );
+    await identity.query("update auth_subjects set status = 'revoked', resource_version = resource_version + 1 where actor_id = $1", [committed.actor]);
+
+    await createCoreSession(rolledBackFinalization, "6".repeat(32), "revoked");
+    await identity.query("update auth_subjects set status = 'revoked', resource_version = resource_version + 1 where actor_id = $1", [rolledBackFinalization.actor]);
+    const finalizeIdentity = async (graph: typeof committed, injectFailure: boolean) => {
+      await identity!.query("begin isolation level serializable");
+      try {
+        await identity!.query("delete from core_sessions where actor_id = $1 and status = 'revoked'", [graph.actor]);
+        await identity!.query("delete from auth_subjects where actor_id = $1 and status = 'revoked'", [graph.actor]);
+        await identity!.query("delete from private_identity_pii where actor_id = $1", [graph.actor]);
+        if (injectFailure) throw new Error("synthetic finalization rollback");
+        await identity!.query("commit");
+      } catch (error) {
+        await identity!.query("rollback");
+        throw error;
+      }
+    };
+    await finalizeIdentity(committed, false);
+    await assert.rejects(finalizeIdentity(rolledBackFinalization, true), /synthetic finalization rollback/);
+    for (const [graph, expected] of [[committed, 0], [rolledBackFinalization, 1]] as const) {
+      const retained = await identity.query<{ sessions: number; subjects: number; pii: number }>(
+        `select
+          (select count(*)::int from core_sessions where actor_id = $1) as sessions,
+          (select count(*)::int from auth_subjects where actor_id = $1) as subjects,
+          (select count(*)::int from private_identity_pii where actor_id = $1) as pii`,
+        [graph.actor],
+      );
+      assert.deepEqual(retained.rows[0], { sessions: expected, subjects: expected, pii: expected });
+    }
 
     await identity.query("begin isolation level serializable");
     await identity.query("update actors set status = 'disabled', resource_version = resource_version + 1 where actor_id = $1", [committed.actor]);

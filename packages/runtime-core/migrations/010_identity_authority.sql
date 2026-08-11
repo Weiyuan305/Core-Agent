@@ -197,6 +197,7 @@ create table auth_subjects (
   resource_version bigint not null check (resource_version > 0),
   created_at timestamptz not null,
   updated_at timestamptz not null,
+  unique (actor_id, auth_subject_id),
   unique (provider, provider_subject)
 );
 
@@ -281,8 +282,28 @@ create table core_sessions (
   revocation_reason text,
   resource_version bigint not null check (resource_version > 0),
   updated_at timestamptz not null,
+  foreign key (actor_id, auth_subject_id) references auth_subjects(actor_id, auth_subject_id),
   check (idle_expires_at <= absolute_expires_at)
 );
+
+create function enforce_core_session_revoked_deletion()
+returns trigger
+language plpgsql
+as $$
+begin
+  if old.status <> 'revoked' then
+    raise exception 'only revoked Core Sessions may be deleted'
+      using errcode = '23514',
+        constraint = 'core_sessions_revoked_deletion_check';
+  end if;
+  return old;
+end
+$$;
+
+create trigger core_sessions_revoked_deletion_check
+before delete on core_sessions
+for each row
+execute function enforce_core_session_revoked_deletion();
 
 create table account_deletions (
   account_deletion_id text primary key,
@@ -386,7 +407,8 @@ to core_agent_identity;
 
 grant select, insert, update, delete on table
   auth_subjects,
-  private_identity_pii
+  private_identity_pii,
+  core_sessions
 to core_agent_identity;
 
 grant select, insert, update on table

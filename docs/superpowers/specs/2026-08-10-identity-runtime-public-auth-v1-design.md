@@ -242,7 +242,8 @@ matrix; omitted operations are denied:
 | --- | --- | --- |
 | `tenants`, `actors`, `memberships`, `profiles` | `SELECT`, `INSERT`, `UPDATE` | create and version the identity graph; deletion is state-based |
 | `auth_subjects`, `private_identity_pii` | `SELECT`, `INSERT`, `UPDATE`, `DELETE` | provider authority and the Task 9 PII erasure boundary |
-| `platform_role_assignments`, `identity_invitations`, `oauth_transactions`, `core_sessions`, `account_deletions` | `SELECT`, `INSERT`, `UPDATE` | versioned identity state machines |
+| `core_sessions` | `SELECT`, `INSERT`, `UPDATE`, `DELETE` | Session state machine; database guard permits physical deletion only after revocation |
+| `platform_role_assignments`, `identity_invitations`, `oauth_transactions`, `account_deletions` | `SELECT`, `INSERT`, `UPDATE` | versioned identity state machines |
 | `public_rate_limits`, `idempotency_records` | `SELECT`, `INSERT`, `UPDATE` | atomic counters and durable replay records |
 | `product_events`, `audit_events`, `outbox` | `SELECT`, `INSERT` | immutable append and delivery enqueue only |
 | `stream_sequences` | `SELECT`, `INSERT`, `UPDATE` | transactional sequence allocation |
@@ -397,6 +398,11 @@ authentication and recent password reauthentication before the deadline.
 
 At expiry:
 
+- the finalizer deletes every revoked Core Session for the Actor/AuthSubject before
+  deleting the AuthSubject and private PII in the same serializable transaction;
+- an active or expired Core Session is never physically deleted: it must first make
+  the immediate, durable transition to `revoked`, and any finalization failure rolls
+  back the Session, AuthSubject, and PII deletions together;
 - provider-subject links and private authentication PII are deleted;
 - the Supabase user is removed through an idempotent background job;
 - B2C-owned personal resources enter the later retention/deletion workflow;

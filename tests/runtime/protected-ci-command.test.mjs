@@ -46,6 +46,8 @@ test("protected CI command terminates stdout stderr and split-chunk credential l
     "const {readFileSync}=await import('node:fs'); process.stdout.write(readFileSync(process.env.ROUND12_SECRET_FILE));",
     "const {readFileSync}=await import('node:fs'); process.stderr.write(readFileSync(process.env.ROUND12_SECRET_FILE));",
     `const {readFileSync}=await import('node:fs'); const value=readFileSync(process.env.ROUND12_SECRET_FILE); const split=Math.floor(value.length/2); process.stdout.write(value.subarray(0,split)); setTimeout(()=>process.stdout.write(value.subarray(split)),20); setTimeout(()=>{},1000);`,
+    `const {readFileSync}=await import('node:fs'); const value=readFileSync(process.env.ROUND12_SECRET_FILE); process.stdout.write(value.subarray(0,1)); setTimeout(()=>process.stderr.write('safe interleave'),10); setTimeout(()=>process.stdout.write(value.subarray(1)),20); setTimeout(()=>{},1000);`,
+    `const {readFileSync}=await import('node:fs'); const value=readFileSync(process.env.ROUND12_SECRET_FILE); process.stderr.write(value.subarray(0,value.length-1)); setTimeout(()=>process.stdout.write('safe interleave'),10); setTimeout(()=>process.stderr.write(value.subarray(value.length-1)),20); setTimeout(()=>{},1000);`,
   ];
   for (const source of cases) {
     const result = invoke(secretFile, source, environment);

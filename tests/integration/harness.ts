@@ -99,10 +99,17 @@ interface DatabaseCreateSession {
   close(): Promise<void>;
 }
 
+interface DatabaseAdminSession {
+  connect(): Promise<void>;
+  query(sql: string, values?: readonly unknown[]): Promise<{ readonly rows: readonly Record<string, unknown>[] }>;
+  close(): Promise<void>;
+}
+
 interface CleanupStage {
   readonly category: string;
   readonly work: () => Promise<void>;
   readonly failureCategory?: (error: unknown) => string;
+  readonly timeoutMs?: number;
 }
 
 interface SentinelScan {
@@ -157,7 +164,7 @@ async function runCleanupStages(
   const failures: string[] = [];
   for (const stage of stages) {
     try {
-      await runWithDeadline(stage.work, timeoutMs);
+      await runWithDeadline(stage.work, stage.timeoutMs ?? timeoutMs);
     } catch (error) {
       let category = stage.category;
       try {
@@ -275,6 +282,108 @@ function databaseUrlFor(controlUrl: URL, databaseName: string): string {
   return value.toString();
 }
 
+function combineSetupAndCleanupFailure(error: unknown, cleanupFailures: readonly string[]): Error {
+  if (cleanupFailures.length === 0) {
+    return error instanceof Error ? error : new Error("Integration setup failed");
+  }
+  return new Error(
+    `Integration setup failed; cleanup failed: ${cleanupFailures.join(", ")}`,
+    { cause: error },
+  );
+}
+
+async function cleanupAfterSetupFailure(error: unknown, stages: readonly CleanupStage[]): Promise<never> {
+  const cleanupFailures = await runCleanupStages(stages);
+  throw combineSetupAndCleanupFailure(error, cleanupFailures);
+}
+
+function runBeforeDeadline<T>(deadline: number, work: () => Promise<T>): Promise<T> {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) return Promise.reject(new Error("Integration stage timed out"));
+  return runWithDeadline(work, remaining);
+}
+
+async function dropIsolatedDatabase(options: {
+  readonly databaseName: string;
+  readonly controlDatabaseUrl?: string;
+  readonly closeOwned: readonly (() => Promise<void>)[];
+  readonly createAdminSession?: () => DatabaseAdminSession;
+  readonly timeoutMs?: number;
+  readonly retryDelayMs?: number;
+}): Promise<void> {
+  assert.match(options.databaseName, databaseNamePattern);
+  const timeoutMs = options.timeoutMs ?? externalStageTimeoutMs;
+  const retryDelayMs = options.retryDelayMs ?? 50;
+  assert(Number.isSafeInteger(timeoutMs) && timeoutMs > 0);
+  assert(Number.isSafeInteger(retryDelayMs) && retryDelayMs > 0 && retryDelayMs <= 250);
+  const finalDeadline = Date.now() + timeoutMs;
+  const closeReserveMs = Math.min(250, Math.max(1, Math.floor(timeoutMs / 4)));
+  const operationDeadline = finalDeadline - closeReserveMs;
+  const ownedFailures: string[] = [];
+  for (const [index, close] of options.closeOwned.entries()) {
+    try {
+      await runBeforeDeadline(operationDeadline, close);
+    } catch {
+      ownedFailures.push(`owned database connection ${index + 1}`);
+    }
+  }
+  const client = options.createAdminSession === undefined
+    ? new Client({
+        connectionString: options.controlDatabaseUrl,
+        connectionTimeoutMillis: timeoutMs,
+        query_timeout: Math.min(timeoutMs, 1_000),
+        statement_timeout: Math.min(timeoutMs, 1_000),
+      })
+    : undefined;
+  if (options.createAdminSession === undefined && options.controlDatabaseUrl === undefined) {
+    throw new Error("Integration stage failed: database drop");
+  }
+  const admin = options.createAdminSession?.() ?? {
+    connect: () => client!.connect(),
+    query: async (sql: string, values?: readonly unknown[]) => {
+      const result = await client!.query(sql, values === undefined ? undefined : [...values]);
+      return { rows: result.rows as readonly Record<string, unknown>[] };
+    },
+    close: () => client!.end(),
+  };
+  let dropped = false;
+  let closeFailed = false;
+  try {
+    await runBeforeDeadline(operationDeadline, () => admin.connect());
+    while (!dropped) {
+      try {
+        await runBeforeDeadline(operationDeadline, () => admin.query(
+          `select pg_terminate_backend(pid)
+           from pg_stat_activity
+           where datname = $1 and pid <> pg_backend_pid()`,
+          [options.databaseName],
+        ));
+        await runBeforeDeadline(operationDeadline, () => admin.query(`drop database if exists "${options.databaseName}"`));
+        const verification = await runBeforeDeadline(operationDeadline, () => admin.query(
+          "select exists (select 1 from pg_database where datname = $1) as exists",
+          [options.databaseName],
+        ));
+        dropped = verification.rows[0]?.exists === false;
+      } catch {
+        dropped = false;
+      }
+      if (dropped) break;
+      if (Date.now() >= operationDeadline) throw new Error("Integration stage failed: database drop");
+      await runBeforeDeadline(operationDeadline, () => sleep(retryDelayMs));
+    }
+  } catch {
+    throw new Error("Integration stage failed: database drop");
+  } finally {
+    try {
+      await runBeforeDeadline(finalDeadline, () => admin.close());
+    } catch {
+      closeFailed = true;
+    }
+  }
+  if (closeFailed) throw new Error("Integration stage failed: database admin close");
+  if (ownedFailures.length > 0) throw new Error("Integration stage failed: owned database connections");
+}
+
 async function createIsolatedDatabase(options: {
   readonly configuredUrl?: string;
   readonly databaseName?: string;
@@ -358,7 +467,7 @@ async function createIsolatedDatabase(options: {
       cancellationConfirmed = false;
     }
     if (!cancellationConfirmed) {
-      await runCleanupStages([
+      const cleanupFailures = await runCleanupStages([
         { category: "control pool", work: () => controlPool.end() },
         ...(options.cleanupControlPool === undefined ? [] : [{
           category: "cleanup control pool",
@@ -1048,33 +1157,24 @@ export class IntegrationHarness {
       await harness.startWorker();
       return harness;
     } catch (error) {
-      const cleanupControlPool = new Pool({
-        connectionString: isolated.controlDatabaseUrl,
-        max: 1,
-        connectionTimeoutMillis: 750,
-        query_timeout: 750,
-        statement_timeout: 750,
-      });
-      await runCleanupStages([
+      await cleanupAfterSetupFailure(error, [
         { category: "supervisor", work: async () => { await supervisor?.close(); } },
         { category: "hermes", work: async () => { await fakeHermes?.close(); } },
-        { category: "database pool", work: async () => {
-          if (db !== undefined) await db.destroy();
-          else await childPool?.end();
-        } },
         { category: "database drop", work: async () => {
-          assert.match(isolated.databaseName, databaseNamePattern);
-          await cleanupControlPool.query(
-            `drop database if exists "${isolated.databaseName}" with (force)`,
-          );
-        } },
-        { category: "cleanup control pool", work: () => cleanupControlPool.end() },
+          await dropIsolatedDatabase({
+            databaseName: isolated.databaseName,
+            controlDatabaseUrl: isolated.controlDatabaseUrl,
+            closeOwned: [async () => {
+              if (db !== undefined) await db.destroy();
+              else await childPool?.end();
+            }],
+          });
+        }, timeoutMs: externalStageTimeoutMs + 1_000 },
         { category: "control pool", work: () => isolated.controlPool.end() },
         { category: "temporary directory", work: async () => {
           if (directory !== undefined) await rm(directory, { recursive: true, force: true });
         } },
       ]);
-      throw error;
     }
   }
 
@@ -1392,34 +1492,13 @@ export class IntegrationHarness {
           return message.startsWith("sentinel category:") ? message : "sentinel";
         },
       },
-      { category: "database pool", work: () => this.db.destroy() },
       { category: "database drop", work: async () => {
-        assert.match(this.databaseName, databaseNamePattern);
-        try {
-          await boundedExternal("database drop", async () => {
-            await this.#controlPool.query(
-              `drop database if exists "${this.databaseName}"`,
-            );
-          }, 500);
-        } catch {
-          const cleanupPool = new Pool({
-            connectionString: this.#controlDatabaseUrl,
-            max: 1,
-            connectionTimeoutMillis: 500,
-            query_timeout: 500,
-            statement_timeout: 500,
-          });
-          try {
-            await boundedExternal("database force drop", async () => {
-              await cleanupPool.query(
-                `drop database if exists "${this.databaseName}" with (force)`,
-              );
-            }, 500);
-          } finally {
-            await boundedExternal("database cleanup pool", () => cleanupPool.end(), 500);
-          }
-        }
-      } },
+        await dropIsolatedDatabase({
+          databaseName: this.databaseName,
+          controlDatabaseUrl: this.#controlDatabaseUrl,
+          closeOwned: [() => this.db.destroy()],
+        });
+      }, timeoutMs: externalStageTimeoutMs + 1_000 },
       { category: "control pool", work: () => this.#controlPool.end() },
       {
         category: "temporary directory",
@@ -1596,7 +1675,10 @@ export const testHarnessInternals = Object.freeze({
   assertStructuredLogsSentinelFree,
   captureStructuredLog,
   capturingLogger,
+  cleanupAfterSetupFailure,
+  combineSetupAndCleanupFailure,
   createIsolatedDatabase,
+  dropIsolatedDatabase,
   runCleanupStages,
 });
 

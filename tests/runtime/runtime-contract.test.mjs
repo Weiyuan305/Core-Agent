@@ -941,8 +941,8 @@ test("CI validates runtime contracts without building or publishing images", asy
   assert.match(workflow, /^\s+fetch-depth: 0$/m);
   assert.match(workflow, /^\s+run: npm run contracts:check$/m);
   assert.match(workflow, /^\s+run: npm run check$/m);
-  assert.match(workflow, /^\s+run: npm run test:postgres$/m);
-  assert.match(workflow, /^\s+run: npm run test:integration$/m);
+  assert.match(workflow, /^\s+run: node scripts\/run-protected-ci-command\.mjs --secret-file "\$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- npm run test:postgres$/m);
+  assert.match(workflow, /^\s+run: node scripts\/run-protected-ci-command\.mjs --secret-file "\$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- npm run test:integration$/m);
   assert.match(workflow, /^\s+run: npm run test:runtime$/m);
   assert.match(workflow, /github\.event\.pull_request\.base\.sha \|\| github\.event\.before/);
   assert.match(

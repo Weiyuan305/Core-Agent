@@ -949,7 +949,7 @@ test("CI preserves contracts and separates deterministic runtime gates", async (
   assert.doesNotMatch(workflowSource, /github\.token|gh[opsu]_[A-Za-z0-9]/iu);
   assert(!/hermes:build|REAL_HERMES|docker compose up/u.test(workflowSource));
   const lock = JSON.parse(await source("infra/runtime/base-images.lock.json"));
-  const syntheticCiDatabaseCredential = "synthetic-ci-db-${{ github.run_id }}-${{ github.run_attempt }}";
+  const syntheticCiDatabaseCredential = "synthetic-ci-db-only-credential-${{ github.run_id }}-${{ github.run_attempt }}-fixed-v1";
   for (const jobName of ["postgres", "integration"]) {
     const service = workflow.jobs[jobName].services.postgres;
     assert.equal(service.image, lock.images.postgres.platforms["linux/amd64"]);
@@ -969,15 +969,31 @@ test("CI preserves contracts and separates deterministic runtime gates", async (
     assert.match(setup.run, /PGPASSFILE=/u);
     assert.doesNotMatch(setup.run, /--password|postgresql:\/\/[^@/:]+:[^@/]+@/u);
     assert.match(setup.run, /core-agent-ci-db-secret/u);
-    const bootstrap = workflow.jobs[jobName].steps.find((step) => step.run === "node scripts/bootstrap-test-database-roles.mjs");
+    const protectedPrefix = 'node scripts/run-protected-ci-command.mjs --secret-file "$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- ';
+    const bootstrap = workflow.jobs[jobName].steps.find((step) => step.run === `${protectedPrefix}node scripts/bootstrap-test-database-roles.mjs`);
     assert(bootstrap);
     assert(workflow.jobs[jobName].steps.indexOf(bootstrap) > workflow.jobs[jobName].steps.indexOf(setup));
-    const suite = workflow.jobs[jobName].steps.find((step) => step.run === `npm run test:${jobName}`);
+    const suite = workflow.jobs[jobName].steps.find((step) => step.run === `${protectedPrefix}npm run test:${jobName}`);
+    assert(suite);
     assert(workflow.jobs[jobName].steps.indexOf(bootstrap) < workflow.jobs[jobName].steps.indexOf(suite));
+    const serviceLogs = workflow.jobs[jobName].steps.find((step) => step.name === "Release scanned PostgreSQL service logs");
+    assert(serviceLogs);
+    assert.equal(serviceLogs.if, "always()");
+    assert.equal(
+      serviceLogs.run,
+      `${protectedPrefix}docker logs "\${{ job.services.postgres.id }}"`,
+    );
+    assert(workflow.jobs[jobName].steps.indexOf(suite) < workflow.jobs[jobName].steps.indexOf(serviceLogs));
     const scan = workflow.jobs[jobName].steps.find((step) => step.name === "Scan actual CI database credential from protected file");
     assert(scan);
-    assert.match(scan.run, /verify-no-secret\.mjs --secret-file/u);
+    assert.equal(
+      scan.run,
+      `${protectedPrefix}node scripts/verify-no-secret.mjs --secret-file "$RUNNER_TEMP/core-agent-ci-db-secret"`,
+    );
     assert.doesNotMatch(scan.run, /CI_DATABASE_PASSWORD/u);
+    const evidenceScan = workflow.jobs[jobName].steps.find((step) => step.name.startsWith("Scan ") && step !== scan);
+    assert(evidenceScan);
+    assert.match(evidenceScan.run, /^node scripts\/run-protected-ci-command\.mjs --secret-file "\$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- /u);
   }
   assert.match(workflowSource, /npm run test:postgres/u);
   assert.match(workflowSource, /npm run test:integration/u);
@@ -1006,6 +1022,9 @@ test("fresh CI-equivalent protects command output and proves cleanup after succe
   assert.match(text, /assert\.rejects\([\s\S]*injected CI-equivalent failure/u);
   assert.match(text, /protectedRun\("npm", \["run", "test:postgres"\]/u);
   assert.match(text, /protectedRun\("npm", \["run", "test:integration"\]/u);
+  assert.match(text, /assertExecutionCount\(postgresOutput, 155\)/u);
+  assert.match(text, /assertExecutionCount\(postgresOutput, 14\)/u);
+  assert.match(text, /assertExecutionCount\(integrationOutput, 50\)/u);
   assert.match(text, /protectedRun\("docker", \["logs", container\]/u);
   assert.match(text, /injectedOutputLeak/u);
   assert.match(runner, /candidate\.includes\(secret\)[\s\S]*terminate\(child\)/u);
