@@ -50,7 +50,10 @@ export function resolveDockerSocketPolicy(environment = process.env, identity = 
     const runtimeGid = numericIdentity(environment.CORE_AGENT_SUPERVISOR_SOCKET_GID);
     const dockerGid = numericIdentity(environment.CORE_AGENT_DOCKER_GID);
     if (
-      identity?.uid !== runtimeUid
+      runtimeUid === 0
+      || runtimeGid === 0
+      || dockerGid === 0
+      || identity?.uid !== runtimeUid
       || identity.gid !== runtimeGid
       || !Array.isArray(identity.groups)
       || !identity.groups.includes(dockerGid)

@@ -96,7 +96,6 @@ async function scenario(kind) {
     CORE_AGENT_POSTGRES_BOOTSTRAP_PASSWORD_FILE: paths.bootstrap,
     CORE_AGENT_POSTGRES_IMAGE: lock.images.postgres.platforms[platform],
     CORE_AGENT_PROVIDER_SECRET_ROOT: join(root, "provider"),
-    CORE_AGENT_RUNTIME_GID: String(process.getgid?.() ?? 0),
     CORE_AGENT_RUNTIME_UID: String(process.getuid?.() ?? 0),
     CORE_AGENT_API_GID: String(process.getgid?.() ?? 0),
     CORE_AGENT_API_UID: String(process.getuid?.() ?? 0),
@@ -158,6 +157,26 @@ async function scenario(kind) {
       assert.fail(`database authentication startup failed\n${logs.slice(-6000)}`);
     }
     compose("build", "api", "worker");
+    for (const override of [
+      { CORE_AGENT_API_UID: "0" },
+      { CORE_AGENT_RUNTIME_UID: "0" },
+      { CORE_AGENT_API_GID: "0" },
+      { CORE_AGENT_SUPERVISOR_SOCKET_GID: "0" },
+    ]) {
+      const result = spawnSync("docker", composeArguments(project, "run", "--rm", "--no-deps", "database-credential-projector"), {
+        cwd: repositoryRoot,
+        env: { ...environment, ...override },
+        encoding: "buffer",
+        maxBuffer: 8 * 1024 * 1024,
+        timeout: 60_000,
+      });
+      safeResult(result, credentialValues);
+      assert.notEqual(result.status, 0, "zero application identity must fail in the real projector container");
+    }
+    assert.equal(
+      docker("image", "inspect", "core-agent/control-plane-worker:dev", "--format", "{{.Config.User}}").trim(),
+      "12002:12002",
+    );
 
     const workerIngressProbe = `
       import { constants } from "node:fs";

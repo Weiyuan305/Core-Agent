@@ -49,7 +49,6 @@ const smokeEnvironment = Object.freeze({
   CORE_AGENT_INGRESS_SECRET_ROOT: "/safe/ingress",
   CORE_AGENT_SUPERVISOR_STATE_ROOT: "/safe/state",
   CORE_AGENT_RUNTIME_UID: "501",
-  CORE_AGENT_RUNTIME_GID: "20",
   CORE_AGENT_SUPERVISOR_SOCKET_GID: "20",
   CORE_AGENT_DOCKER_GID: "100",
   CORE_AGENT_DOCKER_SOCKET_SOURCE: "/var/run/docker.sock.raw",
@@ -80,6 +79,16 @@ test("REAL_HERMES smoke is explicit and rejects CLI and environment extras", () 
     () => validateSmokeEnvironment({ ...smokeEnvironment, CORE_AGENT_SMOKE_CUSTOMER_FIXTURE: "customer.json" }),
     /SMOKE_ENVIRONMENT_INVALID/,
   );
+  assert.throws(
+    () => validateSmokeEnvironment({ ...smokeEnvironment, CORE_AGENT_RUNTIME_GID: "20" }),
+    /SMOKE_ENVIRONMENT_INVALID/,
+  );
+  for (const name of ["CORE_AGENT_RUNTIME_UID", "CORE_AGENT_SUPERVISOR_SOCKET_GID", "CORE_AGENT_DOCKER_GID"]) {
+    assert.throws(
+      () => validateSmokeEnvironment({ ...smokeEnvironment, [name]: "0" }),
+      /SMOKE_ENVIRONMENT_INVALID/,
+    );
+  }
   assert.deepEqual(parseSmokeArguments(["--keep-runtime"]), { keepRuntime: true });
   assert.throws(() => parseSmokeArguments(["--keep-runtime", "--keep-runtime"]), /SMOKE_ARGUMENT_INVALID/);
   assert.throws(() => parseSmokeArguments(["--tenant", "anything"]), /SMOKE_ARGUMENT_INVALID/);

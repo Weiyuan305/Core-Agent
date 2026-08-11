@@ -161,14 +161,31 @@ test("database credential projector rejects privileged application UID collision
     auth: { uid: 999, gid: 999 }, migrate: { uid: 12004, gid: 12004 },
     api: { uid: 12000, gid: 12000 }, worker: { uid: 12001, gid: 12001 },
   };
-  for (const collision of [999, 12003, 12004]) {
+  for (const collision of [0, 999, 12003, 12004]) {
     for (const application of ["api", "worker"]) {
       await assert.rejects(projector.projectRuntimeDatabaseCredentials({
         sourcePaths, outputRoots, sourceUid: process.getuid(), sourceGid: process.getgid(),
         targetIdentities: { ...identities, [application]: { uid: collision, gid: collision } },
+        projectFileImplementation: async () => undefined,
       }), /database credential projection failed/u);
     }
   }
+  for (const application of ["api", "worker"]) {
+    await assert.rejects(projector.projectRuntimeDatabaseCredentials({
+      sourcePaths, outputRoots, sourceUid: process.getuid(), sourceGid: process.getgid(),
+      targetIdentities: { ...identities, [application]: { ...identities[application], gid: 0 } },
+      projectFileImplementation: async () => undefined,
+    }), /database credential projection failed/u);
+  }
+});
+
+test("database credential projector keeps root source allowance separate from non-root target policy", async () => {
+  const source = await readFile(new URL("../../scripts/project-runtime-database-credentials.mjs", import.meta.url), "utf8");
+  assert.match(source, /expectedSourceUid === 0 && expectedSourceGid === 0/u);
+  assert.match(source, /identities\.api\.uid === 0/u);
+  assert.match(source, /identities\.worker\.uid === 0/u);
+  assert.match(source, /identities\.api\.gid === 0/u);
+  assert.match(source, /identities\.worker\.gid === 0/u);
 });
 
 test("PostgreSQL HBA convergence accepts only official fresh legacy and canonical shapes", () => {

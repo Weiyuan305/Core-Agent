@@ -132,6 +132,12 @@ independent Worker UID/GID input. API and runtime UIDs may not collide with
 PostgreSQL `999`, role bootstrap `12003`, or migrator `12004`. Host projections
 must be created for the configured API and shared runtime owners.
 
+Every API, Worker, and Supervisor target UID, primary GID, shared socket GID,
+and Supervisor Docker supplementary GID must be nonzero. Root-owned
+Docker Desktop/Colima database source mounts remain a separate, explicit
+mount-view compatibility policy; root source metadata never authorizes a root
+application target.
+
 Database credentials are projected by one root, networkless one-shot into six
 consumer-specific named volumes. PostgreSQL, role bootstrap, HBA convergence,
 migrate, API, and Worker each mount only their approved volume read-only. API

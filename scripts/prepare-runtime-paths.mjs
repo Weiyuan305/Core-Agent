@@ -105,14 +105,23 @@ function requirePurposeSeparation(projections) {
 
 export function resolveRuntimePathPolicy(environment = process.env) {
   try {
-    if (environment.CORE_AGENT_WORKER_UID !== undefined || environment.CORE_AGENT_WORKER_GID !== undefined) {
+    if (
+      environment.CORE_AGENT_WORKER_UID !== undefined
+      || environment.CORE_AGENT_WORKER_GID !== undefined
+      || environment.CORE_AGENT_RUNTIME_GID !== undefined
+    ) {
       throw preparationError();
     }
     const runtimeUid = identity(environment, "CORE_AGENT_RUNTIME_UID", 12002);
     const runtimeGid = identity(environment, "CORE_AGENT_SUPERVISOR_SOCKET_GID", 12002);
     const apiUid = identity(environment, "CORE_AGENT_API_UID", 12000);
     const apiGid = identity(environment, "CORE_AGENT_API_GID", 12000);
-    if ([999, 12003, 12004].includes(apiUid) || [999, 12003, 12004].includes(runtimeUid)) {
+    if (
+      [0, 999, 12003, 12004].includes(apiUid)
+      || [0, 999, 12003, 12004].includes(runtimeUid)
+      || apiGid === 0
+      || runtimeGid === 0
+    ) {
       throw preparationError();
     }
     return {

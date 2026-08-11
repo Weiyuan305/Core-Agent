@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { chmod, link, mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 import { parse } from "yaml";
@@ -19,6 +20,44 @@ async function yaml(path) {
   const value = parse(text, { merge: true });
   assert(value !== null && typeof value === "object" && !Array.isArray(value));
   return value;
+}
+
+async function resolvedRuntimeCompose(overrides = {}) {
+  const lock = JSON.parse(await source("infra/runtime/base-images.lock.json"));
+  const platform = process.arch === "arm64" ? "linux/arm64" : "linux/amd64";
+  const environment = {
+    ...process.env,
+    CORE_AGENT_API_GID: "12000",
+    CORE_AGENT_API_UID: "12000",
+    CORE_AGENT_BOOTSTRAP_KEY_FILE: "/tmp/core-agent-bootstrap-path-only",
+    CORE_AGENT_CREDENTIAL_MOUNT_GID: "0",
+    CORE_AGENT_CREDENTIAL_MOUNT_UID: "0",
+    CORE_AGENT_DATABASE_APP_PASSWORD_FILE: "/tmp/core-agent-app-path-only",
+    CORE_AGENT_DATABASE_IDENTITY_PASSWORD_FILE: "/tmp/core-agent-identity-path-only",
+    CORE_AGENT_DATABASE_MIGRATOR_PASSWORD_FILE: "/tmp/core-agent-migrator-path-only",
+    CORE_AGENT_DOCKER_GID: "100",
+    CORE_AGENT_DOCKER_SOCKET_SOURCE: "/var/run/docker.sock",
+    CORE_AGENT_HERMES_IMAGE_LOCK_FILE: "/tmp/core-agent-lock-path-only",
+    CORE_AGENT_INGRESS_SECRET_ROOT: "/tmp/core-agent-ingress-path-only",
+    CORE_AGENT_NODE_IMAGE: lock.images.node.platforms[platform],
+    CORE_AGENT_PLATFORM: platform,
+    CORE_AGENT_POSTGRES_BOOTSTRAP_PASSWORD_FILE: "/tmp/core-agent-postgres-path-only",
+    CORE_AGENT_POSTGRES_IMAGE: lock.images.postgres.platforms[platform],
+    CORE_AGENT_PROVIDER_SECRET_ROOT: "/tmp/core-agent-provider-path-only",
+    CORE_AGENT_RUNTIME_UID: "12002",
+    CORE_AGENT_SUPERVISOR_SOCKET_GID: "12002",
+    CORE_AGENT_SUPERVISOR_STATE_ROOT: "/tmp/core-agent-state-path-only",
+    ...overrides,
+  };
+  const result = spawnSync("docker", ["compose", "--file", pathFromRoot("infra/runtime/compose.dev.yaml"), "config", "--format", "json"], {
+    cwd: repositoryRoot,
+    env: environment,
+    encoding: "utf8",
+    maxBuffer: 8 * 1024 * 1024,
+    timeout: 30_000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout);
 }
 
 function environmentMap(service) {
@@ -240,6 +279,57 @@ test("application services use least privilege and bounded resources", async () 
   assert.equal(config.services.supervisor.tmpfs.some((entry) => entry.startsWith("/run/core-agent/staging:")), false);
 });
 
+test("resolved Compose application identities are non-root and invalid zero overrides fail host policy", async () => {
+  const preflightUrl = pathToFileURL(new URL("../../scripts/prepare-runtime-paths.mjs", import.meta.url).pathname).href;
+  const preflight = await import(`${preflightUrl}?round10-resolved=${Date.now()}`);
+  const valid = await resolvedRuntimeCompose();
+  assert.equal(valid.services.api.user, "12000:12000");
+  assert.equal(valid.services["api-ingress"].user, "12000:12000");
+  assert.equal(valid.services.worker.user, "12002:12002");
+  assert.equal(valid.services.supervisor.user, "12002:12002");
+  assert.deepEqual(valid.services.worker.group_add, ["12002"]);
+  assert.deepEqual(valid.services.supervisor.group_add, ["100"]);
+
+  const basePolicy = {
+    CORE_AGENT_BOOTSTRAP_KEY_FILE: "/tmp/bootstrap",
+    CORE_AGENT_POSTGRES_BOOTSTRAP_PASSWORD_FILE: "/tmp/postgres",
+    CORE_AGENT_DATABASE_MIGRATOR_PASSWORD_FILE: "/tmp/migrator",
+    CORE_AGENT_DATABASE_APP_PASSWORD_FILE: "/tmp/application",
+    CORE_AGENT_DATABASE_IDENTITY_PASSWORD_FILE: "/tmp/identity",
+    CORE_AGENT_PROVIDER_SECRET_ROOT: "/tmp/provider",
+    CORE_AGENT_INGRESS_SECRET_ROOT: "/tmp/ingress",
+    CORE_AGENT_SUPERVISOR_STATE_ROOT: "/tmp/state",
+  };
+  for (const override of [
+    { CORE_AGENT_API_UID: "0" },
+    { CORE_AGENT_RUNTIME_UID: "0" },
+    { CORE_AGENT_API_GID: "0" },
+    { CORE_AGENT_SUPERVISOR_SOCKET_GID: "0" },
+  ]) {
+    const resolved = await resolvedRuntimeCompose(override);
+    const [apiUid, apiGid] = resolved.services.api.user.split(":");
+    const [runtimeUid, runtimeGid] = resolved.services.worker.user.split(":");
+    assert.throws(() => preflight.resolveRuntimePathPolicy({
+      ...basePolicy,
+      CORE_AGENT_API_UID: apiUid,
+      CORE_AGENT_API_GID: apiGid,
+      CORE_AGENT_RUNTIME_UID: runtimeUid,
+      CORE_AGENT_SUPERVISOR_SOCKET_GID: runtimeGid,
+    }), /runtime path preparation failed/u);
+  }
+  const socketPreflightUrl = pathToFileURL(new URL("../../scripts/preflight-runtime-docker-socket.mjs", import.meta.url).pathname).href;
+  const socketPreflight = await import(`${socketPreflightUrl}?round10-resolved=${Date.now()}`);
+  const supplementaryZero = await resolvedRuntimeCompose({ CORE_AGENT_DOCKER_GID: "0" });
+  const [runtimeUid, runtimeGid] = supplementaryZero.services.supervisor.user.split(":").map(Number);
+  assert.throws(() => socketPreflight.resolveDockerSocketPolicy({
+    CORE_AGENT_DOCKER_SOCKET_SOURCE: "/var/run/docker.sock",
+    CORE_AGENT_DOCKER_SOCKET_PATH: "/var/run/docker.sock",
+    CORE_AGENT_RUNTIME_UID: String(runtimeUid),
+    CORE_AGENT_SUPERVISOR_SOCKET_GID: String(runtimeGid),
+    CORE_AGENT_DOCKER_GID: "0",
+  }, { uid: runtimeUid, gid: runtimeGid, groups: [runtimeGid, 0] }), /runtime Docker socket preflight failed/u);
+});
+
 test("Supervisor socket volume is initialized by one bounded no-network service", async () => {
   const config = await yaml("infra/runtime/compose.dev.yaml");
   const initializer = config.services["supervisor-socket-volume-init"];
@@ -387,8 +477,8 @@ test("database credential projector is private networkless and owns the only hos
     CORE_AGENT_API_UID: "${CORE_AGENT_API_UID:-12000}",
     CORE_AGENT_CREDENTIAL_SOURCE_GID: "${CORE_AGENT_CREDENTIAL_MOUNT_GID:?set CORE_AGENT_CREDENTIAL_MOUNT_GID}",
     CORE_AGENT_CREDENTIAL_SOURCE_UID: "${CORE_AGENT_CREDENTIAL_MOUNT_UID:?set CORE_AGENT_CREDENTIAL_MOUNT_UID}",
-    CORE_AGENT_RUNTIME_GID: "${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}",
     CORE_AGENT_RUNTIME_UID: "${CORE_AGENT_RUNTIME_UID:-12002}",
+    CORE_AGENT_SUPERVISOR_SOCKET_GID: "${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}",
   });
   const expectedSources = {
     "/run/core-agent/credential-sources/bootstrap": "${CORE_AGENT_POSTGRES_BOOTSTRAP_PASSWORD_FILE:?set CORE_AGENT_POSTGRES_BOOTSTRAP_PASSWORD_FILE}",
@@ -459,17 +549,19 @@ test("host preflight rejects independent Worker identity configuration and privi
     CORE_AGENT_API_UID: "12000",
     CORE_AGENT_API_GID: "12000",
     CORE_AGENT_RUNTIME_UID: "12002",
-    CORE_AGENT_RUNTIME_GID: "12002",
     CORE_AGENT_SUPERVISOR_SOCKET_GID: "12002",
   };
   assert.doesNotThrow(() => preflight.resolveRuntimePathPolicy(environment));
-  for (const uid of [999, 12003, 12004]) {
+  for (const uid of [0, 999, 12003, 12004]) {
     assert.throws(() => preflight.resolveRuntimePathPolicy({ ...environment, CORE_AGENT_API_UID: String(uid) }), /runtime path preparation failed/u);
     assert.throws(() => preflight.resolveRuntimePathPolicy({ ...environment, CORE_AGENT_RUNTIME_UID: String(uid) }), /runtime path preparation failed/u);
   }
+  assert.throws(() => preflight.resolveRuntimePathPolicy({ ...environment, CORE_AGENT_API_GID: "0" }), /runtime path preparation failed/u);
+  assert.throws(() => preflight.resolveRuntimePathPolicy({ ...environment, CORE_AGENT_SUPERVISOR_SOCKET_GID: "0" }), /runtime path preparation failed/u);
   assert.throws(() => preflight.resolveRuntimePathPolicy({ ...environment, CORE_AGENT_WORKER_UID: environment.CORE_AGENT_RUNTIME_UID }), /runtime path preparation failed/u);
   assert.throws(() => preflight.resolveRuntimePathPolicy({ ...environment, CORE_AGENT_WORKER_GID: environment.CORE_AGENT_SUPERVISOR_SOCKET_GID }), /runtime path preparation failed/u);
   assert.throws(() => preflight.resolveRuntimePathPolicy({ ...environment, CORE_AGENT_WORKER_UID: "12001" }), /runtime path preparation failed/u);
+  assert.throws(() => preflight.resolveRuntimePathPolicy({ ...environment, CORE_AGENT_RUNTIME_GID: "12002" }), /runtime path preparation failed/u);
 });
 
 test("PostgreSQL authentication convergence rewrites and verifies HBA before migration", async () => {
@@ -737,7 +829,7 @@ test("runtime Dockerfile has locked bases and exact non-root service targets", a
   assert.match(runtimeRun, /install -d -m 0700 -o 12002 -g 12002 \/var\/lib\/core-agent\/supervisor\/journal/u);
   const targets = {
     api: { user: "12000:12000", entrypoint: ["node", "apps/control-plane-api/dist/src/server.js"] },
-    worker: { user: "12001:12002", entrypoint: ["node", "apps/control-plane-worker/dist/src/server.js"] },
+    worker: { user: "12002:12002", entrypoint: ["node", "apps/control-plane-worker/dist/src/server.js"] },
     supervisor: { user: "12002:12002", entrypoint: ["node", "apps/runtime-supervisor/dist/src/main.js"] },
   };
   for (const [name, expected] of Object.entries(targets)) {
@@ -846,7 +938,7 @@ test("runtime example environment contains paths and generated references only",
   assert.doesNotMatch(text, /CORE_AGENT_SUPERVISOR_SOCKET_ROOT/u);
   assert.match(text, /CORE_AGENT_SUPERVISOR_STATE_ROOT=\/absolute\/path\/to\/runtime-state-directory/u);
   assert.match(text, /CORE_AGENT_RUNTIME_UID=<numeric-output-of-id-u>/u);
-  assert.match(text, /CORE_AGENT_RUNTIME_GID=<numeric-output-of-id-g>/u);
+  assert.doesNotMatch(text, /CORE_AGENT_RUNTIME_GID/u);
   assert.match(text, /CORE_AGENT_API_UID=<numeric-api-service-uid>/u);
   assert.match(text, /CORE_AGENT_API_GID=<numeric-api-service-gid>/u);
   assert.doesNotMatch(text, /CORE_AGENT_WORKER_(?:UID|GID)/u);
@@ -858,6 +950,10 @@ test("runtime example environment contains paths and generated references only",
   assert.match(text, /bootstrap source must be a regular file owned by the API runtime UID with mode 0600/iu);
   assert(!/^.*(?:PASSWORD|TOKEN|SECRET|KEY)=(?!\/absolute\/path\/to\/|$).+$/gmu.test(text));
   assert(!/sk-[A-Za-z0-9]|bearer\s+/iu.test(text));
+  for (const path of [
+    "infra/runtime/compose.dev.yaml",
+    "docs/operations/runtime-v1-local-smoke.md",
+  ]) assert.doesNotMatch(await source(path), /CORE_AGENT_RUNTIME_GID/u, path);
 });
 
 test("runtime operating evidence distinguishes socket platforms and records only executed acceptance", async () => {
@@ -989,7 +1085,6 @@ test("runtime path preflight creates final-uid 0700 roots and validates bootstra
     CORE_AGENT_PROVIDER_SECRET_ROOT: providerRoot,
     CORE_AGENT_INGRESS_SECRET_ROOT: ingressRoot,
     CORE_AGENT_RUNTIME_UID: String(uid),
-    CORE_AGENT_RUNTIME_GID: String(gid),
     CORE_AGENT_API_UID: String(uid),
     CORE_AGENT_API_GID: String(gid),
     CORE_AGENT_SUPERVISOR_SOCKET_GID: String(gid),
@@ -1067,7 +1162,6 @@ test("runtime path preflight rejects symlink ancestors and every canonical cross
   };
   const base = {
     CORE_AGENT_RUNTIME_UID: String(uid),
-    CORE_AGENT_RUNTIME_GID: String(gid),
     CORE_AGENT_API_UID: String(uid),
     CORE_AGENT_API_GID: String(gid),
     CORE_AGENT_SUPERVISOR_SOCKET_GID: String(gid),
@@ -1141,7 +1235,6 @@ test("runtime path preflight rejects a hard-linked bootstrap purpose alias", asy
 
   await assert.rejects(preflight.prepareRuntimePaths({ environment: {
     CORE_AGENT_RUNTIME_UID: String(uid),
-    CORE_AGENT_RUNTIME_GID: String(gid),
     CORE_AGENT_SUPERVISOR_SOCKET_GID: String(gid),
     CORE_AGENT_BOOTSTRAP_KEY_FILE: bootstrap,
     ...await makeDatabaseCredentialSources(root),

@@ -71,7 +71,7 @@ USER 12000:12000
 ENTRYPOINT ["node", "apps/control-plane-api/dist/src/server.js"]
 
 FROM runtime AS worker
-USER 12001:12002
+USER 12002:12002
 ENTRYPOINT ["node", "apps/control-plane-worker/dist/src/server.js"]
 
 FROM runtime AS supervisor

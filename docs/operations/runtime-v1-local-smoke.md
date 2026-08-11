@@ -324,7 +324,10 @@ accepts only the API identity pair or `0/0`, and independently rejects API or
 shared Worker/Supervisor runtime UID collisions with `999`, `12003`, or
 `12004`. Independent `CORE_AGENT_WORKER_UID` and `CORE_AGENT_WORKER_GID`
 settings are rejected because Worker must own the Supervisor-projected ingress
-root. This container-view check does
+root. All application UIDs, primary GIDs, the shared socket GID, and the Docker
+supplementary GID must be nonzero. The `0/0` exception applies only to reviewed
+database source mount-view metadata and never to a target service identity.
+This container-view check does
 not replace `runtime:paths`, which separately requires the actual host files to
 be canonical, regular, single-linked, nonempty, API-owned, and mode `0400`
 or `0600`, and rejects missing files, directories, symlinks, or unsafe owners.

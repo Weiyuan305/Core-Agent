@@ -68,7 +68,6 @@ const requiredEnvironmentNames = Object.freeze([
   "CORE_AGENT_INGRESS_SECRET_ROOT",
   "CORE_AGENT_SUPERVISOR_STATE_ROOT",
   "CORE_AGENT_RUNTIME_UID",
-  "CORE_AGENT_RUNTIME_GID",
   "CORE_AGENT_SUPERVISOR_SOCKET_GID",
   "CORE_AGENT_DOCKER_GID",
   "CORE_AGENT_DOCKER_SOCKET_SOURCE",
@@ -145,9 +144,9 @@ function requiredAbsolutePath(environment, name) {
 
 function requiredNumericIdentity(environment, name) {
   const value = environment[name];
-  if (typeof value !== "string" || !/^(?:0|[1-9]\d{0,9})$/u.test(value)) throw smokeError("SMOKE_ENVIRONMENT_INVALID");
+  if (typeof value !== "string" || !/^[1-9]\d{0,9}$/u.test(value)) throw smokeError("SMOKE_ENVIRONMENT_INVALID");
   const number = Number(value);
-  if (!Number.isSafeInteger(number) || number < 0 || number > 4_294_967_294) throw smokeError("SMOKE_ENVIRONMENT_INVALID");
+  if (!Number.isSafeInteger(number) || number > 4_294_967_294) throw smokeError("SMOKE_ENVIRONMENT_INVALID");
 }
 
 export function validateSmokeEnvironment(environment) {

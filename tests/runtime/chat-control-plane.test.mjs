@@ -420,7 +420,6 @@ function validChatEnvironment(stateRoot) {
     CORE_AGENT_INGRESS_SECRET_ROOT: "/synthetic/ingress-secrets",
     CORE_AGENT_SUPERVISOR_STATE_ROOT: stateRoot,
     CORE_AGENT_RUNTIME_UID: "10001",
-    CORE_AGENT_RUNTIME_GID: "10001",
     CORE_AGENT_SUPERVISOR_SOCKET_GID: "10002",
     CORE_AGENT_DOCKER_GID: "10003",
     CORE_AGENT_DOCKER_SOCKET_SOURCE: "/synthetic/docker.sock",

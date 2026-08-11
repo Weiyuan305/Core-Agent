@@ -36,32 +36,40 @@ test("socket policy accepts only an absolute daemon-side source and the exact fi
     CORE_AGENT_DOCKER_SOCKET_PATH: "/var/run/docker.sock",
     CORE_AGENT_RUNTIME_UID: "501",
     CORE_AGENT_SUPERVISOR_SOCKET_GID: "20",
-    CORE_AGENT_DOCKER_GID: "0",
+    CORE_AGENT_DOCKER_GID: "100",
   };
   assert.deepEqual(preflight.resolveDockerSocketPolicy(environment, {
     uid: 501,
     gid: 20,
-    groups: [0, 20],
+    groups: [20, 100],
   }), {
     source: "/var/run/docker.sock.raw",
     target: "/var/run/docker.sock",
     runtimeUid: 501,
     runtimeGid: 20,
-    dockerGid: 0,
+    dockerGid: 100,
   });
   for (const source of ["docker.sock", "tcp://127.0.0.1:2375", "/", "/var/run/../docker.sock", "/var/run/docker.sock\nother"]) {
     assert.throws(
-      () => preflight.resolveDockerSocketPolicy({ ...environment, CORE_AGENT_DOCKER_SOCKET_SOURCE: source }, { uid: 501, gid: 20, groups: [0, 20] }),
+      () => preflight.resolveDockerSocketPolicy({ ...environment, CORE_AGENT_DOCKER_SOCKET_SOURCE: source }, { uid: 501, gid: 20, groups: [20, 100] }),
       /runtime Docker socket preflight failed/u,
       source,
     );
   }
   assert.throws(
-    () => preflight.resolveDockerSocketPolicy(environment, { uid: 502, gid: 20, groups: [0, 20] }),
+    () => preflight.resolveDockerSocketPolicy(environment, { uid: 502, gid: 20, groups: [20, 100] }),
     /runtime Docker socket preflight failed/u,
   );
   assert.throws(
     () => preflight.resolveDockerSocketPolicy(environment, { uid: 501, gid: 20, groups: [20] }),
+    /runtime Docker socket preflight failed/u,
+  );
+  for (const [name, value] of [
+    ["CORE_AGENT_RUNTIME_UID", "0"],
+    ["CORE_AGENT_SUPERVISOR_SOCKET_GID", "0"],
+    ["CORE_AGENT_DOCKER_GID", "0"],
+  ]) assert.throws(
+    () => preflight.resolveDockerSocketPolicy({ ...environment, [name]: value }, { uid: 501, gid: 20, groups: [20, 100] }),
     /runtime Docker socket preflight failed/u,
   );
 });

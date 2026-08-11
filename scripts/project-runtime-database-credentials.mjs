@@ -141,7 +141,11 @@ export async function projectRuntimeDatabaseCredentials({
       || (expectedSourceUid === apiUid && expectedSourceGid === apiGid)
     )) throw failure();
     if (
-      fixedPrivilegedUids.has(identities.api.uid)
+      identities.api.uid === 0
+      || identities.worker.uid === 0
+      || identities.api.gid === 0
+      || identities.worker.gid === 0
+      || fixedPrivilegedUids.has(identities.api.uid)
       || fixedPrivilegedUids.has(identities.worker.uid)
     ) throw failure();
     const source = {
@@ -206,7 +210,7 @@ export async function runDatabaseCredentialProjector(environment = process.env) 
       },
       worker: {
         uid: required(environment, "CORE_AGENT_RUNTIME_UID"),
-        gid: required(environment, "CORE_AGENT_RUNTIME_GID"),
+        gid: required(environment, "CORE_AGENT_SUPERVISOR_SOCKET_GID"),
       },
     },
   });
