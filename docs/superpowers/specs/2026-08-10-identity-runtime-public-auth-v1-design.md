@@ -233,6 +233,25 @@ student Membership, and one default Profile. It creates no Entitlement and no Ru
 Registration failure rolls back the complete identity graph; retry with the same
 idempotency identity converges on the first result.
 
+### 5.5 Identity database role
+
+`core_agent_identity` is a login role with schema usage and this exact Task 3-9
+matrix; omitted operations are denied:
+
+| Tables | Operations | Purpose |
+| --- | --- | --- |
+| `tenants`, `actors`, `memberships`, `profiles` | `SELECT`, `INSERT`, `UPDATE` | create and version the identity graph; deletion is state-based |
+| `auth_subjects`, `private_identity_pii` | `SELECT`, `INSERT`, `UPDATE`, `DELETE` | provider authority and the Task 9 PII erasure boundary |
+| `platform_role_assignments`, `identity_invitations`, `oauth_transactions`, `core_sessions`, `account_deletions` | `SELECT`, `INSERT`, `UPDATE` | versioned identity state machines |
+| `public_rate_limits`, `idempotency_records` | `SELECT`, `INSERT`, `UPDATE` | atomic counters and durable replay records |
+| `product_events`, `audit_events`, `outbox` | `SELECT`, `INSERT` | immutable append and delivery enqueue only |
+| `stream_sequences` | `SELECT`, `INSERT`, `UPDATE` | transactional sequence allocation |
+| `worker_jobs` | `SELECT`, `INSERT` | enqueue the two closed identity job kinds; Worker owns claims and outcomes |
+
+The role has no access to schema migrations, Runtime/container, Conversation,
+Session/Run/message, secret-reference, or stream-cursor tables. `core_agent_app`
+continues to have no access to the eight private identity tables.
+
 ## 6. AuthProviderAdapter
 
 The adapter surface is provider-neutral and returns allowlisted authentication facts.

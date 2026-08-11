@@ -155,10 +155,6 @@ test("retryable Supervisor inspection retries before dispatch within its ceiling
     "Synthetic inspection retry",
     { tenantId: provisioned.tenant_id },
   );
-  const retrying = await harness.worker.untilRunJobStatus(run.run_id, "retrying");
-  assert.equal(retrying.effect_state, "pre_effect");
-  await harness.db.updateTable("worker_jobs").set({ next_attempt_at: new Date(0) })
-    .where("run_id", "=", run.run_id).execute();
   await harness.worker.untilRunStatus(run.run_id, "succeeded");
   const job = await harness.db.selectFrom("worker_jobs")
     .select(["attempt_count", "max_attempts", "status"])

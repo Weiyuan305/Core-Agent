@@ -31,6 +31,26 @@ const identityTables = [
   "private_identity_pii",
   "public_rate_limits",
 ] as const;
+const identityPrivilegeMatrix = Object.freeze({
+  tenants: ["SELECT", "INSERT", "UPDATE"],
+  actors: ["SELECT", "INSERT", "UPDATE"],
+  memberships: ["SELECT", "INSERT", "UPDATE"],
+  profiles: ["SELECT", "INSERT", "UPDATE"],
+  auth_subjects: ["SELECT", "INSERT", "UPDATE", "DELETE"],
+  private_identity_pii: ["SELECT", "INSERT", "UPDATE", "DELETE"],
+  platform_role_assignments: ["SELECT", "INSERT", "UPDATE"],
+  identity_invitations: ["SELECT", "INSERT", "UPDATE"],
+  oauth_transactions: ["SELECT", "INSERT", "UPDATE"],
+  core_sessions: ["SELECT", "INSERT", "UPDATE"],
+  account_deletions: ["SELECT", "INSERT", "UPDATE"],
+  public_rate_limits: ["SELECT", "INSERT", "UPDATE"],
+  idempotency_records: ["SELECT", "INSERT", "UPDATE"],
+  product_events: ["SELECT", "INSERT"],
+  audit_events: ["SELECT", "INSERT"],
+  outbox: ["SELECT", "INSERT"],
+  stream_sequences: ["SELECT", "INSERT", "UPDATE"],
+  worker_jobs: ["SELECT", "INSERT"],
+} as const);
 const identityColumnShape = {
   account_deletions: [
     "account_deletion_id:text:NO", "actor_id:text:NO", "status:text:NO",
@@ -850,13 +870,14 @@ test("schema 10 identity authority tables retain their compatibility and securit
   }
 });
 
-test("schema 10 revokes general application access and grants Identity DML effectively", async () => {
+test("schema 10 grants only the documented Identity Task 3-9 table-operation matrix", async () => {
   const v9Directory = await applyThroughSchema9();
   try {
     await pool.query("grant usage on schema public to core_agent_app");
     await pool.query(
       "alter default privileges for role current_user in schema public grant select, insert, update, delete on tables to core_agent_app",
     );
+    await pool.query("grant select, insert, update, delete on all tables in schema public to core_agent_identity");
     await applyMigrations(pool, migrationsDirectory);
 
     const privileges = await pool.query<{ role_name: string; table_name: string; privilege: string; allowed: boolean }>(
@@ -866,14 +887,16 @@ test("schema 10 revokes general application access and grants Identity DML effec
        cross join unnest($2::text[]) as table_name
        cross join unnest($3::text[]) as privilege
        order by role_name, table_name, privilege`,
-      [["core_agent_app", "core_agent_identity"], identityTables, ["SELECT", "INSERT", "UPDATE", "DELETE"]],
+      [["core_agent_app", "core_agent_identity"], Object.keys(identityPrivilegeMatrix), ["SELECT", "INSERT", "UPDATE", "DELETE"]],
     );
     for (const privilege of privileges.rows) {
-      assert.equal(
-        privilege.allowed,
-        privilege.role_name === "core_agent_identity",
-        `${privilege.role_name} ${privilege.privilege} ${privilege.table_name}`,
-      );
+      const identityAllowed = (identityPrivilegeMatrix[privilege.table_name as keyof typeof identityPrivilegeMatrix] as readonly string[])
+        .includes(privilege.privilege);
+      if (privilege.role_name === "core_agent_identity") {
+        assert.equal(privilege.allowed, identityAllowed, `${privilege.role_name} ${privilege.privilege} ${privilege.table_name}`);
+      } else if (identityTables.includes(privilege.table_name as typeof identityTables[number])) {
+        assert.equal(privilege.allowed, false, `${privilege.role_name} ${privilege.privilege} ${privilege.table_name}`);
+      }
     }
 
     const client = await pool.connect();
@@ -899,15 +922,22 @@ test("schema 10 revokes general application access and grants Identity DML effec
       await client.query("begin");
       await client.query("set local role core_agent_identity");
       await assert.doesNotReject(client.query("select count(*) from auth_subjects"));
-      await assert.doesNotReject(client.query(
-        `insert into public_rate_limits (
-          bucket_kind, account_identifier_hmac, client_identifier_hmac,
-          window_started_at, request_count, expires_at, updated_at
-        ) values (
-          'login', decode(repeat('00', 32), 'hex'), decode(repeat('11', 32), 'hex'),
-          '2026-08-10T00:00:00.000Z', 1, '2026-08-10T01:00:00.000Z', '2026-08-10T00:00:00.000Z'
-        )`,
-      ));
+      await assert.rejects(client.query("select count(*) from conversations"), /permission denied/);
+      await client.query("rollback");
+
+      await client.query("begin");
+      await client.query("set local role core_agent_identity");
+      await assert.rejects(client.query("delete from tenants where false"), /permission denied/);
+      await client.query("rollback");
+
+      await client.query("begin");
+      await client.query("set local role core_agent_identity");
+      await assert.rejects(client.query("update product_events set payload = payload where false"), /permission denied/);
+      await client.query("rollback");
+
+      await client.query("begin");
+      await client.query("set local role core_agent_identity");
+      await assert.rejects(client.query("update worker_jobs set updated_at = updated_at where false"), /permission denied/);
     } finally {
       await client.query("rollback").catch(() => undefined);
       client.release();
@@ -917,6 +947,138 @@ test("schema 10 revokes general application access and grants Identity DML effec
       "alter default privileges for role current_user in schema public revoke select, insert, update, delete on tables from core_agent_app",
     );
     await rm(v9Directory, { recursive: true, force: true });
+  }
+});
+
+test("real Identity login commits and atomically rolls back the Task 3 cross-table graph", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  const password = randomBytes(32).toString("base64url");
+  const administrator = await pool.connect();
+  let identity: Client | undefined;
+  try {
+    const statement = await administrator.query<{ statement: string }>(
+      "select format('alter role core_agent_identity login password %L', $1::text) as statement",
+      [password],
+    );
+    await administrator.query(statement.rows[0]!.statement);
+    const target = new URL(assertDisposableDatabaseUrl(testDatabaseUrl));
+    identity = new Client({
+      host: target.hostname,
+      port: Number(target.port || 5432),
+      database: target.pathname.slice(1),
+      user: "core_agent_identity",
+      password,
+    });
+    await identity.connect();
+    assert.equal((await identity.query<{ current_user: string }>("select current_user")).rows[0]?.current_user, "core_agent_identity");
+    for (const table of ["runtime_containers", "conversations", "messages", "secret_references", "stream_cursors"]) {
+      await assert.rejects(identity.query(`select count(*) from ${table}`), /permission denied/);
+    }
+    await assert.rejects(identity.query("delete from core_sessions where false"), /permission denied/);
+
+    const writeGraph = async (suffix: string, injectFailure: boolean) => {
+      const tenant = `tenant_identity_${suffix}`;
+      const actor = `actor_identity_${suffix}`;
+      const membership = `membership_identity_${suffix}`;
+      const profile = `profile_identity_${suffix}`;
+      const subject = `subject_identity_${suffix}`;
+      const event = `event_identity_${suffix}`;
+      const timestamp = new Date("2026-08-11T00:00:00.000Z");
+      await identity!.query("begin isolation level serializable");
+      try {
+        await identity!.query(
+          `insert into actors (actor_id, schema_version, resource_version, actor_kind, display_name, status, created_at, updated_at)
+           values ($1, 1, 1, 'human', 'Synthetic identity actor', 'active', $2, $2)`, [actor, timestamp],
+        );
+        await identity!.query(
+          `insert into tenants (tenant_id, schema_version, resource_version, tenant_mode, status, display_name, created_at, updated_at)
+           values ($1, 1, 1, 'b2c', 'active', 'Synthetic identity tenant', $2, $2)`, [tenant, timestamp],
+        );
+        await identity!.query(
+          `insert into memberships (tenant_id, membership_id, actor_id, schema_version, resource_version, roles, membership_source, seat_ref, status, created_at, updated_at)
+           values ($1, $2, $3, 1, 1, array['student'], 'self', null, 'active', $4, $4)`, [tenant, membership, actor, timestamp],
+        );
+        await identity!.query(
+          `insert into profiles (tenant_id, profile_id, schema_version, resource_version, owner_actor_id, profile_kind, hermes_profile_ref, description, status, provider_config_id, model_id, created_at, updated_at)
+           values ($1, $2, 1, 1, $3, 'default', $2, 'Synthetic identity profile', 'active', 'synthetic-provider', 'synthetic-model', $4, $4)`, [tenant, profile, actor, timestamp],
+        );
+        await identity!.query(
+          `insert into auth_subjects (auth_subject_id, actor_id, provider, provider_subject, provider_identity_kind, verified_at, status, resource_version, created_at, updated_at)
+           values ($1, $2, 'supabase', $3, 'email_password', $4, 'active', 1, $4, $4)`, [subject, actor, `opaque-provider-${suffix}`, timestamp],
+        );
+        await identity!.query(
+          `insert into private_identity_pii (actor_id, normalized_email_hmac, encrypted_email, encryption_key_ref, created_at, updated_at)
+           values ($1, decode($2, 'hex'), decode('01', 'hex'), 'synthetic-key-v1', $3, $3)`, [actor, suffix.padEnd(64, "0").slice(0, 64), timestamp],
+        );
+        await identity!.query(
+          `insert into idempotency_records (tenant_id, idempotency_key, payload_hash, operation, status, result_ref, response_json, expires_at, created_at, updated_at)
+           values ($1, $2, $3, 'identity.register-b2c', 'completed', $4, '{}'::jsonb, $5, $6, $6)`,
+          [tenant, `idempotency-${suffix}`, `sha256:${suffix.padEnd(64, "a").slice(0, 64)}`, actor, new Date("2026-08-12T00:00:00.000Z"), timestamp],
+        );
+        await identity!.query("insert into stream_sequences (tenant_id, stream_id, last_sequence) values ($1, $2, 1)", [tenant, actor]);
+        await identity!.query(
+          `insert into product_events (tenant_id, event_id, stream_id, schema_version, sequence, event_type, occurred_at, request_id, trace_id, correlation_id, causation_id, profile_id, payload)
+           values ($1, $2, $3, 1, 1, 'identity.actor.registered', $4, $5, $6, $5, $5, $7, '{}'::jsonb)`,
+          [tenant, event, actor, timestamp, `request-${suffix}`, `trace-${suffix}`, profile],
+        );
+        await identity!.query(
+          `insert into audit_events (tenant_id, audit_event_id, schema_version, occurred_at, actor_id, membership_id, effective_role, action, resource_type, resource_id, decision, outcome, request_id, trace_id, reason_summary, event_json)
+           values ($1, $2, 1, $3, $4, $5, 'student', 'identity.register-b2c', 'actor', $4, 'allowed', 'succeeded', $6, $7, 'synthetic registration', '{}'::jsonb)`,
+          [tenant, `audit-${suffix}`, timestamp, actor, membership, `request-${suffix}`, `trace-${suffix}`],
+        );
+        await identity!.query(
+          `insert into outbox (tenant_id, outbox_id, event_id, delivery_target, status, attempt_count, next_attempt_at, created_at, updated_at)
+           values ($1, $2, $3, 'internal_event_stream', 'pending', 0, $4, $4, $4)`,
+          [tenant, `outbox-${suffix}`, event, timestamp],
+        );
+        if (injectFailure) throw new Error("synthetic injected rollback");
+        await identity!.query("commit");
+      } catch (error) {
+        await identity!.query("rollback");
+        throw error;
+      }
+      return { tenant, actor, membership, profile };
+    };
+
+    const committed = await writeGraph("1".repeat(32), false);
+    await assert.rejects(writeGraph("2".repeat(32), true), /synthetic injected rollback/);
+    const rolledBackSuffix = "2".repeat(32);
+    assert.equal((await pool.query<{ count: number }>(
+      `select (
+        (select count(*) from actors where actor_id = $1)
+        + (select count(*) from tenants where tenant_id = $2)
+        + (select count(*) from memberships where membership_id = $3)
+        + (select count(*) from profiles where profile_id = $4)
+        + (select count(*) from auth_subjects where auth_subject_id = $5)
+        + (select count(*) from private_identity_pii where actor_id = $1)
+        + (select count(*) from idempotency_records where idempotency_key = $6)
+        + (select count(*) from stream_sequences where stream_id = $1)
+        + (select count(*) from product_events where event_id = $7)
+        + (select count(*) from audit_events where audit_event_id = $8)
+        + (select count(*) from outbox where outbox_id = $9)
+      )::int as count`,
+      [
+        `actor_identity_${rolledBackSuffix}`, `tenant_identity_${rolledBackSuffix}`,
+        `membership_identity_${rolledBackSuffix}`, `profile_identity_${rolledBackSuffix}`,
+        `subject_identity_${rolledBackSuffix}`, `idempotency-${rolledBackSuffix}`,
+        `event_identity_${rolledBackSuffix}`, `audit-${rolledBackSuffix}`, `outbox-${rolledBackSuffix}`,
+      ],
+    )).rows[0]?.count, 0);
+
+    await identity.query("begin isolation level serializable");
+    await identity.query("update actors set status = 'disabled', resource_version = resource_version + 1 where actor_id = $1", [committed.actor]);
+    await identity.query("update memberships set status = 'suspended', resource_version = resource_version + 1 where tenant_id = $1 and membership_id = $2", [committed.tenant, committed.membership]);
+    await identity.query("update profiles set status = 'suspended', resource_version = resource_version + 1 where tenant_id = $1 and profile_id = $2", [committed.tenant, committed.profile]);
+    await identity.query(
+      `insert into worker_jobs (tenant_id, job_id, job_kind, status, attempt_count, max_attempts, next_attempt_at, payload_ref, effect_state, created_at, updated_at)
+       values ($1, 'job_identity_projection', 'project_platform_memberships', 'queued', 0, 3, $2, 'identity:projection', 'pre_effect', $2, $2)`,
+      [committed.tenant, new Date("2026-08-11T00:00:00.000Z")],
+    );
+    await identity.query("rollback");
+  } finally {
+    await identity?.end().catch(() => undefined);
+    await administrator.query("alter role core_agent_identity password null").catch(() => undefined);
+    administrator.release();
   }
 });
 

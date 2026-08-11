@@ -11,6 +11,7 @@ const lock = JSON.parse(await import("node:fs/promises").then(({ readFile }) => 
   new URL("../../infra/runtime/base-images.lock.json", import.meta.url), "utf8",
 )));
 const platform = process.arch === "arm64" ? "linux/arm64" : "linux/amd64";
+const protectedRunner = join(repositoryRoot, "scripts/run-protected-ci-command.mjs");
 
 function safeOutput(result, credential) {
   const output = Buffer.concat([result.stdout ?? Buffer.alloc(0), result.stderr ?? Buffer.alloc(0)]);
@@ -42,6 +43,12 @@ function run(command, args, environment, credential, timeout = 12 * 60 * 1000) {
   return output;
 }
 
+function protectedRun(command, args, environment, credential, credentialFile, timeout = 12 * 60 * 1000) {
+  return run(process.execPath, [
+    protectedRunner, "--secret-file", credentialFile, "--", command, ...args,
+  ], environment, credential, timeout);
+}
+
 function exactDockerNames(kind, environment, credential) {
   const command = kind === "container" ? ["ps", "--all", "--format", "{{.Names}}"] : [kind, "ls", "--format", "{{.Name}}"];
   return run("docker", command, environment, credential).trim().split("\n").filter(Boolean);
@@ -56,16 +63,13 @@ async function assertResourcesAbsent({ container, dataVolume, network, paths, en
   }
 }
 
-async function bootstrapTestRolesWhenPublishedDatabaseIsReady(environment, credential) {
+async function bootstrapTestRolesWhenPublishedDatabaseIsReady(environment, credential, credentialFile) {
   let lastOutput = "";
   for (let attempt = 0; attempt < 12; attempt += 1) {
-    const result = spawnSync("node", ["scripts/bootstrap-test-database-roles.mjs"], {
-      cwd: repositoryRoot,
-      env: environment,
-      encoding: "buffer",
-      maxBuffer: 64 * 1024 * 1024,
-      timeout: 10_000,
-    });
+    const result = spawnSync(process.execPath, [
+      protectedRunner, "--secret-file", credentialFile, "--",
+      process.execPath, "scripts/bootstrap-test-database-roles.mjs",
+    ], { cwd: repositoryRoot, env: environment, encoding: "buffer", maxBuffer: 64 * 1024 * 1024, timeout: 10_000 });
     lastOutput = safeOutput(result, credential);
     if (result.status === 0) return;
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -73,7 +77,7 @@ async function bootstrapTestRolesWhenPublishedDatabaseIsReady(environment, crede
   assert.fail(`fresh CI-equivalent role bootstrap did not become ready\n${lastOutput.slice(-1000)}`);
 }
 
-async function runCiEquivalentScenario({ injectedFailure = false } = {}) {
+async function runCiEquivalentScenario({ injectedFailure = false, injectedOutputLeak = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "core-agent-ci-equivalent-"));
   const suffix = `${process.pid}-${randomBytes(4).toString("hex")}`;
   const container = `core-agent-ci-equivalent-${suffix}`;
@@ -84,6 +88,7 @@ async function runCiEquivalentScenario({ injectedFailure = false } = {}) {
   const postgresEnvFile = join(root, "postgres.env");
   const pgpass = join(root, "database.pgpass");
   const baseEnvironment = { ...process.env };
+  delete baseEnvironment.NODE_TEST_CONTEXT;
   const resources = {
     container, dataVolume, network,
     paths: [credentialFile, postgresEnvFile, pgpass, root],
@@ -116,6 +121,7 @@ async function runCiEquivalentScenario({ injectedFailure = false } = {}) {
       if (attempt === 59) assert.fail("fresh CI-equivalent PostgreSQL did not become ready");
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
+    protectedRun("docker", ["logs", container], baseEnvironment, credential, credentialFile);
     if (injectedFailure) throw new Error("injected CI-equivalent failure");
 
     const published = run("docker", ["port", container, "5432/tcp"], baseEnvironment, credential).trim();
@@ -132,10 +138,24 @@ async function runCiEquivalentScenario({ injectedFailure = false } = {}) {
       PGPASSFILE: pgpass,
     };
 
-    await bootstrapTestRolesWhenPublishedDatabaseIsReady(environment, credential);
-    run("node", ["scripts/bootstrap-test-database-roles.mjs"], environment, credential);
-    run("npm", ["run", "test:postgres"], environment, credential);
-    run("npm", ["run", "test:integration"], environment, credential);
+    await bootstrapTestRolesWhenPublishedDatabaseIsReady(environment, credential, credentialFile);
+    protectedRun(process.execPath, ["scripts/bootstrap-test-database-roles.mjs"], environment, credential, credentialFile);
+    if (injectedOutputLeak) {
+      const leaked = spawnSync(process.execPath, [
+        protectedRunner, "--secret-file", credentialFile, "--", process.execPath, "--input-type=module", "--eval",
+        "const {readFileSync}=await import('node:fs'); process.stdout.write(readFileSync(process.env.CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE));",
+      ], { cwd: repositoryRoot, env: environment, encoding: "buffer", maxBuffer: 64 * 1024 * 1024, timeout: 10_000 });
+      const safe = safeOutput(leaked, credential);
+      assert.notEqual(leaked.status, 0);
+      assert.equal(safe, "protected CI command output rejected\n");
+      throw new Error("injected CI-equivalent output leak rejected");
+    }
+    const postgresOutput = protectedRun("npm", ["run", "test:postgres"], environment, credential, credentialFile);
+    assert.match(postgresOutput, /schema 10 grants only the documented Identity Task 3-9 table-operation matrix/u);
+    assert.match(postgresOutput, /real Identity login commits and atomically rolls back the Task 3 cross-table graph/u);
+    const integrationOutput = protectedRun("npm", ["run", "test:integration"], environment, credential, credentialFile);
+    assert.match(integrationOutput, /provision, converse, stream, restart, and resume/u);
+    protectedRun("docker", ["logs", container], environment, credential, credentialFile);
     const changed = spawnSync("git", ["diff", "--name-only", "-z"], { cwd: repositoryRoot, env: environment, encoding: "buffer" });
     const untracked = spawnSync("git", ["ls-files", "--others", "--exclude-standard", "-z"], { cwd: repositoryRoot, env: environment, encoding: "buffer" });
     safeOutput(changed, credential);
@@ -143,11 +163,11 @@ async function runCiEquivalentScenario({ injectedFailure = false } = {}) {
     assert.equal(changed.status, 0);
     assert.equal(untracked.status, 0);
     const artifactPaths = Buffer.concat([changed.stdout, untracked.stdout]).toString("utf8").split("\0").filter(Boolean);
-    run("node", [
+    protectedRun(process.execPath, [
       "scripts/verify-no-secret.mjs", "--secret-file", credentialFile,
       ...artifactPaths,
       ".superpowers/sdd/task-2-report.md",
-    ], environment, credential);
+    ], environment, credential, credentialFile);
   } finally {
     docker(["rm", "--force", "--volumes", container], baseEnvironment, credential);
     docker(["network", "rm", network], baseEnvironment, credential);
@@ -165,5 +185,12 @@ test("fresh CI-equivalent cleanup removes exact resources after an injected fail
   await assert.rejects(
     runCiEquivalentScenario({ injectedFailure: true }),
     (error) => error?.message === "injected CI-equivalent failure",
+  );
+});
+
+test("fresh CI-equivalent output leak is redacted and exact resources are removed", { timeout: 5 * 60 * 1000 }, async () => {
+  await assert.rejects(
+    runCiEquivalentScenario({ injectedOutputLeak: true }),
+    (error) => error?.message === "injected CI-equivalent output leak rejected",
   );
 });

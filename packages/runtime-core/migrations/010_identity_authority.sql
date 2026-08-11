@@ -326,6 +326,41 @@ create index public_rate_limits_expiry_idx on public_rate_limits (expires_at);
 
 grant usage on schema public to core_agent_identity;
 
+-- Identity Task 3-9 authority matrix. The role owns identity graph mutations,
+-- immutable identity event/audit append, Outbox enqueue, sequence advancement,
+-- idempotency lifecycle, and identity-job enqueue only. Worker delivery/claim,
+-- Runtime, conversation, message, provider, and infrastructure state remain out
+-- of scope. Revoke first so schema-9 upgrades fail closed even if the role was
+-- previously over-granted outside the reviewed bootstrap.
+revoke all on table
+  core_agent_schema_migrations,
+  tenants,
+  actors,
+  memberships,
+  profiles,
+  runtime_containers,
+  conversations,
+  sessions,
+  agent_runs,
+  messages,
+  secret_references,
+  worker_jobs,
+  idempotency_records,
+  outbox,
+  product_events,
+  stream_sequences,
+  audit_events,
+  stream_cursors,
+  auth_subjects,
+  private_identity_pii,
+  platform_role_assignments,
+  identity_invitations,
+  oauth_transactions,
+  core_sessions,
+  account_deletions,
+  public_rate_limits
+from core_agent_identity;
+
 revoke all on table
   auth_subjects,
   private_identity_pii,
@@ -337,16 +372,36 @@ revoke all on table
   public_rate_limits
 from public, core_agent_app;
 
-grant select, insert, update, delete on table
-  auth_subjects,
-  private_identity_pii,
+grant select, insert, update on table
+  tenants,
+  actors,
+  memberships,
+  profiles,
   platform_role_assignments,
   identity_invitations,
   oauth_transactions,
   core_sessions,
-  account_deletions,
-  public_rate_limits
+  account_deletions
 to core_agent_identity;
+
+grant select, insert, update, delete on table
+  auth_subjects,
+  private_identity_pii
+to core_agent_identity;
+
+grant select, insert, update on table
+  public_rate_limits,
+  idempotency_records
+to core_agent_identity;
+
+grant select, insert on table
+  product_events,
+  audit_events,
+  outbox,
+  worker_jobs
+to core_agent_identity;
+
+grant select, insert, update on table stream_sequences to core_agent_identity;
 
 alter table worker_jobs drop constraint worker_jobs_job_kind_check;
 alter table worker_jobs

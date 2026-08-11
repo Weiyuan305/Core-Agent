@@ -192,7 +192,10 @@ export function validateSmokeEnvironment(environment) {
   }
   const apiUid = requiredNumericIdentity(environment, "CORE_AGENT_API_UID");
   const apiGid = requiredNumericIdentity(environment, "CORE_AGENT_API_GID");
-  if ([999, 12003, 12004].includes(apiUid)) throw smokeError("SMOKE_ENVIRONMENT_INVALID");
+  const runtimeUid = requiredNumericIdentity(environment, "CORE_AGENT_RUNTIME_UID");
+  if ([999, 12003, 12004].includes(apiUid) || [999, 12003, 12004].includes(runtimeUid)) {
+    throw smokeError("SMOKE_ENVIRONMENT_INVALID");
+  }
   const sourceUid = requiredSourceIdentity(environment, "CORE_AGENT_CREDENTIAL_MOUNT_UID");
   const sourceGid = requiredSourceIdentity(environment, "CORE_AGENT_CREDENTIAL_MOUNT_GID");
   if (!((sourceUid === 0 && sourceGid === 0) || (sourceUid === apiUid && sourceGid === apiGid))) {

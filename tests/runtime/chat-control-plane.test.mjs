@@ -430,6 +430,37 @@ function validChatEnvironment(stateRoot) {
   };
 }
 
+test("chat and retained cleanup reject reserved shared runtime UIDs before dependencies", async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), "core-agent-chat-reserved-runtime-"));
+  try {
+    for (const reservedRuntimeUid of ["999", "12003", "12004"]) {
+      let calls = 0;
+      await assert.rejects(
+        runChatControlPlane({
+          environment: { ...validChatEnvironment(stateRoot), CORE_AGENT_RUNTIME_UID: reservedRuntimeUid },
+          argv: [],
+          dependencies: { validatePrerequisites: async () => { calls += 1; } },
+          lineInput: lineSource(["/exit"]),
+          output: textSink(),
+          errorOutput: textSink(),
+        }),
+        (error) => error?.message === "SMOKE_ENVIRONMENT_INVALID",
+      );
+      await assert.rejects(
+        runRetainedRuntimeCleanup({
+          environment: { ...validChatEnvironment(stateRoot), CORE_AGENT_RUNTIME_UID: reservedRuntimeUid },
+          argv: [],
+          dependencies: { validatePrerequisites: async () => { calls += 1; } },
+        }),
+        (error) => error?.message === "SMOKE_ENVIRONMENT_INVALID",
+      );
+      assert.equal(calls, 0);
+    }
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
 function chatLifecycleFixture() {
   const calls = [];
   const context = Object.freeze({

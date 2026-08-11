@@ -995,14 +995,21 @@ test("CI preserves contracts and separates deterministic runtime gates", async (
   assert.equal(workflow.jobs.compose.steps.find((step) => step.name === "Validate Compose configuration").env.CORE_AGENT_DOCKER_SOCKET_SOURCE, "/var/run/docker.sock");
 });
 
-test("fresh CI-equivalent owns exact resources and proves cleanup after success and injected failure", async () => {
+test("fresh CI-equivalent protects command output and proves cleanup after success failure and leak", async () => {
   const text = await source("tests/runtime/database-ci-equivalent.integration.mjs");
+  const runner = await source("scripts/run-protected-ci-command.mjs");
   assert.match(text, /docker", \["volume", "create"/u);
   assert.match(text, /docker", \["network", "create"/u);
   assert.match(text, /--volume", `\$\{dataVolume\}:\/var\/lib\/postgresql\/data`/u);
   assert.match(text, /assertResourcesAbsent/u);
   assert.match(text, /injectedFailure/u);
   assert.match(text, /assert\.rejects\([\s\S]*injected CI-equivalent failure/u);
+  assert.match(text, /protectedRun\("npm", \["run", "test:postgres"\]/u);
+  assert.match(text, /protectedRun\("npm", \["run", "test:integration"\]/u);
+  assert.match(text, /protectedRun\("docker", \["logs", container\]/u);
+  assert.match(text, /injectedOutputLeak/u);
+  assert.match(runner, /candidate\.includes\(secret\)[\s\S]*terminate\(child\)/u);
+  assert.match(runner, /maximumOutputBytes/u);
   assert.doesNotMatch(text, /docker (?:volume|network) (?:prune|rm) .*\*/u);
 });
 

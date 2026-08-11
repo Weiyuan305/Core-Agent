@@ -354,6 +354,30 @@ async function scenario(kind) {
     assert.match(hba, /host:all:scram-sha-256/u);
     assert.doesNotMatch(hba, /host:all:trust/u);
 
+    if (kind === "legacy") {
+      compose("restart", "postgres");
+      let restartedIdentity;
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        try {
+          restartedIdentity = postgresConnect("core_agent_bootstrap", "/run/core-agent/database-credentials/database-password", "999:999");
+          break;
+        } catch {
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+        }
+      }
+      assert.equal(restartedIdentity, "core_agent_bootstrap", "persisted legacy HBA must authenticate after PostgreSQL restart");
+      reject(
+        "--user", "0:0", "--volume", `${paths.wrong}:/run/core-agent/wrong-password:ro`,
+        "--entrypoint", "sh", "postgres", "-ceu",
+        "export PGPASSWORD=\"$(cat /run/core-agent/wrong-password)\"; exec psql -X -w -h postgres -U core_agent_app -d core_agent_runtime -Atc 'select current_user'",
+      );
+      reject(
+        "--user", "0:0", "--entrypoint", "sh", "postgres", "-ceu",
+        "unset PGPASSWORD; export PGPASSFILE=/run/unavailable; exec psql -X -w -h postgres -U core_agent_app -d core_agent_runtime -Atc 'select current_user'",
+      );
+      assert.match(compose("run", "--rm", "--no-deps", "--entrypoint", "node", "api", "--input-type=module", "--eval", applicationProbe), /core_agent_app\|10/u);
+    }
+
     for (const service of ["database-credential-projector", "identity-role-bootstrap", "postgres-auth-convergence", "migrate"]) {
       compose("run", "--rm", "--no-deps", service);
     }

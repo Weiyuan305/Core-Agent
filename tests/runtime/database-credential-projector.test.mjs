@@ -215,3 +215,72 @@ host all all all ${method}\n`;
     );
   }
 });
+
+test("PostgreSQL HBA replacement crash-durably fsyncs PGDATA after atomic rename", async () => {
+  const source = await readFile(new URL("../../scripts/converge-runtime-postgres-auth.mjs", import.meta.url), "utf8");
+  assert.match(source, /await rename\(temporary, path\)[\s\S]*await open\(dirname\(path\), constants\.O_RDONLY \| constants\.O_DIRECTORY\)[\s\S]*await directory\.sync\(\)/u);
+});
+
+test("PostgreSQL HBA reload rejects false and query failure with fixed diagnostics", async () => {
+  assert.equal(typeof hba.reloadRuntimePostgresAuth, "function");
+  await assert.rejects(
+    hba.reloadRuntimePostgresAuth({ query: async () => ({ rows: [{ reloaded: false }] }) }),
+    (error) => error?.message === "PostgreSQL authentication convergence failed",
+  );
+  await assert.rejects(
+    hba.reloadRuntimePostgresAuth({ query: async () => { throw new Error("private reload detail"); } }),
+    (error) => error?.message === "PostgreSQL authentication convergence failed"
+      && !error.message.includes("private reload detail"),
+  );
+});
+
+test("PostgreSQL active SCRAM barrier waits for delayed reload using fresh connections", async () => {
+  assert.equal(typeof hba.awaitRuntimePostgresScramBarrier, "function");
+  let attempt = 0;
+  const clients = [];
+  const createClient = ({ proof }) => {
+    const client = {
+      async connect() {
+        if (proof === "correct") return;
+        if (attempt < 2) return;
+        const error = new Error("synthetic authentication rejection");
+        error.code = "28P01";
+        throw error;
+      },
+      async query() { return { rows: [{ current_user: "core_agent_bootstrap" }] }; },
+      async end() {},
+    };
+    clients.push(client);
+    return client;
+  };
+  await hba.awaitRuntimePostgresScramBarrier({
+    databaseUrl: "postgresql://core_agent_bootstrap@postgres/core_agent_runtime",
+    password: "synthetic-correct-password",
+    createClient,
+    timeoutMs: 100,
+    now: () => attempt * 10,
+    sleep: async () => { attempt += 1; },
+  });
+  assert.equal(attempt, 2);
+  assert.equal(clients.length, 9, "every proof and retry must use a fresh client");
+});
+
+test("PostgreSQL active SCRAM barrier fails closed when trust never converges", async () => {
+  assert.equal(typeof hba.awaitRuntimePostgresScramBarrier, "function");
+  let clock = 0;
+  await assert.rejects(
+    hba.awaitRuntimePostgresScramBarrier({
+      databaseUrl: "postgresql://core_agent_bootstrap@postgres/core_agent_runtime",
+      password: "synthetic-correct-password",
+      createClient: () => ({
+        async connect() {},
+        async query() { return { rows: [{ current_user: "core_agent_bootstrap" }] }; },
+        async end() {},
+      }),
+      timeoutMs: 20,
+      now: () => clock,
+      sleep: async () => { clock += 10; },
+    }),
+    (error) => error?.message === "PostgreSQL authentication convergence failed",
+  );
+});

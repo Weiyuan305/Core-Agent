@@ -3,7 +3,7 @@
 import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import { chmod, lstat, open, rename, unlink } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { databaseConnectionOptions, readProtectedDatabasePassword } from "@core-agent/runtime-core";
@@ -88,9 +88,80 @@ async function replaceHba(path, content) {
   try {
     await chmod(temporary, 0o600);
     await rename(temporary, path);
+    const directory = await open(dirname(path), constants.O_RDONLY | constants.O_DIRECTORY);
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
   } catch (error) {
     await unlink(temporary).catch(() => undefined);
     throw error;
+  }
+}
+
+export async function reloadRuntimePostgresAuth(client) {
+  try {
+    const reload = await client.query("select pg_reload_conf() as reloaded");
+    if (reload.rows[0]?.reloaded !== true) throw failure();
+  } catch {
+    throw failure();
+  }
+}
+
+function defaultBarrierClient({ options }) {
+  return new Client(options);
+}
+
+async function freshProof(createClient, proof, options) {
+  let client;
+  try {
+    client = createClient({ proof, options });
+    await client.connect();
+    if (proof === "correct") {
+      const current = await client.query("select current_user");
+      if (current.rows[0]?.current_user !== "core_agent_bootstrap") throw failure();
+    }
+    return { connected: true };
+  } catch (error) {
+    return { connected: false, code: error?.code };
+  } finally {
+    await client?.end().catch(() => undefined);
+  }
+}
+
+export async function awaitRuntimePostgresScramBarrier({
+  databaseUrl,
+  password,
+  createClient = defaultBarrierClient,
+  timeoutMs = 10_000,
+  now = Date.now,
+  sleep = (milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)),
+}) {
+  try {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) throw failure();
+    const correctOptions = {
+      ...databaseConnectionOptions(databaseUrl, password),
+      connectionTimeoutMillis: Math.min(timeoutMs, 1_000),
+      query_timeout: 1_000,
+      statement_timeout: 1_000,
+    };
+    const wrongOptions = { ...correctOptions, password: randomBytes(32).toString("base64url") };
+    const { password: _discardedPassword, ...absentOptions } = correctOptions;
+    const deadline = now() + timeoutMs;
+    do {
+      const [correct, wrong, absent] = await Promise.all([
+        freshProof(createClient, "correct", correctOptions),
+        freshProof(createClient, "wrong", wrongOptions),
+        freshProof(createClient, "absent", absentOptions),
+      ]);
+      if (correct.connected && !wrong.connected && wrong.code === "28P01" && !absent.connected) return;
+      if (now() >= deadline) break;
+      await sleep(100);
+    } while (now() <= deadline);
+    throw failure();
+  } catch {
+    throw failure();
   }
 }
 
@@ -117,8 +188,7 @@ export async function convergeRuntimePostgresAuth(environment = process.env) {
     const hbaPath = join(pgdata, "pg_hba.conf");
     const canonical = await readProtectedHba(hbaPath);
     await replaceHba(hbaPath, canonical);
-    const reload = await client.query("select pg_reload_conf() as reloaded");
-    if (reload.rows[0]?.reloaded !== true) throw failure();
+    await reloadRuntimePostgresAuth(client);
     const effective = await client.query(`
       select type, database, user_name, address, auth_method, error
       from pg_hba_file_rules
@@ -128,6 +198,7 @@ export async function convergeRuntimePostgresAuth(environment = process.env) {
       { type: "local", database: ["all"], user_name: ["all"], address: null, auth_method: "trust", error: null },
       { type: "host", database: ["all"], user_name: ["all"], address: "all", auth_method: "scram-sha-256", error: null },
     ])) throw failure();
+    await awaitRuntimePostgresScramBarrier({ databaseUrl, password });
   } catch {
     throw failure();
   } finally {

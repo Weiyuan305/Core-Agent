@@ -93,6 +93,12 @@ test("REAL_HERMES smoke is explicit and rejects CLI and environment extras", () 
       /SMOKE_ENVIRONMENT_INVALID/,
     );
   }
+  for (const reservedRuntimeUid of ["999", "12003", "12004"]) {
+    assert.throws(
+      () => validateSmokeEnvironment({ ...smokeEnvironment, CORE_AGENT_RUNTIME_UID: reservedRuntimeUid }),
+      /SMOKE_ENVIRONMENT_INVALID/,
+    );
+  }
   assert.deepEqual(parseSmokeArguments(["--keep-runtime"]), { keepRuntime: true });
   assert.throws(() => parseSmokeArguments(["--keep-runtime", "--keep-runtime"]), /SMOKE_ARGUMENT_INVALID/);
   assert.throws(() => parseSmokeArguments(["--tenant", "anything"]), /SMOKE_ARGUMENT_INVALID/);
