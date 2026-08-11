@@ -1,5 +1,16 @@
 do $$
 begin
+  if not exists (select 1 from pg_roles where rolname = 'core_agent_app') then
+    raise exception 'required database role core_agent_app is absent';
+  end if;
+  if not exists (select 1 from pg_roles where rolname = 'core_agent_identity') then
+    raise exception 'required database role core_agent_identity is absent';
+  end if;
+end
+$$;
+
+do $$
+begin
   if exists (
     select 1
     from actors
@@ -16,12 +27,37 @@ begin
 end
 $$;
 
+alter table memberships
+  add column membership_source text not null default 'company';
+
+update memberships as membership
+set membership_source = 'platform'
+from actors as actor
+where actor.tenant_id = membership.tenant_id
+  and actor.actor_id = membership.actor_id
+  and actor.actor_id = 'core_agent_provisioner'
+  and actor.actor_kind = 'service'
+  and actor.display_name = 'Core Agent Provisioner'
+  and actor.status = 'active'
+  and membership.membership_id = 'core_agent_provisioner_admin'
+  and membership.roles = array['admin']::text[]
+  and membership.seat_ref is null
+  and membership.status = 'active';
+
+update memberships as membership
+set membership_source = 'self'
+from tenants as tenant
+where tenant.tenant_id = membership.tenant_id
+  and tenant.tenant_mode = 'b2c'
+  and membership.roles = array['student']::text[];
+
 do $$
 begin
   if exists (
     select 1
     from memberships
-    where status in ('active', 'invited')
+    where membership_source <> 'platform'
+      and status in ('active', 'invited')
     group by actor_id
     having count(distinct tenant_id) > 1
   ) then
@@ -80,16 +116,6 @@ alter table sessions
   add constraint sessions_actor_id_fkey foreign key (actor_id) references actors (actor_id);
 alter table audit_events
   add constraint audit_events_actor_id_fkey foreign key (actor_id) references actors (actor_id);
-
-alter table memberships
-  add column membership_source text not null default 'company';
-
-update memberships as membership
-set membership_source = 'self'
-from tenants as tenant
-where tenant.tenant_id = membership.tenant_id
-  and tenant.tenant_mode = 'b2c'
-  and membership.roles = array['student']::text[];
 
 alter table memberships alter column membership_source drop default;
 alter table memberships
@@ -298,14 +324,29 @@ create index identity_invitations_tenant_status_idx on identity_invitations (ten
 create index account_deletions_due_idx on account_deletions (status, scheduled_for);
 create index public_rate_limits_expiry_idx on public_rate_limits (expires_at);
 
-revoke all on table auth_subjects from public;
-revoke all on table private_identity_pii from public;
-revoke all on table platform_role_assignments from public;
-revoke all on table identity_invitations from public;
-revoke all on table oauth_transactions from public;
-revoke all on table core_sessions from public;
-revoke all on table account_deletions from public;
-revoke all on table public_rate_limits from public;
+grant usage on schema public to core_agent_identity;
+
+revoke all on table
+  auth_subjects,
+  private_identity_pii,
+  platform_role_assignments,
+  identity_invitations,
+  oauth_transactions,
+  core_sessions,
+  account_deletions,
+  public_rate_limits
+from public, core_agent_app;
+
+grant select, insert, update, delete on table
+  auth_subjects,
+  private_identity_pii,
+  platform_role_assignments,
+  identity_invitations,
+  oauth_transactions,
+  core_sessions,
+  account_deletions,
+  public_rate_limits
+to core_agent_identity;
 
 alter table worker_jobs drop constraint worker_jobs_job_kind_check;
 alter table worker_jobs

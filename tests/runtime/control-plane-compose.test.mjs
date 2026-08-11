@@ -320,6 +320,7 @@ test("compose environment carries paths and public configuration but no secret v
   assert.equal(workerEnvironment.CONTROL_PLANE_PROVIDER_CATALOG_FILE, "/app/infra/runtime/providers.json");
   assert.equal(workerEnvironment.CONTROL_PLANE_SECRET_ROOT, "/run/core-agent/ingress");
   assert.equal(workerEnvironment.CONTROL_PLANE_DATABASE_URL, "postgresql://core_agent_app@postgres:5432/core_agent_runtime");
+  assert.doesNotMatch(JSON.stringify([apiEnvironment, workerEnvironment]), /core_agent_identity/u);
   assert.deepEqual(environmentMap(config.services.postgres), {
     POSTGRES_DB: "core_agent_runtime",
     POSTGRES_HOST_AUTH_METHOD: "trust",
@@ -668,11 +669,15 @@ test("runtime PostgreSQL initialization separates bootstrap migrator and applica
   const sql = await source("infra/runtime/postgres/init/00-create-test-database.sql");
   assert.match(sql, /CREATE ROLE core_agent_migrator LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE/u);
   assert.match(sql, /CREATE ROLE core_agent_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE/u);
+  assert.match(sql, /CREATE ROLE core_agent_identity LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT/u);
   assert.match(sql, /ALTER DATABASE core_agent_runtime OWNER TO core_agent_migrator/u);
   assert.match(sql, /CREATE DATABASE core_agent_control OWNER core_agent_migrator/u);
   assert.match(sql, /ALTER DEFAULT PRIVILEGES FOR ROLE core_agent_migrator[\s\S]+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO core_agent_app/u);
   assert.match(sql, /GRANT CONNECT ON DATABASE core_agent_runtime TO core_agent_app/u);
   assert.match(sql, /GRANT CONNECT ON DATABASE core_agent_control TO core_agent_app/u);
+  assert.match(sql, /GRANT CONNECT ON DATABASE core_agent_runtime TO core_agent_identity/u);
+  assert.match(sql, /GRANT USAGE ON SCHEMA public TO core_agent_identity/u);
+  assert.doesNotMatch(sql, /GRANT CONNECT ON DATABASE core_agent_control TO core_agent_identity/u);
   assert(!/PASSWORD|SUPERUSER(?!\s+NOCREATEDB)/u.test(sql.replaceAll("NOSUPERUSER", "")));
 });
 

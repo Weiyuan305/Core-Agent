@@ -20,6 +20,59 @@ import {
 
 const testDatabaseUrl = process.env.CONTROL_PLANE_TEST_DATABASE_URL;
 const migrationsDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
+const identityTables = [
+  "account_deletions",
+  "auth_subjects",
+  "core_sessions",
+  "identity_invitations",
+  "oauth_transactions",
+  "platform_role_assignments",
+  "private_identity_pii",
+  "public_rate_limits",
+] as const;
+const identityColumnShape = {
+  account_deletions: [
+    "account_deletion_id:text:NO", "actor_id:text:NO", "status:text:NO",
+    "requested_at:timestamptz:NO", "scheduled_for:timestamptz:NO", "cancelled_at:timestamptz:YES",
+    "deleted_at:timestamptz:YES", "resource_version:int8:NO", "created_at:timestamptz:NO", "updated_at:timestamptz:NO",
+  ],
+  auth_subjects: [
+    "auth_subject_id:text:NO", "actor_id:text:NO", "provider:text:NO", "provider_subject:text:NO",
+    "provider_identity_kind:text:NO", "verified_at:timestamptz:NO", "status:text:NO",
+    "resource_version:int8:NO", "created_at:timestamptz:NO", "updated_at:timestamptz:NO",
+  ],
+  core_sessions: [
+    "session_id:text:NO", "secret_digest:bytea:NO", "csrf_digest:bytea:YES", "actor_id:text:NO",
+    "auth_subject_id:text:NO", "client_kind:text:NO", "status:text:NO", "device_label:text:YES",
+    "created_at:timestamptz:NO", "last_seen_at:timestamptz:NO", "idle_expires_at:timestamptz:NO",
+    "absolute_expires_at:timestamptz:NO", "reauthenticated_at:timestamptz:YES", "revocation_reason:text:YES",
+    "resource_version:int8:NO", "updated_at:timestamptz:NO",
+  ],
+  identity_invitations: [
+    "invitation_id:text:NO", "tenant_id:text:NO", "membership_id:text:NO", "invited_by_actor_id:text:NO",
+    "role:text:NO", "secret_digest:bytea:NO", "normalized_email_hmac:bytea:NO", "status:text:NO",
+    "expires_at:timestamptz:NO", "accepted_actor_id:text:YES", "accepted_at:timestamptz:YES",
+    "replaced_by_invitation_id:text:YES", "resource_version:int8:NO", "created_at:timestamptz:NO", "updated_at:timestamptz:NO",
+  ],
+  oauth_transactions: [
+    "oauth_transaction_id:text:NO", "provider:text:NO", "flow_kind:text:NO", "actor_id:text:YES",
+    "client_kind:text:NO", "state_digest:bytea:NO", "nonce_digest:bytea:NO", "pkce_verifier_ciphertext:bytea:NO",
+    "redirect_uri:text:NO", "status:text:NO", "expires_at:timestamptz:NO", "consumed_at:timestamptz:YES",
+    "created_at:timestamptz:NO", "updated_at:timestamptz:NO",
+  ],
+  platform_role_assignments: [
+    "platform_role_assignment_id:text:NO", "actor_id:text:NO", "role:text:NO", "status:text:NO",
+    "resource_version:int8:NO", "created_at:timestamptz:NO", "updated_at:timestamptz:NO",
+  ],
+  private_identity_pii: [
+    "actor_id:text:NO", "normalized_email_hmac:bytea:NO", "encrypted_email:bytea:NO",
+    "encryption_key_ref:text:NO", "created_at:timestamptz:NO", "updated_at:timestamptz:NO",
+  ],
+  public_rate_limits: [
+    "bucket_kind:text:NO", "account_identifier_hmac:bytea:NO", "client_identifier_hmac:bytea:NO",
+    "window_started_at:timestamptz:NO", "request_count:int4:NO", "expires_at:timestamptz:NO", "updated_at:timestamptz:NO",
+  ],
+} as const;
 
 function assertDisposableDatabaseUrl(url: string | undefined): string {
   if (url === undefined) throw new Error("CONTROL_PLANE_TEST_DATABASE_URL is required for PostgreSQL tests");
@@ -35,6 +88,19 @@ const db: Kysely<RuntimeDatabase> = createRuntimeDatabase(pool);
 
 async function resetDatabase(): Promise<void> {
   await pool.query("drop schema public cascade; create schema public;");
+}
+
+async function ensureIdentityTestRoles(): Promise<void> {
+  await pool.query(`do $$
+    begin
+      if not exists (select 1 from pg_roles where rolname = 'core_agent_app') then
+        create role core_agent_app login nosuperuser nocreatedb nocreaterole noinherit;
+      end if;
+      if not exists (select 1 from pg_roles where rolname = 'core_agent_identity') then
+        create role core_agent_identity login nosuperuser nocreatedb nocreaterole noinherit;
+      end if;
+    end
+  $$`);
 }
 
 async function seedTenant(tenantId: string): Promise<void> {
@@ -84,6 +150,33 @@ async function applyThroughSchema9(): Promise<string> {
   await applyMigrations(pool, v9Directory);
   assert.equal(await readSchemaVersion(db), 9);
   return v9Directory;
+}
+
+async function seedLegacyProvisioner(tenantIds: readonly string[], membershipId = "core_agent_provisioner_admin"): Promise<void> {
+  const timestamp = new Date("2026-08-10T00:00:00.000Z");
+  for (const tenantId of tenantIds) {
+    await pool.query(
+      `insert into tenants (
+        tenant_id, schema_version, resource_version, tenant_mode, status,
+        display_name, created_at, updated_at
+      ) values ($1, 1, 1, 'b2b', 'active', $2, $3, $3)`,
+      [tenantId, `Legacy ${tenantId}`, timestamp],
+    );
+    await pool.query(
+      `insert into actors (
+        tenant_id, actor_id, schema_version, resource_version, actor_kind,
+        display_name, status, created_at, updated_at
+      ) values ($1, 'core_agent_provisioner', 1, 1, 'service', 'Core Agent Provisioner', 'active', $2, $2)`,
+      [tenantId, timestamp],
+    );
+    await pool.query(
+      `insert into memberships (
+        tenant_id, membership_id, actor_id, schema_version, resource_version,
+        roles, seat_ref, status, created_at, updated_at
+      ) values ($1, $2, 'core_agent_provisioner', 1, 1, array['admin'], null, 'active', $3, $3)`,
+      [tenantId, membershipId, timestamp],
+    );
+  }
 }
 
 async function seedLegacyGlobalActorGraph(): Promise<void> {
@@ -174,6 +267,10 @@ async function seedProfile(tenantId: string, profileId: string): Promise<void> {
   }).execute();
 }
 
+test.before(async () => {
+  await ensureIdentityTestRoles();
+});
+
 test.beforeEach(async () => {
   await resetDatabase();
 });
@@ -260,6 +357,7 @@ test("schema 10 fails closed for every contradictory legacy global Actor fact", 
 test("schema 10 fails closed for legacy cross-Tenant ordinary Membership authority", async () => {
   const v9Directory = await applyThroughSchema9();
   try {
+    await seedLegacyProvisioner(["tenant_legacy_platform_control_a", "tenant_legacy_platform_control_b"]);
     const timestamp = new Date("2026-08-10T00:00:00.000Z");
     await pool.query(
       `insert into tenants (
@@ -297,6 +395,84 @@ test("schema 10 fails closed for legacy cross-Tenant ordinary Membership authori
     assert.equal((await pool.query(
       "select count(*)::int as count from memberships where actor_id = 'actor_legacy_authority'",
     )).rows[0]?.count, 2);
+  } finally {
+    await rm(v9Directory, { recursive: true, force: true });
+  }
+});
+
+test("schema 10 backfills one legacy platform provisioner Membership", async () => {
+  const v9Directory = await applyThroughSchema9();
+  try {
+    await seedLegacyProvisioner(["tenant_legacy_platform_one"]);
+
+    await applyMigrations(pool, migrationsDirectory);
+
+    const memberships = await pool.query(
+      `select tenant_id, membership_id, membership_source
+       from memberships where actor_id = 'core_agent_provisioner' order by tenant_id`,
+    );
+    assert.deepEqual(memberships.rows, [{
+      tenant_id: "tenant_legacy_platform_one",
+      membership_id: "core_agent_provisioner_admin",
+      membership_source: "platform",
+    }]);
+  } finally {
+    await rm(v9Directory, { recursive: true, force: true });
+  }
+});
+
+test("schema 10 backfills multiple legacy platform provisioner Memberships", async () => {
+  const v9Directory = await applyThroughSchema9();
+  try {
+    await seedLegacyProvisioner(["tenant_legacy_platform_a", "tenant_legacy_platform_b"]);
+
+    await applyMigrations(pool, migrationsDirectory);
+
+    const memberships = await pool.query(
+      `select tenant_id, membership_source
+       from memberships where actor_id = 'core_agent_provisioner' order by tenant_id`,
+    );
+    assert.deepEqual(memberships.rows, [
+      { tenant_id: "tenant_legacy_platform_a", membership_source: "platform" },
+      { tenant_id: "tenant_legacy_platform_b", membership_source: "platform" },
+    ]);
+  } finally {
+    await rm(v9Directory, { recursive: true, force: true });
+  }
+});
+
+test("schema 10 does not classify a provisioner lookalike as platform authority", async () => {
+  const v9Directory = await applyThroughSchema9();
+  try {
+    await seedLegacyProvisioner(
+      ["tenant_legacy_lookalike_a", "tenant_legacy_lookalike_b"],
+      "core_agent_provisioner_admin_lookalike",
+    );
+
+    await assert.rejects(
+      applyMigrations(pool, migrationsDirectory),
+      /legacy ordinary Membership authority conflict/,
+    );
+    assert.equal(await readSchemaVersion(db), 9);
+  } finally {
+    await rm(v9Directory, { recursive: true, force: true });
+  }
+});
+
+test("schema 10 role prerequisite fails closed before an existing schema-9 upgrade", async () => {
+  const v9Directory = await applyThroughSchema9();
+  try {
+    const migration = await readFile(join(migrationsDirectory, "010_identity_authority.sql"), "utf8");
+    await writeFile(
+      join(v9Directory, "010_identity_authority.sql"),
+      migration.replaceAll("core_agent_identity", "core_agent_identity_missing_for_test"),
+    );
+
+    await assert.rejects(
+      applyMigrations(pool, v9Directory),
+      /required database role core_agent_identity_missing_for_test is absent/,
+    );
+    assert.equal(await readSchemaVersion(db), 9);
   } finally {
     await rm(v9Directory, { recursive: true, force: true });
   }
@@ -404,27 +580,17 @@ test("schema 10 creates private authority tables without PUBLIC read grants and 
   try {
     await seedTenant("tenant_identity_tables");
     await applyMigrations(pool, migrationsDirectory);
-    const expectedTables = [
-      "account_deletions",
-      "auth_subjects",
-      "core_sessions",
-      "identity_invitations",
-      "oauth_transactions",
-      "platform_role_assignments",
-      "private_identity_pii",
-      "public_rate_limits",
-    ];
     const tables = await pool.query<{ table_name: string }>(
       `select table_name from information_schema.tables
        where table_schema = 'public' and table_name = any($1::text[]) order by table_name`,
-      [expectedTables],
+      [identityTables],
     );
-    assert.deepEqual(tables.rows.map((row) => row.table_name), expectedTables);
+    assert.deepEqual(tables.rows.map((row) => row.table_name), identityTables);
     const publicReads = await pool.query(
       `select table_name, privilege_type from information_schema.role_table_grants
        where table_schema = 'public' and grantee = 'PUBLIC'
          and table_name = any($1::text[]) and privilege_type = 'SELECT'`,
-      [expectedTables],
+      [identityTables],
     );
     assert.deepEqual(publicReads.rows, []);
     const timestamp = new Date("2026-08-10T00:00:00.000Z");
@@ -440,6 +606,163 @@ test("schema 10 creates private authority tables without PUBLIC read grants and 
       );
     }
   } finally {
+    await rm(v9Directory, { recursive: true, force: true });
+  }
+});
+
+test("schema 10 identity authority tables retain their compatibility and security-critical catalog shape", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+
+  const columns = await pool.query<{
+    table_name: keyof typeof identityColumnShape;
+    column_name: string;
+    udt_name: string;
+    is_nullable: "YES" | "NO";
+  }>(
+    `select table_name, column_name, udt_name, is_nullable
+     from information_schema.columns
+     where table_schema = 'public' and table_name = any($1::text[])
+     order by table_name, ordinal_position`,
+    [identityTables],
+  );
+  const actualColumns = Object.fromEntries(identityTables.map((tableName) => [
+    tableName,
+    columns.rows
+      .filter((column) => column.table_name === tableName)
+      .map((column) => `${column.column_name}:${column.udt_name}:${column.is_nullable}`),
+  ]));
+  assert.deepEqual(actualColumns, identityColumnShape);
+
+  const keys = await pool.query<{ table_name: string; constraint_type: string; definition: string }>(
+    `select relation.relname as table_name, catalog_constraint.contype as constraint_type,
+            pg_get_constraintdef(catalog_constraint.oid) as definition
+     from pg_constraint as catalog_constraint
+     join pg_class as relation on relation.oid = catalog_constraint.conrelid
+     where relation.relname = any($1::text[]) and catalog_constraint.contype in ('p', 'u', 'f')
+     order by table_name, constraint_type, definition`,
+    [identityTables],
+  );
+  const actualKeys = new Set(keys.rows.map((key) => `${key.table_name}:${key.constraint_type}:${key.definition}`));
+  const expectedKeys = new Set([
+    "account_deletions:f:FOREIGN KEY (actor_id) REFERENCES actors(actor_id)",
+    "account_deletions:p:PRIMARY KEY (account_deletion_id)",
+    "auth_subjects:f:FOREIGN KEY (actor_id) REFERENCES actors(actor_id)",
+    "auth_subjects:p:PRIMARY KEY (auth_subject_id)",
+    "auth_subjects:u:UNIQUE (provider, provider_subject)",
+    "core_sessions:f:FOREIGN KEY (actor_id) REFERENCES actors(actor_id)",
+    "core_sessions:f:FOREIGN KEY (auth_subject_id) REFERENCES auth_subjects(auth_subject_id)",
+    "core_sessions:p:PRIMARY KEY (session_id)",
+    "core_sessions:u:UNIQUE (secret_digest)",
+    "identity_invitations:f:FOREIGN KEY (accepted_actor_id) REFERENCES actors(actor_id)",
+    "identity_invitations:f:FOREIGN KEY (invited_by_actor_id) REFERENCES actors(actor_id)",
+    "identity_invitations:f:FOREIGN KEY (replaced_by_invitation_id) REFERENCES identity_invitations(invitation_id)",
+    "identity_invitations:f:FOREIGN KEY (tenant_id) REFERENCES tenants(tenant_id)",
+    "identity_invitations:p:PRIMARY KEY (invitation_id)",
+    "identity_invitations:u:UNIQUE (secret_digest)",
+    "oauth_transactions:f:FOREIGN KEY (actor_id) REFERENCES actors(actor_id)",
+    "oauth_transactions:p:PRIMARY KEY (oauth_transaction_id)",
+    "oauth_transactions:u:UNIQUE (state_digest)",
+    "platform_role_assignments:f:FOREIGN KEY (actor_id) REFERENCES actors(actor_id)",
+    "platform_role_assignments:p:PRIMARY KEY (platform_role_assignment_id)",
+    "platform_role_assignments:u:UNIQUE (actor_id, role)",
+    "private_identity_pii:f:FOREIGN KEY (actor_id) REFERENCES actors(actor_id)",
+    "private_identity_pii:p:PRIMARY KEY (actor_id)",
+    "private_identity_pii:u:UNIQUE (normalized_email_hmac)",
+    "public_rate_limits:p:PRIMARY KEY (bucket_kind, account_identifier_hmac, client_identifier_hmac, window_started_at)",
+  ]);
+  assert.deepEqual(actualKeys, expectedKeys);
+
+  const checks = await pool.query<{ table_name: string; definitions: string }>(
+    `select relation.relname as table_name,
+            string_agg(pg_get_constraintdef(catalog_constraint.oid), E'\n' order by catalog_constraint.conname) as definitions
+     from pg_constraint as catalog_constraint
+     join pg_class as relation on relation.oid = catalog_constraint.conrelid
+     where relation.relname = any($1::text[]) and catalog_constraint.contype = 'c'
+     group by relation.relname order by relation.relname`,
+    [identityTables],
+  );
+  const checkText = new Map(checks.rows.map((row) => [row.table_name, row.definitions]));
+  for (const [tableName, required] of Object.entries({
+    auth_subjects: ["supabase", "email_password", "apple", "active", "unlinked", "revoked"],
+    platform_role_assignments: ["platform_super_admin", "active", "revoked"],
+    identity_invitations: ["admin", "consultant", "pending", "accepted", "revoked", "expired", "replaced", "octet_length(secret_digest) = 32", "octet_length(normalized_email_hmac) = 32"],
+    oauth_transactions: ["supabase", "apple_sign_in", "apple_link", "web", "iphone", "macos", "pending", "consumed", "expired", "octet_length(state_digest) = 32", "octet_length(nonce_digest) = 32"],
+    core_sessions: ["web", "iphone", "macos", "active", "revoked", "expired", "octet_length(secret_digest) = 32", "octet_length(csrf_digest) = 32"],
+    account_deletions: ["deletion_pending", "cancelled", "deleted"],
+    private_identity_pii: ["octet_length(normalized_email_hmac) = 32", "octet_length(encrypted_email) > 0"],
+    public_rate_limits: ["signup", "login", "reset", "apple_callback", "invitation_accept", "reauthenticate", "octet_length(account_identifier_hmac) = 32", "octet_length(client_identifier_hmac) = 32"],
+  })) {
+    const definitions = checkText.get(tableName) ?? "";
+    for (const fragment of required) assert(definitions.includes(fragment), `${tableName} missing check: ${fragment}`);
+  }
+});
+
+test("schema 10 revokes general application access and grants Identity DML effectively", async () => {
+  const v9Directory = await applyThroughSchema9();
+  try {
+    await pool.query("grant usage on schema public to core_agent_app");
+    await pool.query(
+      "alter default privileges for role current_user in schema public grant select, insert, update, delete on tables to core_agent_app",
+    );
+    await applyMigrations(pool, migrationsDirectory);
+
+    const privileges = await pool.query<{ role_name: string; table_name: string; privilege: string; allowed: boolean }>(
+      `select role_name, table_name, privilege,
+              has_table_privilege(role_name, format('public.%I', table_name), privilege) as allowed
+       from unnest($1::text[]) as role_name
+       cross join unnest($2::text[]) as table_name
+       cross join unnest($3::text[]) as privilege
+       order by role_name, table_name, privilege`,
+      [["core_agent_app", "core_agent_identity"], identityTables, ["SELECT", "INSERT", "UPDATE", "DELETE"]],
+    );
+    for (const privilege of privileges.rows) {
+      assert.equal(
+        privilege.allowed,
+        privilege.role_name === "core_agent_identity",
+        `${privilege.role_name} ${privilege.privilege} ${privilege.table_name}`,
+      );
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      await client.query("set local role core_agent_app");
+      await assert.rejects(client.query("select count(*) from auth_subjects"), /permission denied/);
+      await client.query("rollback");
+
+      await client.query("begin");
+      await client.query("set local role core_agent_app");
+      await assert.rejects(client.query(
+        `insert into public_rate_limits (
+          bucket_kind, account_identifier_hmac, client_identifier_hmac,
+          window_started_at, request_count, expires_at, updated_at
+        ) values (
+          'login', decode(repeat('22', 32), 'hex'), decode(repeat('33', 32), 'hex'),
+          '2026-08-10T00:00:00.000Z', 1, '2026-08-10T01:00:00.000Z', '2026-08-10T00:00:00.000Z'
+        )`,
+      ), /permission denied/);
+      await client.query("rollback");
+
+      await client.query("begin");
+      await client.query("set local role core_agent_identity");
+      await assert.doesNotReject(client.query("select count(*) from auth_subjects"));
+      await assert.doesNotReject(client.query(
+        `insert into public_rate_limits (
+          bucket_kind, account_identifier_hmac, client_identifier_hmac,
+          window_started_at, request_count, expires_at, updated_at
+        ) values (
+          'login', decode(repeat('00', 32), 'hex'), decode(repeat('11', 32), 'hex'),
+          '2026-08-10T00:00:00.000Z', 1, '2026-08-10T01:00:00.000Z', '2026-08-10T00:00:00.000Z'
+        )`,
+      ));
+    } finally {
+      await client.query("rollback").catch(() => undefined);
+      client.release();
+    }
+  } finally {
+    await pool.query(
+      "alter default privileges for role current_user in schema public revoke select, insert, update, delete on tables from core_agent_app",
+    );
     await rm(v9Directory, { recursive: true, force: true });
   }
 });
