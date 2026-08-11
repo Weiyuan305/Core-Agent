@@ -71,9 +71,12 @@ async function scenario(kind) {
     wrong: randomBytes(32).toString("base64url"),
   };
   const credentialValues = Object.values(credentials);
+  const ingressMaterial = randomBytes(32).toString("base64url");
+  credentialValues.push(ingressMaterial);
   const paths = Object.fromEntries(Object.keys(credentials).map((name) => [name, join(root, name)]));
   for (const [name, path] of Object.entries(paths)) await protectedFile(path, credentials[name]);
   for (const name of ["provider", "ingress", "state"]) await mkdir(join(root, name), { mode: 0o700 });
+  await protectedFile(join(root, "ingress", "round9_ingress.v1"), ingressMaterial);
   const bootstrapKey = join(root, "bootstrap-key");
   await protectedFile(bootstrapKey, randomBytes(32).toString("base64url"));
   const environment = {
@@ -97,8 +100,6 @@ async function scenario(kind) {
     CORE_AGENT_RUNTIME_UID: String(process.getuid?.() ?? 0),
     CORE_AGENT_API_GID: String(process.getgid?.() ?? 0),
     CORE_AGENT_API_UID: String(process.getuid?.() ?? 0),
-    CORE_AGENT_WORKER_GID: String((process.getgid?.() ?? 0) + 1),
-    CORE_AGENT_WORKER_UID: String((process.getuid?.() ?? 0) + 1),
     CORE_AGENT_SUPERVISOR_SOCKET_GID: String(process.getgid?.() ?? 0),
     CORE_AGENT_SUPERVISOR_STATE_ROOT: join(root, "state"),
   };
@@ -158,6 +159,36 @@ async function scenario(kind) {
     }
     compose("build", "api", "worker");
 
+    const workerIngressProbe = `
+      import { constants } from "node:fs";
+      import { access, stat } from "node:fs/promises";
+      import { FileSecretStore } from "@core-agent/runtime-core";
+      if (process.getuid() !== Number(process.env.ROUND9_EXPECTED_RUNTIME_UID)) throw new Error("Worker and Supervisor runtime UIDs differ");
+      const root = await stat(process.env.CONTROL_PLANE_SECRET_ROOT);
+      const leaf = await stat(process.env.CONTROL_PLANE_SECRET_ROOT + "/round9_ingress.v1");
+      if ((root.mode & 0o777) !== 0o700 || (leaf.mode & 0o777) !== 0o600 || root.uid !== process.getuid() || leaf.uid !== process.getuid()) throw new Error("invalid ingress projection metadata");
+      const material = await new FileSecretStore(process.env.CONTROL_PLANE_SECRET_ROOT).get({ reference_id: "round9_ingress", version: 1, purpose: "hermes_ingress" });
+      try {
+        if (material.text().length !== 43) throw new Error("invalid ingress projection");
+      } finally { material.release(); }
+      for (const path of [
+        "/run/core-agent/credential-sources",
+        "/run/core-agent/database-credentials/application-password",
+        "/run/core-agent/database-credentials/bootstrap-password",
+        "/run/core-agent/database-credentials/identity-password",
+        "/run/core-agent/database-credentials/migrator-password",
+        "/run/core-agent/projected",
+      ]) {
+        try { await access(path, constants.F_OK); throw new Error("foreign credential path is visible"); }
+        catch (error) { if (error?.code !== "ENOENT") throw error; }
+      }
+      process.stdout.write("worker-ingress-ok");
+    `;
+    assert.match(
+      compose("run", "--rm", "--no-deps", "--env", `ROUND9_EXPECTED_RUNTIME_UID=${environment.CORE_AGENT_RUNTIME_UID}`, "--entrypoint", "node", "worker", "--input-type=module", "--eval", workerIngressProbe),
+      /worker-ingress-ok/u,
+    );
+
     const projected = compose(
       "run", "--rm", "--no-deps", "--entrypoint", "sh", "database-credential-projector",
       "-ceu", "find /run/core-agent/projected -type f -maxdepth 3 -exec stat -c '%n|%u|%g|%a|%i' {} + | sort",
@@ -173,7 +204,7 @@ async function scenario(kind) {
       ["role-bootstrap/bootstrap-password", 12003],
       ["role-bootstrap/identity-password", 12003],
       ["role-bootstrap/migrator-password", 12003],
-      ["worker/database-password", (process.getuid?.() ?? 0) + 1],
+      ["worker/database-password", process.getuid?.() ?? 0],
     ]);
     for (const line of projected) {
       const [path, uid, , mode] = line.split("|");

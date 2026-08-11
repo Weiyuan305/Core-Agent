@@ -321,8 +321,10 @@ projects those binds as root-owned. Verify all four sources report the same
 owner, group, regular-file type, safe mode, and nonzero size through the locked
 Node image using `stat`; never read or print their contents. The projector
 accepts only the API identity pair or `0/0`, and independently rejects API or
-Worker UID collisions with `999`, `12003`, `12004`, or each other. This
-container-view check does
+shared Worker/Supervisor runtime UID collisions with `999`, `12003`, or
+`12004`. Independent `CORE_AGENT_WORKER_UID` and `CORE_AGENT_WORKER_GID`
+settings are rejected because Worker must own the Supervisor-projected ingress
+root. This container-view check does
 not replace `runtime:paths`, which separately requires the actual host files to
 be canonical, regular, single-linked, nonempty, API-owned, and mode `0400`
 or `0600`, and rejects missing files, directories, symlinks, or unsafe owners.

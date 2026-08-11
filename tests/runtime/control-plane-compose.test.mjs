@@ -231,7 +231,7 @@ test("application services use least privilege and bounded resources", async () 
   }
   assert.equal(config.services.api.user, "${CORE_AGENT_API_UID:-12000}:${CORE_AGENT_API_GID:-12000}");
   assert.equal(config.services["api-ingress"].user, "${CORE_AGENT_API_UID:-12000}:${CORE_AGENT_API_GID:-12000}");
-  assert.equal(config.services.worker.user, "${CORE_AGENT_WORKER_UID:-12002}:${CORE_AGENT_WORKER_GID:-12002}");
+  assert.equal(config.services.worker.user, "${CORE_AGENT_RUNTIME_UID:-12002}:${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}");
   assert.equal(config.services.supervisor.user, "${CORE_AGENT_RUNTIME_UID:-12002}:${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}");
   assert.deepEqual(config.services.api.group_add, undefined);
   assert.deepEqual(config.services["api-ingress"].group_add, undefined);
@@ -387,8 +387,8 @@ test("database credential projector is private networkless and owns the only hos
     CORE_AGENT_API_UID: "${CORE_AGENT_API_UID:-12000}",
     CORE_AGENT_CREDENTIAL_SOURCE_GID: "${CORE_AGENT_CREDENTIAL_MOUNT_GID:?set CORE_AGENT_CREDENTIAL_MOUNT_GID}",
     CORE_AGENT_CREDENTIAL_SOURCE_UID: "${CORE_AGENT_CREDENTIAL_MOUNT_UID:?set CORE_AGENT_CREDENTIAL_MOUNT_UID}",
-    CORE_AGENT_WORKER_GID: "${CORE_AGENT_WORKER_GID:-12002}",
-    CORE_AGENT_WORKER_UID: "${CORE_AGENT_WORKER_UID:-12002}",
+    CORE_AGENT_RUNTIME_GID: "${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}",
+    CORE_AGENT_RUNTIME_UID: "${CORE_AGENT_RUNTIME_UID:-12002}",
   });
   const expectedSources = {
     "/run/core-agent/credential-sources/bootstrap": "${CORE_AGENT_POSTGRES_BOOTSTRAP_PASSWORD_FILE:?set CORE_AGENT_POSTGRES_BOOTSTRAP_PASSWORD_FILE}",
@@ -422,7 +422,7 @@ test("database credential projector is private networkless and owns the only hos
   }
 });
 
-test("each database consumer mounts only its isolated credential volume and API/Worker identities are distinct", async () => {
+test("each database consumer mounts only its isolated credential volume and Worker shares the Supervisor runtime identity", async () => {
   const config = await yaml("infra/runtime/compose.dev.yaml");
   const expected = {
     postgres: "postgres-credentials",
@@ -438,12 +438,13 @@ test("each database consumer mounts only its isolated credential volume and API/
   }
   assert.deepEqual(Object.keys(config.volumes).filter((name) => name.endsWith("-credentials")).sort(), Object.values(expected).sort());
   assert.equal(config.services.api.user, "${CORE_AGENT_API_UID:-12000}:${CORE_AGENT_API_GID:-12000}");
-  assert.equal(config.services.worker.user, "${CORE_AGENT_WORKER_UID:-12002}:${CORE_AGENT_WORKER_GID:-12002}");
+  assert.equal(config.services.worker.user, config.services.supervisor.user);
+  assert.equal(config.services.worker.user, "${CORE_AGENT_RUNTIME_UID:-12002}:${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}");
   assert.equal(environmentMap(config.services.api).CONTROL_PLANE_DATABASE_PASSWORD_FILE, "/run/core-agent/database-credentials/database-password");
   assert.equal(environmentMap(config.services.worker).CONTROL_PLANE_DATABASE_PASSWORD_FILE, "/run/core-agent/database-credentials/database-password");
 });
 
-test("host preflight rejects API and Worker UID collisions with privileged or peer identities", async () => {
+test("host preflight rejects independent Worker identity configuration and privileged runtime identities", async () => {
   const preflightUrl = pathToFileURL(new URL("../../scripts/prepare-runtime-paths.mjs", import.meta.url).pathname).href;
   const preflight = await import(`${preflightUrl}?round7=${Date.now()}`);
   const environment = {
@@ -457,8 +458,6 @@ test("host preflight rejects API and Worker UID collisions with privileged or pe
     CORE_AGENT_SUPERVISOR_STATE_ROOT: "/tmp/state",
     CORE_AGENT_API_UID: "12000",
     CORE_AGENT_API_GID: "12000",
-    CORE_AGENT_WORKER_UID: "12001",
-    CORE_AGENT_WORKER_GID: "12001",
     CORE_AGENT_RUNTIME_UID: "12002",
     CORE_AGENT_RUNTIME_GID: "12002",
     CORE_AGENT_SUPERVISOR_SOCKET_GID: "12002",
@@ -466,9 +465,11 @@ test("host preflight rejects API and Worker UID collisions with privileged or pe
   assert.doesNotThrow(() => preflight.resolveRuntimePathPolicy(environment));
   for (const uid of [999, 12003, 12004]) {
     assert.throws(() => preflight.resolveRuntimePathPolicy({ ...environment, CORE_AGENT_API_UID: String(uid) }), /runtime path preparation failed/u);
-    assert.throws(() => preflight.resolveRuntimePathPolicy({ ...environment, CORE_AGENT_WORKER_UID: String(uid) }), /runtime path preparation failed/u);
+    assert.throws(() => preflight.resolveRuntimePathPolicy({ ...environment, CORE_AGENT_RUNTIME_UID: String(uid) }), /runtime path preparation failed/u);
   }
-  assert.throws(() => preflight.resolveRuntimePathPolicy({ ...environment, CORE_AGENT_WORKER_UID: environment.CORE_AGENT_API_UID }), /runtime path preparation failed/u);
+  assert.throws(() => preflight.resolveRuntimePathPolicy({ ...environment, CORE_AGENT_WORKER_UID: environment.CORE_AGENT_RUNTIME_UID }), /runtime path preparation failed/u);
+  assert.throws(() => preflight.resolveRuntimePathPolicy({ ...environment, CORE_AGENT_WORKER_GID: environment.CORE_AGENT_SUPERVISOR_SOCKET_GID }), /runtime path preparation failed/u);
+  assert.throws(() => preflight.resolveRuntimePathPolicy({ ...environment, CORE_AGENT_WORKER_UID: "12001" }), /runtime path preparation failed/u);
 });
 
 test("PostgreSQL authentication convergence rewrites and verifies HBA before migration", async () => {
@@ -848,8 +849,8 @@ test("runtime example environment contains paths and generated references only",
   assert.match(text, /CORE_AGENT_RUNTIME_GID=<numeric-output-of-id-g>/u);
   assert.match(text, /CORE_AGENT_API_UID=<numeric-api-service-uid>/u);
   assert.match(text, /CORE_AGENT_API_GID=<numeric-api-service-gid>/u);
-  assert.match(text, /CORE_AGENT_WORKER_UID=<numeric-worker-service-uid>/u);
-  assert.match(text, /CORE_AGENT_WORKER_GID=<numeric-worker-service-gid>/u);
+  assert.doesNotMatch(text, /CORE_AGENT_WORKER_(?:UID|GID)/u);
+  assert.match(text, /Worker and Supervisor share CORE_AGENT_RUNTIME_UID/iu);
   assert.match(text, /CORE_AGENT_CREDENTIAL_MOUNT_UID=<numeric-owner-visible-inside-container>/u);
   assert.match(text, /CORE_AGENT_CREDENTIAL_MOUNT_GID=<numeric-group-visible-inside-container>/u);
   assert.match(text, /CORE_AGENT_SUPERVISOR_SOCKET_GID=<numeric-output-of-id-g>/u);
@@ -991,8 +992,6 @@ test("runtime path preflight creates final-uid 0700 roots and validates bootstra
     CORE_AGENT_RUNTIME_GID: String(gid),
     CORE_AGENT_API_UID: String(uid),
     CORE_AGENT_API_GID: String(gid),
-    CORE_AGENT_WORKER_UID: String(uid + 1),
-    CORE_AGENT_WORKER_GID: String(gid),
     CORE_AGENT_SUPERVISOR_SOCKET_GID: String(gid),
     CORE_AGENT_SUPERVISOR_STATE_ROOT: stateRoot,
   };
@@ -1071,8 +1070,6 @@ test("runtime path preflight rejects symlink ancestors and every canonical cross
     CORE_AGENT_RUNTIME_GID: String(gid),
     CORE_AGENT_API_UID: String(uid),
     CORE_AGENT_API_GID: String(gid),
-    CORE_AGENT_WORKER_UID: String(uid + 1),
-    CORE_AGENT_WORKER_GID: String(gid),
     CORE_AGENT_SUPERVISOR_SOCKET_GID: String(gid),
     CORE_AGENT_BOOTSTRAP_KEY_FILE: await makeBootstrap(join(root, "bootstrap")),
     ...await makeDatabaseCredentialSources(root),

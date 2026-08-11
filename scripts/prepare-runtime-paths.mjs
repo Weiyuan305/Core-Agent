@@ -105,14 +105,14 @@ function requirePurposeSeparation(projections) {
 
 export function resolveRuntimePathPolicy(environment = process.env) {
   try {
-    const runtimeUid = environment.CORE_AGENT_RUNTIME_UID === undefined
-      ? undefined
-      : identity(environment, "CORE_AGENT_RUNTIME_UID", 0);
+    if (environment.CORE_AGENT_WORKER_UID !== undefined || environment.CORE_AGENT_WORKER_GID !== undefined) {
+      throw preparationError();
+    }
+    const runtimeUid = identity(environment, "CORE_AGENT_RUNTIME_UID", 12002);
+    const runtimeGid = identity(environment, "CORE_AGENT_SUPERVISOR_SOCKET_GID", 12002);
     const apiUid = identity(environment, "CORE_AGENT_API_UID", 12000);
     const apiGid = identity(environment, "CORE_AGENT_API_GID", 12000);
-    const workerUid = identity(environment, "CORE_AGENT_WORKER_UID", 12002);
-    const workerGid = identity(environment, "CORE_AGENT_WORKER_GID", 12002);
-    if ([999, 12003, 12004].includes(apiUid) || [999, 12003, 12004].includes(workerUid) || apiUid === workerUid) {
+    if ([999, 12003, 12004].includes(apiUid) || [999, 12003, 12004].includes(runtimeUid)) {
       throw preparationError();
     }
     return {
@@ -130,10 +130,10 @@ export function resolveRuntimePathPolicy(environment = process.env) {
       bootstrapGid: apiGid,
       apiUid,
       apiGid,
-      workerUid,
-      workerGid,
-      supervisorUid: runtimeUid ?? 12002,
-      supervisorGid: identity(environment, "CORE_AGENT_SUPERVISOR_SOCKET_GID", 12002),
+      workerUid: runtimeUid,
+      workerGid: runtimeGid,
+      supervisorUid: runtimeUid,
+      supervisorGid: runtimeGid,
     };
   } catch {
     throw preparationError();

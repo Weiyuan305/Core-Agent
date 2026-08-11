@@ -123,13 +123,14 @@ references to the ingress projection, rejecting every other secret purpose;
 it never receives the bootstrap key. The provider catalog and image lock are
 non-secret managed configuration, not substitutes for either projection.
 
-The image targets retain dedicated non-root identities: API `12000`, Worker
-`12001`, and Supervisor `12002`. Compose has separate, collision-checked API
-and Worker UID/GID inputs; neither may collide with PostgreSQL `999`, the role
-bootstrap `12003`, or migrator `12004`, and API and Worker may not share a UID.
-The Supervisor keeps its independent runtime identity. Host projections must be
-created for these exact numeric owners, while the shared Supervisor socket GID
-provides only the intended UDS traversal.
+The image targets retain non-root identities: API defaults to its independent
+application UID `12000`, while Worker and Supervisor explicitly share runtime
+UID `12002`. The shared identity is required because Worker reads the
+Supervisor-owned `0700` Hermes ingress projection and `FileSecretStore` requires
+the current UID to own that root and each `0600` leaf. Compose accepts no
+independent Worker UID/GID input. API and runtime UIDs may not collide with
+PostgreSQL `999`, role bootstrap `12003`, or migrator `12004`. Host projections
+must be created for the configured API and shared runtime owners.
 
 Database credentials are projected by one root, networkless one-shot into six
 consumer-specific named volumes. PostgreSQL, role bootstrap, HBA convergence,
@@ -173,8 +174,9 @@ is an ancestor of the other. This prevents the Worker-visible ingress or
 state mount from containing bootstrap or provider bytes. With no UID
 override the runtime roots must be `12002:12002`; a caller who cannot create
 that ownership must prepare it explicitly rather than receive a silent
-chmod/chown. With a host override the same numeric value drives both the
-container user and preflight policy. Worker mounts only ingress and the socket
+chmod/chown. With a host override the same numeric value drives Worker,
+Supervisor, the credential projector, and preflight policy. Worker mounts only
+ingress and the socket
 volume, with the socket mount read-only; migration receives no runtime root. The
 bootstrap source is separately rejected unless it is a regular file owned by
 the exact effective API UID/GID with mode `0600` and exactly one hard link.
@@ -188,9 +190,10 @@ closes hard-link aliases introduced before preflight or while secret material is
 being loaded.
 
 This UID convergence is strictly a local-development compatibility mechanism.
-Production must keep dedicated API `12000`, Worker `12001`, and Supervisor
-`12002` identities and use the real orchestrator's ownership-aware secret,
-state, and UDS projections instead of converging services onto a host user.
+Production must keep API on a dedicated application identity and configure one
+shared Worker/Supervisor runtime identity. It must use the real orchestrator's
+ownership-aware secret, state, and UDS projections instead of silently
+converging services onto an arbitrary host user.
 
 ### Supervisor deadline and journal ownership
 

@@ -236,8 +236,8 @@ jobs:
           CORE_AGENT_CREDENTIAL_MOUNT_UID: "1001"
           CORE_AGENT_API_GID: "1001"
           CORE_AGENT_API_UID: "1001"
-          CORE_AGENT_WORKER_GID: "1002"
-          CORE_AGENT_WORKER_UID: "1002"
+          CORE_AGENT_RUNTIME_UID: "1002"
+          CORE_AGENT_SUPERVISOR_SOCKET_GID: "1002"
           CORE_AGENT_DOCKER_GID: "999"
           CORE_AGENT_DOCKER_SOCKET_SOURCE: /var/run/docker.sock
           CORE_AGENT_HERMES_IMAGE_LOCK_FILE: /tmp/core-agent-product-image-lock-path-only

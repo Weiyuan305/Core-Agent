@@ -143,7 +143,7 @@ test("database credential projector rejects every unsafe host source without ref
   assert.equal((await lstat(linked)).isSymbolicLink(), true);
 });
 
-test("database credential projector rejects privileged and peer UID collisions", async (t) => {
+test("database credential projector rejects privileged application UID collisions", async (t) => {
   assert.equal(typeof projector.projectRuntimeDatabaseCredentials, "function");
   const root = await mkdtemp(join(tmpdir(), "core-agent-credential-collisions-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -162,15 +162,13 @@ test("database credential projector rejects privileged and peer UID collisions",
     api: { uid: 12000, gid: 12000 }, worker: { uid: 12001, gid: 12001 },
   };
   for (const collision of [999, 12003, 12004]) {
-    await assert.rejects(projector.projectRuntimeDatabaseCredentials({
-      sourcePaths, outputRoots, sourceUid: process.getuid(), sourceGid: process.getgid(),
-      targetIdentities: { ...identities, api: { uid: collision, gid: collision } },
-    }), /database credential projection failed/u);
+    for (const application of ["api", "worker"]) {
+      await assert.rejects(projector.projectRuntimeDatabaseCredentials({
+        sourcePaths, outputRoots, sourceUid: process.getuid(), sourceGid: process.getgid(),
+        targetIdentities: { ...identities, [application]: { uid: collision, gid: collision } },
+      }), /database credential projection failed/u);
+    }
   }
-  await assert.rejects(projector.projectRuntimeDatabaseCredentials({
-    sourcePaths, outputRoots, sourceUid: process.getuid(), sourceGid: process.getgid(),
-    targetIdentities: { ...identities, worker: { uid: 12000, gid: 12001 } },
-  }), /database credential projection failed/u);
 });
 
 test("PostgreSQL HBA convergence accepts only official fresh legacy and canonical shapes", () => {
