@@ -48,6 +48,10 @@ const smokeEnvironment = Object.freeze({
   CORE_AGENT_PROVIDER_SECRET_ROOT: "/safe/provider",
   CORE_AGENT_INGRESS_SECRET_ROOT: "/safe/ingress",
   CORE_AGENT_SUPERVISOR_STATE_ROOT: "/safe/state",
+  CORE_AGENT_API_UID: "12000",
+  CORE_AGENT_API_GID: "12000",
+  CORE_AGENT_CREDENTIAL_MOUNT_UID: "0",
+  CORE_AGENT_CREDENTIAL_MOUNT_GID: "0",
   CORE_AGENT_RUNTIME_UID: "501",
   CORE_AGENT_SUPERVISOR_SOCKET_GID: "20",
   CORE_AGENT_DOCKER_GID: "100",
@@ -125,6 +129,37 @@ test("REAL_HERMES child environment never propagates ambient DOCKER_HOST", () =>
   } finally {
     if (previous === undefined) delete process.env.DOCKER_HOST;
     else Object.defineProperty(process.env, "DOCKER_HOST", previous);
+  }
+});
+
+test("REAL_HERMES child environment carries the closed API target and credential source identities", () => {
+  validateSmokeEnvironment(smokeEnvironment);
+  const childEnvironment = createSmokeChildEnvironment(smokeEnvironment);
+  assert.deepEqual(
+    Object.fromEntries([
+      "CORE_AGENT_API_UID",
+      "CORE_AGENT_API_GID",
+      "CORE_AGENT_CREDENTIAL_MOUNT_UID",
+      "CORE_AGENT_CREDENTIAL_MOUNT_GID",
+    ].map((name) => [name, childEnvironment[name]])),
+    {
+      CORE_AGENT_API_UID: "12000",
+      CORE_AGENT_API_GID: "12000",
+      CORE_AGENT_CREDENTIAL_MOUNT_UID: "0",
+      CORE_AGENT_CREDENTIAL_MOUNT_GID: "0",
+    },
+  );
+  for (const override of [
+    { CORE_AGENT_API_UID: "0" },
+    { CORE_AGENT_API_UID: "999" },
+    { CORE_AGENT_API_UID: "12003" },
+    { CORE_AGENT_API_UID: "12004" },
+    { CORE_AGENT_API_GID: "0" },
+    { CORE_AGENT_CREDENTIAL_MOUNT_UID: "0", CORE_AGENT_CREDENTIAL_MOUNT_GID: "12000" },
+    { CORE_AGENT_CREDENTIAL_MOUNT_UID: "12000", CORE_AGENT_CREDENTIAL_MOUNT_GID: "0" },
+    { CORE_AGENT_CREDENTIAL_MOUNT_UID: "12001", CORE_AGENT_CREDENTIAL_MOUNT_GID: "12001" },
+  ]) {
+    assert.throws(() => validateSmokeEnvironment({ ...smokeEnvironment, ...override }), /SMOKE_ENVIRONMENT_INVALID/u);
   }
 });
 

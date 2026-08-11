@@ -73,6 +73,43 @@ services:
     restart: "no"
     stop_grace_period: 5s
 
+  api-bootstrap-key-projector:
+    image: core-agent/control-plane-api:dev
+    platform: ${CORE_AGENT_PLATFORM:?set CORE_AGENT_PLATFORM}
+    build:
+      <<: *service-build
+      target: api
+    user: "0:0"
+    entrypoint: ["node", "scripts/project-runtime-api-bootstrap-key.mjs"]
+    environment:
+      CORE_AGENT_API_GID: ${CORE_AGENT_API_GID:-12000}
+      CORE_AGENT_API_UID: ${CORE_AGENT_API_UID:-12000}
+      CORE_AGENT_CREDENTIAL_SOURCE_GID: ${CORE_AGENT_CREDENTIAL_MOUNT_GID:?set CORE_AGENT_CREDENTIAL_MOUNT_GID}
+      CORE_AGENT_CREDENTIAL_SOURCE_UID: ${CORE_AGENT_CREDENTIAL_MOUNT_UID:?set CORE_AGENT_CREDENTIAL_MOUNT_UID}
+    volumes:
+      - type: bind
+        source: ${CORE_AGENT_BOOTSTRAP_KEY_FILE:?set CORE_AGENT_BOOTSTRAP_KEY_FILE}
+        target: /run/core-agent/bootstrap-source/bootstrap-key
+        read_only: true
+      - type: volume
+        source: api-bootstrap-key
+        target: /run/core-agent/projected-api-bootstrap
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_READ_SEARCH
+    security_opt:
+      - no-new-privileges:true
+    privileged: false
+    network_mode: none
+    pids_limit: 32
+    mem_limit: 64m
+    cpus: 0.25
+    restart: "no"
+    stop_grace_period: 5s
+
   postgres:
     image: ${CORE_AGENT_POSTGRES_IMAGE:?set CORE_AGENT_POSTGRES_IMAGE}
     platform: ${CORE_AGENT_PLATFORM:?set CORE_AGENT_PLATFORM}
@@ -228,7 +265,7 @@ services:
       CONTROL_PLANE_API_CONTAINER_BIND: "1"
       CONTROL_PLANE_API_HOST: 0.0.0.0
       CONTROL_PLANE_API_PORT: "8787"
-      CONTROL_PLANE_BOOTSTRAP_KEY_FILE: /run/secrets/bootstrap_key
+      CONTROL_PLANE_BOOTSTRAP_KEY_FILE: /run/core-agent/bootstrap/bootstrap-key
       CONTROL_PLANE_DATABASE_URL: postgresql://core_agent_app@postgres:5432/core_agent_runtime
       CONTROL_PLANE_DATABASE_PASSWORD_FILE: /run/core-agent/database-credentials/database-password
       CONTROL_PLANE_IMAGE_LOCK_FILE: /run/core-agent/config/hermes-images.lock.json
@@ -236,12 +273,6 @@ services:
       CONTROL_PLANE_SECRET_ROOT: /run/unavailable/api-secrets
       CONTROL_PLANE_SUPERVISOR_SOCKET: /run/unavailable/supervisor.sock
       CONTROL_PLANE_WORKER_ID: api-unused
-    secrets:
-      - source: bootstrap-key
-        target: bootstrap_key
-        uid: "${CORE_AGENT_API_UID:-12000}"
-        gid: "${CORE_AGENT_API_GID:-12000}"
-        mode: 0o600
     volumes:
       - type: bind
         source: ${CORE_AGENT_HERMES_IMAGE_LOCK_FILE:?set CORE_AGENT_HERMES_IMAGE_LOCK_FILE}
@@ -255,9 +286,15 @@ services:
         source: api-credentials
         target: /run/core-agent/database-credentials
         read_only: true
+      - type: volume
+        source: api-bootstrap-key
+        target: /run/core-agent/bootstrap
+        read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
     depends_on:
+      api-bootstrap-key-projector:
+        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
       postgres:
@@ -470,6 +507,7 @@ services:
       - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
 
 volumes:
+  api-bootstrap-key:
   api-credentials:
   migrate-credentials:
   postgres-auth-credentials:
@@ -478,10 +516,6 @@ volumes:
   role-bootstrap-credentials:
   supervisor-socket:
   worker-credentials:
-
-secrets:
-  bootstrap-key:
-    file: ${CORE_AGENT_BOOTSTRAP_KEY_FILE:?set CORE_AGENT_BOOTSTRAP_KEY_FILE}
 
 networks:
   core-agent-control:

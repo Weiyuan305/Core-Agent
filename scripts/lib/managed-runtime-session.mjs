@@ -67,6 +67,10 @@ const requiredEnvironmentNames = Object.freeze([
   "CORE_AGENT_PROVIDER_SECRET_ROOT",
   "CORE_AGENT_INGRESS_SECRET_ROOT",
   "CORE_AGENT_SUPERVISOR_STATE_ROOT",
+  "CORE_AGENT_API_UID",
+  "CORE_AGENT_API_GID",
+  "CORE_AGENT_CREDENTIAL_MOUNT_UID",
+  "CORE_AGENT_CREDENTIAL_MOUNT_GID",
   "CORE_AGENT_RUNTIME_UID",
   "CORE_AGENT_SUPERVISOR_SOCKET_GID",
   "CORE_AGENT_DOCKER_GID",
@@ -147,6 +151,15 @@ function requiredNumericIdentity(environment, name) {
   if (typeof value !== "string" || !/^[1-9]\d{0,9}$/u.test(value)) throw smokeError("SMOKE_ENVIRONMENT_INVALID");
   const number = Number(value);
   if (!Number.isSafeInteger(number) || number > 4_294_967_294) throw smokeError("SMOKE_ENVIRONMENT_INVALID");
+  return number;
+}
+
+function requiredSourceIdentity(environment, name) {
+  const value = environment[name];
+  if (typeof value !== "string" || !/^(?:0|[1-9]\d{0,9})$/u.test(value)) throw smokeError("SMOKE_ENVIRONMENT_INVALID");
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number > 4_294_967_294) throw smokeError("SMOKE_ENVIRONMENT_INVALID");
+  return number;
 }
 
 export function validateSmokeEnvironment(environment) {
@@ -174,8 +187,16 @@ export function validateSmokeEnvironment(environment) {
     requiredAbsolutePath(environment, name);
   }
   requiredAbsolutePath(environment, "CORE_AGENT_DOCKER_SOCKET_SOURCE");
-  for (const name of requiredEnvironmentNames.filter((name) => name.endsWith("_UID") || name.endsWith("_GID"))) {
+  for (const name of requiredEnvironmentNames.filter((name) => (name.endsWith("_UID") || name.endsWith("_GID")) && !name.startsWith("CORE_AGENT_CREDENTIAL_MOUNT_"))) {
     requiredNumericIdentity(environment, name);
+  }
+  const apiUid = requiredNumericIdentity(environment, "CORE_AGENT_API_UID");
+  const apiGid = requiredNumericIdentity(environment, "CORE_AGENT_API_GID");
+  if ([999, 12003, 12004].includes(apiUid)) throw smokeError("SMOKE_ENVIRONMENT_INVALID");
+  const sourceUid = requiredSourceIdentity(environment, "CORE_AGENT_CREDENTIAL_MOUNT_UID");
+  const sourceGid = requiredSourceIdentity(environment, "CORE_AGENT_CREDENTIAL_MOUNT_GID");
+  if (!((sourceUid === 0 && sourceGid === 0) || (sourceUid === apiUid && sourceGid === apiGid))) {
+    throw smokeError("SMOKE_ENVIRONMENT_INVALID");
   }
   return environment;
 }

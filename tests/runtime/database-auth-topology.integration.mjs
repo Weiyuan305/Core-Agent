@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
+import { createSmokeChildEnvironment, validateSmokeEnvironment } from "../../scripts/lib/managed-runtime-session.mjs";
+
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const composeFile = join(repositoryRoot, "infra/runtime/compose.dev.yaml");
 const lock = JSON.parse(await import("node:fs/promises").then(({ readFile }) => readFile(
@@ -78,9 +80,12 @@ async function scenario(kind) {
   for (const name of ["provider", "ingress", "state"]) await mkdir(join(root, name), { mode: 0o700 });
   await protectedFile(join(root, "ingress", "round9_ingress.v1"), ingressMaterial);
   const bootstrapKey = join(root, "bootstrap-key");
-  await protectedFile(bootstrapKey, randomBytes(32).toString("base64url"));
+  const bootstrapMaterial = `${randomBytes(32).toString("base64url")}\n`;
+  credentialValues.push(bootstrapMaterial);
+  await protectedFile(bootstrapKey, bootstrapMaterial);
   const environment = {
     ...process.env,
+    CORE_AGENT_REAL_HERMES_SMOKE: "1",
     CORE_AGENT_BOOTSTRAP_KEY_FILE: bootstrapKey,
     CORE_AGENT_DATABASE_APP_PASSWORD_FILE: paths.application,
     CORE_AGENT_DATABASE_IDENTITY_PASSWORD_FILE: paths.identity,
@@ -102,6 +107,8 @@ async function scenario(kind) {
     CORE_AGENT_SUPERVISOR_SOCKET_GID: String(process.getgid?.() ?? 0),
     CORE_AGENT_SUPERVISOR_STATE_ROOT: join(root, "state"),
   };
+  validateSmokeEnvironment(environment);
+  const childEnvironment = createSmokeChildEnvironment(environment);
 
   await prepareRuntimePaths({ environment });
   const unsafeLink = join(root, "unsafe-application-credential-link");
@@ -118,7 +125,7 @@ async function scenario(kind) {
   );
   await chmod(paths.application, 0o600);
 
-  const docker = (...args) => command(args, environment, credentialValues);
+  const docker = (...args) => command(args, childEnvironment, credentialValues);
   const compose = (...args) => docker(...composeArguments(project, ...args));
   try {
     if (kind === "legacy") {
@@ -165,7 +172,7 @@ async function scenario(kind) {
     ]) {
       const result = spawnSync("docker", composeArguments(project, "run", "--rm", "--no-deps", "database-credential-projector"), {
         cwd: repositoryRoot,
-        env: { ...environment, ...override },
+        env: { ...childEnvironment, ...override },
         encoding: "buffer",
         maxBuffer: 8 * 1024 * 1024,
         timeout: 60_000,
@@ -177,6 +184,54 @@ async function scenario(kind) {
       docker("image", "inspect", "core-agent/control-plane-worker:dev", "--format", "{{.Config.User}}").trim(),
       "12002:12002",
     );
+
+    const bootstrapSourceMetadata = compose(
+      "run", "--rm", "--no-deps", "--entrypoint", "sh", "api-bootstrap-key-projector",
+      "-ceu", "stat -c '%F|%u|%g|%a|%h|%s' /run/core-agent/bootstrap-source/bootstrap-key; stat -c '%F|%u|%g|%a|%h' /run/core-agent/projected-api-bootstrap",
+    ).trim().split("\n").filter((line) => /^(?:regular file|directory)\|/u.test(line));
+    assert.deepEqual(bootstrapSourceMetadata, [
+      `regular file|${environment.CORE_AGENT_CREDENTIAL_MOUNT_UID}|${environment.CORE_AGENT_CREDENTIAL_MOUNT_GID}|600|1|${Buffer.byteLength(bootstrapMaterial)}`,
+      "directory|0|0|755|2",
+    ]);
+    compose("run", "--rm", "--no-deps", "api-bootstrap-key-projector");
+    assert.equal(compose(
+      "run", "--rm", "--no-deps", "--entrypoint", "sh", "api-bootstrap-key-projector",
+      "-ceu", "stat -c '%u|%g|%a|%h|%s' /run/core-agent/projected-api-bootstrap/bootstrap-key",
+    ).trim().split("\n").find((line) => /^\d+\|\d+\|\d+\|\d+\|\d+$/u.test(line)),
+    `${environment.CORE_AGENT_API_UID}|${environment.CORE_AGENT_API_GID}|600|1|${Buffer.byteLength(bootstrapMaterial)}`);
+
+    compose("up", "--detach", "api");
+    const apiStartupProbe = `
+      import { readFile, stat } from "node:fs/promises";
+      const path = process.env.CONTROL_PLANE_BOOTSTRAP_KEY_FILE;
+      const material = await readFile(path, "utf8");
+      const response = await fetch("http://127.0.0.1:8787/health/ready", { headers: { authorization: "Bearer " + material.trimEnd() } });
+      if (response.status !== 200) throw new Error("API readiness failed");
+      const metadata = await stat(path);
+      if (metadata.uid !== process.getuid() || metadata.gid !== process.getgid() || (metadata.mode & 0o7777) !== 0o600) throw new Error("API bootstrap projection metadata invalid");
+      process.stdout.write("api-normal-entrypoint-ok|" + metadata.uid + "|" + metadata.gid + "|" + (metadata.mode & 0o7777).toString(8));
+    `;
+    let apiProbe;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const result = spawnSync("docker", composeArguments(project, "exec", "-T", "api", "node", "--input-type=module", "--eval", apiStartupProbe), {
+        cwd: repositoryRoot, env: childEnvironment, encoding: "buffer", maxBuffer: 8 * 1024 * 1024, timeout: 30_000,
+      });
+      const output = safeResult(result, credentialValues);
+      if (result.status === 0) { apiProbe = output; break; }
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+    }
+    if (apiProbe === undefined) {
+      const logs = compose("logs", "--no-color", "api", "api-bootstrap-key-projector");
+      assert.fail(`normal API entrypoint did not become ready\n${logs.slice(-4000)}`);
+    }
+    assert.match(apiProbe, new RegExp(`api-normal-entrypoint-ok\\|${environment.CORE_AGENT_API_UID}\\|${environment.CORE_AGENT_API_GID}\\|600`, "u"));
+    compose("logs", "--no-color", "api", "api-bootstrap-key-projector");
+    for (const service of ["worker", "migrate", "postgres", "identity-role-bootstrap", "postgres-auth-convergence", "database-credential-projector"]) {
+      compose(
+        "run", "--rm", "--no-deps", "--entrypoint", "sh", service, "-ceu",
+        "test ! -e /run/core-agent/bootstrap/bootstrap-key; test ! -e /run/core-agent/bootstrap-source/bootstrap-key; test ! -e /run/core-agent/projected-api-bootstrap/bootstrap-key",
+      );
+    }
 
     const workerIngressProbe = `
       import { constants } from "node:fs";
@@ -267,11 +322,16 @@ async function scenario(kind) {
 
     const reject = (...args) => {
       const result = spawnSync("docker", composeArguments(project, "run", "--rm", "--no-deps", ...args), {
-        cwd: repositoryRoot, env: environment, encoding: "buffer", maxBuffer: 8 * 1024 * 1024, timeout: 60_000,
+        cwd: repositoryRoot, env: childEnvironment, encoding: "buffer", maxBuffer: 8 * 1024 * 1024, timeout: 60_000,
       });
       safeResult(result, credentialValues);
       assert.notEqual(result.status, 0);
     };
+    reject("--env", "CORE_AGENT_API_UID=999", "api-bootstrap-key-projector");
+    assert.equal(compose(
+      "run", "--rm", "--no-deps", "--entrypoint", "sh", "api-bootstrap-key-projector",
+      "-ceu", "find /run/core-agent/projected-api-bootstrap -maxdepth 1 -name '*.tmp' -print",
+    ).trim(), "");
     reject(
       "--user", "0:0", "--volume", `${paths.wrong}:/run/core-agent/wrong-password:ro`,
       "--entrypoint", "sh", "postgres", "-ceu",
@@ -299,9 +359,9 @@ async function scenario(kind) {
     }
     assert.match(compose("run", "--rm", "--no-deps", "--entrypoint", "node", "api", "--input-type=module", "--eval", applicationProbe), /core_agent_app\|10/u);
   } finally {
-    command(composeArguments(project, "down", "--volumes", "--remove-orphans"), environment, credentialValues);
-    spawnSync("docker", ["rm", "--force", legacyContainer], { env: environment, encoding: "buffer" });
-    spawnSync("docker", ["volume", "rm", `${project}_postgres-data`], { env: environment, encoding: "buffer" });
+    command(composeArguments(project, "down", "--volumes", "--remove-orphans"), childEnvironment, credentialValues);
+    spawnSync("docker", ["rm", "--force", legacyContainer], { env: childEnvironment, encoding: "buffer" });
+    spawnSync("docker", ["volume", "rm", `${project}_postgres-data`], { env: childEnvironment, encoding: "buffer" });
     await rm(root, { recursive: true, force: true });
   }
 }

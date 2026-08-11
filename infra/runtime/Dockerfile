@@ -59,6 +59,7 @@ COPY packages/runtime-core/migrations ./packages/runtime-core/migrations
 COPY scripts/migrate-runtime.mjs ./scripts/migrate-runtime.mjs
 COPY scripts/bootstrap-runtime-database-auth.mjs ./scripts/bootstrap-runtime-database-auth.mjs
 COPY scripts/project-runtime-database-credentials.mjs ./scripts/project-runtime-database-credentials.mjs
+COPY scripts/project-runtime-api-bootstrap-key.mjs ./scripts/project-runtime-api-bootstrap-key.mjs
 COPY scripts/converge-runtime-postgres-auth.mjs ./scripts/converge-runtime-postgres-auth.mjs
 COPY scripts/api-ingress-proxy.mjs ./scripts/api-ingress-proxy.mjs
 COPY scripts/preflight-runtime-docker-socket.mjs ./scripts/preflight-runtime-docker-socket.mjs

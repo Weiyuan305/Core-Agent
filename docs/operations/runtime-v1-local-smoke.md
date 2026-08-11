@@ -185,8 +185,10 @@ The required secret leaves are:
 - ingress: `hermes_ingress.v1` below the ingress root.
 
 Each secret must be a current-owner regular file, have exactly one hard link,
-and have mode `0600`. Its bytes must be non-empty valid UTF-8 with no NUL,
-carriage return, or line feed; in particular, do not leave a terminal newline.
+and have mode `0600`. Bootstrap key bytes must be 32–512 bytes followed by
+exactly one terminal newline, as required by the API loader. Provider and
+ingress bytes must be non-empty valid UTF-8 with no NUL, carriage return, or
+line feed; do not leave a terminal newline in those two files.
 Provider/ingress roots and the state root are exact `0700` directories. Put
 secret bytes into those files using the approved local secret-provisioning
 procedure, then set metadata without printing them:
@@ -315,9 +317,9 @@ identity, platform, and immutable reference. Do not put secret bytes in it.
 platform entries generated in `infra/runtime/base-images.lock.json`.
 
 Set `CORE_AGENT_CREDENTIAL_MOUNT_UID/GID` to the metadata Docker exposes for
-each protected database credential bind: the API UID/GID pair on native
+the protected bootstrap-key bind and each database credential bind: the API UID/GID pair on native
 Linux, or `0/0` only when the selected Docker Desktop/Colima implementation
-projects those binds as root-owned. Verify all four sources report the same
+projects those binds as root-owned. Verify all five sources report the same
 owner, group, regular-file type, safe mode, and nonzero size through the locked
 Node image using `stat`; never read or print their contents. The projector
 accepts only the API identity pair or `0/0`, and independently rejects API or
@@ -326,11 +328,15 @@ shared Worker/Supervisor runtime UID collisions with `999`, `12003`, or
 settings are rejected because Worker must own the Supervisor-projected ingress
 root. All application UIDs, primary GIDs, the shared socket GID, and the Docker
 supplementary GID must be nonzero. The `0/0` exception applies only to reviewed
-database source mount-view metadata and never to a target service identity.
+credential source mount-view metadata and never to a target service identity.
 This container-view check does
 not replace `runtime:paths`, which separately requires the actual host files to
-be canonical, regular, single-linked, nonempty, API-owned, and mode `0400`
-or `0600`, and rejects missing files, directories, symlinks, or unsafe owners.
+be canonical, regular, single-linked, nonempty, API-UID-owned, and
+mode `0600` for bootstrap or `0400`/`0600` for database credentials, and rejects
+missing files, directories, symlinks, or unsafe owners.
+The bootstrap projector writes a seventh isolated named volume with an
+API-owned exact-`0600` file; only API mounts it read-only. It is separate from
+the six database credential volumes and is never visible to another consumer.
 The projector writes six separate named volumes; PostgreSQL, role bootstrap,
 HBA convergence, migrate, API, and Worker each mount only their own approved
 material read-only.

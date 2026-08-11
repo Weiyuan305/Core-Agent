@@ -116,6 +116,8 @@ export function resolveRuntimePathPolicy(environment = process.env) {
     const runtimeGid = identity(environment, "CORE_AGENT_SUPERVISOR_SOCKET_GID", 12002);
     const apiUid = identity(environment, "CORE_AGENT_API_UID", 12000);
     const apiGid = identity(environment, "CORE_AGENT_API_GID", 12000);
+    const credentialMountUid = identity(environment, "CORE_AGENT_CREDENTIAL_MOUNT_UID");
+    const credentialMountGid = identity(environment, "CORE_AGENT_CREDENTIAL_MOUNT_GID");
     if (
       [0, 999, 12003, 12004].includes(apiUid)
       || [0, 999, 12003, 12004].includes(runtimeUid)
@@ -124,6 +126,10 @@ export function resolveRuntimePathPolicy(environment = process.env) {
     ) {
       throw preparationError();
     }
+    if (!(
+      (credentialMountUid === 0 && credentialMountGid === 0)
+      || (credentialMountUid === apiUid && credentialMountGid === apiGid)
+    )) throw preparationError();
     return {
       bootstrapPath: absolutePath(environment, "CORE_AGENT_BOOTSTRAP_KEY_FILE"),
       databaseCredentialPaths: {
@@ -153,7 +159,16 @@ export async function prepareRuntimePaths({ environment = process.env } = {}) {
   try {
     const policy = resolveRuntimePathPolicy(environment);
     const existing = [
-      { purpose: "bootstrap", path: policy.bootstrapPath, kind: "file", uid: policy.bootstrapUid, gid: policy.bootstrapGid, mode: 0o600 },
+      {
+        purpose: "bootstrap",
+        path: policy.bootstrapPath,
+        kind: "file",
+        uid: policy.bootstrapUid,
+        gid: policy.bootstrapGid,
+        mode: 0o600,
+        minimumSize: 33,
+        maximumSize: 513,
+      },
       ...Object.entries(policy.databaseCredentialPaths).map(([purpose, path]) => ({
         purpose: `database-${purpose}`,
         path,

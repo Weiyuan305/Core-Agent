@@ -123,6 +123,16 @@ references to the ingress projection, rejecting every other secret purpose;
 it never receives the bootstrap key. The provider catalog and image lock are
 non-secret managed configuration, not substitutes for either projection.
 
+The API bootstrap key uses its own protected projection boundary. Host
+preflight validates the API-UID-owned `0600`, single-link regular source without
+reading it. A bounded root one-shot with `network_mode: none` validates the
+explicit Docker mount-view owner/group, copies the material into an isolated
+named volume, and assigns the configured non-root API UID/GID with exact mode
+`0600`. Only API mounts that volume read-only; Worker, Supervisor, PostgreSQL,
+migration, database-auth one-shots, and API ingress receive neither its source
+nor projection. This avoids relying on Compose file-secret `uid`, `gid`, and
+`mode` metadata that Docker Desktop or Colima may ignore.
+
 The image targets retain non-root identities: API defaults to its independent
 application UID `12000`, while Worker and Supervisor explicitly share runtime
 UID `12002`. The shared identity is required because Worker reads the
@@ -134,7 +144,7 @@ must be created for the configured API and shared runtime owners.
 
 Every API, Worker, and Supervisor target UID, primary GID, shared socket GID,
 and Supervisor Docker supplementary GID must be nonzero. Root-owned
-Docker Desktop/Colima database source mounts remain a separate, explicit
+Docker Desktop/Colima protected credential source mounts remain a separate, explicit
 mount-view compatibility policy; root source metadata never authorizes a root
 application target.
 
