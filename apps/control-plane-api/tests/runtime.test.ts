@@ -35,7 +35,7 @@ function provisioning(tenantId: string) {
     identity_graph: { schema_version: 1,
       tenant: { schema_version: 1, resource_version: 1, tenant_id: tenantId, tenant_mode: "b2c", display_name: "Runtime tenant", status: "provisioning", created_at: timestamp, updated_at: timestamp },
       actors: [{ schema_version: 1, resource_version: 1, actor_id: `actor_${tenantId}`, actor_kind: "human", status: "active", created_at: timestamp, updated_at: timestamp }],
-      memberships: [{ schema_version: 1, resource_version: 1, membership_id: `membership_${tenantId}`, tenant_id: tenantId, actor_id: `actor_${tenantId}`, roles: ["student"], status: "active", created_at: timestamp, updated_at: timestamp }],
+      memberships: [{ schema_version: 1, resource_version: 1, membership_id: `membership_${tenantId}`, tenant_id: tenantId, actor_id: `actor_${tenantId}`, roles: ["student"], membership_source: "self", status: "active", created_at: timestamp, updated_at: timestamp }],
       profiles: [{ schema_version: 1, resource_version: 1, profile_id: `profile_${tenantId}`, tenant_id: tenantId, owner_actor_id: `actor_${tenantId}`, profile_kind: "default", status: "provisioning", hermes_profile_ref: `hermes_${tenantId}`, created_at: timestamp, updated_at: timestamp }],
     }, provider_config_id: "provider_a", model_id: "model_a",
     runtime: { image_ref: imageRef, platform: "linux/amd64", ingress_secret_ref: `ingress_${tenantId}` },

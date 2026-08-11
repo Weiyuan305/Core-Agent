@@ -112,6 +112,12 @@ function assertUnique(values: readonly string[], label: string): void {
   if (new Set(values).size !== values.length) invalid(`${label} must be unique`);
 }
 
+function compareActorIds(left: { readonly actor_id: string }, right: { readonly actor_id: string }): number {
+  if (left.actor_id < right.actor_id) return -1;
+  if (left.actor_id > right.actor_id) return 1;
+  return 0;
+}
+
 function validateIdentityRequest(graph: IdentityGraph): void {
   const authorityGraph: IdentityGraph = {
     ...graph,
@@ -231,13 +237,16 @@ export async function provisionTenant(
       .where("tenant_id", "=", tenantId).executeTakeFirst();
     let insertedTenant: { tenant_id: string } | undefined;
     if (existingTenant === undefined) {
-      for (const actor of graph.actors) {
+      const actors = [
+        ...graph.actors,
+        {
+          schema_version: 1 as const, resource_version: 1, actor_id: context.actorId, actor_kind: "service" as const,
+          display_name: "Core Agent Provisioner", status: "active" as const, created_at: nowIso, updated_at: nowIso,
+        },
+      ].sort(compareActorIds);
+      for (const actor of actors) {
         await repositories.actors.insert({ ...actor, schema_version: 1, resource_version: 1, created_at: nowIso, updated_at: nowIso });
       }
-      await repositories.actors.insert({
-        schema_version: 1, resource_version: 1, actor_id: context.actorId, actor_kind: "service",
-        display_name: "Core Agent Provisioner", status: "active", created_at: nowIso, updated_at: nowIso,
-      });
       insertedTenant = await trx.insertInto("tenants").values({
         tenant_id: tenantId, schema_version: 1, resource_version: 1,
         tenant_mode: graph.tenant.tenant_mode, status: "provisioning",

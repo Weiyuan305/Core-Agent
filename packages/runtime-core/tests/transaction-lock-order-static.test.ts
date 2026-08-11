@@ -49,6 +49,11 @@ test("tenant provisioning locks global Actor authority before Tenant Membership 
   const actorInsert = method(resources, "public async insert(actor", "public async find(actorId");
 
   ordered(transaction, [
+    "const actors = [",
+    "...graph.actors",
+    "actor_id: context.actorId",
+    "].sort(compareActorIds)",
+    "for (const actor of actors)",
     "repositories.actors.insert",
     'insertInto("tenants")',
     "repositories.memberships.insert",

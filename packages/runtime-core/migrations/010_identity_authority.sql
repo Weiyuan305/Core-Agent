@@ -16,6 +16,20 @@ begin
 end
 $$;
 
+do $$
+begin
+  if exists (
+    select 1
+    from memberships
+    where status in ('active', 'invited')
+    group by actor_id
+    having count(distinct tenant_id) > 1
+  ) then
+    raise exception 'legacy ordinary Membership authority conflict prevents global identity migration';
+  end if;
+end
+$$;
+
 create table actors_v2 (
   actor_id text primary key,
   schema_version integer not null check (schema_version = 1),
@@ -54,8 +68,12 @@ alter table actors_v2 rename to actors;
 
 alter table memberships
   add constraint memberships_actor_id_fkey foreign key (actor_id) references actors (actor_id);
+alter table memberships
+  add constraint memberships_tenant_id_fkey foreign key (tenant_id) references tenants (tenant_id);
 alter table profiles
   add constraint profiles_owner_actor_id_fkey foreign key (owner_actor_id) references actors (actor_id);
+alter table profiles
+  add constraint profiles_tenant_id_fkey foreign key (tenant_id) references tenants (tenant_id);
 alter table conversations
   add constraint conversations_created_by_actor_id_fkey foreign key (created_by_actor_id) references actors (actor_id);
 alter table sessions
@@ -98,6 +116,11 @@ alter table memberships
       )
     )
   );
+
+create index memberships_ordinary_actor_authority_idx
+  on memberships (actor_id, tenant_id, membership_id)
+  where membership_source <> 'platform'
+    and status in ('active', 'invited');
 
 create function enforce_ordinary_membership_actor_authority()
 returns trigger

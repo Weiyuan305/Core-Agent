@@ -49,7 +49,7 @@ function request() {
       schema_version: 1,
       tenant: { schema_version: 1, resource_version: 1, tenant_id: tenantId, tenant_mode: "b2c", display_name: "HTTP B2C", status: "provisioning", created_at: timestamp, updated_at: timestamp },
       actors: [{ schema_version: 1, resource_version: 1, actor_id: "actor_http_student", actor_kind: "human", display_name: "Student", status: "active", created_at: timestamp, updated_at: timestamp }],
-      memberships: [{ schema_version: 1, resource_version: 1, membership_id: "membership_http_student", tenant_id: tenantId, actor_id: "actor_http_student", roles: ["student"], status: "active", created_at: timestamp, updated_at: timestamp }],
+      memberships: [{ schema_version: 1, resource_version: 1, membership_id: "membership_http_student", tenant_id: tenantId, actor_id: "actor_http_student", roles: ["student"], membership_source: "self", status: "active", created_at: timestamp, updated_at: timestamp }],
       profiles: [{ schema_version: 1, resource_version: 1, profile_id: "profile_http_student", tenant_id: tenantId, owner_actor_id: "actor_http_student", profile_kind: "default", status: "provisioning", hermes_profile_ref: "hermes_http_student", created_at: timestamp, updated_at: timestamp }],
     },
     provider_config_id: "provider_a", model_id: "model_a",

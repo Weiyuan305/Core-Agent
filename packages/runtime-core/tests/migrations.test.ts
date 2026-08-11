@@ -257,6 +257,51 @@ test("schema 10 fails closed for every contradictory legacy global Actor fact", 
   }
 });
 
+test("schema 10 fails closed for legacy cross-Tenant ordinary Membership authority", async () => {
+  const v9Directory = await applyThroughSchema9();
+  try {
+    const timestamp = new Date("2026-08-10T00:00:00.000Z");
+    await pool.query(
+      `insert into tenants (
+        tenant_id, schema_version, resource_version, tenant_mode, status,
+        display_name, created_at, updated_at
+      ) values
+        ('tenant_legacy_authority_a', 1, 1, 'b2b', 'active', 'Legacy Authority A', $1, $1),
+        ('tenant_legacy_authority_b', 1, 1, 'b2b', 'active', 'Legacy Authority B', $1, $1)`,
+      [timestamp],
+    );
+    await pool.query(
+      `insert into actors (
+        tenant_id, actor_id, schema_version, resource_version, actor_kind,
+        display_name, status, created_at, updated_at
+      ) values
+        ('tenant_legacy_authority_a', 'actor_legacy_authority', 1, 1, 'human', 'Legacy Human', 'active', $1, $1),
+        ('tenant_legacy_authority_b', 'actor_legacy_authority', 1, 1, 'human', 'Legacy Human', 'active', $1, $1)`,
+      [timestamp],
+    );
+    await pool.query(
+      `insert into memberships (
+        tenant_id, membership_id, actor_id, schema_version, resource_version,
+        roles, seat_ref, status, created_at, updated_at
+      ) values
+        ('tenant_legacy_authority_a', 'membership_legacy_authority_a', 'actor_legacy_authority', 1, 1, array['consultant'], null, 'active', $1, $1),
+        ('tenant_legacy_authority_b', 'membership_legacy_authority_b', 'actor_legacy_authority', 1, 1, array['consultant'], null, 'invited', $1, $1)`,
+      [timestamp],
+    );
+
+    await assert.rejects(
+      applyMigrations(pool, migrationsDirectory),
+      /legacy ordinary Membership authority conflict/,
+    );
+    assert.equal(await readSchemaVersion(db), 9);
+    assert.equal((await pool.query(
+      "select count(*)::int as count from memberships where actor_id = 'actor_legacy_authority'",
+    )).rows[0]?.count, 2);
+  } finally {
+    await rm(v9Directory, { recursive: true, force: true });
+  }
+});
+
 test("schema 10 collapses consistent Actors and preserves every legacy Actor foreign key", async () => {
   const v9Directory = await applyThroughSchema9();
   try {
@@ -297,6 +342,61 @@ test("schema 10 collapses consistent Actors and preserves every legacy Actor for
   } finally {
     await rm(v9Directory, { recursive: true, force: true });
   }
+});
+
+test("schema 10 preserves Tenant foreign keys after replacing composite Actor foreign keys", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+
+  const tenantForeignKeys = await pool.query<{ relation: string }>(
+    `select distinct child.relname as relation
+     from pg_constraint as fk
+     join pg_class as child on child.oid = fk.conrelid
+     join pg_class as parent on parent.oid = fk.confrelid
+     join unnest(fk.conkey) as key(attnum) on true
+     join pg_attribute as attribute
+       on attribute.attrelid = child.oid and attribute.attnum = key.attnum
+     where fk.contype = 'f'
+       and child.relname = any($1::text[])
+       and attribute.attname = 'tenant_id'
+       and parent.relname <> 'actors'
+     order by relation`,
+    [["memberships", "profiles", "conversations", "sessions", "audit_events"]],
+  );
+  assert.deepEqual(tenantForeignKeys.rows.map((row) => row.relation), [
+    "audit_events",
+    "conversations",
+    "memberships",
+    "profiles",
+    "sessions",
+  ]);
+
+  const directTenantForeignKeys = await pool.query<{ relation: string; definition: string }>(
+    `select child.relname as relation, pg_get_constraintdef(fk.oid) as definition
+     from pg_constraint as fk
+     join pg_class as child on child.oid = fk.conrelid
+     join pg_class as parent on parent.oid = fk.confrelid
+     where fk.contype = 'f'
+       and child.relname = any($1::text[])
+       and parent.relname = 'tenants'
+     order by relation`,
+    [["memberships", "profiles"]],
+  );
+  assert.deepEqual(directTenantForeignKeys.rows, [
+    { relation: "memberships", definition: "FOREIGN KEY (tenant_id) REFERENCES tenants(tenant_id)" },
+    { relation: "profiles", definition: "FOREIGN KEY (tenant_id) REFERENCES tenants(tenant_id)" },
+  ]);
+});
+
+test("ordinary Membership authority has an actor-leading partial index", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+
+  const index = await pool.query<{ indexdef: string }>(
+    `select indexdef from pg_indexes
+     where schemaname = 'public' and indexname = 'memberships_ordinary_actor_authority_idx'`,
+  );
+  assert.equal(index.rowCount, 1);
+  assert.match(index.rows[0]!.indexdef, /USING btree \(actor_id, tenant_id, membership_id\)/);
+  assert.match(index.rows[0]!.indexdef, /WHERE \(\(membership_source <> 'platform'::text\) AND \(status = ANY \(ARRAY\['active'::text, 'invited'::text\]\)\)\)/);
 });
 
 test("schema 10 creates private authority tables without PUBLIC read grants and admits future jobs", async () => {
