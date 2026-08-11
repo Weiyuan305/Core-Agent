@@ -56,6 +56,23 @@ async function assertResourcesAbsent({ container, dataVolume, network, paths, en
   }
 }
 
+async function bootstrapTestRolesWhenPublishedDatabaseIsReady(environment, credential) {
+  let lastOutput = "";
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const result = spawnSync("node", ["scripts/bootstrap-test-database-roles.mjs"], {
+      cwd: repositoryRoot,
+      env: environment,
+      encoding: "buffer",
+      maxBuffer: 64 * 1024 * 1024,
+      timeout: 10_000,
+    });
+    lastOutput = safeOutput(result, credential);
+    if (result.status === 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.fail(`fresh CI-equivalent role bootstrap did not become ready\n${lastOutput.slice(-1000)}`);
+}
+
 async function runCiEquivalentScenario({ injectedFailure = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "core-agent-ci-equivalent-"));
   const suffix = `${process.pid}-${randomBytes(4).toString("hex")}`;
@@ -115,6 +132,7 @@ async function runCiEquivalentScenario({ injectedFailure = false } = {}) {
       PGPASSFILE: pgpass,
     };
 
+    await bootstrapTestRolesWhenPublishedDatabaseIsReady(environment, credential);
     run("node", ["scripts/bootstrap-test-database-roles.mjs"], environment, credential);
     run("npm", ["run", "test:postgres"], environment, credential);
     run("npm", ["run", "test:integration"], environment, credential);
