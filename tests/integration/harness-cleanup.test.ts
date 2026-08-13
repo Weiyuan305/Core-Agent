@@ -210,6 +210,54 @@ test("production isolated database creation preserves setup cause and every clea
   );
 });
 
+test("production create child is force-terminated and reaped before categorized cleanup returns", async () => {
+  const calls: string[] = [];
+  let stable = true;
+  await assert.rejects(
+    testHarnessInternals.createIsolatedDatabase({
+      configuredUrl: "postgresql://test@127.0.0.1/core_agent_control",
+      databaseName,
+      createOwnedProcess: () => ({
+        completion: new Promise<number>(() => undefined),
+        terminateAndReap: async () => { calls.push("create reaped"); },
+      }),
+      controlPool: {
+        query: async () => undefined,
+        end: async () => { calls.push("control closed"); },
+      },
+      cleanupControlPool: {
+        query: async (sql: string) => { calls.push(sql.startsWith("drop database") ? "database dropped" : "cleanup query"); },
+        end: async () => { calls.push("admin closed"); },
+      },
+      timeoutMs: 25,
+    }),
+    (error: unknown) => {
+      assert(error instanceof Error);
+      assert.equal(error.message, "Integration stage failed: database create");
+      return true;
+    },
+  );
+  const returned = [...calls];
+  await delay(30);
+  stable = calls.length === returned.length;
+  assert.equal(stable, true);
+  assert.deepEqual(calls, ["create reaped", "database dropped", "control closed", "admin closed"]);
+});
+
+test("production create child rejects embedded credentials before launch", async () => {
+  let launches = 0;
+  await assert.rejects(testHarnessInternals.createIsolatedDatabase({
+    configuredUrl: "postgresql://test:embedded@127.0.0.1/core_agent_control",
+    databaseName,
+    createOwnedProcess: () => {
+      launches += 1;
+      throw new Error("must not launch");
+    },
+    timeoutMs: 25,
+  }), /Integration stage failed: database create/u);
+  assert.equal(launches, 0);
+});
+
 test("isolated database teardown settles a delayed owned close without forcing it", async () => {
   const calls: string[] = [];
   await testHarnessInternals.dropIsolatedDatabase({

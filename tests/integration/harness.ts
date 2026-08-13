@@ -100,6 +100,11 @@ interface DatabaseCreateSession {
   close(): Promise<void>;
 }
 
+interface OwnedTerminalProcess {
+  readonly completion: Promise<number>;
+  terminateAndReap(): Promise<void>;
+}
+
 interface DatabaseAdminSession {
   connect(): Promise<void>;
   query(sql: string, values?: readonly unknown[]): Promise<{ readonly rows: readonly Record<string, unknown>[] }>;
@@ -650,6 +655,11 @@ async function createIsolatedDatabase(options: {
   readonly createSession?: DatabaseCreateSession;
   readonly controlPool?: DatabaseControlPool;
   readonly cleanupControlPool?: DatabaseControlPool;
+  readonly createOwnedProcess?: (input: {
+    readonly controlDatabaseUrl: string;
+    readonly databaseName: string;
+    readonly timeoutMs: number;
+  }) => OwnedTerminalProcess;
   readonly timeoutMs?: number;
 } = {}): Promise<{
   readonly controlPool: DatabaseControlPool;
@@ -670,6 +680,36 @@ async function createIsolatedDatabase(options: {
     ?? `core_agent_test_${randomBytes(8).toString("hex")}`;
   assert.match(databaseName, databaseNamePattern);
   const timeoutMs = options.timeoutMs ?? externalStageTimeoutMs;
+  if (options.createSession === undefined && controlUrl.password !== "") {
+    throw new Error("Integration stage failed: database create");
+  }
+  const createOwnedProcess = options.createOwnedProcess ?? ((input): OwnedTerminalProcess => {
+    const child = spawn(process.execPath, [
+      join(repositoryRoot, "scripts", "create-test-database-child.mjs"),
+      input.controlDatabaseUrl,
+      input.databaseName,
+      String(input.timeoutMs),
+    ], { cwd: repositoryRoot, env: process.env, stdio: "ignore", detached: process.platform !== "win32" });
+    let terminateRequested = false;
+    const completion = new Promise<number>((resolve) => {
+      let spawnFailed = false;
+      child.once("error", () => { spawnFailed = true; });
+      child.once("close", (code) => resolve(!spawnFailed && code === 0 ? 0 : 1));
+    });
+    return {
+      completion,
+      terminateAndReap: async () => {
+        if (child.exitCode === null && !terminateRequested) {
+          terminateRequested = true;
+          try {
+            if (child.pid !== undefined && process.platform !== "win32") process.kill(-child.pid, "SIGKILL");
+            else child.kill("SIGKILL");
+          } catch { child.kill("SIGKILL"); }
+        }
+        await completion;
+      },
+    };
+  });
   const createClient = options.createSession === undefined
     ? new Client({
         connectionString: controlUrl.toString(),
@@ -690,6 +730,52 @@ async function createIsolatedDatabase(options: {
     query_timeout: timeoutMs,
     statement_timeout: timeoutMs,
   });
+  if (options.createSession === undefined) {
+    let createProcess: OwnedTerminalProcess | undefined;
+    try {
+      createProcess = createOwnedProcess({
+        controlDatabaseUrl: controlUrl.toString(), databaseName, timeoutMs,
+      });
+      const status = await runWithDeadline(() => createProcess!.completion, timeoutMs);
+      if (status !== 0) throw new Error("Integration stage failed: database create");
+    } catch (error) {
+      const createError = error instanceof Error && error.message === "Integration stage failed: database create"
+        ? error
+        : new Error("Integration stage failed: database create", { cause: error });
+      const cleanupFailures: string[] = [];
+      if (createProcess !== undefined) {
+        try { await createProcess.terminateAndReap(); }
+        catch { cleanupFailures.push("create_cancellation"); }
+      }
+      if (cleanupFailures.includes("create_cancellation")) {
+        cleanupFailures.push(...await runCleanupStages([
+          { category: "control_pool_close", work: () => controlPool.end() },
+          ...(options.cleanupControlPool === undefined ? [] : [{
+            category: "admin_close", work: () => options.cleanupControlPool!.end(),
+          }]),
+        ], timeoutMs));
+        throw combineSetupAndCleanupFailure(createError, cleanupFailures);
+      }
+      const cleanupControlPool = options.cleanupControlPool ?? new Pool({
+        connectionString: controlUrl.toString(), max: 1,
+        connectionTimeoutMillis: timeoutMs, query_timeout: timeoutMs, statement_timeout: timeoutMs,
+      });
+      cleanupFailures.push(...await runCleanupStages([
+        { category: "drop_database", work: async () => {
+          await cleanupControlPool.query(`drop database if exists "${databaseName}" with (force)`);
+        } },
+        { category: "control_pool_close", work: () => controlPool.end() },
+        ...(cleanupControlPool === controlPool ? [] : [{ category: "admin_close", work: () => cleanupControlPool.end() }]),
+      ], timeoutMs));
+      throw combineSetupAndCleanupFailure(createError, cleanupFailures);
+    }
+    return {
+      controlPool,
+      controlDatabaseUrl: controlUrl.toString(),
+      databaseName,
+      databaseUrl: databaseUrlFor(controlUrl, databaseName),
+    };
+  }
   let createOperation: Promise<void> | undefined;
   try {
     await boundedExternal(

@@ -168,9 +168,21 @@ async function applyThroughSchema9(): Promise<string> {
   const v9Directory = await mkdtemp(join(tmpdir(), "core-agent-v9-migrations-"));
   await cp(migrationsDirectory, v9Directory, { recursive: true });
   await rm(join(v9Directory, "010_identity_authority.sql"), { force: true });
-  await applyMigrations(pool, v9Directory);
+  await migrationTestInternals.applyMigrationsWithManifests(
+    pool,
+    v9Directory,
+    new Map([...migrationTestInternals.schemaManifests].filter(([version]) => version <= 9)),
+  );
   assert.equal(await readSchemaVersion(db), 9);
   return v9Directory;
+}
+
+async function applyMigrationPrefix(directory: string, maximumVersion: number): Promise<void> {
+  await migrationTestInternals.applyMigrationsWithManifests(
+    pool,
+    directory,
+    new Map([...migrationTestInternals.schemaManifests].filter(([version]) => version <= maximumVersion)),
+  );
 }
 
 async function seedLegacyProvisioner(tenantIds: readonly string[], membershipId = "core_agent_provisioner_admin"): Promise<void> {
@@ -1051,12 +1063,58 @@ test("an unknown migration 011 is rejected before SQL execution or recording", a
   try {
     await cp(migrationsDirectory, directory, { recursive: true });
     await writeFile(join(directory, "011_unknown.sql"), "create table unknown_manifest_side_effect (id text primary key);\n");
-    await assert.rejects(applyMigrations(pool, directory), /no binary-owned schema manifest for migration 11/);
+    await assert.rejects(applyMigrations(pool, directory), /migration manifest inventory/u);
     assert.equal((await pool.query("select to_regclass('public.unknown_manifest_side_effect')::text as relation")).rows[0]?.relation, null);
     assert.equal((await pool.query("select to_regclass('public.core_agent_schema_migrations')::text as relation")).rows[0]?.relation, null);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("migration and manifest inventories are an exact ordered contiguous bijection before connect", async (t) => {
+  const cases: Array<[string, (directory: string, manifests: Map<number, typeof migrationTestInternals.schemaManifests extends ReadonlyMap<number, infer M> ? M : never>) => Promise<void>]> = [
+    ["orphan manifest", async (_directory, manifests) => {
+      manifests.set(11, { version: 11, name: "orphan", checksum: "0".repeat(64) });
+    }],
+    ["gap", async (directory, manifests) => {
+      await rm(join(directory, "005_worker_runtime_facts.sql"));
+      manifests.delete(5);
+    }],
+    ["reordered manifests", async (_directory, manifests) => {
+      const reversed = [...manifests.entries()].reverse();
+      manifests.clear();
+      for (const [version, manifest] of reversed) manifests.set(version, manifest);
+    }],
+  ];
+  for (const [name, mutate] of cases) {
+    await t.test(name, async () => {
+      const directory = await mkdtemp(join(tmpdir(), "core-agent-inventory-"));
+      let connects = 0;
+      try {
+        await cp(migrationsDirectory, directory, { recursive: true });
+        const manifests = new Map(migrationTestInternals.schemaManifests);
+        await mutate(directory, manifests);
+        await assert.rejects(
+          migrationTestInternals.applyMigrationsWithManifests({
+            connect: async () => { connects += 1; throw new Error("must not connect"); },
+          } as unknown as Pool, directory, manifests),
+          /migration manifest inventory/u,
+        );
+        assert.equal(connects, 0);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test("a database above the binary max fails closed", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await pool.query(
+    "insert into core_agent_schema_migrations(version, name, checksum, applied_at) values (11, 'future', $1, now())",
+    ["0".repeat(64)],
+  );
+  await assert.rejects(applyMigrations(pool, migrationsDirectory), /database schema is newer than this binary/u);
 });
 
 test("a registered migration 011 validates and records atomically", async () => {
@@ -1072,11 +1130,15 @@ test("a registered migration 011 validates and records atomically", async () => 
       checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
       relations: ["registered_manifest_object"],
       sequences: [],
+      columns: [["registered_manifest_object", "id", "text", true, ""]],
+      constraints: [["registered_manifest_object", "registered_manifest_object_pkey", "p", true, "PRIMARY KEY (id)"]],
+      indexes: [["registered_manifest_object", "registered_manifest_object_pkey", "CREATE UNIQUE INDEX registered_manifest_object_pkey ON public.registered_manifest_object USING btree (id)"]],
       validateAndConverge: async (client: PoolClient) => {
         const result = await client.query("select to_regclass('public.registered_manifest_object')::text as relation");
         if (result.rows[0]?.relation !== "registered_manifest_object") throw new Error("schema 11 manifest validation failed");
       },
     });
+    await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
     await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
     assert.equal((await pool.query("select max(version) as version from core_agent_schema_migrations")).rows[0]?.version, 11);
   } finally {
@@ -1104,6 +1166,106 @@ test("a registered migration manifest failure rolls back both schema and record"
     assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 11")).rows[0]?.count, 0);
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("registered migration 011 forward security objects validate and record in one transaction", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "core-agent-forward-security-"));
+  try {
+    await cp(migrationsDirectory, directory, { recursive: true });
+    const sql = `
+      create table registered_security_object (id bigint primary key);
+      create sequence registered_security_sequence;
+      create function registered_security_trigger() returns trigger language plpgsql
+        set search_path = pg_catalog, public as $$ begin return new; end $$;
+      revoke all on function registered_security_trigger() from public;
+      create trigger registered_security_check before insert on registered_security_object
+        for each row execute function registered_security_trigger();
+      create view registered_security_view as select id from registered_security_object;
+    `;
+    await writeFile(join(directory, "011_registered_security.sql"), sql);
+    const manifests = new Map(migrationTestInternals.schemaManifests);
+    manifests.set(11, {
+      version: 11,
+      name: "registered_security",
+      checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
+      relations: ["registered_security_object"],
+      views: ["registered_security_view"],
+      sequences: ["registered_security_sequence"],
+      columns: [["registered_security_object", "id", "bigint", true, ""]],
+      constraints: [["registered_security_object", "registered_security_object_pkey", "p", true, "PRIMARY KEY (id)"]],
+      indexes: [["registered_security_object", "registered_security_object_pkey", "CREATE UNIQUE INDEX registered_security_object_pkey ON public.registered_security_object USING btree (id)"]],
+      triggers: [["registered_security_object", "registered_security_check", "O", "CREATE TRIGGER registered_security_check BEFORE INSERT ON registered_security_object FOR EACH ROW EXECUTE FUNCTION registered_security_trigger()"]],
+      routines: [["f", "registered_security_trigger", "", "trigger", false, ["search_path=pg_catalog, public"], "35dcfee45395dbef24cd2196a919182b"]],
+      validateAndConverge: async (client: PoolClient) => {
+        const result = await client.query("select to_regclass('public.registered_security_view')::text as relation");
+        if (result.rows[0]?.relation !== "registered_security_view") throw new Error("schema 11 manifest validation failed");
+      },
+    });
+    await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
+    await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
+    assert.equal((await pool.query("select max(version) as version from core_agent_schema_migrations")).rows[0]?.version, 11);
+    assert.equal((await pool.query("select to_regclass('public.registered_security_view')::text as relation")).rows[0]?.relation, "registered_security_view");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("registered migration 011 union failure rolls back every object and record", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "core-agent-forward-union-failure-"));
+  try {
+    await cp(migrationsDirectory, directory, { recursive: true });
+    const sql = `
+      create table registered_union_object (id text primary key);
+      create function undeclared_union_function() returns integer language sql as 'select 1';
+    `;
+    await writeFile(join(directory, "011_union_failure.sql"), sql);
+    const manifests = new Map(migrationTestInternals.schemaManifests);
+    manifests.set(11, {
+      version: 11,
+      name: "union_failure",
+      checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
+      relations: ["registered_union_object"],
+      columns: [["registered_union_object", "id", "text", true, ""]],
+      constraints: [["registered_union_object", "registered_union_object_pkey", "p", true, "PRIMARY KEY (id)"]],
+      indexes: [["registered_union_object", "registered_union_object_pkey", "CREATE UNIQUE INDEX registered_union_object_pkey ON public.registered_union_object USING btree (id)"]],
+    });
+    await assert.rejects(
+      migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests),
+      /schema 11 manifest validation failed: routine catalog/u,
+    );
+    assert.equal((await pool.query("select to_regclass('public.registered_union_object')::text as relation")).rows[0]?.relation, null);
+    assert.equal((await pool.query("select to_regprocedure('public.undeclared_union_function()')::text as routine")).rows[0]?.routine, null);
+    assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 11")).rows[0]?.count, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("recorded current max rejects undeclared security catalog objects and grantees", async (t) => {
+  const mutations: Array<[string, string]> = [
+    ["unknown ACL grantee", "create role core_agent_unknown_acl; grant select on auth_subjects to core_agent_unknown_acl"],
+    ["NOT VALID constraint", "alter table auth_subjects add constraint hostile_not_valid check (true) not valid"],
+    ["SECURITY DEFINER public function", "create function hostile_public() returns integer language sql security definer as 'select 1'"],
+    ["view", "create view hostile_view as select actor_id from actors"],
+    ["materialized view", "create materialized view hostile_materialized as select actor_id from actors"],
+    ["sequence", "create sequence hostile_security_sequence"],
+    ["index", "create index hostile_index on tenants(status)"],
+    ["trigger", "create trigger hostile_trigger before delete on actors for each row execute function enforce_core_session_revoked_deletion()"],
+    ["function", "create function hostile_function() returns integer language sql as 'select 1'"],
+    ["procedure", "create procedure hostile_procedure() language sql as 'select 1'"],
+  ];
+  for (const [name, mutation] of mutations) {
+    await t.test(name, async () => {
+      await resetDatabase();
+      await applyMigrations(pool, migrationsDirectory);
+      if (name === "unknown ACL grantee") await pool.query("drop role if exists core_agent_unknown_acl");
+      await pool.query(mutation);
+      await assert.rejects(applyMigrations(pool, migrationsDirectory), /manifest validation failed/u);
+      if (name === "unknown ACL grantee") {
+        await pool.query("drop owned by core_agent_unknown_acl; drop role core_agent_unknown_acl").catch(() => undefined);
+      }
+    });
   }
 });
 
@@ -1492,7 +1654,7 @@ test("schema 10 upgrades a genuine v7 database and supports Worker claim plans",
   await rm(join(v7Directory, "009_agent_run_failure_code.sql"));
   await rm(join(v7Directory, "010_identity_authority.sql"));
   try {
-    await applyMigrations(pool, v7Directory);
+    await applyMigrationPrefix(v7Directory, 7);
     assert.equal(await readSchemaVersion(db), 7);
     await applyMigrations(pool, migrationsDirectory);
     assert.equal(await readSchemaVersion(db), 10);
@@ -1542,7 +1704,7 @@ test("schema 10 backfills failed Runs and enforces failure code state", async ()
   await rm(join(v8Directory, "009_agent_run_failure_code.sql"));
   await rm(join(v8Directory, "010_identity_authority.sql"));
   try {
-    await applyMigrations(pool, v8Directory);
+    await applyMigrationPrefix(v8Directory, 8);
     assert.equal(await readSchemaVersion(db), 8);
     const tenantId = "tenant_v8_failure_upgrade";
     const actorId = `actor_${tenantId}`;
@@ -1622,7 +1784,7 @@ test("version 4 terminalizes ambiguous legacy reconcile jobs and enforces the jo
   await rm(join(legacyDirectory, "009_agent_run_failure_code.sql"));
   await rm(join(legacyDirectory, "010_identity_authority.sql"));
   try {
-    await applyMigrations(pool, legacyDirectory);
+    await applyMigrationPrefix(legacyDirectory, 3);
     await seedTenant("tenant_upgrade");
     const createdAt = new Date("2026-08-03T00:00:00.000Z");
     for (const [suffix, desiredState] of [
@@ -1737,7 +1899,7 @@ test("version 5 fails genuine active v4 command intent closed and preserves term
   await rm(join(v4Directory, "009_agent_run_failure_code.sql"));
   await rm(join(v4Directory, "010_identity_authority.sql"));
   try {
-    await applyMigrations(pool, v4Directory);
+    await applyMigrationPrefix(v4Directory, 4);
     await seedTenant("tenant_v4_worker_upgrade");
     const timestamp = new Date("2026-08-04T00:00:00.000Z");
     await pool.query(
@@ -1770,7 +1932,7 @@ test("latest schema upgrades a genuine v5 database through the version 6 Worker 
   await rm(join(v5Directory, "009_agent_run_failure_code.sql"));
   await rm(join(v5Directory, "010_identity_authority.sql"));
   try {
-    await applyMigrations(pool, v5Directory);
+    await applyMigrationPrefix(v5Directory, 5);
     assert.equal(await readSchemaVersion(db), 5);
     await seedTenant("tenant_v5_attempt_upgrade");
     const timestamp = new Date("2026-08-04T00:00:00.000Z");
@@ -1802,7 +1964,7 @@ test("version 6 fails closed when genuine v5 storage already exceeds the Worker 
   await rm(join(v5Directory, "009_agent_run_failure_code.sql"));
   await rm(join(v5Directory, "010_identity_authority.sql"));
   try {
-    await applyMigrations(pool, v5Directory);
+    await applyMigrationPrefix(v5Directory, 5);
     await seedTenant("tenant_v5_invalid_attempt");
     const timestamp = new Date("2026-08-04T00:00:00.000Z");
     await pool.query(
