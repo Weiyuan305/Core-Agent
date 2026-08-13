@@ -436,3 +436,22 @@ alter table worker_jobs
     'project_platform_memberships',
     'finalize_account_deletion'
   ));
+
+create function enforce_identity_worker_job_kind()
+returns trigger
+language plpgsql
+as $$
+begin
+  if session_user = 'core_agent_identity'
+    and new.job_kind not in ('project_platform_memberships', 'finalize_account_deletion') then
+    raise exception 'Identity role may enqueue only identity Worker jobs'
+      using errcode = '42501';
+  end if;
+  return new;
+end
+$$;
+
+create trigger worker_jobs_identity_job_kind_check
+before insert on worker_jobs
+for each row
+execute function enforce_identity_worker_job_kind();

@@ -347,7 +347,7 @@ test("empty database migrates exactly to schema version 10 with identity authori
   ]);
 });
 
-test("database role bootstrap enforces SCRAM credentials and rotates persisted volumes", async () => {
+test("database role bootstrap removes hostile role drift and rotates persisted SCRAM credentials", async () => {
   const runtimeCore = await import("../src/index.js") as Record<string, unknown>;
   assert.equal(typeof runtimeCore.bootstrapRuntimeDatabaseAuth, "function");
   const bootstrapAuth = runtimeCore.bootstrapRuntimeDatabaseAuth as (input: {
@@ -451,25 +451,55 @@ test("database role bootstrap enforces SCRAM credentials and rotates persisted v
     await pool.query(
       "alter role core_agent_migrator nologin password null; alter role core_agent_app nologin password null; alter role core_agent_identity nologin password null",
     );
+    const protectedRoles = ["core_agent_app", "core_agent_identity", "core_agent_migrator"] as const;
+    for (const [index, role] of protectedRoles.entries()) {
+      const parent = `core_agent_hostile_parent_${index}`;
+      const member = `core_agent_hostile_member_${index}`;
+      await pool.query(`create role ${parent} nologin; create role ${member} nologin`);
+      await pool.query(`grant ${parent} to ${role}; grant ${role} to ${member}`);
+      await pool.query(`alter role ${role} superuser createdb createrole inherit replication bypassrls`);
+    }
 
     const first = credentials();
     await writeSecrets(first);
     await bootstrapAuth({ databaseUrl: databaseUrl.toString(), ...secretPaths });
     await bootstrapAuth({ databaseUrl: databaseUrl.toString(), ...secretPaths });
 
-    const roles = await pool.query<{ rolname: string; scram: boolean }>(
-      `select rolname, rolpassword like 'SCRAM-SHA-256$%' as scram
+    const roles = await pool.query<{
+      rolname: string;
+      scram: boolean;
+      rolcanlogin: boolean;
+      rolsuper: boolean;
+      rolcreatedb: boolean;
+      rolcreaterole: boolean;
+      rolinherit: boolean;
+      rolreplication: boolean;
+      rolbypassrls: boolean;
+    }>(
+      `select rolname, rolpassword like 'SCRAM-SHA-256$%' as scram,
+              rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolinherit,
+              rolreplication, rolbypassrls
        from pg_authid
        where rolname = any($1::text[])
        order by rolname`,
       [["core_agent_app", bootstrapRole, "core_agent_identity", "core_agent_migrator"]],
     );
     assert.deepEqual(roles.rows, [
-      { rolname: "core_agent_app", scram: true },
-      { rolname: bootstrapRole, scram: true },
-      { rolname: "core_agent_identity", scram: true },
-      { rolname: "core_agent_migrator", scram: true },
+      { rolname: "core_agent_app", scram: true, rolcanlogin: true, rolsuper: false, rolcreatedb: false, rolcreaterole: false, rolinherit: false, rolreplication: false, rolbypassrls: false },
+      { rolname: bootstrapRole, scram: true, rolcanlogin: true, rolsuper: true, rolcreatedb: true, rolcreaterole: true, rolinherit: true, rolreplication: true, rolbypassrls: true },
+      { rolname: "core_agent_identity", scram: true, rolcanlogin: true, rolsuper: false, rolcreatedb: false, rolcreaterole: false, rolinherit: false, rolreplication: false, rolbypassrls: false },
+      { rolname: "core_agent_migrator", scram: true, rolcanlogin: true, rolsuper: false, rolcreatedb: false, rolcreaterole: false, rolinherit: false, rolreplication: false, rolbypassrls: false },
     ].sort((left, right) => left.rolname.localeCompare(right.rolname)));
+    const memberships = await pool.query<{ count: number }>(
+      `select count(*)::int as count
+       from pg_auth_members memberships
+       join pg_roles granted_role on granted_role.oid = memberships.roleid
+       join pg_roles member_role on member_role.oid = memberships.member
+       where granted_role.rolname = any($1::text[])
+          or member_role.rolname = any($1::text[])`,
+      [protectedRoles],
+    );
+    assert.equal(memberships.rows[0]?.count, 0);
     for (const [role, password] of [
       ["core_agent_app", first.applicationPasswordFile],
       ["core_agent_identity", first.identityPasswordFile],
@@ -477,6 +507,9 @@ test("database role bootstrap enforces SCRAM credentials and rotates persisted v
     ] as const) {
       const client = await connect(role, password);
       assert.equal((await client.query<{ current_user: string }>("select current_user")).rows[0]?.current_user, role);
+      if (role !== "core_agent_identity") {
+        await assert.rejects(client.query("set role core_agent_identity"), /permission denied/);
+      }
       await client.end();
     }
     await rejectsAuthentication("core_agent_identity", undefined);
@@ -491,9 +524,29 @@ test("database role bootstrap enforces SCRAM credentials and rotates persisted v
     const rotatedClient = await connect("core_agent_app", rotated.applicationPasswordFile);
     await rotatedClient.end();
   } finally {
+    await pool.query(`do $cleanup$
+      declare edge record;
+      begin
+        for edge in
+          select granted_role.rolname as granted_role, member_role.rolname as member_role
+          from pg_auth_members memberships
+          join pg_roles granted_role on granted_role.oid = memberships.roleid
+          join pg_roles member_role on member_role.oid = memberships.member
+          where granted_role.rolname = any(array['core_agent_app', 'core_agent_identity', 'core_agent_migrator'])
+             or member_role.rolname = any(array['core_agent_app', 'core_agent_identity', 'core_agent_migrator'])
+        loop
+          execute format('revoke %I from %I', edge.granted_role, edge.member_role);
+        end loop;
+      end
+    $cleanup$`);
     await pool.query(
-      "alter role core_agent_migrator login password null; alter role core_agent_app login password null; alter role core_agent_identity login password null",
+      `alter role core_agent_migrator login nosuperuser nocreatedb nocreaterole noinherit noreplication nobypassrls password null;
+       alter role core_agent_app login nosuperuser nocreatedb nocreaterole noinherit noreplication nobypassrls password null;
+       alter role core_agent_identity login nosuperuser nocreatedb nocreaterole noinherit noreplication nobypassrls password null`,
     ).catch(() => undefined);
+    for (let index = 0; index < 3; index += 1) {
+      await pool.query(`drop role if exists core_agent_hostile_parent_${index}; drop role if exists core_agent_hostile_member_${index}`).catch(() => undefined);
+    }
     await rotateBootstrapPassword(originalBootstrapPassword).catch(() => undefined);
     await rm(directory, { recursive: true, force: true });
   }
@@ -1044,6 +1097,55 @@ test("real Identity login commits and atomically rolls back the Task 3 cross-tab
 
     const committed = await writeGraph("1".repeat(32), false);
     await assert.rejects(writeGraph("2".repeat(32), true), /synthetic injected rollback/);
+    const enqueueIdentityJob = (jobKind: string) => identity!.query(
+      `insert into worker_jobs (
+        tenant_id, job_id, job_kind, status, attempt_count, max_attempts,
+        next_attempt_at, payload_ref, runtime_command, target_command_version,
+        effect_state, created_at, updated_at
+      ) values ($1, $2, $3, 'succeeded', 0, 3, $4, $5, null, null, 'pre_effect', $4, $4)`,
+      [
+        committed.tenant,
+        `job_identity_${jobKind}`,
+        jobKind,
+        new Date("2026-08-11T00:00:00.000Z"),
+        `identity:${jobKind}`,
+      ],
+    );
+    for (const jobKind of ["project_platform_memberships", "finalize_account_deletion"]) {
+      await assert.doesNotReject(enqueueIdentityJob(jobKind));
+    }
+    for (const jobKind of ["provision_runtime", "reconcile_runtime", "execute_agent_run", "dispatch_outbox"]) {
+      await assert.rejects(enqueueIdentityJob(jobKind), /Identity role may enqueue only identity Worker jobs/);
+    }
+    await administrator.query(`
+      create or replace function public.identity_worker_job_security_definer_probe(
+        target_tenant text,
+        target_job text,
+        target_kind text
+      ) returns void
+      language sql
+      security definer
+      set search_path = pg_catalog, public
+      as $probe$
+        insert into public.worker_jobs (
+          tenant_id, job_id, job_kind, status, attempt_count, max_attempts,
+          next_attempt_at, payload_ref, runtime_command, target_command_version,
+          effect_state, created_at, updated_at
+        ) values (
+          target_tenant, target_job, target_kind, 'succeeded', 0, 3,
+          timestamptz '2026-08-11T00:00:00.000Z', 'identity:security-definer-probe',
+          null, null, 'pre_effect', timestamptz '2026-08-11T00:00:00.000Z',
+          timestamptz '2026-08-11T00:00:00.000Z'
+        )
+      $probe$
+    `);
+    await assert.rejects(
+      identity.query(
+        "select public.identity_worker_job_security_definer_probe($1, $2, 'provision_runtime')",
+        [committed.tenant, "job_identity_security_definer_probe"],
+      ),
+      /Identity role may enqueue only identity Worker jobs/,
+    );
     const rolledBackSuffix = "2".repeat(32);
     assert.equal((await pool.query<{ count: number }>(
       `select (
@@ -1165,6 +1267,7 @@ test("real Identity login commits and atomically rolls back the Task 3 cross-tab
     await identity.query("rollback");
   } finally {
     await identity?.end().catch(() => undefined);
+    await administrator.query("drop function if exists public.identity_worker_job_security_definer_probe(text, text, text)").catch(() => undefined);
     await administrator.query("alter role core_agent_identity password null").catch(() => undefined);
     administrator.release();
   }

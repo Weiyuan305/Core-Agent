@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
+import { assertNodeTestSummaries } from "../../scripts/lib/node-test-summary.mjs";
+
 const repositoryRoot = new URL("../..", import.meta.url).pathname;
 const lock = JSON.parse(await import("node:fs/promises").then(({ readFile }) => readFile(
   new URL("../../infra/runtime/base-images.lock.json", import.meta.url), "utf8",
@@ -47,11 +49,6 @@ function protectedRun(command, args, environment, credential, credentialFile, ti
   return run(process.execPath, [
     protectedRunner, "--secret-file", credentialFile, "--", command, ...args,
   ], environment, credential, timeout);
-}
-
-function assertExecutionCount(output, expected) {
-  const counts = [...output.matchAll(/^(?:ℹ|#) tests (\d+)$/gmu)].map((match) => Number(match[1]));
-  assert.equal(counts.includes(expected), true, "fresh CI-equivalent execution count missing");
 }
 
 function exactDockerNames(kind, environment, credential) {
@@ -156,12 +153,11 @@ async function runCiEquivalentScenario({ injectedFailure = false, injectedOutput
       throw new Error("injected CI-equivalent output leak rejected");
     }
     const postgresOutput = protectedRun("npm", ["run", "test:postgres"], environment, credential, credentialFile);
-    assertExecutionCount(postgresOutput, 155);
-    assertExecutionCount(postgresOutput, 14);
+    assertNodeTestSummaries(postgresOutput, [155, 14]);
     assert.match(postgresOutput, /schema 10 grants only the documented Identity Task 3-9 table-operation matrix/u);
     assert.match(postgresOutput, /real Identity login commits and atomically rolls back the Task 3 cross-table graph/u);
     const integrationOutput = protectedRun("npm", ["run", "test:integration"], environment, credential, credentialFile);
-    assertExecutionCount(integrationOutput, 50);
+    assertNodeTestSummaries(integrationOutput, [54]);
     assert.match(integrationOutput, /provision, converse, stream, restart, and resume/u);
     protectedRun("docker", ["logs", container], environment, credential, credentialFile);
     const changed = spawnSync("git", ["diff", "--name-only", "-z"], { cwd: repositoryRoot, env: environment, encoding: "buffer" });

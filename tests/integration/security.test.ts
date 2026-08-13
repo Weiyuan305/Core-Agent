@@ -544,22 +544,35 @@ test("timed out delayed CREATE cannot advance after cleanup", async () => {
   assert(cleanupCalls.some((sql) => sql.startsWith("drop database")));
 });
 
-test("unconfirmed CREATE cancellation fails closed without claiming cleanup", async () => {
+test("unconfirmed CREATE cancellation fails closed with its cause and without claiming database cleanup", async () => {
   const cleanupCalls: string[] = [];
-  await assert.rejects(testHarnessInternals.createIsolatedDatabase({
-    configuredUrl: "postgresql://test:test@127.0.0.1/core_agent_control",
-    databaseName: "core_agent_test_0123456789abcdef",
-    createSession: {
-      connect: async () => undefined,
-      query: () => new Promise(() => undefined),
-      close: () => new Promise(() => undefined),
+  await assert.rejects(
+    testHarnessInternals.createIsolatedDatabase({
+      configuredUrl: "postgresql://test:test@127.0.0.1/core_agent_control",
+      databaseName: "core_agent_test_0123456789abcdef",
+      createSession: {
+        connect: async () => undefined,
+        query: () => new Promise(() => undefined),
+        close: () => new Promise(() => undefined),
+      },
+      controlPool: { query: async () => undefined, end: async () => undefined },
+      cleanupControlPool: {
+        query: async (sql: string) => { cleanupCalls.push(sql); },
+        end: async () => { cleanupCalls.push("end"); },
+      },
+      timeoutMs: 25,
+    }),
+    (error: unknown) => {
+      assert(error instanceof Error);
+      assert.equal(error.message, "Integration setup failed; cleanup failed: create_cancellation");
+      assert.deepEqual(
+        (error as Error & { readonly cleanupFailures?: readonly string[] }).cleanupFailures,
+        ["create_cancellation"],
+      );
+      assert(error.cause instanceof Error);
+      assert.equal(error.cause.message, "Integration stage failed: database create");
+      return true;
     },
-    controlPool: { query: async () => undefined, end: async () => undefined },
-    cleanupControlPool: {
-      query: async (sql: string) => { cleanupCalls.push(sql); },
-      end: async () => { cleanupCalls.push("end"); },
-    },
-    timeoutMs: 25,
-  }), /^Error: Integration stage failed: database create cancellation$/);
+  );
   assert.equal(cleanupCalls.some((sql) => sql.startsWith("drop database")), false);
 });

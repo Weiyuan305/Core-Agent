@@ -56,19 +56,35 @@ export async function bootstrapRuntimeDatabaseAuth(input: RuntimeDatabaseAuthBoo
     await client.query(`do $roles$
       begin
         if not exists (select 1 from pg_roles where rolname = 'core_agent_migrator') then
-          create role core_agent_migrator login nosuperuser nocreatedb nocreaterole noinherit;
+          create role core_agent_migrator login nosuperuser nocreatedb nocreaterole noinherit noreplication nobypassrls;
         end if;
         if not exists (select 1 from pg_roles where rolname = 'core_agent_app') then
-          create role core_agent_app login nosuperuser nocreatedb nocreaterole noinherit;
+          create role core_agent_app login nosuperuser nocreatedb nocreaterole noinherit noreplication nobypassrls;
         end if;
         if not exists (select 1 from pg_roles where rolname = 'core_agent_identity') then
-          create role core_agent_identity login nosuperuser nocreatedb nocreaterole noinherit;
+          create role core_agent_identity login nosuperuser nocreatedb nocreaterole noinherit noreplication nobypassrls;
         end if;
       end
     $roles$`);
-    await client.query("alter role core_agent_migrator login nosuperuser nocreatedb nocreaterole noinherit");
-    await client.query("alter role core_agent_app login nosuperuser nocreatedb nocreaterole noinherit");
-    await client.query("alter role core_agent_identity login nosuperuser nocreatedb nocreaterole noinherit");
+    await client.query(`do $memberships$
+      declare edge record;
+      begin
+        for edge in
+          select granted_role.rolname as granted_role, member_role.rolname as member_role
+          from pg_auth_members memberships
+          join pg_roles granted_role on granted_role.oid = memberships.roleid
+          join pg_roles member_role on member_role.oid = memberships.member
+          where granted_role.rolname = any(array['core_agent_migrator', 'core_agent_app', 'core_agent_identity'])
+             or member_role.rolname = any(array['core_agent_migrator', 'core_agent_app', 'core_agent_identity'])
+          order by granted_role.rolname, member_role.rolname
+        loop
+          execute format('revoke %I from %I', edge.granted_role, edge.member_role);
+        end loop;
+      end
+    $memberships$`);
+    await client.query("alter role core_agent_migrator login nosuperuser nocreatedb nocreaterole noinherit noreplication nobypassrls");
+    await client.query("alter role core_agent_app login nosuperuser nocreatedb nocreaterole noinherit noreplication nobypassrls");
+    await client.query("alter role core_agent_identity login nosuperuser nocreatedb nocreaterole noinherit noreplication nobypassrls");
     await setRolePassword(client, bootstrapRole, bootstrapPassword);
     await setRolePassword(client, "core_agent_migrator", migratorPassword);
     await setRolePassword(client, "core_agent_app", applicationPassword);

@@ -105,6 +105,19 @@ interface DatabaseAdminSession {
   close(): Promise<void>;
 }
 
+interface OwnedDatabaseResource {
+  close(signal: AbortSignal): Promise<void>;
+  forceClose(): Promise<void>;
+}
+
+interface PoolLifecycleClient {
+  release(destroy?: boolean): void;
+}
+
+interface PoolLifecycleEvents {
+  on(event: "connect" | "remove", listener: (client: PoolLifecycleClient) => void): unknown;
+}
+
 interface CleanupStage {
   readonly category: string;
   readonly work: () => Promise<void>;
@@ -286,10 +299,17 @@ function combineSetupAndCleanupFailure(error: unknown, cleanupFailures: readonly
   if (cleanupFailures.length === 0) {
     return error instanceof Error ? error : new Error("Integration setup failed");
   }
-  return new Error(
+  const combined = new Error(
     `Integration setup failed; cleanup failed: ${cleanupFailures.join(", ")}`,
     { cause: error },
   );
+  Object.defineProperty(combined, "cleanupFailures", {
+    configurable: false,
+    enumerable: true,
+    value: Object.freeze([...cleanupFailures]),
+    writable: false,
+  });
+  return combined;
 }
 
 async function cleanupAfterSetupFailure(error: unknown, stages: readonly CleanupStage[]): Promise<never> {
@@ -303,10 +323,64 @@ function runBeforeDeadline<T>(deadline: number, work: () => Promise<T>): Promise
   return runWithDeadline(work, remaining);
 }
 
+async function settlesBefore(promise: Promise<void>, deadline: number): Promise<boolean> {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) return false;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise.then(() => true),
+      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), remaining); }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+async function settleOwnedDatabaseResource(
+  resource: OwnedDatabaseResource,
+  gracefulDeadline: number,
+  finalDeadline: number,
+): Promise<void> {
+  const controller = new AbortController();
+  let failure: unknown;
+  const close = Promise.resolve()
+    .then(() => resource.close(controller.signal))
+    .catch((error: unknown) => { failure = error; });
+  if (!await settlesBefore(close, gracefulDeadline)) {
+    controller.abort();
+    const abortGraceDeadline = Math.min(finalDeadline, Date.now() + 5);
+    if (!await settlesBefore(close, abortGraceDeadline)) {
+      await runBeforeDeadline(finalDeadline, () => resource.forceClose());
+      await runBeforeDeadline(finalDeadline, () => close);
+    }
+  }
+  if (failure !== undefined) throw failure;
+}
+
+function trackPostgresPool(
+  pool: PoolLifecycleEvents,
+  close: () => Promise<void>,
+): OwnedDatabaseResource {
+  const clients = new Set<PoolLifecycleClient>();
+  pool.on("connect", (client) => clients.add(client));
+  pool.on("remove", (client) => clients.delete(client));
+  let closePromise: Promise<void> | undefined;
+  return {
+    close: async () => {
+      closePromise ??= close();
+      await closePromise;
+    },
+    forceClose: async () => {
+      for (const client of [...clients]) client.release(true);
+    },
+  };
+}
+
 async function dropIsolatedDatabase(options: {
   readonly databaseName: string;
   readonly controlDatabaseUrl?: string;
-  readonly closeOwned: readonly (() => Promise<void>)[];
+  readonly closeOwned: readonly OwnedDatabaseResource[];
   readonly createAdminSession?: () => DatabaseAdminSession;
   readonly timeoutMs?: number;
   readonly retryDelayMs?: number;
@@ -319,10 +393,11 @@ async function dropIsolatedDatabase(options: {
   const finalDeadline = Date.now() + timeoutMs;
   const closeReserveMs = Math.min(250, Math.max(1, Math.floor(timeoutMs / 4)));
   const operationDeadline = finalDeadline - closeReserveMs;
+  const ownedDeadline = Date.now() + Math.max(1, Math.floor((operationDeadline - Date.now()) / 2));
   const ownedFailures: string[] = [];
-  for (const [index, close] of options.closeOwned.entries()) {
+  for (const [index, resource] of options.closeOwned.entries()) {
     try {
-      await runBeforeDeadline(operationDeadline, close);
+      await settleOwnedDatabaseResource(resource, ownedDeadline, operationDeadline);
     } catch {
       ownedFailures.push(`owned database connection ${index + 1}`);
     }
@@ -451,30 +526,31 @@ async function createIsolatedDatabase(options: {
       timeoutMs,
     );
   } catch (error) {
+    const cleanupFailures: string[] = [];
     let cancellationConfirmed = false;
     try {
-      await runWithDeadline(async () => {
-        const results = await Promise.allSettled([
+      const results = await runWithDeadline(
+        () => Promise.allSettled([
           createSession.close(),
           createOperation ?? Promise.resolve(),
-        ]);
-        if (results[0]?.status !== "fulfilled") {
-          throw new Error("Database create session did not close");
-        }
-      }, timeoutMs);
+        ]),
+        timeoutMs,
+      );
       cancellationConfirmed = true;
+      if (results[0]?.status !== "fulfilled") cleanupFailures.push("create_session_close");
     } catch {
       cancellationConfirmed = false;
+      cleanupFailures.push("create_cancellation");
     }
     if (!cancellationConfirmed) {
-      const cleanupFailures = await runCleanupStages([
-        { category: "control pool", work: () => controlPool.end() },
+      cleanupFailures.push(...await runCleanupStages([
+        { category: "control_pool_close", work: () => controlPool.end() },
         ...(options.cleanupControlPool === undefined ? [] : [{
-          category: "cleanup control pool",
+          category: "admin_close",
           work: () => options.cleanupControlPool!.end(),
         }]),
-      ], timeoutMs);
-      throw new Error("Integration stage failed: database create cancellation");
+      ], timeoutMs));
+      throw combineSetupAndCleanupFailure(error, cleanupFailures);
     }
     const cleanupControlPool = options.cleanupControlPool ?? new Pool({
       connectionString: controlUrl.toString(),
@@ -483,25 +559,22 @@ async function createIsolatedDatabase(options: {
       query_timeout: timeoutMs,
       statement_timeout: timeoutMs,
     });
-    const cleanupFailures = await runCleanupStages([
+    cleanupFailures.push(...await runCleanupStages([
       {
-        category: "database create cleanup",
+        category: "drop_database",
         work: async () => {
           await cleanupControlPool.query(
             `drop database if exists "${databaseName}" with (force)`,
           );
         },
       },
-      { category: "control pool", work: () => controlPool.end() },
+      { category: "control_pool_close", work: () => controlPool.end() },
       ...(cleanupControlPool === controlPool ? [] : [{
-        category: "cleanup control pool",
+        category: "admin_close",
         work: () => cleanupControlPool.end(),
       }]),
-    ], timeoutMs);
-    if (cleanupFailures.length > 0) {
-      throw new Error("Integration stage failed: database create cleanup");
-    }
-    throw error;
+    ], timeoutMs));
+    throw combineSetupAndCleanupFailure(error, cleanupFailures);
   }
   return {
     controlPool,
@@ -1020,6 +1093,7 @@ export class IntegrationHarness {
   readonly #controlPool: DatabaseControlPool;
   readonly #controlDatabaseUrl: string;
   readonly #childPool: Pool;
+  readonly #childPoolResource: OwnedDatabaseResource;
   readonly #directory: string;
   readonly #socketPath: string;
   readonly #bootstrapKeyFile: string;
@@ -1041,6 +1115,7 @@ export class IntegrationHarness {
     readonly databaseName: string;
     readonly databaseUrl: string;
     readonly childPool: Pool;
+    readonly childPoolResource: OwnedDatabaseResource;
     readonly db: Kysely<RuntimeDatabase>;
     readonly directory: string;
     readonly socketPath: string;
@@ -1055,6 +1130,7 @@ export class IntegrationHarness {
     this.databaseName = input.databaseName;
     this.databaseUrl = input.databaseUrl;
     this.#childPool = input.childPool;
+    this.#childPoolResource = input.childPoolResource;
     this.db = input.db;
     this.#directory = input.directory;
     this.#socketPath = input.socketPath;
@@ -1089,6 +1165,7 @@ export class IntegrationHarness {
   public static async create(suite: string): Promise<IntegrationHarness> {
     const isolated = await createIsolatedDatabase();
     let childPool: Pool | undefined;
+    let childPoolResource: OwnedDatabaseResource | undefined;
     let db: Kysely<RuntimeDatabase> | undefined;
     let directory: string | undefined;
     let fakeHermes: FakeHermes | undefined;
@@ -1099,6 +1176,10 @@ export class IntegrationHarness {
         max: 12,
         connectionTimeoutMillis: externalStageTimeoutMs,
         query_timeout: externalStageTimeoutMs,
+      });
+      childPoolResource = trackPostgresPool(childPool, async () => {
+        if (db !== undefined) await db.destroy();
+        else await childPool!.end();
       });
       await boundedExternal(
         "database migrations",
@@ -1145,6 +1226,7 @@ export class IntegrationHarness {
         databaseName: isolated.databaseName,
         databaseUrl: isolated.databaseUrl,
         childPool,
+        childPoolResource,
         db,
         directory,
         socketPath,
@@ -1164,10 +1246,7 @@ export class IntegrationHarness {
           await dropIsolatedDatabase({
             databaseName: isolated.databaseName,
             controlDatabaseUrl: isolated.controlDatabaseUrl,
-            closeOwned: [async () => {
-              if (db !== undefined) await db.destroy();
-              else await childPool?.end();
-            }],
+            closeOwned: childPoolResource === undefined ? [] : [childPoolResource],
           });
         }, timeoutMs: externalStageTimeoutMs + 1_000 },
         { category: "control pool", work: () => isolated.controlPool.end() },
@@ -1496,7 +1575,7 @@ export class IntegrationHarness {
         await dropIsolatedDatabase({
           databaseName: this.databaseName,
           controlDatabaseUrl: this.#controlDatabaseUrl,
-          closeOwned: [() => this.db.destroy()],
+          closeOwned: [this.#childPoolResource],
         });
       }, timeoutMs: externalStageTimeoutMs + 1_000 },
       { category: "control pool", work: () => this.#controlPool.end() },
@@ -1680,6 +1759,7 @@ export const testHarnessInternals = Object.freeze({
   createIsolatedDatabase,
   dropIsolatedDatabase,
   runCleanupStages,
+  trackPostgresPool,
 });
 
 export async function createIntegrationHarness(
