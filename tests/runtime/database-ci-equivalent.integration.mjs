@@ -157,7 +157,7 @@ async function runCiEquivalentScenario({ injectedFailure = false, injectedOutput
     assert.match(postgresOutput, /schema 10 grants only the documented Identity Task 3-9 table-operation matrix/u);
     assert.match(postgresOutput, /real Identity login commits and atomically rolls back the Task 3 cross-table graph/u);
     const integrationOutput = protectedRun("npm", ["run", "test:integration"], environment, credential, credentialFile);
-    assertNodeTestSummaries(integrationOutput, [81]);
+    assertNodeTestSummaries(integrationOutput, [87]);
     assert.match(integrationOutput, /provision, converse, stream, restart, and resume/u);
     protectedRun("docker", ["logs", container], environment, credential, credentialFile);
     const changed = spawnSync("git", ["diff", "--name-only", "-z"], { cwd: repositoryRoot, env: environment, encoding: "buffer" });

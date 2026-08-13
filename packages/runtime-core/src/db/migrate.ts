@@ -714,7 +714,7 @@ async function readOwnedColumnAcls(
      from pg_class relation
      join pg_namespace namespace on namespace.oid = relation.relnamespace
      join pg_attribute attribute on attribute.attrelid = relation.oid
-       and attribute.attnum > 0 and not attribute.attisdropped
+       and attribute.attnum <> 0 and not attribute.attisdropped
      cross join lateral aclexplode(attribute.attacl) privilege
      left join pg_roles grantee on grantee.oid = privilege.grantee
      where namespace.nspname = 'public' and relation.relkind in ('r', 'p', 'v', 'm')

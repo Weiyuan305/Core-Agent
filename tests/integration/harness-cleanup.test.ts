@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { createServer, type Socket } from "node:net";
+import { createConnection, createServer, type Socket } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 
@@ -462,6 +462,208 @@ test("production PostgreSQL pool teardown aborts and reaps a pre-auth connection
       server.close((error) => error === undefined ? resolve() : reject(error));
     });
   }
+});
+
+test("owned PostgreSQL pool rejects a TLS transport replacement before an external peer can escape teardown", async () => {
+  const rawPeers = new Set<Socket>();
+  const externalPeers = new Set<Socket>();
+  let acceptRaw: (() => void) | undefined;
+  let observeExternalTls: (() => void) | undefined;
+  const rawAccepted = new Promise<void>((resolve) => { acceptRaw = resolve; });
+  const externalTlsObserved = new Promise<void>((resolve) => { observeExternalTls = resolve; });
+  const rawServer = createServer((socket) => {
+    rawPeers.add(socket);
+    socket.once("close", () => rawPeers.delete(socket));
+    socket.once("data", () => {
+      socket.write("S");
+      acceptRaw?.();
+    });
+  });
+  const externalServer = createServer((socket) => {
+    externalPeers.add(socket);
+    socket.once("close", () => externalPeers.delete(socket));
+    socket.once("data", () => observeExternalTls?.());
+  });
+  await Promise.all([rawServer, externalServer].map((server) => new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  })));
+  const rawAddress = rawServer.address();
+  const externalAddress = externalServer.address();
+  assert(rawAddress !== null && typeof rawAddress !== "string");
+  assert(externalAddress !== null && typeof externalAddress !== "string");
+  const externalSocket = createConnection({ host: "127.0.0.1", port: externalAddress.port });
+  await new Promise<void>((resolve, reject) => {
+    externalSocket.once("connect", resolve);
+    externalSocket.once("error", reject);
+  });
+  let connecting: Promise<void> | undefined;
+  let teardown: Promise<void> | undefined;
+  let ownedPool: ReturnType<typeof testHarnessInternals.createOwnedPostgresPool> | undefined;
+  let poolWasCreated = false;
+  try {
+    try {
+      ownedPool = testHarnessInternals.createOwnedPostgresPool({
+        host: "127.0.0.1",
+        port: rawAddress.port,
+        user: "synthetic",
+        password: "synthetic",
+        database: "synthetic",
+        max: 1,
+        connectionTimeoutMillis: 6_000,
+        ssl: { rejectUnauthorized: false, socket: externalSocket } as never,
+      });
+      poolWasCreated = true;
+    } catch (error) {
+      assert.match(String(error), /TLS configuration contains an unsafe field: socket/u);
+      return;
+    }
+    const pool = ownedPool.pool;
+    connecting = pool.connect().then(
+      (client) => { client.release(); },
+      () => undefined,
+    );
+    await rawAccepted;
+    await externalTlsObserved;
+    const tracked = testHarnessInternals.trackPostgresPool(
+      pool,
+      () => pool.end(),
+      ownedPool.terminatePreAuthConnections,
+    );
+    teardown = testHarnessInternals.dropIsolatedDatabase({
+      databaseName,
+      closeOwned: [tracked],
+      createAdminSession: () => ({
+        connect: async () => undefined,
+        query: async (sql: string) => /select exists/iu.test(sql)
+          ? { rows: [{ exists: false }] }
+          : { rows: [] },
+        close: async () => undefined,
+      }),
+      timeoutMs: 50,
+      retryDelayMs: 1,
+    });
+    const outcome = await Promise.race([
+      teardown.then(() => "returned", () => "rejected"),
+      delay(250).then(() => "still-running"),
+    ]);
+    assert.notEqual(outcome, "still-running");
+    assert.equal(externalPeers.size, 0, "teardown returned while the replacement TLS peer remained open");
+  } finally {
+    externalSocket.destroy();
+    for (const socket of rawPeers) socket.destroy();
+    for (const socket of externalPeers) socket.destroy();
+    await connecting;
+    await teardown?.catch(() => undefined);
+    await ownedPool?.pool.end().catch(() => undefined);
+    await Promise.all([rawServer, externalServer].map((server) => new Promise<void>((resolve, reject) => {
+      server.close((error) => error === undefined ? resolve() : reject(error));
+    })));
+  }
+  assert.equal(poolWasCreated, false);
+});
+
+test("owned PostgreSQL pool accepts only inert plain-data TLS configuration", async () => {
+  const unsafe = [
+    ["stream", { stream: () => new Socket() }],
+    ["createConnection", { createConnection: () => new Socket() }],
+    ["unknown", { unknown: true }],
+  ] as const;
+  for (const [field, ssl] of unsafe) {
+    assert.throws(
+      () => testHarnessInternals.createOwnedPostgresPool({ ssl } as never),
+      new RegExp(`TLS configuration contains an unsafe field: ${field}`, "u"),
+    );
+  }
+  const accessor = Object.defineProperty({}, "rejectUnauthorized", { get: () => false, enumerable: true });
+  assert.throws(
+    () => testHarnessInternals.createOwnedPostgresPool({ ssl: accessor } as never),
+    /TLS configuration must contain only plain data properties/u,
+  );
+  const inherited = Object.create({ rejectUnauthorized: false }) as Record<string, unknown>;
+  assert.throws(
+    () => testHarnessInternals.createOwnedPostgresPool({ ssl: inherited } as never),
+    /TLS configuration must be a plain object/u,
+  );
+  assert.throws(
+    () => testHarnessInternals.createOwnedPostgresPool({ ssl: { rejectUnauthorized: "false" } } as never),
+    /TLS configuration field rejectUnauthorized must be a boolean/u,
+  );
+
+  const ownedPool = testHarnessInternals.createOwnedPostgresPool({
+    ssl: { rejectUnauthorized: false, servername: "localhost", minVersion: "TLSv1.2", maxVersion: "TLSv1.3" },
+  });
+  await ownedPool.pool.end();
+  await ownedPool.terminatePreAuthConnections();
+  await ownedPool.terminatePreAuthConnections();
+});
+
+test("owned PostgreSQL TLS handshake stalls are terminal on IPv4 and IPv6", async (t) => {
+  for (const host of ["127.0.0.1", "::1"] as const) {
+    await t.test(host, async () => {
+      const peers = new Set<Socket>();
+      let observeTls: (() => void) | undefined;
+      const tlsObserved = new Promise<void>((resolve) => { observeTls = resolve; });
+      const server = createServer((socket) => {
+        peers.add(socket);
+        socket.once("close", () => peers.delete(socket));
+        socket.once("data", () => {
+          socket.write("S");
+          socket.once("data", () => observeTls?.());
+        });
+      });
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, host, resolve);
+      });
+      const address = server.address();
+      assert(address !== null && typeof address !== "string");
+      const ssl = { rejectUnauthorized: false, servername: "localhost" };
+      const ownedPool = testHarnessInternals.createOwnedPostgresPool({
+        host,
+        port: address.port,
+        user: "synthetic",
+        password: "synthetic",
+        database: "synthetic",
+        max: 1,
+        connectionTimeoutMillis: 6_000,
+        ssl,
+      });
+      Object.assign(ssl, { socket: Object.freeze({}), createConnection: () => assert.fail("source TLS configuration was retained") });
+      const connecting = ownedPool.pool.connect().then(
+        (client) => { client.release(); },
+        () => undefined,
+      );
+      try {
+        await tlsObserved;
+        await ownedPool.terminatePreAuthConnections();
+        await ownedPool.terminatePreAuthConnections();
+        await ownedPool.pool.end();
+        await connecting;
+        assert.equal(peers.size, 0);
+        await delay(30);
+        assert.equal(peers.size, 0);
+      } finally {
+        for (const socket of peers) socket.destroy();
+        await connecting;
+        await ownedPool.pool.end().catch(() => undefined);
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => error === undefined ? resolve() : reject(error));
+        });
+      }
+    });
+  }
+});
+
+test("owned PostgreSQL pool rejects every top-level custom transport seam", () => {
+  assert.throws(
+    () => testHarnessInternals.createOwnedPostgresPool({ stream: () => new Socket() } as never),
+    /requires the owned connector/u,
+  );
+  assert.throws(
+    () => testHarnessInternals.createOwnedPostgresPool({ Client: class extends EventEmitter {} } as never),
+    /requires the owned connector/u,
+  );
 });
 
 test("tracked PostgreSQL pool forces one held checkout exactly once and never touches a foreign client", async () => {

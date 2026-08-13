@@ -565,9 +565,7 @@ function trackPostgresPool(
 }
 
 function createOwnedPostgresPool(options: PoolConfig): OwnedPostgresPool {
-  if (options.stream !== undefined || options.Client !== undefined) {
-    throw new Error("Integration PostgreSQL pool requires the owned connector");
-  }
+  const poolOptions = cloneOwnedPostgresPoolConfig(options);
   const preAuthSockets = new Set<Socket>();
   class OwnedClient extends Client {
     public readonly ownedPreAuthSocket: Socket;
@@ -589,7 +587,7 @@ function createOwnedPostgresPool(options: PoolConfig): OwnedPostgresPool {
     }
   }
   const pool = new Pool({
-    ...options,
+    ...poolOptions,
     Client: OwnedClient as unknown as NonNullable<PoolConfig["Client"]>,
   });
   pool.on("connect", (client) => {
@@ -608,6 +606,123 @@ function createOwnedPostgresPool(options: PoolConfig): OwnedPostgresPool {
       await new Promise<void>((resolve) => setImmediate(resolve));
     },
   };
+}
+
+const inertTlsFields = new Set([
+  "ca", "cert", "ciphers", "key", "maxVersion", "minVersion", "passphrase",
+  "rejectUnauthorized", "servername",
+]);
+
+function cloneBoundedTlsBytes(value: unknown, field: string): string | Buffer | readonly (string | Buffer)[] {
+  const cloneOne = (item: unknown): string | Buffer => {
+    if (typeof item === "string") {
+      if (Buffer.byteLength(item) > 1_048_576) {
+        throw new Error(`Integration PostgreSQL pool TLS configuration field ${field} is too large`);
+      }
+      return item;
+    }
+    if (Buffer.isBuffer(item)) {
+      if (item.byteLength > 1_048_576) {
+        throw new Error(`Integration PostgreSQL pool TLS configuration field ${field} is too large`);
+      }
+      return Buffer.from(item);
+    }
+    throw new Error(`Integration PostgreSQL pool TLS configuration field ${field} must contain strings or buffers`);
+  };
+  if (Array.isArray(value)) {
+    if (value.length > 32) {
+      throw new Error(`Integration PostgreSQL pool TLS configuration field ${field} has too many entries`);
+    }
+    return Object.freeze(value.map(cloneOne));
+  }
+  return cloneOne(value);
+}
+
+function cloneOwnedTlsConfiguration(value: unknown): PoolConfig["ssl"] {
+  if (value === undefined || typeof value === "boolean") return value;
+  if (value === null || typeof value !== "object" || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) {
+    throw new Error("Integration PostgreSQL pool TLS configuration must be a plain object");
+  }
+  const clone: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string") {
+      throw new Error("Integration PostgreSQL pool TLS configuration must contain only string fields");
+    }
+    if (!inertTlsFields.has(key)) {
+      throw new Error(`Integration PostgreSQL pool TLS configuration contains an unsafe field: ${key}`);
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) {
+      throw new Error("Integration PostgreSQL pool TLS configuration must contain only plain data properties");
+    }
+    const fieldValue = descriptor.value;
+    switch (key) {
+      case "rejectUnauthorized":
+        if (typeof fieldValue !== "boolean") {
+          throw new Error("Integration PostgreSQL pool TLS configuration field rejectUnauthorized must be a boolean");
+        }
+        clone[key] = fieldValue;
+        break;
+      case "servername":
+        if (typeof fieldValue !== "string" || fieldValue.length < 1 || fieldValue.length > 253 || fieldValue.includes("\0")) {
+          throw new Error("Integration PostgreSQL pool TLS configuration field servername must be a bounded non-empty string");
+        }
+        clone[key] = fieldValue;
+        break;
+      case "minVersion":
+      case "maxVersion":
+        if (fieldValue !== "TLSv1.2" && fieldValue !== "TLSv1.3") {
+          throw new Error(`Integration PostgreSQL pool TLS configuration field ${key} must be TLSv1.2 or TLSv1.3`);
+        }
+        clone[key] = fieldValue;
+        break;
+      case "ciphers":
+        if (typeof fieldValue !== "string" || fieldValue.length < 1 || fieldValue.length > 8_192 || fieldValue.includes("\0")) {
+          throw new Error("Integration PostgreSQL pool TLS configuration field ciphers must be a bounded non-empty string");
+        }
+        clone[key] = fieldValue;
+        break;
+      case "passphrase":
+        if (typeof fieldValue !== "string" || fieldValue.length > 4_096 || fieldValue.includes("\0")) {
+          throw new Error("Integration PostgreSQL pool TLS configuration field passphrase must be a bounded string");
+        }
+        clone[key] = fieldValue;
+        break;
+      case "ca":
+      case "cert":
+      case "key":
+        clone[key] = cloneBoundedTlsBytes(fieldValue, key);
+        break;
+      default:
+        assert.fail(`unhandled inert TLS field: ${key}`);
+    }
+  }
+  return clone as PoolConfig["ssl"];
+}
+
+function cloneOwnedPostgresPoolConfig(options: PoolConfig): PoolConfig {
+  if (![Object.prototype, null].includes(Object.getPrototypeOf(options))) {
+    throw new Error("Integration PostgreSQL pool configuration must be a plain object");
+  }
+  const clone: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const key of Reflect.ownKeys(options)) {
+    if (typeof key !== "string") {
+      throw new Error("Integration PostgreSQL pool configuration must contain only string fields");
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(options, key);
+    if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) {
+      throw new Error("Integration PostgreSQL pool configuration must contain only plain data properties");
+    }
+    if ((key === "stream" || key === "Client") && descriptor.value !== undefined) {
+      throw new Error("Integration PostgreSQL pool requires the owned connector");
+    }
+    if (key === "ssl") {
+      clone[key] = cloneOwnedTlsConfiguration(descriptor.value);
+    } else {
+      clone[key] = descriptor.value;
+    }
+  }
+  return clone as PoolConfig;
 }
 
 async function settleTerminalOperation(operation: TerminalOperation, budgetMs: number): Promise<void> {
@@ -635,15 +750,20 @@ async function dropIsolatedDatabase(options: {
   // Each terminal phase owns a fresh bounded slice. A slow terminate or owned-resource
   // handoff therefore cannot consume the DROP/absence or admin-close budget.
   const phaseBudget = (fraction: number): number => Math.max(5, Math.floor(timeoutMs * fraction));
-  const gracefulBudgetMs = phaseBudget(0.1);
-  const forceBudgetMs = phaseBudget(0.1);
+  const productionBudget = timeoutMs >= externalStageTimeoutMs;
+  // The production path spends most of its fixed budget on the two killable
+  // PostgreSQL child operations. Docker-forwarded connect/query/close can
+  // legitimately exceed the smaller in-process slices under scheduler load;
+  // graceful and force handoff remain independently bounded and terminal.
+  const gracefulBudgetMs = phaseBudget(productionBudget ? 0.05 : 0.1);
+  const forceBudgetMs = phaseBudget(productionBudget ? 0.05 : 0.1);
   const hasOwnedResources = options.closeOwned.length > 0;
-  const terminateBudgetMs = phaseBudget(hasOwnedResources ? 0.2 : 0.1);
-  const ownedTerminalBudgetMs = phaseBudget(0.2);
+  const terminateBudgetMs = phaseBudget(productionBudget && hasOwnedResources ? 0.3 : hasOwnedResources ? 0.2 : 0.1);
+  const ownedTerminalBudgetMs = phaseBudget(productionBudget ? 0.15 : 0.2);
   // When there are no owned resources, transfer their unused slices to DROP;
   // this preserves the operation bound while tolerating scheduler pressure.
-  const dropBudgetMs = phaseBudget(hasOwnedResources ? 0.3 : 0.85);
-  const adminCloseBudgetMs = phaseBudget(hasOwnedResources ? 0.1 : 0.05);
+  const dropBudgetMs = phaseBudget(productionBudget && hasOwnedResources ? 0.4 : hasOwnedResources ? 0.3 : 0.85);
+  const adminCloseBudgetMs = phaseBudget(productionBudget && hasOwnedResources ? 0.05 : hasOwnedResources ? 0.1 : 0.05);
   const ownedFailures: string[] = [];
   const ownedSettlements: Array<{
     readonly index: number;

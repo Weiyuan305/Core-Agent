@@ -1059,6 +1059,9 @@ test("recorded schema 10 startup converges every owned relation column ACL to ex
     await pool.query("grant select (device_label), update (revocation_reason) on core_sessions to core_agent_identity with grant option");
     await pool.query(`grant select (provider) on auth_subjects to "core_agent_column_acl_"";--"`);
     await pool.query("grant insert (provider_identity_kind) on auth_subjects to current_user with grant option");
+    await pool.query("grant select (tableoid, ctid, xmin) on auth_subjects to core_agent_unknown_column_acl with grant option");
+    await pool.query("grant select (tableoid) on auth_subjects to public");
+    await pool.query("grant select (ctid) on auth_subjects to current_user with grant option");
 
     await applyMigrations(pool, migrationsDirectory);
     await applyMigrations(pool, migrationsDirectory);
@@ -1068,7 +1071,7 @@ test("recorded schema 10 startup converges every owned relation column ACL to ex
        from pg_class relation
        join pg_namespace namespace on namespace.oid = relation.relnamespace
        join pg_attribute attribute on attribute.attrelid = relation.oid
-         and attribute.attnum > 0 and not attribute.attisdropped
+         and attribute.attnum <> 0 and not attribute.attisdropped
        cross join lateral aclexplode(attribute.attacl) privilege
        where namespace.nspname = 'public' and relation.relkind in ('r', 'p', 'v', 'm')`,
     );
@@ -1086,7 +1089,7 @@ test("column ACL convergence rolls back with a rejected forward migration", asyn
   await pool.query("drop role if exists core_agent_column_acl_rollback; create role core_agent_column_acl_rollback");
   const directory = await mkdtemp(join(tmpdir(), "core-agent-column-acl-rollback-"));
   try {
-    await pool.query("grant select (provider_subject) on auth_subjects to core_agent_column_acl_rollback with grant option");
+    await pool.query("grant select (provider_subject, tableoid, xmin) on auth_subjects to core_agent_column_acl_rollback with grant option");
     await cp(migrationsDirectory, directory, { recursive: true });
     const migrationSql = "create table undeclared_column_acl_rollback (id text);\n";
     await writeFile(join(directory, "011_column_acl_rollback.sql"), migrationSql);
@@ -1103,6 +1106,9 @@ test("column ACL convergence rolls back with a rejected forward migration", asyn
     assert.equal((await pool.query(
       "select has_column_privilege('core_agent_column_acl_rollback', 'auth_subjects', 'provider_subject', 'SELECT WITH GRANT OPTION') as allowed",
     )).rows[0]?.allowed, true);
+    assert.equal((await pool.query(
+      "select has_column_privilege('core_agent_column_acl_rollback', 'auth_subjects', 'tableoid', 'SELECT WITH GRANT OPTION') as allowed",
+    )).rows[0]?.allowed, true);
     assert.equal((await pool.query("select to_regclass('public.undeclared_column_acl_rollback')::text as relation")).rows[0]?.relation, null);
     assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 11")).rows[0]?.count, 0);
   } finally {
@@ -1115,6 +1121,8 @@ test("registered views and materialized views reconverge column ACLs to exact em
   const directory = await mkdtemp(join(tmpdir(), "core-agent-forward-column-acl-"));
   const migrationSql = `
     create table registered_column_acl_source (id integer not null, label text);
+    create table registered_column_acl_partitioned (id integer not null, label text) partition by list (id);
+    create table registered_column_acl_partition partition of registered_column_acl_partitioned for values in (1);
     create view registered_column_acl_view as select id, label from registered_column_acl_source;
     create materialized view registered_column_acl_materialized as select id, label from registered_column_acl_source;
   `;
@@ -1129,12 +1137,18 @@ test("registered views and materialized views reconverge column ACLs to exact em
       checksum: (await import("node:crypto")).createHash("sha256").update(migrationSql).digest("hex"),
       objects: [
         ["public", "registered_column_acl_source", "r", "current_user"],
+        ["public", "registered_column_acl_partitioned", "p", "current_user"],
+        ["public", "registered_column_acl_partition", "r", "current_user"],
         ["public", "registered_column_acl_view", "v", "current_user"],
         ["public", "registered_column_acl_materialized", "m", "current_user"],
       ],
       columns: [
         { schema: "public", relation: "registered_column_acl_source", relkind: "r", name: "id", position: 1, type: "integer", notNull: true, defaultExpression: "" },
         { schema: "public", relation: "registered_column_acl_source", relkind: "r", name: "label", position: 2, type: "text", notNull: false, defaultExpression: "" },
+        { schema: "public", relation: "registered_column_acl_partitioned", relkind: "p", name: "id", position: 1, type: "integer", notNull: true, defaultExpression: "" },
+        { schema: "public", relation: "registered_column_acl_partitioned", relkind: "p", name: "label", position: 2, type: "text", notNull: false, defaultExpression: "" },
+        { schema: "public", relation: "registered_column_acl_partition", relkind: "r", name: "id", position: 1, type: "integer", notNull: true, defaultExpression: "" },
+        { schema: "public", relation: "registered_column_acl_partition", relkind: "r", name: "label", position: 2, type: "text", notNull: false, defaultExpression: "" },
         { schema: "public", relation: "registered_column_acl_view", relkind: "v", name: "id", position: 1, type: "integer", notNull: false, defaultExpression: "" },
         { schema: "public", relation: "registered_column_acl_view", relkind: "v", name: "label", position: 2, type: "text", notNull: false, defaultExpression: "" },
         { schema: "public", relation: "registered_column_acl_materialized", relkind: "m", name: "id", position: 1, type: "integer", notNull: false, defaultExpression: "" },
@@ -1145,15 +1159,34 @@ test("registered views and materialized views reconverge column ACLs to exact em
     await pool.query("grant select (id, label) on registered_column_acl_view to core_agent_forward_column_acl with grant option");
     await pool.query("grant select (id) on registered_column_acl_materialized to public");
     await pool.query("grant select (label) on registered_column_acl_materialized to core_agent_forward_column_acl with grant option");
+    await pool.query("grant select (tableoid) on registered_column_acl_source to core_agent_forward_column_acl with grant option");
+    await pool.query("grant select (tableoid) on registered_column_acl_partitioned to public");
+    await pool.query("grant select (xmin) on registered_column_acl_partition to current_user with grant option");
+    await pool.query("grant select (ctid) on registered_column_acl_materialized to core_agent_forward_column_acl with grant option");
+    const dirtySystemAcls = await pool.query<{ kinds: string[] }>(
+      `select array_agg(distinct relation.relkind order by relation.relkind)::text[] as kinds
+       from pg_class relation
+       join pg_attribute attribute on attribute.attrelid = relation.oid and attribute.attnum < 0
+       cross join lateral aclexplode(attribute.attacl) privilege
+       where relation.relname = any($1::text[])`,
+      [[
+        "registered_column_acl_source", "registered_column_acl_partitioned",
+        "registered_column_acl_partition", "registered_column_acl_materialized",
+      ]],
+    );
+    assert.deepEqual(dirtySystemAcls.rows[0]?.kinds, ["m", "p", "r"]);
     await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
     await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
     assert.equal((await pool.query(
       `select count(*)::int as count from pg_class relation
        join pg_attribute attribute on attribute.attrelid = relation.oid
-         and attribute.attnum > 0 and not attribute.attisdropped
+         and attribute.attnum <> 0 and not attribute.attisdropped
        cross join lateral aclexplode(attribute.attacl) privilege
        where relation.relname = any($1::text[])`,
-      [["registered_column_acl_view", "registered_column_acl_materialized"]],
+      [[
+        "registered_column_acl_source", "registered_column_acl_partitioned", "registered_column_acl_partition",
+        "registered_column_acl_view", "registered_column_acl_materialized",
+      ]],
     )).rows[0]?.count, 0);
   } finally {
     await pool.query("drop owned by core_agent_forward_column_acl; drop role if exists core_agent_forward_column_acl");
