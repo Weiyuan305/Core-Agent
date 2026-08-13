@@ -1049,7 +1049,7 @@ test("recorded schema 10 startup reconverges dirty direct ACLs and remains idemp
 test("recorded schema 10 fails closed on an undeclared sequence", async () => {
   await applyMigrations(pool, migrationsDirectory);
   await pool.query("create sequence acl_drift_sequence");
-  await assert.rejects(applyMigrations(pool, migrationsDirectory), /schema 10 manifest validation failed: sequence catalog/);
+  await assert.rejects(applyMigrations(pool, migrationsDirectory), /schema 10 manifest validation failed: relation catalog/);
 });
 
 test("recorded schema 10 convergence fails closed for a malformed partial identity catalog", async () => {
@@ -1128,8 +1128,7 @@ test("a registered migration 011 validates and records atomically", async () => 
       version: 11,
       name: "registered",
       checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
-      relations: ["registered_manifest_object"],
-      sequences: [],
+      objects: [["public", "registered_manifest_object", "r", "current_user"]],
       columns: [["registered_manifest_object", "id", "text", true, ""]],
       constraints: [["registered_manifest_object", "registered_manifest_object_pkey", "p", true, "PRIMARY KEY (id)"]],
       indexes: [["registered_manifest_object", "registered_manifest_object_pkey", "CREATE UNIQUE INDEX registered_manifest_object_pkey ON public.registered_manifest_object USING btree (id)"]],
@@ -1157,8 +1156,7 @@ test("a registered migration manifest failure rolls back both schema and record"
       version: 11,
       name: "registered",
       checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
-      relations: ["rolled_back_manifest_object"],
-      sequences: [],
+      objects: [["public", "rolled_back_manifest_object", "r", "current_user"]],
       validateAndConverge: async () => { throw new Error("schema 11 manifest validation failed"); },
     });
     await assert.rejects(migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests), /schema 11 manifest validation failed/);
@@ -1189,9 +1187,11 @@ test("registered migration 011 forward security objects validate and record in o
       version: 11,
       name: "registered_security",
       checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
-      relations: ["registered_security_object"],
-      views: ["registered_security_view"],
-      sequences: ["registered_security_sequence"],
+      objects: [
+        ["public", "registered_security_object", "r", "current_user"],
+        ["public", "registered_security_sequence", "S", "current_user"],
+        ["public", "registered_security_view", "v", "current_user"],
+      ],
       columns: [["registered_security_object", "id", "bigint", true, ""]],
       constraints: [["registered_security_object", "registered_security_object_pkey", "p", true, "PRIMARY KEY (id)"]],
       indexes: [["registered_security_object", "registered_security_object_pkey", "CREATE UNIQUE INDEX registered_security_object_pkey ON public.registered_security_object USING btree (id)"]],
@@ -1211,6 +1211,185 @@ test("registered migration 011 forward security objects validate and record in o
   }
 });
 
+test("registered migration 011 declares exact relation and routine ACL additions", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "core-agent-forward-acl-"));
+  try {
+    await cp(migrationsDirectory, directory, { recursive: true });
+    const sql = `
+      create table registered_acl_object (id text primary key);
+      grant select on table registered_acl_object to core_agent_app;
+      create function registered_security_trigger() returns trigger language plpgsql
+        set search_path = pg_catalog, public as $$ begin return new; end $$;
+      revoke all on function registered_security_trigger() from public;
+      grant execute on function registered_security_trigger() to core_agent_identity;
+    `;
+    await writeFile(join(directory, "011_registered_acl.sql"), sql);
+    const manifests = new Map(migrationTestInternals.schemaManifests);
+    manifests.set(11, {
+      version: 11,
+      name: "registered_acl",
+      checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
+      objects: [["public", "registered_acl_object", "r", "current_user"]],
+      columns: [["registered_acl_object", "id", "text", true, ""]],
+      constraints: [["registered_acl_object", "registered_acl_object_pkey", "p", true, "PRIMARY KEY (id)"]],
+      indexes: [["registered_acl_object", "registered_acl_object_pkey", "CREATE UNIQUE INDEX registered_acl_object_pkey ON public.registered_acl_object USING btree (id)"]],
+      routines: [["f", "registered_security_trigger", "", "trigger", false, ["search_path=pg_catalog, public"], "35dcfee45395dbef24cd2196a919182b"]],
+      relationAcls: [
+        ["grant", "public", "registered_acl_object", "r", "core_agent_app", "SELECT", false],
+        ["revoke", "public", "registered_acl_object", "r", "core_agent_app", "INSERT", false],
+        ["revoke", "public", "registered_acl_object", "r", "PUBLIC", "SELECT", false],
+      ],
+      routineAcls: [
+        ["revoke", "public", "registered_security_trigger", "f", "", "PUBLIC", "EXECUTE", false],
+        ["grant", "public", "registered_security_trigger", "f", "", "core_agent_identity", "EXECUTE", false],
+        ["revoke", "public", "registered_security_trigger", "f", "", "core_agent_app", "EXECUTE", false],
+      ],
+    });
+    await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
+    await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
+    assert.equal((await pool.query("select has_table_privilege('core_agent_app', 'registered_acl_object', 'SELECT') as allowed")).rows[0]?.allowed, true);
+    assert.equal((await pool.query("select has_function_privilege('core_agent_identity', 'registered_security_trigger()', 'EXECUTE') as allowed")).rows[0]?.allowed, true);
+
+    await pool.query("revoke select on registered_acl_object from core_agent_app");
+    await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
+    assert.equal((await pool.query("select has_table_privilege('core_agent_app', 'registered_acl_object', 'SELECT') as allowed")).rows[0]?.allowed, true);
+
+    await pool.query("grant insert on registered_acl_object to core_agent_app");
+    await pool.query("grant execute on function registered_security_trigger() to core_agent_app");
+    await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
+    assert.equal((await pool.query("select has_table_privilege('core_agent_app', 'registered_acl_object', 'INSERT') as allowed")).rows[0]?.allowed, false);
+    assert.equal((await pool.query("select has_function_privilege('core_agent_app', 'registered_security_trigger()', 'EXECUTE') as allowed")).rows[0]?.allowed, false);
+
+    await pool.query("grant select on registered_acl_object to core_agent_app with grant option");
+    await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
+    assert.equal((await pool.query(
+      `select bool_or(privilege.is_grantable) as grantable
+       from pg_class relation
+       cross join lateral aclexplode(relation.relacl) privilege
+       where relation.oid = 'registered_acl_object'::regclass
+         and privilege.grantee = 'core_agent_app'::regrole and privilege.privilege_type = 'SELECT'`,
+    )).rows[0]?.grantable, false);
+
+    await pool.query("drop role if exists core_agent_unknown_acl; create role core_agent_unknown_acl; grant select on registered_acl_object to core_agent_unknown_acl");
+    await assert.rejects(
+      migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests),
+      /schema 11 manifest validation failed: relation ACL/u,
+    );
+    await pool.query("revoke all on registered_acl_object from core_agent_unknown_acl; drop role core_agent_unknown_acl");
+  } finally {
+    await pool.query("drop owned by core_agent_unknown_acl; drop role if exists core_agent_unknown_acl").catch(() => undefined);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("recorded registered view rejects replacement by a materialized view with the same name", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "core-agent-relkind-drift-"));
+  try {
+    await cp(migrationsDirectory, directory, { recursive: true });
+    const sql = "create view registered_relkind_object as select 1::integer as id;\n";
+    await writeFile(join(directory, "011_registered_relkind.sql"), sql);
+    const manifests = new Map(migrationTestInternals.schemaManifests);
+    manifests.set(11, {
+      version: 11,
+      name: "registered_relkind",
+      checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
+      objects: [["public", "registered_relkind_object", "v", "current_user"]],
+    });
+    await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
+    await pool.query("drop view registered_relkind_object; create materialized view registered_relkind_object as select 1::integer as id");
+    await assert.rejects(
+      migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests),
+      /schema 11 manifest validation failed: relation catalog/u,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("undeclared forward ACL rolls back its object and migration record atomically", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "core-agent-acl-rollback-"));
+  try {
+    await cp(migrationsDirectory, directory, { recursive: true });
+    const sql = "create table registered_acl_rollback (id text); grant select on registered_acl_rollback to public;\n";
+    await writeFile(join(directory, "011_acl_rollback.sql"), sql);
+    const manifests = new Map(migrationTestInternals.schemaManifests);
+    manifests.set(11, {
+      version: 11,
+      name: "acl_rollback",
+      checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
+      objects: [["public", "registered_acl_rollback", "r", "current_user"]],
+      columns: [["registered_acl_rollback", "id", "text", false, ""]],
+    });
+    await assert.rejects(
+      migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests),
+      /schema 11 manifest validation failed: relation ACL/u,
+    );
+    assert.equal((await pool.query("select to_regclass('registered_acl_rollback')::text as object")).rows[0]?.object, null);
+    assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 11")).rows[0]?.count, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("registered relation identities reject relkind owner and same-name category drift", async (t) => {
+  const cases = [
+    {
+      name: "table to partitioned table",
+      sql: "create table registered_identity_object (id integer);\n",
+      object: ["public", "registered_identity_object", "r", "current_user"] as const,
+      columns: [["registered_identity_object", "id", "integer", false, ""]] as const,
+      mutate: "drop table registered_identity_object; create table registered_identity_object (id integer) partition by list (id)",
+    },
+    {
+      name: "sequence to view",
+      sql: "create sequence registered_identity_object;\n",
+      object: ["public", "registered_identity_object", "S", "current_user"] as const,
+      columns: [] as const,
+      mutate: "drop sequence registered_identity_object; create view registered_identity_object as select 1::bigint as last_value",
+    },
+    {
+      name: "owner",
+      sql: "create table registered_identity_object (id integer);\n",
+      object: ["public", "registered_identity_object", "r", "current_user"] as const,
+      columns: [["registered_identity_object", "id", "integer", false, ""]] as const,
+      mutate: "alter table registered_identity_object owner to core_agent_app",
+    },
+    {
+      name: "sequence owner",
+      sql: "create sequence registered_identity_object;\n",
+      object: ["public", "registered_identity_object", "S", "current_user"] as const,
+      columns: [] as const,
+      mutate: "alter sequence registered_identity_object owner to core_agent_app",
+    },
+  ];
+  for (const scenario of cases) {
+    await t.test(scenario.name, async () => {
+      await resetDatabase();
+      const directory = await mkdtemp(join(tmpdir(), "core-agent-object-identity-"));
+      try {
+        await cp(migrationsDirectory, directory, { recursive: true });
+        await writeFile(join(directory, "011_object_identity.sql"), scenario.sql);
+        const manifests = new Map(migrationTestInternals.schemaManifests);
+        manifests.set(11, {
+          version: 11,
+          name: "object_identity",
+          checksum: (await import("node:crypto")).createHash("sha256").update(scenario.sql).digest("hex"),
+          objects: [scenario.object],
+          columns: scenario.columns,
+        });
+        await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
+        await pool.query(scenario.mutate);
+        await assert.rejects(
+          migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests),
+          /schema 11 manifest validation failed: relation catalog/u,
+        );
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
 test("registered migration 011 union failure rolls back every object and record", async () => {
   const directory = await mkdtemp(join(tmpdir(), "core-agent-forward-union-failure-"));
   try {
@@ -1225,7 +1404,7 @@ test("registered migration 011 union failure rolls back every object and record"
       version: 11,
       name: "union_failure",
       checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
-      relations: ["registered_union_object"],
+      objects: [["public", "registered_union_object", "r", "current_user"]],
       columns: [["registered_union_object", "id", "text", true, ""]],
       constraints: [["registered_union_object", "registered_union_object_pkey", "p", true, "PRIMARY KEY (id)"]],
       indexes: [["registered_union_object", "registered_union_object_pkey", "CREATE UNIQUE INDEX registered_union_object_pkey ON public.registered_union_object USING btree (id)"]],

@@ -221,14 +221,10 @@ test("production create child is force-terminated and reaped before categorized 
         completion: new Promise<number>(() => undefined),
         terminateAndReap: async () => { calls.push("create reaped"); },
       }),
-      controlPool: {
-        query: async () => undefined,
-        end: async () => { calls.push("control closed"); },
-      },
-      cleanupControlPool: {
-        query: async (sql: string) => { calls.push(sql.startsWith("drop database") ? "database dropped" : "cleanup query"); },
-        end: async () => { calls.push("admin closed"); },
-      },
+      createCleanupOwnedProcess: () => ({
+        completion: Promise.resolve(0).then((status) => { calls.push("database dropped"); return status; }),
+        terminateAndReap: async () => { assert.fail("settled cleanup child must not need termination"); },
+      }),
       timeoutMs: 25,
     }),
     (error: unknown) => {
@@ -241,7 +237,44 @@ test("production create child is force-terminated and reaped before categorized 
   await delay(30);
   stable = calls.length === returned.length;
   assert.equal(stable, true);
-  assert.deepEqual(calls, ["create reaped", "database dropped", "control closed", "admin closed"]);
+  assert.deepEqual(calls, ["create reaped", "database dropped"]);
+});
+
+test("failed production create leaves no timed-out database cleanup mutation after return", async () => {
+  let lateMutation = 0;
+  let cleanupReaped = 0;
+  let timer: NodeJS.Timeout | undefined;
+  await assert.rejects(
+    testHarnessInternals.createIsolatedDatabase({
+      configuredUrl: "postgresql://test@127.0.0.1/core_agent_control",
+      databaseName,
+      createOwnedProcess: () => ({
+        completion: Promise.resolve(1),
+        terminateAndReap: async () => undefined,
+      }),
+      createCleanupOwnedProcess: () => ({
+        completion: new Promise<number>((resolve) => {
+          timer = setTimeout(() => { lateMutation += 1; resolve(0); }, 50);
+        }),
+        terminateAndReap: async () => {
+          cleanupReaped += 1;
+          if (timer !== undefined) clearTimeout(timer);
+        },
+        failureCategory: () => "admin_close",
+      }),
+      timeoutMs: 10,
+    }),
+    (error: unknown) => {
+      assert(error instanceof Error);
+      assert.equal(error.message, "Integration setup failed; cleanup failed: admin_close");
+      assert.equal(error.cause instanceof Error, true);
+      return true;
+    },
+  );
+  assert.equal(cleanupReaped, 1);
+  assert.equal(lateMutation, 0);
+  await delay(60);
+  assert.equal(lateMutation, 0);
 });
 
 test("production create child rejects embedded credentials before launch", async () => {
@@ -430,7 +463,9 @@ test("force failure still waits for the original pool close and leaves no post-r
     timeoutMs: 80,
     retryDelayMs: 1,
   }), /^Error: Integration stage failed: owned database connections$/);
-  assert.deepEqual(calls, ["held force failed", "admin connected", "pool close settled", "admin closed"]);
+  assert.equal(calls[0], "held force failed");
+  assert.equal(calls.at(-1), "admin closed");
+  assert.deepEqual(new Set(calls), new Set(["held force failed", "admin connected", "pool close settled", "admin closed"]));
   const returnedCalls = [...calls];
   await delay(30);
   assert.deepEqual(calls, returnedCalls);

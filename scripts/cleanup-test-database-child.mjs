@@ -35,11 +35,17 @@ try {
       "select exists (select 1 from pg_database where datname = $1) as exists",
       [databaseName],
     );
-    status = result.rows[0]?.exists === false ? 0 : 1;
+    if (result.rows[0]?.exists === false) {
+      await new Promise((resolve) => {
+        if (process.send === undefined) resolve();
+        else process.send("drop_complete", () => resolve());
+      });
+      status = 0;
+    }
   }
 } catch {
   status = 1;
 } finally {
-  await client.end().catch(() => undefined);
+  try { await client.end(); } catch { status = 1; }
 }
 process.exit(status);

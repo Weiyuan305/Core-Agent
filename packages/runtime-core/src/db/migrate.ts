@@ -11,16 +11,28 @@ interface Migration {
   sql: string;
 }
 
+type RelationKind = "r" | "p" | "v" | "m" | "S";
+type AclDisposition = "grant" | "revoke";
+type RelationManifestEntry = readonly [schema: "public", name: string, kind: RelationKind, owner: "current_user"];
+type RelationAclManifestEntry = readonly [
+  disposition: AclDisposition, schema: "public", name: string, kind: RelationKind,
+  grantee: string, privilege: string, grantable: boolean,
+];
+type RoutineAclManifestEntry = readonly [
+  disposition: AclDisposition, schema: "public", name: string, kind: "f" | "p", arguments: string,
+  grantee: string, privilege: "EXECUTE", grantable: boolean,
+];
+
 interface SchemaManifest {
   readonly checksum: string;
   readonly columns?: readonly (readonly [relation: string, name: string, type: string, notNull: boolean, defaultExpression: string])[];
   readonly constraints?: readonly (readonly [relation: string, name: string, type: string, validated: boolean, definition: string])[];
   readonly indexes?: readonly (readonly [relation: string, name: string, definition: string])[];
   readonly name: string;
-  readonly relations?: readonly string[];
+  readonly objects?: readonly RelationManifestEntry[];
+  readonly relationAcls?: readonly RelationAclManifestEntry[];
   readonly routines?: readonly (readonly [kind: string, name: string, arguments: string, result: string, securityDefiner: boolean, config: readonly string[], definitionHash: string])[];
-  readonly views?: readonly string[];
-  readonly sequences?: readonly string[];
+  readonly routineAcls?: readonly RoutineAclManifestEntry[];
   readonly triggers?: readonly (readonly [relation: string, name: string, enabled: string, definition: string])[];
   readonly validateAndConverge?: (client: import("pg").PoolClient, maximumVersion: number) => Promise<void>;
   readonly version: number;
@@ -43,12 +55,15 @@ const schemaManifests = new Map<number, SchemaManifest>(schemaManifestEntries.ma
   version, { version, name, checksum },
 ]));
 
-schemaManifests.set(1, { ...schemaManifests.get(1)!, relations: [
+const ownedTables = (names: readonly string[]): readonly RelationManifestEntry[] =>
+  names.map((name) => ["public", name, "r", "current_user"] as const);
+
+schemaManifests.set(1, { ...schemaManifests.get(1)!, objects: ownedTables([
   "agent_runs", "actors", "conversations", "core_agent_schema_migrations", "memberships", "messages",
   "profiles", "runtime_containers", "secret_references", "sessions", "tenants",
-] });
-schemaManifests.set(2, { ...schemaManifests.get(2)!, relations: ["idempotency_records", "outbox", "worker_jobs"] });
-schemaManifests.set(3, { ...schemaManifests.get(3)!, relations: ["audit_events", "product_events", "stream_cursors", "stream_sequences"] });
+]) });
+schemaManifests.set(2, { ...schemaManifests.get(2)!, objects: ownedTables(["idempotency_records", "outbox", "worker_jobs"]) });
+schemaManifests.set(3, { ...schemaManifests.get(3)!, objects: ownedTables(["audit_events", "product_events", "stream_cursors", "stream_sequences"]) });
 
 const schema10Tables = [
   "account_deletions", "actors", "agent_runs", "audit_events", "auth_subjects",
@@ -71,6 +86,27 @@ const identityGrants = [
   ["SELECT, INSERT, UPDATE", "public_rate_limits, idempotency_records, stream_sequences"],
   ["SELECT, INSERT", "product_events, audit_events, outbox, worker_jobs"],
 ] as const;
+
+const relationPrivileges = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"] as const;
+const schema10RelationAclGrantCandidates: RelationAclManifestEntry[] = [
+  ...applicationTables.flatMap((table) => relationPrivileges.slice(0, 4).map((privilege) =>
+    ["grant", "public", table, "r", "core_agent_app", privilege, false] as const)),
+  ["grant", "public", "core_agent_schema_migrations", "r", "core_agent_app", "SELECT", false],
+  ...identityGrants.flatMap(([privileges, tables]) => tables.split(", ").flatMap((table) =>
+    privileges.split(", ").map((privilege) =>
+      ["grant", "public", table, "r", "core_agent_identity", privilege, false] as const))),
+];
+const schema10RelationAclGrants = [...new Map(schema10RelationAclGrantCandidates.map((entry) =>
+  [entry.slice(1).join("|"), entry])).values()];
+const schema10RelationGrantKeys = new Set(schema10RelationAclGrants.map((entry) => entry.slice(1).join("|")));
+const schema10RelationAcls: readonly RelationAclManifestEntry[] = [
+  ...schema10RelationAclGrants,
+  ...schema10Tables.flatMap((table) => ["PUBLIC", "core_agent_app", "core_agent_identity"].flatMap((grantee) =>
+    relationPrivileges.flatMap((privilege) => {
+      const rule = ["revoke", "public", table, "r", grantee, privilege, false] as const;
+      return schema10RelationGrantKeys.has(rule.slice(1).join("|")) ? [] : [rule];
+    }))),
+];
 
 const schema10Triggers = [
   ["core_sessions", "core_sessions_revoked_deletion_check", "O",
@@ -216,7 +252,7 @@ async function convergeSchema10Acls(client: import("pg").PoolClient, maximumVers
      where namespace.nspname = 'public' and relation.relkind = 'S'
      order by relation.relname`,
   );
-  if (sequences.rows.filter((row) => schemaManifests.get(10)?.sequences?.includes(row.sequence_name)).some((row) => !row.owner_matches)) {
+  if (sequences.rows.filter((row) => schemaManifests.get(10)?.objects?.some((entry) => entry[2] === "S" && entry[1] === row.sequence_name)).some((row) => !row.owner_matches)) {
     throw new Error("schema 10 ACL convergence failed: sequence owner");
   }
   for (const sequence of sequences.rows) {
@@ -248,15 +284,54 @@ async function convergeSchema10Acls(client: import("pg").PoolClient, maximumVers
 
 schemaManifests.set(10, {
   ...schemaManifests.get(10)!,
-  relations: [
+  objects: ownedTables([
     "account_deletions", "auth_subjects", "core_sessions", "identity_invitations", "oauth_transactions",
     "platform_role_assignments", "private_identity_pii", "public_rate_limits",
-  ],
-  sequences: [],
+  ]),
+  relationAcls: schema10RelationAcls,
   triggers: schema10Triggers,
   routines: schema10Routines,
+  routineAcls: schema10Routines.flatMap(([kind, name]) => ["PUBLIC", "core_agent_app", "core_agent_identity"].map((grantee) =>
+    ["revoke", "public", name, kind, "", grantee, "EXECUTE", false] as const)),
   validateAndConverge: convergeSchema10Acls,
 });
+
+function quoteIdentifier(value: string): string {
+  if (!/^[a-z][a-z0-9_]*$/u.test(value)) throw new Error("migration manifest contains an invalid identifier");
+  return `"${value}"`;
+}
+
+async function convergeManifestAcls(client: import("pg").PoolClient, manifest: SchemaManifest): Promise<void> {
+  // Schema 10 has a single set-based, fail-closed convergence routine above. Forward manifests
+  // use the same declarative rules directly so their SQL and reviewed ACL state remain atomic.
+  if (manifest.version <= 10) return;
+  for (const [disposition, schema, name, kind, grantee, privilege, grantable] of manifest.relationAcls ?? []) {
+    if (!new Set<RelationKind>(["r", "p", "v", "m", "S"]).has(kind)
+      || !new Set(["PUBLIC", "core_agent_app", "core_agent_identity", "core_agent_worker"]).has(grantee)
+      || !new Set(["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER", "USAGE"]).has(privilege)
+      || (disposition === "revoke" && grantable)) throw new Error(`schema ${manifest.version} manifest validation failed: relation ACL declaration`);
+    const target = kind === "S" ? "sequence" : "table";
+    const verb = disposition === "grant" ? "grant" : "revoke";
+    const suffix = disposition === "grant" ? "to" : "from";
+    if (disposition === "grant") {
+      await client.query(`revoke grant option for ${privilege} on ${target} ${quoteIdentifier(schema)}.${quoteIdentifier(name)} from ${grantee === "PUBLIC" ? "PUBLIC" : quoteIdentifier(grantee)}`);
+    }
+    await client.query(`${verb} ${privilege} on ${target} ${quoteIdentifier(schema)}.${quoteIdentifier(name)} ${suffix} ${grantee === "PUBLIC" ? "PUBLIC" : quoteIdentifier(grantee)}${disposition === "grant" && grantable ? " with grant option" : ""}`);
+  }
+  for (const [disposition, schema, name, kind, arguments_, grantee, privilege, grantable] of manifest.routineAcls ?? []) {
+    if (!new Set(["f", "p"]).has(kind) || !/^[a-z0-9_, ]*$/u.test(arguments_)
+      || !new Set(["PUBLIC", "core_agent_app", "core_agent_identity", "core_agent_worker"]).has(grantee)
+      || privilege !== "EXECUTE" || (disposition === "revoke" && grantable)) {
+      throw new Error(`schema ${manifest.version} manifest validation failed: routine ACL declaration`);
+    }
+    const verb = disposition === "grant" ? "grant" : "revoke";
+    const suffix = disposition === "grant" ? "to" : "from";
+    if (disposition === "grant") {
+      await client.query(`revoke grant option for EXECUTE on ${kind === "p" ? "procedure" : "function"} ${quoteIdentifier(schema)}.${quoteIdentifier(name)}(${arguments_}) from ${grantee === "PUBLIC" ? "PUBLIC" : quoteIdentifier(grantee)}`);
+    }
+    await client.query(`${verb} EXECUTE on ${kind === "p" ? "procedure" : "function"} ${quoteIdentifier(schema)}.${quoteIdentifier(name)}(${arguments_}) ${suffix} ${grantee === "PUBLIC" ? "PUBLIC" : quoteIdentifier(grantee)}${disposition === "grant" && grantable ? " with grant option" : ""}`);
+  }
+}
 
 async function validateRegisteredCatalog(
   client: import("pg").PoolClient,
@@ -264,50 +339,25 @@ async function validateRegisteredCatalog(
   throughVersion: number,
 ): Promise<void> {
   if (throughVersion < 10) return;
-  const expectedRelations = [...manifests.values()]
+  const expectedObjects = [...manifests.values()]
     .filter((manifest) => manifest.version <= throughVersion)
-    .flatMap((manifest) => manifest.relations ?? [])
-    .sort();
-  const expectedSequences = [...manifests.values()]
-    .filter((manifest) => manifest.version <= throughVersion)
-    .flatMap((manifest) => manifest.sequences ?? [])
-    .sort();
-  const expectedViews = [...manifests.values()]
-    .filter((manifest) => manifest.version <= throughVersion)
-    .flatMap((manifest) => manifest.views ?? [])
-    .sort();
-  const relationsResult = await client.query<{ name: string; owner_matches: boolean }>(
-    `select relation.relname as name, owner.rolname = current_user as owner_matches
-     from pg_class relation join pg_roles owner on owner.oid = relation.relowner
-     where relation.relnamespace = 'public'::regnamespace and relation.relkind in ('r', 'p')
-     order by relation.relname`,
+    .flatMap((manifest) => manifest.objects ?? [])
+    .sort((left, right) => left.join("|").localeCompare(right.join("|")));
+  const catalogResult = await client.query<{ kind: RelationKind; name: string; owner: string; schema: "public"; expected_owner: string }>(
+    `select namespace.nspname as schema, relation.relname as name, relation.relkind as kind,
+            owner.rolname as owner, current_user as expected_owner
+     from pg_class relation
+     join pg_namespace namespace on namespace.oid = relation.relnamespace
+     join pg_roles owner on owner.oid = relation.relowner
+     where namespace.nspname = 'public' and relation.relkind in ('r', 'p', 'v', 'm', 'S')
+     order by namespace.nspname, relation.relname, relation.relkind`,
   );
-  const relations = relationsResult.rows.map((row) => row.name);
-  const sequencesResult = await client.query<{ name: string; owner_matches: boolean }>(
-    `select relation.relname as name, owner.rolname = current_user as owner_matches
-     from pg_class relation join pg_roles owner on owner.oid = relation.relowner
-     where relation.relnamespace = 'public'::regnamespace and relation.relkind = 'S'
-     order by relation.relname`,
-  );
-  const sequences = sequencesResult.rows.map((row) => row.name);
-  const viewsResult = await client.query<{ name: string; owner_matches: boolean }>(
-    `select relation.relname as name, owner.rolname = current_user as owner_matches
-     from pg_class relation join pg_roles owner on owner.oid = relation.relowner
-     where relation.relnamespace = 'public'::regnamespace and relation.relkind in ('v', 'm')
-     order by relation.relname`,
-  );
-  const views = viewsResult.rows.map((row) => row.name);
-  if ([...relationsResult.rows, ...sequencesResult.rows, ...viewsResult.rows].some((row) => !row.owner_matches)) {
-    throw new Error(`schema ${throughVersion} manifest validation failed: relation owner`);
-  }
-  if (JSON.stringify(relations) !== JSON.stringify(expectedRelations)) {
+  const expectedOwner = catalogResult.rows[0]?.expected_owner ?? (await client.query<{ owner: string }>("select current_user as owner")).rows[0]!.owner;
+  const normalizedExpectedObjects = expectedObjects.map(([schema, name, kind, owner]) =>
+    [schema, name, kind, owner === "current_user" ? expectedOwner : owner] as const);
+  const actualObjects = catalogResult.rows.map((row) => [row.schema, row.name, row.kind, row.owner] as const);
+  if (JSON.stringify(actualObjects) !== JSON.stringify(normalizedExpectedObjects)) {
     throw new Error(`schema ${throughVersion} manifest validation failed: relation catalog`);
-  }
-  if (JSON.stringify(sequences) !== JSON.stringify(expectedSequences)) {
-    throw new Error(`schema ${throughVersion} manifest validation failed: sequence catalog`);
-  }
-  if (JSON.stringify(views) !== JSON.stringify(expectedViews)) {
-    throw new Error(`schema ${throughVersion} manifest validation failed: view catalog`);
   }
   if (throughVersion < 10) return;
 
@@ -352,19 +402,37 @@ async function validateRegisteredCatalog(
     || JSON.stringify(normalizedRoutines) !== JSON.stringify(expectedRoutines)) {
     throw new Error(`schema ${throughVersion} manifest validation failed: routine catalog`);
   }
-  const routineGrants = await client.query(
-    `select 1 from pg_proc routine
+  const expectedRoutineAcls = [...manifests.values()]
+    .filter((manifest) => manifest.version <= throughVersion)
+    .flatMap((manifest) => manifest.routineAcls ?? [])
+    .filter(([disposition]) => disposition === "grant")
+    .map(([, schema, name, kind, arguments_, grantee, privilege, grantable]) =>
+      [schema, name, kind, arguments_, grantee, privilege, grantable] as const)
+    .sort((left, right) => left.join("|").localeCompare(right.join("|")));
+  const actualRoutineAcls = (await client.query<{
+    arguments: string; grantable: boolean; grantee: string; kind: string; name: string; privilege: string; schema: string;
+  }>(
+    `select namespace.nspname as schema, routine.proname as name, routine.prokind as kind,
+            pg_get_function_identity_arguments(routine.oid) as arguments,
+            coalesce(grantee.rolname, 'PUBLIC') as grantee,
+            privilege.privilege_type as privilege, privilege.is_grantable as grantable
+     from pg_proc routine
+     join pg_namespace namespace on namespace.oid = routine.pronamespace
      cross join lateral aclexplode(coalesce(routine.proacl, acldefault('f', routine.proowner))) privilege
-     where routine.pronamespace = 'public'::regnamespace and privilege.grantee <> routine.proowner
-     limit 1`,
-  );
-  if (routineGrants.rowCount !== 0) {
+     left join pg_roles grantee on grantee.oid = privilege.grantee
+     where namespace.nspname = 'public' and privilege.grantee <> routine.proowner
+     order by namespace.nspname, routine.proname, routine.prokind, pg_get_function_identity_arguments(routine.oid),
+              coalesce(grantee.rolname, 'PUBLIC'), privilege.privilege_type, privilege.is_grantable`,
+  )).rows.map((row) => [row.schema, row.name, row.kind, row.arguments, row.grantee, row.privilege, row.grantable] as const);
+  if (JSON.stringify(actualRoutineAcls) !== JSON.stringify(expectedRoutineAcls)) {
     throw new Error(`schema ${throughVersion} manifest validation failed: routine ACL`);
   }
 
   const futureRelations = [...manifests.values()]
     .filter((manifest) => manifest.version > 10 && manifest.version <= throughVersion)
-    .flatMap((manifest) => manifest.relations ?? [])
+    .flatMap((manifest) => manifest.objects ?? [])
+    .filter((entry) => entry[2] === "r" || entry[2] === "p")
+    .map((entry) => entry[1])
     .sort();
   const expectedColumns = [...manifests.values()]
     .filter((manifest) => manifest.version > 10 && manifest.version <= throughVersion)
@@ -419,22 +487,31 @@ async function validateRegisteredCatalog(
   if (JSON.stringify(actualIndexes) !== JSON.stringify(expectedIndexes)) {
     throw new Error(`schema ${throughVersion} manifest validation failed: index catalog`);
   }
-  const futureAclObjects = [...futureRelations,
-    ...[...manifests.values()].filter((manifest) => manifest.version > 10 && manifest.version <= throughVersion)
-      .flatMap((manifest) => [...(manifest.views ?? []), ...(manifest.sequences ?? [])])];
-  if (futureAclObjects.length > 0) {
-    const unexpectedAcl = await client.query(
-      `select 1 from pg_class relation
-       cross join lateral aclexplode(coalesce(relation.relacl,
-         acldefault(case relation.relkind when 'S' then 'S'::"char" else 'r'::"char" end, relation.relowner))) privilege
-       where relation.relnamespace = 'public'::regnamespace and relation.relname = any($1::text[])
-         and privilege.grantee <> relation.relowner
-       limit 1`,
-      [futureAclObjects],
-    );
-    if (unexpectedAcl.rowCount !== 0) {
-      throw new Error(`schema ${throughVersion} manifest validation failed: relation ACL`);
-    }
+  const expectedRelationAcls = [...manifests.values()]
+    .filter((manifest) => manifest.version <= throughVersion)
+    .flatMap((manifest) => manifest.relationAcls ?? [])
+    .filter(([disposition]) => disposition === "grant")
+    .map(([, schema, name, kind, grantee, privilege, grantable]) =>
+      [schema, name, kind, grantee, privilege, grantable] as const)
+    .sort((left, right) => left.join("|").localeCompare(right.join("|")));
+  const actualRelationAcls = (await client.query<{
+    grantable: boolean; grantee: string; kind: RelationKind; name: string; privilege: string; schema: string;
+  }>(
+    `select namespace.nspname as schema, relation.relname as name, relation.relkind as kind,
+            coalesce(grantee.rolname, 'PUBLIC') as grantee,
+            privilege.privilege_type as privilege, privilege.is_grantable as grantable
+     from pg_class relation
+     join pg_namespace namespace on namespace.oid = relation.relnamespace
+     cross join lateral aclexplode(coalesce(relation.relacl,
+       acldefault(case relation.relkind when 'S' then 'S'::"char" else 'r'::"char" end, relation.relowner))) privilege
+     left join pg_roles grantee on grantee.oid = privilege.grantee
+     where namespace.nspname = 'public' and relation.relkind in ('r', 'p', 'v', 'm', 'S')
+       and privilege.grantee <> relation.relowner
+     order by namespace.nspname, relation.relname, relation.relkind,
+              coalesce(grantee.rolname, 'PUBLIC'), privilege.privilege_type, privilege.is_grantable`,
+  )).rows.map((row) => [row.schema, row.name, row.kind, row.grantee, row.privilege, row.grantable] as const);
+  if (JSON.stringify(actualRelationAcls) !== JSON.stringify(expectedRelationAcls)) {
+    throw new Error(`schema ${throughVersion} manifest validation failed: relation ACL`);
   }
 }
 
@@ -531,6 +608,7 @@ async function applyMigrationsWithManifests(
       try {
         await client.query(migration.sql);
         await manifests.get(migration.version)?.validateAndConverge?.(client, maximumVersion);
+        await convergeManifestAcls(client, manifests.get(migration.version)!);
         await validateRegisteredCatalog(client, manifests, migration.version);
         await client.query(
           "insert into core_agent_schema_migrations (version, name, checksum, applied_at) values ($1, $2, $3, now())",
@@ -548,6 +626,7 @@ async function applyMigrationsWithManifests(
       try {
         for (const version of [...applied.keys()].sort((left, right) => left - right)) {
           await manifests.get(version)?.validateAndConverge?.(client, maximumVersion);
+          await convergeManifestAcls(client, manifests.get(version)!);
         }
         const currentVersion = Math.max(...applied.keys());
         if (currentVersion !== maximumVersion) throw new Error("database schema is below this binary");
@@ -557,7 +636,7 @@ async function applyMigrationsWithManifests(
         await client.query("rollback");
         if (error instanceof Error && (
           error.message.startsWith("schema 10 ACL convergence failed:")
-          || error.message.startsWith("schema 10 manifest validation failed:")
+          || /^schema [0-9]+ manifest validation failed:/u.test(error.message)
         )) throw error;
         throw new Error("schema 10 ACL convergence failed");
       }

@@ -90,7 +90,7 @@ interface NotifierWaiter {
 }
 
 interface DatabaseControlPool {
-  query(sql: string): Promise<unknown>;
+  query(sql: string, values?: readonly unknown[]): Promise<unknown>;
   end(): Promise<void>;
 }
 
@@ -102,7 +102,64 @@ interface DatabaseCreateSession {
 
 interface OwnedTerminalProcess {
   readonly completion: Promise<number>;
+  failureCategory?(): "drop_database" | "admin_close";
   terminateAndReap(): Promise<void>;
+}
+
+function spawnOwnedTerminalProcess(scriptName: string, args: readonly string[]): OwnedTerminalProcess {
+  const child = spawn(process.execPath, [
+    join(repositoryRoot, "scripts", scriptName),
+    ...args,
+  ], { cwd: repositoryRoot, env: process.env, stdio: "ignore", detached: process.platform !== "win32" });
+  let terminateRequested = false;
+  const completion = new Promise<number>((resolve) => {
+    let spawnFailed = false;
+    child.once("error", () => { spawnFailed = true; });
+    child.once("close", (code) => resolve(!spawnFailed && code === 0 ? 0 : 1));
+  });
+  return {
+    completion,
+    terminateAndReap: async () => {
+      if (child.exitCode === null && !terminateRequested) {
+        terminateRequested = true;
+        try {
+          if (child.pid !== undefined && process.platform !== "win32") process.kill(-child.pid, "SIGKILL");
+          else child.kill("SIGKILL");
+        } catch { child.kill("SIGKILL"); }
+      }
+      await completion;
+    },
+  };
+}
+
+function spawnOwnedCleanupProcess(args: readonly string[]): OwnedTerminalProcess {
+  const child = spawn(process.execPath, [
+    join(repositoryRoot, "scripts", "cleanup-test-database-child.mjs"), ...args,
+  ], { cwd: repositoryRoot, env: process.env, stdio: ["ignore", "ignore", "ignore", "ipc"], detached: process.platform !== "win32" });
+  let dropComplete = false;
+  let terminateRequested = false;
+  child.on("message", (message) => {
+    if (message === "drop_complete") dropComplete = true;
+  });
+  const completion = new Promise<number>((resolve) => {
+    let spawnFailed = false;
+    child.once("error", () => { spawnFailed = true; });
+    child.once("close", (code) => resolve(!spawnFailed && code === 0 ? 0 : 1));
+  });
+  return {
+    completion,
+    failureCategory: () => dropComplete ? "admin_close" : "drop_database",
+    terminateAndReap: async () => {
+      if (child.exitCode === null && !terminateRequested) {
+        terminateRequested = true;
+        try {
+          if (child.pid !== undefined && process.platform !== "win32") process.kill(-child.pid, "SIGKILL");
+          else child.kill("SIGKILL");
+        } catch { child.kill("SIGKILL"); }
+      }
+      await completion;
+    },
+  };
 }
 
 interface DatabaseAdminSession {
@@ -660,6 +717,11 @@ async function createIsolatedDatabase(options: {
     readonly databaseName: string;
     readonly timeoutMs: number;
   }) => OwnedTerminalProcess;
+  readonly createCleanupOwnedProcess?: (input: {
+    readonly controlDatabaseUrl: string;
+    readonly databaseName: string;
+    readonly timeoutMs: number;
+  }) => OwnedTerminalProcess;
   readonly timeoutMs?: number;
 } = {}): Promise<{
   readonly controlPool: DatabaseControlPool;
@@ -683,33 +745,14 @@ async function createIsolatedDatabase(options: {
   if (options.createSession === undefined && controlUrl.password !== "") {
     throw new Error("Integration stage failed: database create");
   }
-  const createOwnedProcess = options.createOwnedProcess ?? ((input): OwnedTerminalProcess => {
-    const child = spawn(process.execPath, [
-      join(repositoryRoot, "scripts", "create-test-database-child.mjs"),
-      input.controlDatabaseUrl,
-      input.databaseName,
-      String(input.timeoutMs),
-    ], { cwd: repositoryRoot, env: process.env, stdio: "ignore", detached: process.platform !== "win32" });
-    let terminateRequested = false;
-    const completion = new Promise<number>((resolve) => {
-      let spawnFailed = false;
-      child.once("error", () => { spawnFailed = true; });
-      child.once("close", (code) => resolve(!spawnFailed && code === 0 ? 0 : 1));
-    });
-    return {
-      completion,
-      terminateAndReap: async () => {
-        if (child.exitCode === null && !terminateRequested) {
-          terminateRequested = true;
-          try {
-            if (child.pid !== undefined && process.platform !== "win32") process.kill(-child.pid, "SIGKILL");
-            else child.kill("SIGKILL");
-          } catch { child.kill("SIGKILL"); }
-        }
-        await completion;
-      },
-    };
-  });
+  const createOwnedProcess = options.createOwnedProcess ?? ((input): OwnedTerminalProcess =>
+    spawnOwnedTerminalProcess("create-test-database-child.mjs", [
+      input.controlDatabaseUrl, input.databaseName, String(input.timeoutMs),
+    ]));
+  const createCleanupOwnedProcess = options.createCleanupOwnedProcess ?? ((input): OwnedTerminalProcess =>
+    spawnOwnedCleanupProcess([
+      "drop", input.controlDatabaseUrl, input.databaseName, String(input.timeoutMs),
+    ]));
   const createClient = options.createSession === undefined
     ? new Client({
         connectionString: controlUrl.toString(),
@@ -723,13 +766,6 @@ async function createIsolatedDatabase(options: {
     query: (sql: string) => createClient!.query(sql),
     close: () => createClient!.end(),
   };
-  const controlPool = options.controlPool ?? new Pool({
-    connectionString: controlUrl.toString(),
-    max: 2,
-    connectionTimeoutMillis: timeoutMs,
-    query_timeout: timeoutMs,
-    statement_timeout: timeoutMs,
-  });
   if (options.createSession === undefined) {
     let createProcess: OwnedTerminalProcess | undefined;
     try {
@@ -747,28 +783,28 @@ async function createIsolatedDatabase(options: {
         try { await createProcess.terminateAndReap(); }
         catch { cleanupFailures.push("create_cancellation"); }
       }
-      if (cleanupFailures.includes("create_cancellation")) {
-        cleanupFailures.push(...await runCleanupStages([
-          { category: "control_pool_close", work: () => controlPool.end() },
-          ...(options.cleanupControlPool === undefined ? [] : [{
-            category: "admin_close", work: () => options.cleanupControlPool!.end(),
-          }]),
-        ], timeoutMs));
-        throw combineSetupAndCleanupFailure(createError, cleanupFailures);
+      if (!cleanupFailures.includes("create_cancellation")) {
+        let cleanupProcess: OwnedTerminalProcess | undefined;
+        try {
+          cleanupProcess = createCleanupOwnedProcess({
+            controlDatabaseUrl: controlUrl.toString(), databaseName, timeoutMs,
+          });
+          const status = await runWithDeadline(() => cleanupProcess!.completion, timeoutMs);
+          if (status !== 0) cleanupFailures.push(cleanupProcess.failureCategory?.() ?? "drop_database");
+        } catch {
+          cleanupFailures.push(cleanupProcess?.failureCategory?.() ?? "drop_database");
+          if (cleanupProcess !== undefined) {
+            try { await cleanupProcess.terminateAndReap(); }
+            catch { cleanupFailures.push("admin_close"); }
+          }
+        }
       }
-      const cleanupControlPool = options.cleanupControlPool ?? new Pool({
-        connectionString: controlUrl.toString(), max: 1,
-        connectionTimeoutMillis: timeoutMs, query_timeout: timeoutMs, statement_timeout: timeoutMs,
-      });
-      cleanupFailures.push(...await runCleanupStages([
-        { category: "drop_database", work: async () => {
-          await cleanupControlPool.query(`drop database if exists "${databaseName}" with (force)`);
-        } },
-        { category: "control_pool_close", work: () => controlPool.end() },
-        ...(cleanupControlPool === controlPool ? [] : [{ category: "admin_close", work: () => cleanupControlPool.end() }]),
-      ], timeoutMs));
       throw combineSetupAndCleanupFailure(createError, cleanupFailures);
     }
+    const controlPool = options.controlPool ?? new Pool({
+      connectionString: controlUrl.toString(), max: 2,
+      connectionTimeoutMillis: timeoutMs, query_timeout: timeoutMs, statement_timeout: timeoutMs,
+    });
     return {
       controlPool,
       controlDatabaseUrl: controlUrl.toString(),
@@ -776,6 +812,10 @@ async function createIsolatedDatabase(options: {
       databaseUrl: databaseUrlFor(controlUrl, databaseName),
     };
   }
+  const controlPool = options.controlPool ?? new Pool({
+    connectionString: controlUrl.toString(), max: 2,
+    connectionTimeoutMillis: timeoutMs, query_timeout: timeoutMs, statement_timeout: timeoutMs,
+  });
   let createOperation: Promise<void> | undefined;
   try {
     await boundedExternal(

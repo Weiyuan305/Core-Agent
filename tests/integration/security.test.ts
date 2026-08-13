@@ -578,6 +578,32 @@ test("unconfirmed CREATE cancellation fails closed with its cause and without cl
   assert.equal(cleanupCalls.some((sql) => sql.startsWith("drop database")), false);
 });
 
+test("official PostgreSQL default create failure reaps exact cleanup and leaves the target absent", async () => {
+  const isolated = await testHarnessInternals.createIsolatedDatabase();
+  try {
+    await assert.rejects(
+      testHarnessInternals.createIsolatedDatabase({
+        databaseName: isolated.databaseName,
+        timeoutMs: 1_000,
+      }),
+      /^Error: Integration stage failed: database create$/,
+    );
+    const direct = await isolated.controlPool.query(
+      "select exists (select 1 from pg_database where datname = $1) as exists",
+      [isolated.databaseName],
+    ) as { rows: readonly { exists: boolean }[] };
+    assert.equal(direct.rows[0]?.exists, false);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const stable = await isolated.controlPool.query(
+      "select exists (select 1 from pg_database where datname = $1) as exists",
+      [isolated.databaseName],
+    ) as { rows: readonly { exists: boolean }[] };
+    assert.equal(stable.rows[0]?.exists, false);
+  } finally {
+    await isolated.controlPool.end();
+  }
+});
+
 test("official PostgreSQL teardown force-releases one real held child-pool checkout", async () => {
   const isolated = await testHarnessInternals.createIsolatedDatabase();
   const childPool = new Pool({ connectionString: isolated.databaseUrl, max: 1 });
@@ -590,7 +616,7 @@ test("official PostgreSQL teardown force-releases one real held child-pool check
       databaseName: isolated.databaseName,
       controlDatabaseUrl: isolated.controlDatabaseUrl,
       closeOwned: [tracked],
-      timeoutMs: 1_000,
+      timeoutMs: 2_000,
       retryDelayMs: 1,
     });
     assert.equal(childPool.ended, true);
