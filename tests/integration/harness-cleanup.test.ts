@@ -290,25 +290,99 @@ test("isolated database teardown force-terminates an abort-ignoring close with n
   assert.deepEqual(calls, ["owned forced", "owned settled", "admin connected", "admin closed"]);
 });
 
-test("tracked PostgreSQL pool uses public lifecycle events and force-closes only its owned clients", async () => {
+test("tracked PostgreSQL pool never forces a released idle client even when remove is delayed", async () => {
   const pool = new EventEmitter();
   const released: string[] = [];
-  const ownedOne = { release: (destroy?: boolean) => { released.push(`owned one:${String(destroy)}`); } };
-  const ownedRemoved = { release: (destroy?: boolean) => { released.push(`owned removed:${String(destroy)}`); } };
+  const idle = { release: (destroy?: boolean) => { released.push(`idle:${String(destroy)}`); } };
+  const tracked = testHarnessInternals.trackPostgresPool(pool, async () => undefined);
+  pool.emit("connect", idle);
+  pool.emit("acquire", idle);
+  pool.emit("release", undefined, idle);
+  await tracked.forceClose();
+  pool.emit("remove", idle);
+  assert.deepEqual(released, []);
+  assert.equal("_clients" in pool, false);
+});
+
+test("tracked PostgreSQL pool forces one held checkout exactly once and never touches a foreign client", async () => {
+  const pool = new EventEmitter();
+  const released: string[] = [];
+  const held = { release: (destroy?: boolean) => { released.push(`held:${String(destroy)}`); } };
   const foreign = { release: (destroy?: boolean) => { released.push(`foreign:${String(destroy)}`); } };
+  const tracked = testHarnessInternals.trackPostgresPool(pool, async () => undefined);
+  pool.emit("acquire", held);
+  await tracked.forceClose();
+  await tracked.forceClose();
+  foreign.release(false);
+  assert.deepEqual(released, ["held:true", "foreign:false"]);
+});
+
+test("release and remove racing the force handoff prevent a double release", async () => {
+  const pool = new EventEmitter();
+  const released: string[] = [];
+  const second = { release: (destroy?: boolean) => { released.push(`second:${String(destroy)}`); } };
+  const first = { release: (destroy?: boolean) => {
+    released.push(`first:${String(destroy)}`);
+    pool.emit("release", undefined, second);
+    pool.emit("remove", second);
+  } };
+  const tracked = testHarnessInternals.trackPostgresPool(pool, async () => undefined);
+  pool.emit("acquire", first);
+  pool.emit("acquire", second);
+  await tracked.forceClose();
+  assert.deepEqual(released, ["first:true"]);
+});
+
+test("force-close aggregates failures while processing every exact held checkout", async () => {
+  const pool = new EventEmitter();
+  const released: string[] = [];
+  const first = { release: () => { released.push("first"); throw new Error("first force failed"); } };
+  const second = { release: () => { released.push("second"); throw new Error("second force failed"); } };
+  const third = { release: () => { released.push("third"); } };
+  const tracked = testHarnessInternals.trackPostgresPool(pool, async () => undefined);
+  pool.emit("acquire", first);
+  pool.emit("acquire", second);
+  pool.emit("acquire", third);
+  await assert.rejects(tracked.forceClose(), (error: unknown) => {
+    assert(error instanceof AggregateError);
+    assert.equal(error.errors.length, 2);
+    return true;
+  });
+  assert.deepEqual(released, ["first", "second", "third"]);
+});
+
+test("force failure still waits for the original pool close and leaves no post-return mutation", async () => {
+  const pool = new EventEmitter();
+  const calls: string[] = [];
   let releaseClose: (() => void) | undefined;
+  const held = { release: () => {
+    calls.push("held force failed");
+    setTimeout(() => {
+      calls.push("pool close settled");
+      releaseClose?.();
+    }, 10);
+    throw new Error("synthetic force failure");
+  } };
   const tracked = testHarnessInternals.trackPostgresPool(
     pool,
     async () => { await new Promise<void>((resolve) => { releaseClose = resolve; }); },
   );
-  pool.emit("connect", ownedOne);
-  pool.emit("connect", ownedRemoved);
-  pool.emit("remove", ownedRemoved);
-  const close = tracked.close(new AbortController().signal);
-  await tracked.forceClose();
-  releaseClose?.();
-  await close;
-  foreign.release(false);
-  assert.deepEqual(released, ["owned one:true", "foreign:false"]);
-  assert.equal("_clients" in pool, false);
+  pool.emit("acquire", held);
+  await assert.rejects(testHarnessInternals.dropIsolatedDatabase({
+    databaseName,
+    closeOwned: [tracked],
+    createAdminSession: () => ({
+      connect: async () => { calls.push("admin connected"); },
+      query: async (sql: string) => /select exists/iu.test(sql)
+        ? { rows: [{ exists: false }] }
+        : { rows: [] },
+      close: async () => { calls.push("admin closed"); },
+    }),
+    timeoutMs: 80,
+    retryDelayMs: 1,
+  }), /^Error: Integration stage failed: owned database connections$/);
+  assert.deepEqual(calls, ["held force failed", "pool close settled", "admin connected", "admin closed"]);
+  const returnedCalls = [...calls];
+  await delay(30);
+  assert.deepEqual(calls, returnedCalls);
 });

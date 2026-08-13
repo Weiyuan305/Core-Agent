@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import test from "node:test";
+import { Pool } from "pg";
 
 import {
   createIntegrationHarness,
@@ -575,4 +576,30 @@ test("unconfirmed CREATE cancellation fails closed with its cause and without cl
     },
   );
   assert.equal(cleanupCalls.some((sql) => sql.startsWith("drop database")), false);
+});
+
+test("official PostgreSQL teardown force-releases one real held child-pool checkout", async () => {
+  const isolated = await testHarnessInternals.createIsolatedDatabase();
+  const childPool = new Pool({ connectionString: isolated.databaseUrl, max: 1 });
+  const tracked = testHarnessInternals.trackPostgresPool(childPool, () => childPool.end());
+  const held = await childPool.connect();
+  let removed = 0;
+  childPool.on("remove", () => { removed += 1; });
+  try {
+    await testHarnessInternals.dropIsolatedDatabase({
+      databaseName: isolated.databaseName,
+      controlDatabaseUrl: isolated.controlDatabaseUrl,
+      closeOwned: [tracked],
+      timeoutMs: 1_000,
+      retryDelayMs: 1,
+    });
+    assert.equal(childPool.ended, true);
+    assert.equal(removed, 1);
+  } finally {
+    if (!childPool.ended) {
+      try { held.release(true); } catch { /* already force-released */ }
+      await childPool.end().catch(() => undefined);
+    }
+    await isolated.controlPool.end();
+  }
 });

@@ -115,7 +115,8 @@ interface PoolLifecycleClient {
 }
 
 interface PoolLifecycleEvents {
-  on(event: "connect" | "remove", listener: (client: PoolLifecycleClient) => void): unknown;
+  on(event: "acquire" | "remove", listener: (client: PoolLifecycleClient) => void): unknown;
+  on(event: "release", listener: (error: Error | undefined, client: PoolLifecycleClient) => void): unknown;
 }
 
 interface CleanupStage {
@@ -347,14 +348,23 @@ async function settleOwnedDatabaseResource(
   const close = Promise.resolve()
     .then(() => resource.close(controller.signal))
     .catch((error: unknown) => { failure = error; });
+  let forceFailure: unknown;
   if (!await settlesBefore(close, gracefulDeadline)) {
     controller.abort();
     const abortGraceDeadline = Math.min(finalDeadline, Date.now() + 5);
     if (!await settlesBefore(close, abortGraceDeadline)) {
-      await runBeforeDeadline(finalDeadline, () => resource.forceClose());
-      await runBeforeDeadline(finalDeadline, () => close);
+      try {
+        await resource.forceClose();
+      } catch (error) {
+        forceFailure = error;
+      }
+      await close;
     }
   }
+  if (forceFailure !== undefined && failure !== undefined) {
+    throw new AggregateError([forceFailure, failure], "Integration owned database close failed");
+  }
+  if (forceFailure !== undefined) throw forceFailure;
   if (failure !== undefined) throw failure;
 }
 
@@ -362,17 +372,42 @@ function trackPostgresPool(
   pool: PoolLifecycleEvents,
   close: () => Promise<void>,
 ): OwnedDatabaseResource {
-  const clients = new Set<PoolLifecycleClient>();
-  pool.on("connect", (client) => clients.add(client));
-  pool.on("remove", (client) => clients.delete(client));
+  const checkedOut = new Set<PoolLifecycleClient>();
+  let forcePending: Set<PoolLifecycleClient> | undefined;
+  const releaseOwnership = (client: PoolLifecycleClient): void => {
+    checkedOut.delete(client);
+    forcePending?.delete(client);
+  };
+  pool.on("acquire", (client) => checkedOut.add(client));
+  pool.on("release", (_error, client) => releaseOwnership(client));
+  pool.on("remove", (client) => releaseOwnership(client));
   let closePromise: Promise<void> | undefined;
+  let forcePromise: Promise<void> | undefined;
   return {
     close: async () => {
       closePromise ??= close();
       await closePromise;
     },
     forceClose: async () => {
-      for (const client of [...clients]) client.release(true);
+      forcePromise ??= Promise.resolve().then(() => {
+        const pending = new Set(checkedOut);
+        checkedOut.clear();
+        forcePending = pending;
+        const failures: unknown[] = [];
+        for (const client of [...pending]) {
+          if (!pending.delete(client)) continue;
+          try {
+            client.release(true);
+          } catch (error) {
+            failures.push(error);
+          }
+        }
+        forcePending = undefined;
+        if (failures.length > 0) {
+          throw new AggregateError(failures, "Integration owned database force close failed");
+        }
+      });
+      await forcePromise;
     },
   };
 }

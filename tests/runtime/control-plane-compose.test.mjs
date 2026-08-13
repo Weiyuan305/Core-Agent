@@ -1023,7 +1023,7 @@ test("fresh CI-equivalent protects command output and proves cleanup after succe
   assert.match(text, /protectedRun\("npm", \["run", "test:postgres"\]/u);
   assert.match(text, /protectedRun\("npm", \["run", "test:integration"\]/u);
   assert.match(text, /assertNodeTestSummaries\(postgresOutput, \[155, 14\]\)/u);
-  assert.match(text, /assertNodeTestSummaries\(integrationOutput, \[54\]\)/u);
+  assert.match(text, /assertNodeTestSummaries\(integrationOutput, \[59\]\)/u);
   assert.match(text, /protectedRun\("docker", \["logs", container\]/u);
   assert.match(text, /injectedOutputLeak/u);
   assert.match(runner, /candidate\.includes\(secret\)[\s\S]*terminate\(child\)/u);
