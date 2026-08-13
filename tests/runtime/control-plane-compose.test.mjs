@@ -1022,8 +1022,8 @@ test("fresh CI-equivalent protects command output and proves cleanup after succe
   assert.match(text, /assert\.rejects\([\s\S]*injected CI-equivalent failure/u);
   assert.match(text, /protectedRun\("npm", \["run", "test:postgres"\]/u);
   assert.match(text, /protectedRun\("npm", \["run", "test:integration"\]/u);
-  assert.match(text, /assertNodeTestSummaries\(postgresOutput, \[155, 14\]\)/u);
-  assert.match(text, /assertNodeTestSummaries\(integrationOutput, \[65\]\)/u);
+  assert.match(text, /assertNodeTestSummaries\(postgresOutput, \[157, 14\]\)/u);
+  assert.match(text, /assertNodeTestSummaries\(integrationOutput, \[70\]\)/u);
   assert.match(text, /protectedRun\("docker", \["logs", container\]/u);
   assert.match(text, /injectedOutputLeak/u);
   assert.match(runner, /candidate\.includes\(secret\)[\s\S]*terminate\(child\)/u);
@@ -1134,8 +1134,8 @@ test("runtime PostgreSQL initialization separates bootstrap migrator and applica
   const identityBootstrap = await source("infra/runtime/postgres/init/01-bootstrap-identity-role.sql");
   assert.match(sql, /CREATE ROLE core_agent_migrator LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE/u);
   assert.match(sql, /CREATE ROLE core_agent_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE/u);
-  assert.match(sql, /ALTER DATABASE core_agent_runtime OWNER TO core_agent_migrator/u);
-  assert.match(sql, /CREATE DATABASE core_agent_control OWNER core_agent_migrator/u);
+  assert.match(sql, /ALTER DATABASE core_agent_runtime OWNER TO core_agent_bootstrap/u);
+  assert.match(sql, /CREATE DATABASE core_agent_control OWNER core_agent_bootstrap/u);
   assert.match(sql, /ALTER DEFAULT PRIVILEGES FOR ROLE core_agent_migrator[\s\S]+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO core_agent_app/u);
   assert.match(sql, /GRANT CONNECT ON DATABASE core_agent_runtime TO core_agent_app/u);
   assert.match(sql, /GRANT CONNECT ON DATABASE core_agent_control TO core_agent_app/u);

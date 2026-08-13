@@ -1,12 +1,12 @@
 CREATE ROLE core_agent_migrator LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
 CREATE ROLE core_agent_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
 
-ALTER DATABASE core_agent_runtime OWNER TO core_agent_migrator;
+ALTER DATABASE core_agent_runtime OWNER TO core_agent_bootstrap;
 REVOKE CONNECT, TEMPORARY ON DATABASE core_agent_runtime FROM PUBLIC;
 GRANT CONNECT ON DATABASE core_agent_runtime TO core_agent_migrator;
 GRANT CONNECT ON DATABASE core_agent_runtime TO core_agent_app;
 
-CREATE DATABASE core_agent_control OWNER core_agent_migrator;
+CREATE DATABASE core_agent_control OWNER core_agent_bootstrap;
 REVOKE CONNECT, TEMPORARY ON DATABASE core_agent_control FROM PUBLIC;
 GRANT CONNECT ON DATABASE core_agent_control TO core_agent_migrator;
 GRANT CONNECT ON DATABASE core_agent_control TO core_agent_app;

@@ -462,8 +462,16 @@ test("database role bootstrap removes hostile role drift and rotates persisted S
 
     const first = credentials();
     await writeSecrets(first);
+    await pool.query(`grant temporary on database "${databaseName}" to core_agent_app, core_agent_identity, core_agent_migrator`);
+    await pool.query("grant create on schema public to public, core_agent_app, core_agent_identity");
     await bootstrapAuth({ databaseUrl: databaseUrl.toString(), ...secretPaths });
     await bootstrapAuth({ databaseUrl: databaseUrl.toString(), ...secretPaths });
+
+    for (const role of ["core_agent_app", "core_agent_identity", "core_agent_migrator"]) {
+      assert.equal((await pool.query("select has_database_privilege($1, current_database(), 'TEMPORARY') as allowed", [role])).rows[0]?.allowed, false);
+      assert.equal((await pool.query("select has_schema_privilege($1, 'public', 'CREATE') as allowed", [role])).rows[0]?.allowed, role === "core_agent_migrator");
+    }
+    assert.equal((await pool.query("select has_schema_privilege('public', 'public', 'CREATE') as allowed")).rows[0]?.allowed, false);
 
     const roles = await pool.query<{
       rolname: string;
@@ -1003,6 +1011,37 @@ test("schema 10 grants only the documented Identity Task 3-9 table-operation mat
     );
     await rm(v9Directory, { recursive: true, force: true });
   }
+});
+
+test("recorded schema 10 startup reconverges dirty direct ACLs and remains idempotent", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await pool.query("grant select, insert, update, delete on table private_identity_pii to core_agent_app");
+  await pool.query("grant select, update, delete on table conversations, secret_references, runtime_containers to core_agent_identity");
+  await pool.query("create sequence acl_drift_sequence; grant all on sequence acl_drift_sequence to core_agent_app, core_agent_identity, public");
+
+  await applyMigrations(pool, migrationsDirectory);
+  await applyMigrations(pool, migrationsDirectory);
+
+  for (const privilege of ["SELECT", "INSERT", "UPDATE", "DELETE"]) {
+    assert.equal((await pool.query("select has_table_privilege('core_agent_app', 'public.private_identity_pii', $1) as allowed", [privilege])).rows[0]?.allowed, false);
+  }
+  for (const table of ["conversations", "secret_references", "runtime_containers"]) {
+    for (const privilege of ["SELECT", "UPDATE", "DELETE"]) {
+      assert.equal((await pool.query("select has_table_privilege('core_agent_identity'::text, format('public.%I', $1::text), $2::text) as allowed", [table, privilege])).rows[0]?.allowed, false);
+    }
+  }
+  for (const role of ["core_agent_app", "core_agent_identity"]) {
+    assert.equal((await pool.query("select has_sequence_privilege($1::text, 'public.acl_drift_sequence'::text, 'USAGE') as allowed", [role])).rows[0]?.allowed, false);
+  }
+  assert.equal((await pool.query(
+    "select has_sequence_privilege(0, 'public.acl_drift_sequence'::text, 'USAGE') as allowed",
+  )).rows[0]?.allowed, false);
+});
+
+test("recorded schema 10 convergence fails closed for a malformed partial identity catalog", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await pool.query("drop table public_rate_limits");
+  await assert.rejects(applyMigrations(pool, migrationsDirectory), /schema 10 ACL convergence failed/);
 });
 
 test("real Identity login commits and atomically rolls back the Task 3 cross-table graph", async () => {

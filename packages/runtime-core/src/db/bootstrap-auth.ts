@@ -91,7 +91,8 @@ export async function bootstrapRuntimeDatabaseAuth(input: RuntimeDatabaseAuthBoo
     await setRolePassword(client, "core_agent_identity", identityPassword);
     await client.query(`do $database_privileges$
       begin
-        execute format('revoke connect, temporary on database %I from public', current_database());
+        execute format('alter database %I owner to %I', current_database(), current_user);
+        execute format('revoke connect, temporary on database %I from public, core_agent_migrator, core_agent_app, core_agent_identity', current_database());
         execute format('grant connect on database %I to core_agent_migrator', current_database());
         execute format('grant connect on database %I to core_agent_app', current_database());
         execute format('grant connect on database %I to core_agent_identity', current_database());
@@ -100,7 +101,8 @@ export async function bootstrapRuntimeDatabaseAuth(input: RuntimeDatabaseAuthBoo
         end if;
       end
     $database_privileges$`);
-    await client.query("revoke all on schema public from public");
+    await client.query("revoke all on schema public from public, core_agent_migrator, core_agent_app, core_agent_identity");
+    await client.query("grant create, usage on schema public to core_agent_migrator");
     await client.query("grant usage on schema public to core_agent_app, core_agent_identity");
     await client.query("commit");
   } catch {

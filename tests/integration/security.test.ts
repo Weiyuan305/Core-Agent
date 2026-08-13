@@ -622,9 +622,20 @@ test("official PostgreSQL teardown drains a real checkout acquired after Pool.en
   });
   const tracked = testHarnessInternals.trackPostgresPool(childPool, () => childPool.end());
   const held = await childPool.connect();
+  const terminationErrors: string[] = [];
+  const recordTermination = (error: Error & { readonly code?: string }): void => {
+    terminationErrors.push(error.code ?? "missing");
+  };
+  childPool.on("error", recordTermination);
   let acquired = 0;
   childPool.on("acquire", () => { acquired += 1; });
-  const lateCheckout = childPool.connect();
+  const lateCheckout = childPool.connect().then(
+    (client) => {
+      client.on("error", recordTermination);
+      return "acquired" as const;
+    },
+    () => "terminated" as const,
+  );
   await lateConnectStarted;
   const teardown = testHarnessInternals.dropIsolatedDatabase({
     databaseName: isolated.databaseName,
@@ -636,9 +647,12 @@ test("official PostgreSQL teardown drains a real checkout acquired after Pool.en
   await new Promise((resolve) => setTimeout(resolve, 700));
   releaseLateConnect?.();
   try {
-    await lateCheckout;
+    const lateResult = await lateCheckout;
     await teardown;
     assert.equal(acquired, 1);
+    assert.equal(lateResult, "acquired");
+    assert(terminationErrors.length > 0);
+    assert.deepEqual([...new Set(terminationErrors)], ["57P01"]);
     assert.equal(childPool.ended, true);
   } finally {
     if (!childPool.ended) {

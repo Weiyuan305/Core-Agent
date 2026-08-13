@@ -117,6 +117,8 @@ interface PoolLifecycleClient {
 interface PoolLifecycleEvents {
   on(event: "acquire" | "remove", listener: (client: PoolLifecycleClient) => void): unknown;
   on(event: "release", listener: (error: Error | undefined, client: PoolLifecycleClient) => void): unknown;
+  removeListener(event: "acquire" | "remove", listener: (client: PoolLifecycleClient) => void): unknown;
+  removeListener(event: "release", listener: (error: Error | undefined, client: PoolLifecycleClient) => void): unknown;
 }
 
 interface CleanupStage {
@@ -341,31 +343,27 @@ async function settlesBefore(promise: Promise<void>, deadline: number): Promise<
 async function settleOwnedDatabaseResource(
   resource: OwnedDatabaseResource,
   gracefulDeadline: number,
-  finalDeadline: number,
-): Promise<void> {
+  forceDeadline: number,
+): Promise<{ readonly close: Promise<void>; readonly failure: () => unknown }> {
   const controller = new AbortController();
   let failure: unknown;
   const close = Promise.resolve()
     .then(() => resource.close(controller.signal))
     .catch((error: unknown) => { failure = error; });
-  let forceFailure: unknown;
   if (!await settlesBefore(close, gracefulDeadline)) {
     controller.abort();
-    const abortGraceDeadline = Math.min(finalDeadline, Date.now() + 5);
+    const abortGraceDeadline = Math.min(forceDeadline, Date.now() + 5);
     if (!await settlesBefore(close, abortGraceDeadline)) {
       try {
-        await resource.forceClose();
+        await runBeforeDeadline(forceDeadline, () => resource.forceClose());
       } catch (error) {
-        forceFailure = error;
+        failure = failure === undefined
+          ? error
+          : new AggregateError([failure, error], "Integration owned database close failed");
       }
-      await close;
     }
   }
-  if (forceFailure !== undefined && failure !== undefined) {
-    throw new AggregateError([forceFailure, failure], "Integration owned database close failed");
-  }
-  if (forceFailure !== undefined) throw forceFailure;
-  if (failure !== undefined) throw failure;
+  return { close, failure: () => failure };
 }
 
 function trackPostgresPool(
@@ -395,47 +393,63 @@ function trackPostgresPool(
     }).finally(() => drainTasks.delete(task));
     drainTasks.add(task);
   };
-  pool.on("acquire", (client) => {
+  const onAcquire = (client: PoolLifecycleClient): void => {
     checkedOut.add(client);
     if (state === "forcing") scheduleForce(client);
-  });
-  pool.on("release", (_error, client) => releaseOwnership(client));
-  pool.on("remove", (client) => releaseOwnership(client));
-  let closePromise: Promise<void> | undefined;
-  let closeSettlement: Promise<void> | undefined;
-  let forcePromise: Promise<void> | undefined;
+  };
+  const onRelease = (_error: Error | undefined, client: PoolLifecycleClient): void => releaseOwnership(client);
+  const onRemove = (client: PoolLifecycleClient): void => releaseOwnership(client);
+  pool.on("acquire", onAcquire);
+  pool.on("release", onRelease);
+  pool.on("remove", onRemove);
+  let rawClosePromise: Promise<void> | undefined;
+  let terminalClosePromise: Promise<void> | undefined;
+  const settle = (): void => {
+    if (state === "settled") return;
+    state = "settled";
+    checkedOut.clear();
+    drainTasks.clear();
+    pool.removeListener("acquire", onAcquire);
+    pool.removeListener("release", onRelease);
+    pool.removeListener("remove", onRemove);
+  };
   const startClose = (): Promise<void> => {
-    if (closePromise === undefined) {
+    if (rawClosePromise === undefined) {
       if (state === "open") state = "closing";
-      closePromise = Promise.resolve().then(close);
-      closeSettlement = closePromise.then(
-        () => undefined,
-        () => undefined,
-      ).then(() => {
-        if (state === "closing") state = "settled";
-      });
+      rawClosePromise = Promise.resolve().then(close);
+      terminalClosePromise = (async () => {
+        let closeFailure: unknown;
+        try {
+          await rawClosePromise;
+        } catch (error) {
+          closeFailure = error;
+        }
+        while (drainTasks.size > 0) await Promise.all([...drainTasks]);
+        settle();
+        if (closeFailure !== undefined && forceFailures.length > 0) {
+          throw new AggregateError(
+            [closeFailure, ...forceFailures],
+            "Integration owned database close failed",
+          );
+        }
+        if (closeFailure !== undefined) throw closeFailure;
+        if (forceFailures.length > 0) {
+          throw new AggregateError(forceFailures, "Integration owned database force close failed");
+        }
+      })();
     }
-    return closePromise;
+    return terminalClosePromise!;
   };
   return {
     close: async () => {
       await startClose();
     },
     forceClose: async () => {
-      forcePromise ??= Promise.resolve().then(async () => {
-        startClose();
-        state = "forcing";
-        for (const client of [...checkedOut]) scheduleForce(client);
-        await closeSettlement;
-        while (drainTasks.size > 0) {
-          await Promise.all([...drainTasks]);
-        }
-        state = "settled";
-        if (forceFailures.length > 0) {
-          throw new AggregateError(forceFailures, "Integration owned database force close failed");
-        }
-      });
-      await forcePromise;
+      startClose();
+      if (state === "settled") return;
+      state = "forcing";
+      for (const client of [...checkedOut]) scheduleForce(client);
+      while (drainTasks.size > 0) await Promise.all([...drainTasks]);
     },
   };
 }
@@ -458,9 +472,15 @@ async function dropIsolatedDatabase(options: {
   const operationDeadline = finalDeadline - closeReserveMs;
   const ownedDeadline = Date.now() + Math.max(1, Math.floor((operationDeadline - Date.now()) / 2));
   const ownedFailures: string[] = [];
+  const ownedSettlements: Array<{
+    readonly index: number;
+    readonly close: Promise<void>;
+    readonly failure: () => unknown;
+  }> = [];
   for (const [index, resource] of options.closeOwned.entries()) {
     try {
-      await settleOwnedDatabaseResource(resource, ownedDeadline, operationDeadline);
+      const settlement = await settleOwnedDatabaseResource(resource, ownedDeadline, operationDeadline);
+      ownedSettlements.push({ index, ...settlement });
     } catch {
       ownedFailures.push(`owned database connection ${index + 1}`);
     }
@@ -486,16 +506,30 @@ async function dropIsolatedDatabase(options: {
   };
   let dropped = false;
   let closeFailed = false;
+  let adminReady = false;
+  let databaseFailed = false;
   try {
-    await runBeforeDeadline(operationDeadline, () => admin.connect());
+    try {
+      await runBeforeDeadline(operationDeadline, () => admin.connect());
+      adminReady = true;
+      await runBeforeDeadline(operationDeadline, () => admin.query(
+        `select pg_terminate_backend(pid)
+         from pg_stat_activity
+         where datname = $1 and pid <> pg_backend_pid()`,
+        [options.databaseName],
+      ));
+    } catch {
+      databaseFailed = true;
+    }
+    await Promise.all(ownedSettlements.map(async (settlement) => {
+      await settlement.close;
+      if (settlement.failure() !== undefined) {
+        ownedFailures.push(`owned database connection ${settlement.index + 1}`);
+      }
+    }));
+    if (!adminReady) throw new Error("Integration stage failed: database drop");
     while (!dropped) {
       try {
-        await runBeforeDeadline(operationDeadline, () => admin.query(
-          `select pg_terminate_backend(pid)
-           from pg_stat_activity
-           where datname = $1 and pid <> pg_backend_pid()`,
-          [options.databaseName],
-        ));
         await runBeforeDeadline(operationDeadline, () => admin.query(`drop database if exists "${options.databaseName}"`));
         const verification = await runBeforeDeadline(operationDeadline, () => admin.query(
           "select exists (select 1 from pg_database where datname = $1) as exists",
@@ -509,8 +543,9 @@ async function dropIsolatedDatabase(options: {
       if (Date.now() >= operationDeadline) throw new Error("Integration stage failed: database drop");
       await runBeforeDeadline(operationDeadline, () => sleep(retryDelayMs));
     }
+    if (databaseFailed) throw new Error("Integration stage failed: database drop");
   } catch {
-    throw new Error("Integration stage failed: database drop");
+    databaseFailed = true;
   } finally {
     try {
       await runBeforeDeadline(finalDeadline, () => admin.close());
@@ -519,6 +554,7 @@ async function dropIsolatedDatabase(options: {
     }
   }
   if (closeFailed) throw new Error("Integration stage failed: database admin close");
+  if (databaseFailed) throw new Error("Integration stage failed: database drop");
   if (ownedFailures.length > 0) throw new Error("Integration stage failed: owned database connections");
 }
 

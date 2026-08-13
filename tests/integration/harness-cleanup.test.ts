@@ -343,7 +343,8 @@ test("force-close aggregates failures while processing every exact held checkout
   pool.emit("acquire", first);
   pool.emit("acquire", second);
   pool.emit("acquire", third);
-  await assert.rejects(tracked.forceClose(), (error: unknown) => {
+  await tracked.forceClose();
+  await assert.rejects(tracked.close(new AbortController().signal), (error: unknown) => {
     assert(error instanceof AggregateError);
     assert.equal(error.errors.length, 2);
     return true;
@@ -381,7 +382,7 @@ test("force failure still waits for the original pool close and leaves no post-r
     timeoutMs: 80,
     retryDelayMs: 1,
   }), /^Error: Integration stage failed: owned database connections$/);
-  assert.deepEqual(calls, ["held force failed", "pool close settled", "admin connected", "admin closed"]);
+  assert.deepEqual(calls, ["held force failed", "admin connected", "pool close settled", "admin closed"]);
   const returnedCalls = [...calls];
   await delay(30);
   assert.deepEqual(calls, returnedCalls);
@@ -525,14 +526,185 @@ test("a force failure from a late checkout is aggregated only after close settle
   );
   pool.emit("acquire", first);
   const close = tracked.close(new AbortController().signal);
-  await assert.rejects(tracked.forceClose(), (error: unknown) => {
+  await tracked.forceClose();
+  await assert.rejects(close, (error: unknown) => {
     assert(error instanceof AggregateError);
     assert.equal(error.errors.length, 1);
     return true;
   });
-  await close;
   assert.deepEqual(calls, ["first forced", "late force failed", "pool close settled"]);
   const returnedCalls = [...calls];
   await delay(20);
   assert.deepEqual(calls, returnedCalls);
+});
+
+test("exact admin termination unblocks an owned close before DROP and absence verification", async () => {
+  const calls: string[] = [];
+  let settleClose: (() => void) | undefined;
+  const teardown = testHarnessInternals.dropIsolatedDatabase({
+    databaseName,
+    closeOwned: [{
+      close: async () => {
+        calls.push("close started");
+        await new Promise<void>((resolve) => { settleClose = resolve; });
+        calls.push("close settled");
+      },
+      forceClose: async () => { calls.push("force attempted"); },
+    }],
+    createAdminSession: () => ({
+      connect: async () => { calls.push("admin connected"); },
+      query: async (sql: string, values?: readonly unknown[]) => {
+        if (/pg_terminate_backend/iu.test(sql)) {
+          calls.push(`terminate:${String(values?.[0])}`);
+          settleClose?.();
+          return { rows: [{ pg_terminate_backend: true }] };
+        }
+        if (sql.startsWith("drop database")) calls.push("drop");
+        if (/select exists/iu.test(sql)) {
+          calls.push("absence verified");
+          return { rows: [{ exists: false }] };
+        }
+        return { rows: [] };
+      },
+      close: async () => { calls.push("admin closed"); },
+    }),
+    timeoutMs: 80,
+    retryDelayMs: 1,
+  });
+  await Promise.race([
+    teardown,
+    delay(150).then(() => { throw new Error("admin termination was unreachable"); }),
+  ]);
+  assert.deepEqual(calls, [
+    "close started", "force attempted", "admin connected", `terminate:${databaseName}`,
+    "close settled", "drop", "absence verified", "admin closed",
+  ]);
+});
+
+test("force failure does not skip exact termination close settlement DROP or absence", async () => {
+  const calls: string[] = [];
+  let settleClose: (() => void) | undefined;
+  const teardown = testHarnessInternals.dropIsolatedDatabase({
+    databaseName,
+    closeOwned: [{
+      close: async () => {
+        await new Promise<void>((resolve) => { settleClose = resolve; });
+        calls.push("close settled");
+      },
+      forceClose: async () => { calls.push("force failed"); throw new Error(LEAK_SENTINEL); },
+    }],
+    createAdminSession: () => ({
+      connect: async () => { calls.push("admin connected"); },
+      query: async (sql: string, values?: readonly unknown[]) => {
+        if (/pg_terminate_backend/iu.test(sql)) {
+          assert.deepEqual(values, [databaseName]);
+          calls.push("exact terminated");
+          settleClose?.();
+        }
+        if (sql.startsWith("drop database")) calls.push("drop");
+        if (/select exists/iu.test(sql)) {
+          calls.push("absence verified");
+          return { rows: [{ exists: false }] };
+        }
+        return { rows: [] };
+      },
+      close: async () => { calls.push("admin closed"); },
+    }),
+    timeoutMs: 80,
+    retryDelayMs: 1,
+  });
+  await assert.rejects(Promise.race([
+    teardown,
+    delay(150).then(() => { throw new Error("force failure skipped admin termination"); }),
+  ]), /^Error: Integration stage failed: owned database connections$/);
+  assert.deepEqual(calls, [
+    "force failed", "admin connected", "exact terminated", "close settled",
+    "drop", "absence verified", "admin closed",
+  ]);
+});
+
+test("exact termination failure still waits for terminal close and attempts DROP and absence", async () => {
+  const calls: string[] = [];
+  let settleClose: (() => void) | undefined;
+  await assert.rejects(testHarnessInternals.dropIsolatedDatabase({
+    databaseName,
+    closeOwned: [{
+      close: async () => {
+        await new Promise<void>((resolve) => { settleClose = resolve; });
+        calls.push("close settled");
+      },
+      forceClose: async () => { calls.push("force attempted"); },
+    }],
+    createAdminSession: () => ({
+      connect: async () => { calls.push("admin connected"); },
+      query: async (sql: string, values?: readonly unknown[]) => {
+        if (/pg_terminate_backend/iu.test(sql)) {
+          assert.deepEqual(values, [databaseName]);
+          calls.push("exact termination failed");
+          settleClose?.();
+          throw new Error(LEAK_SENTINEL);
+        }
+        if (sql.startsWith("drop database")) calls.push("drop attempted");
+        if (/select exists/iu.test(sql)) {
+          calls.push("absence verified");
+          return { rows: [{ exists: false }] };
+        }
+        return { rows: [] };
+      },
+      close: async () => { calls.push("admin closed"); },
+    }),
+    timeoutMs: 80,
+    retryDelayMs: 1,
+  }), /^Error: Integration stage failed: database drop$/);
+  assert.deepEqual(calls, [
+    "force attempted", "admin connected", "exact termination failed", "close settled",
+    "drop attempted", "absence verified", "admin closed",
+  ]);
+});
+
+test("admin connection failure is categorized after every owned close becomes terminal", async () => {
+  const calls: string[] = [];
+  let settleClose: (() => void) | undefined;
+  const teardown = testHarnessInternals.dropIsolatedDatabase({
+    databaseName,
+    closeOwned: [{
+      close: async () => {
+        await new Promise<void>((resolve) => { settleClose = resolve; });
+        calls.push("close settled");
+      },
+      forceClose: async () => { calls.push("force attempted"); },
+    }],
+    createAdminSession: () => ({
+      connect: async () => {
+        calls.push("admin connect failed");
+        settleClose?.();
+        throw new Error(LEAK_SENTINEL);
+      },
+      query: async () => { assert.fail("failed admin must not query"); },
+      close: async () => { calls.push("admin closed"); },
+    }),
+    timeoutMs: 80,
+    retryDelayMs: 1,
+  });
+  await assert.rejects(Promise.race([
+    teardown,
+    delay(150).then(() => { throw new Error("admin connection remained unreachable"); }),
+  ]), /^Error: Integration stage failed: database drop$/);
+  assert.deepEqual(calls, ["force attempted", "admin connect failed", "close settled", "admin closed"]);
+});
+
+test("terminal Pool tracking detaches listeners and neutralizes a next-tick acquire", async () => {
+  const pool = new EventEmitter();
+  const released: string[] = [];
+  const client = { release: (destroy?: boolean) => { released.push(String(destroy)); } };
+  const tracked = testHarnessInternals.trackPostgresPool(pool, async () => undefined);
+  await tracked.close(new AbortController().signal);
+  await tracked.forceClose();
+  assert.equal(pool.listenerCount("acquire"), 0);
+  assert.equal(pool.listenerCount("release"), 0);
+  assert.equal(pool.listenerCount("remove"), 0);
+  process.nextTick(() => pool.emit("acquire", client));
+  await delay(0);
+  await tracked.forceClose();
+  assert.deepEqual(released, []);
 });
