@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { createConnection } from "node:net";
+import { spawn } from "node:child_process";
 
 import type { ProductEvent } from "@core-agent/contracts";
 import {
@@ -103,11 +104,13 @@ interface DatabaseAdminSession {
   connect(): Promise<void>;
   query(sql: string, values?: readonly unknown[]): Promise<{ readonly rows: readonly Record<string, unknown>[] }>;
   close(): Promise<void>;
+  forceTerminate?(): Promise<void>;
 }
 
 interface OwnedDatabaseResource {
   close(signal: AbortSignal): Promise<void>;
   forceClose(): Promise<void>;
+  forceTerminate?(): Promise<void>;
 }
 
 interface PoolLifecycleClient {
@@ -344,9 +347,10 @@ async function settleOwnedDatabaseResource(
   resource: OwnedDatabaseResource,
   gracefulDeadline: number,
   forceDeadline: number,
-): Promise<{ readonly close: Promise<void>; readonly failure: () => unknown }> {
+): Promise<{ readonly close: Promise<void>; readonly failure: () => unknown; readonly terminal: () => boolean }> {
   const controller = new AbortController();
   let failure: unknown;
+  let terminal = false;
   const close = Promise.resolve()
     .then(() => resource.close(controller.signal))
     .catch((error: unknown) => { failure = error; });
@@ -355,7 +359,12 @@ async function settleOwnedDatabaseResource(
     const abortGraceDeadline = Math.min(forceDeadline, Date.now() + 5);
     if (!await settlesBefore(close, abortGraceDeadline)) {
       try {
-        await runBeforeDeadline(forceDeadline, () => resource.forceClose());
+        const force = Promise.resolve().then(() => resource.forceClose());
+        if (!await settlesBefore(force.then(() => undefined, () => undefined), forceDeadline)) {
+          failure = new Error("Integration owned database force timed out");
+        } else {
+          await force;
+        }
       } catch (error) {
         failure = failure === undefined
           ? error
@@ -363,7 +372,8 @@ async function settleOwnedDatabaseResource(
       }
     }
   }
-  return { close, failure: () => failure };
+  terminal = await settlesBefore(close, forceDeadline);
+  return { close, failure: () => failure, terminal: () => terminal };
 }
 
 function trackPostgresPool(
@@ -451,6 +461,14 @@ function trackPostgresPool(
       for (const client of [...checkedOut]) scheduleForce(client);
       while (drainTasks.size > 0) await Promise.all([...drainTasks]);
     },
+    forceTerminate: async () => {
+      if (state !== "settled") {
+        state = "forcing";
+        for (const client of [...checkedOut]) scheduleForce(client);
+        while (drainTasks.size > 0) await Promise.all([...drainTasks]);
+      }
+      await startClose();
+    },
   };
 }
 
@@ -471,19 +489,81 @@ async function dropIsolatedDatabase(options: {
   const closeReserveMs = Math.min(250, Math.max(1, Math.floor(timeoutMs / 4)));
   const operationDeadline = finalDeadline - closeReserveMs;
   const ownedDeadline = Date.now() + Math.max(1, Math.floor((operationDeadline - Date.now()) / 2));
+  const forceDeadline = ownedDeadline + Math.max(1, Math.floor((operationDeadline - ownedDeadline) / 2));
+  const adminConnectDeadline = forceDeadline + Math.max(1, Math.floor((operationDeadline - forceDeadline) / 2));
   const ownedFailures: string[] = [];
   const ownedSettlements: Array<{
     readonly index: number;
     readonly close: Promise<void>;
     readonly failure: () => unknown;
+    readonly terminal: () => boolean;
   }> = [];
   for (const [index, resource] of options.closeOwned.entries()) {
     try {
-      const settlement = await settleOwnedDatabaseResource(resource, ownedDeadline, operationDeadline);
+      const settlement = await settleOwnedDatabaseResource(resource, ownedDeadline, forceDeadline);
       ownedSettlements.push({ index, ...settlement });
     } catch {
       ownedFailures.push(`owned database connection ${index + 1}`);
     }
+  }
+  const settleOwnedTerminally = async (): Promise<void> => {
+    await Promise.all(ownedSettlements.map(async (settlement) => {
+      const terminal = settlement.terminal()
+        || await settlesBefore(settlement.close, Math.min(finalDeadline, Date.now() + 10));
+      if (!terminal) {
+        const resource = options.closeOwned[settlement.index]!;
+        try {
+          if (resource.forceTerminate === undefined) throw new Error("missing terminal owner protocol");
+          await resource.forceTerminate();
+        } catch {
+          ownedFailures.push(`owned database connection ${settlement.index + 1}`);
+        }
+      } else {
+        await settlement.close;
+      }
+      if (settlement.failure() !== undefined) ownedFailures.push(`owned database connection ${settlement.index + 1}`);
+    }));
+  };
+  if (options.createAdminSession === undefined) {
+    if (options.controlDatabaseUrl === undefined) throw new Error("Integration stage failed: database drop");
+    let cleanupControlUrl: URL;
+    try { cleanupControlUrl = new URL(options.controlDatabaseUrl); }
+    catch { throw new Error("Integration stage failed: database drop"); }
+    if (cleanupControlUrl.password !== "") throw new Error("Integration stage failed: database drop");
+    const runCleanupChild = async (operation: "terminate" | "drop", deadline: number): Promise<number> => {
+      const remaining = Math.max(1, deadline - Date.now());
+      const child = spawn(process.execPath, [
+        join(repositoryRoot, "scripts", "cleanup-test-database-child.mjs"),
+        operation,
+        options.controlDatabaseUrl!,
+        options.databaseName,
+        String(remaining),
+      ], { cwd: repositoryRoot, env: process.env, stdio: "ignore", detached: process.platform !== "win32" });
+      let timer: NodeJS.Timeout | undefined;
+      const status = await new Promise<number>((resolve) => {
+        let spawnFailed = false;
+        child.once("error", () => { spawnFailed = true; });
+        child.once("close", (code) => resolve(!spawnFailed && code === 0 ? 0 : 1));
+        timer = setTimeout(() => {
+          try {
+            if (child.pid !== undefined && process.platform !== "win32") process.kill(-child.pid, "SIGKILL");
+            else child.kill("SIGKILL");
+          } catch { child.kill("SIGKILL"); }
+        }, remaining);
+      });
+      if (timer !== undefined) clearTimeout(timer);
+      return status;
+    };
+    const terminateStatus = await runCleanupChild("terminate", adminConnectDeadline);
+    await settleOwnedTerminally();
+    const dropStatus = await runCleanupChild("drop", operationDeadline);
+    const failures = [
+      ...(terminateStatus === 0 && dropStatus === 0 ? [] : ["database drop"]),
+      ...(ownedFailures.length > 0 ? ["owned database connections"] : []),
+    ];
+    if (failures.length === 1) throw new Error(`Integration stage failed: ${failures[0]}`);
+    if (failures.length > 1) throw new Error(`Integration teardown failed: ${failures.join(", ")}`);
+    return;
   }
   const client = options.createAdminSession === undefined
     ? new Client({
@@ -503,6 +583,7 @@ async function dropIsolatedDatabase(options: {
       return { rows: result.rows as readonly Record<string, unknown>[] };
     },
     close: () => client!.end(),
+    forceTerminate: () => client!.end(),
   };
   let dropped = false;
   let closeFailed = false;
@@ -510,7 +591,7 @@ async function dropIsolatedDatabase(options: {
   let databaseFailed = false;
   try {
     try {
-      await runBeforeDeadline(operationDeadline, () => admin.connect());
+      await runBeforeDeadline(adminConnectDeadline, () => admin.connect());
       adminReady = true;
       await runBeforeDeadline(operationDeadline, () => admin.query(
         `select pg_terminate_backend(pid)
@@ -521,12 +602,7 @@ async function dropIsolatedDatabase(options: {
     } catch {
       databaseFailed = true;
     }
-    await Promise.all(ownedSettlements.map(async (settlement) => {
-      await settlement.close;
-      if (settlement.failure() !== undefined) {
-        ownedFailures.push(`owned database connection ${settlement.index + 1}`);
-      }
-    }));
+    await settleOwnedTerminally();
     if (!adminReady) throw new Error("Integration stage failed: database drop");
     while (!dropped) {
       try {
@@ -551,11 +627,21 @@ async function dropIsolatedDatabase(options: {
       await runBeforeDeadline(finalDeadline, () => admin.close());
     } catch {
       closeFailed = true;
+      try {
+        if (admin.forceTerminate === undefined) throw new Error("missing admin terminal protocol");
+        await admin.forceTerminate();
+      } catch {
+        // The stable admin-close category already records terminalization failure.
+      }
     }
   }
-  if (closeFailed) throw new Error("Integration stage failed: database admin close");
-  if (databaseFailed) throw new Error("Integration stage failed: database drop");
-  if (ownedFailures.length > 0) throw new Error("Integration stage failed: owned database connections");
+  const failureCategories = [
+    ...(databaseFailed ? ["database drop"] : []),
+    ...(ownedFailures.length > 0 ? ["owned database connections"] : []),
+    ...(closeFailed ? ["database admin close"] : []),
+  ];
+  if (failureCategories.length === 1) throw new Error(`Integration stage failed: ${failureCategories[0]}`);
+  if (failureCategories.length > 1) throw new Error(`Integration teardown failed: ${failureCategories.join(", ")}`);
 }
 
 async function createIsolatedDatabase(options: {

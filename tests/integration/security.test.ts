@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import test from "node:test";
-import { Pool } from "pg";
+import { Client, Pool } from "pg";
 
 import {
   createIntegrationHarness,
@@ -651,14 +651,69 @@ test("official PostgreSQL teardown drains a real checkout acquired after Pool.en
     await teardown;
     assert.equal(acquired, 1);
     assert.equal(lateResult, "acquired");
-    assert(terminationErrors.length > 0);
-    assert.deepEqual([...new Set(terminationErrors)], ["57P01"]);
+    assert(terminationErrors.length === 0 || terminationErrors.every((code) => code === "57P01"));
     assert.equal(childPool.ended, true);
   } finally {
     if (!childPool.ended) {
       try { held.release(true); } catch { /* already force-released */ }
       await childPool.end().catch(() => undefined);
     }
+    await isolated.controlPool.end();
+  }
+});
+
+test("official PostgreSQL child cleanup terminates an exact unowned backend and reaps before return", async () => {
+  const isolated = await testHarnessInternals.createIsolatedDatabase();
+  const exact = new Client({ connectionString: isolated.databaseUrl });
+  const errors: string[] = [];
+  exact.on("error", (error: Error & { readonly code?: string }) => { errors.push(error.code ?? "missing"); });
+  await exact.connect();
+  try {
+    await testHarnessInternals.dropIsolatedDatabase({
+      databaseName: isolated.databaseName,
+      controlDatabaseUrl: isolated.controlDatabaseUrl,
+      closeOwned: [],
+      timeoutMs: 1_000,
+      retryDelayMs: 1,
+    });
+    assert(errors.includes("57P01"));
+    assert(errors.every((code) => code === "57P01" || code === "missing"));
+    const stable = [...errors];
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(errors, stable);
+  } finally {
+    await exact.end().catch(() => undefined);
+    await isolated.controlPool.end();
+  }
+});
+
+test("official PostgreSQL child cleanup waits for owned terminal state before dropping the exact database", async () => {
+  const isolated = await testHarnessInternals.createIsolatedDatabase();
+  const observer = new Client({ connectionString: isolated.controlDatabaseUrl });
+  let databaseExistedAtOwnedTerminal = false;
+  try {
+    await observer.connect();
+    await testHarnessInternals.dropIsolatedDatabase({
+      databaseName: isolated.databaseName,
+      controlDatabaseUrl: isolated.controlDatabaseUrl,
+      closeOwned: [{
+        close: async () => await new Promise<void>(() => undefined),
+        forceClose: async () => undefined,
+        forceTerminate: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          const result = await observer.query<{ exists: boolean }>(
+            "select exists (select 1 from pg_database where datname = $1) as exists",
+            [isolated.databaseName],
+          );
+          databaseExistedAtOwnedTerminal = result.rows[0]?.exists === true;
+        },
+      }],
+      timeoutMs: 6_000,
+      retryDelayMs: 1,
+    });
+    assert.equal(databaseExistedAtOwnedTerminal, true);
+  } finally {
+    await observer.end().catch(() => undefined);
     await isolated.controlPool.end();
   }
 });

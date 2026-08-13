@@ -66,6 +66,7 @@ export async function runProtectedCiCommand({ secretFile, command, args, environ
   const tails = {
     stdout: Buffer.alloc(0),
     stderr: Buffer.alloc(0),
+    merged: Buffer.alloc(0),
   };
   const stdout = [];
   const stderr = [];
@@ -83,7 +84,8 @@ export async function runProtectedCiCommand({ secretFile, command, args, environ
       const bytes = Buffer.from(chunk);
       total += bytes.length;
       const candidate = Buffer.concat([tails[stream], bytes]);
-      if (total > maximumOutputBytes || candidate.includes(secret)) {
+      const mergedCandidate = Buffer.concat([tails.merged, bytes]);
+      if (total > maximumOutputBytes || candidate.includes(secret) || mergedCandidate.includes(secret)) {
         rejected = true;
         terminate(child);
         return;
@@ -91,6 +93,7 @@ export async function runProtectedCiCommand({ secretFile, command, args, environ
       target.push(bytes);
       const retained = Math.max(0, secret.length - 1);
       tails[stream] = candidate.subarray(Math.max(0, candidate.length - retained));
+      tails.merged = mergedCandidate.subarray(Math.max(0, mergedCandidate.length - retained));
     };
     child.stdout.on("data", inspect("stdout", stdout));
     child.stderr.on("data", inspect("stderr", stderr));
@@ -103,18 +106,23 @@ export async function runProtectedCiCommand({ secretFile, command, args, environ
       child.once("error", () => resolvePromise({ code: null, signal: null }));
       child.once("close", (code, signal) => resolvePromise({ code, signal }));
     });
-    if (rejected) return { rejected: true, status: 1, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+    const stdoutBytes = Buffer.concat(stdout);
+    const stderrBytes = Buffer.concat(stderr);
+    if (rejected || Buffer.concat([stdoutBytes, stderrBytes]).includes(secret)) {
+      return { rejected: true, status: 1, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+    }
     return {
       rejected: false,
       status: Number.isInteger(outcome.code) ? outcome.code : 1,
-      stdout: Buffer.concat(stdout),
-      stderr: Buffer.concat(stderr),
+      stdout: stdoutBytes,
+      stderr: stderrBytes,
     };
   } finally {
     if (timer !== undefined) clearTimeout(timer);
     secret.fill(0);
     tails.stdout.fill(0);
     tails.stderr.fill(0);
+    tails.merged.fill(0);
   }
 }
 

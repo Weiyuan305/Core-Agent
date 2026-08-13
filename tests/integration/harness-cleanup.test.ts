@@ -708,3 +708,54 @@ test("terminal Pool tracking detaches listeners and neutralizes a next-tick acqu
   await tracked.forceClose();
   assert.deepEqual(released, []);
 });
+
+test("hung close and hung force cannot consume the reserved exact-termination slice", async () => {
+  const calls: string[] = [];
+  let terminal = false;
+  const teardown = testHarnessInternals.dropIsolatedDatabase({
+    databaseName,
+    closeOwned: [{
+      close: async () => { await new Promise(() => undefined); },
+      forceClose: async () => { await new Promise(() => undefined); },
+      forceTerminate: async () => { terminal = true; calls.push("owned terminal"); },
+    }],
+    createAdminSession: () => ({
+      connect: async () => { calls.push("admin connected"); },
+      query: async (sql: string) => {
+        if (/pg_terminate_backend/iu.test(sql)) calls.push("exact terminated");
+        if (/select exists/iu.test(sql)) return { rows: [{ exists: false }] };
+        return { rows: [] };
+      },
+      close: async () => { calls.push("admin closed"); },
+      forceTerminate: async () => { calls.push("admin terminal"); },
+    }),
+    timeoutMs: 80,
+    retryDelayMs: 1,
+  });
+  await assert.rejects(Promise.race([
+    teardown,
+    delay(150).then(() => { throw new Error("cleanup exceeded its terminal deadline"); }),
+  ]), /^Error: Integration stage failed: owned database connections$/);
+  assert.equal(terminal, true);
+  assert.deepEqual(calls, ["admin connected", "exact terminated", "owned terminal", "admin closed"]);
+});
+
+test("hung admin connect is force-terminated and reaped before return", async () => {
+  const calls: string[] = [];
+  await assert.rejects(testHarnessInternals.dropIsolatedDatabase({
+    databaseName,
+    closeOwned: [],
+    createAdminSession: () => ({
+      connect: async () => { await new Promise(() => undefined); },
+      query: async () => { assert.fail("hung connect must not query"); },
+      close: async () => { await new Promise(() => undefined); },
+      forceTerminate: async () => { calls.push("admin reaped"); },
+    }),
+    timeoutMs: 60,
+    retryDelayMs: 1,
+  }), /^Error: Integration teardown failed: database drop, database admin close$/);
+  assert.deepEqual(calls, ["admin reaped"]);
+  const stable = [...calls];
+  await delay(30);
+  assert.deepEqual(calls, stable);
+});

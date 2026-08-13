@@ -48,6 +48,9 @@ test("protected CI command terminates stdout stderr and split-chunk credential l
     `const {readFileSync}=await import('node:fs'); const value=readFileSync(process.env.ROUND12_SECRET_FILE); const split=Math.floor(value.length/2); process.stdout.write(value.subarray(0,split)); setTimeout(()=>process.stdout.write(value.subarray(split)),20); setTimeout(()=>{},1000);`,
     `const {readFileSync}=await import('node:fs'); const value=readFileSync(process.env.ROUND12_SECRET_FILE); process.stdout.write(value.subarray(0,1)); setTimeout(()=>process.stderr.write('safe interleave'),10); setTimeout(()=>process.stdout.write(value.subarray(1)),20); setTimeout(()=>{},1000);`,
     `const {readFileSync}=await import('node:fs'); const value=readFileSync(process.env.ROUND12_SECRET_FILE); process.stderr.write(value.subarray(0,value.length-1)); setTimeout(()=>process.stdout.write('safe interleave'),10); setTimeout(()=>process.stderr.write(value.subarray(value.length-1)),20); setTimeout(()=>{},1000);`,
+    `const {readFileSync}=await import('node:fs'); const value=readFileSync(process.env.ROUND12_SECRET_FILE); const split=Math.floor(value.length/2); process.stdout.write(value.subarray(0,split)); setTimeout(()=>process.stderr.write(value.subarray(split)),20); setTimeout(()=>{},1000);`,
+    `const {readFileSync}=await import('node:fs'); const value=readFileSync(process.env.ROUND12_SECRET_FILE); const split=Math.floor(value.length/2); process.stderr.write(value.subarray(0,split)); setTimeout(()=>process.stdout.write(value.subarray(split)),20); setTimeout(()=>{},1000);`,
+    `const {readFileSync}=await import('node:fs'); const value=readFileSync(process.env.ROUND12_SECRET_FILE); const a=Math.floor(value.length/3); const b=a*2; process.stdout.write(value.subarray(0,a)); setTimeout(()=>process.stderr.write(value.subarray(a,b)),10); setTimeout(()=>process.stdout.write(value.subarray(b)),20); setTimeout(()=>{},1000);`,
   ];
   for (const source of cases) {
     const result = invoke(secretFile, source, environment);
@@ -56,4 +59,16 @@ test("protected CI command terminates stdout stderr and split-chunk credential l
     assert.equal(output.includes(Buffer.from(credential)), false);
     assert.equal(output.toString("utf8"), "protected CI command output rejected\n");
   }
+});
+
+test("protected CI command preserves safe chronological cross-stream interleaving", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "core-agent-protected-ci-interleave-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const secretFile = join(root, "database-password");
+  await writeFile(secretFile, randomBytes(32).toString("base64url"), { mode: 0o600 });
+  await chmod(secretFile, 0o600);
+  const result = invoke(secretFile, `process.stdout.write('alpha'); setTimeout(()=>process.stderr.write('beta'),10); setTimeout(()=>process.stdout.write('gamma'),20);`);
+  assert.equal(result.status, 0);
+  assert.equal(result.stdout.toString("utf8"), "alphagamma");
+  assert.equal(result.stderr.toString("utf8"), "beta");
 });

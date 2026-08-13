@@ -7,11 +7,11 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { Kysely, PostgresDialect, sql } from "kysely";
-import { Client, Pool } from "pg";
+import { Client, Pool, type PoolClient } from "pg";
 import { ProductEventSchema } from "@core-agent/contracts";
 import Schema from "typebox/schema";
 
-import { applyMigrations } from "../src/db/migrate.js";
+import { applyMigrations, migrationTestInternals } from "../src/db/migrate.js";
 import { createRuntimeDatabase, type RuntimeDatabase } from "../src/db/database.js";
 import {
   assertSchemaVersion,
@@ -697,13 +697,16 @@ test("schema 10 role prerequisite fails closed before an existing schema-9 upgra
   const v9Directory = await applyThroughSchema9();
   try {
     const migration = await readFile(join(migrationsDirectory, "010_identity_authority.sql"), "utf8");
-    await writeFile(
-      join(v9Directory, "010_identity_authority.sql"),
-      migration.replaceAll("core_agent_identity", "core_agent_identity_missing_for_test"),
-    );
+    const modified = migration.replaceAll("core_agent_identity", "core_agent_identity_missing_for_test");
+    await writeFile(join(v9Directory, "010_identity_authority.sql"), modified);
+    const manifests = new Map(migrationTestInternals.schemaManifests);
+    manifests.set(10, {
+      ...manifests.get(10)!,
+      checksum: (await import("node:crypto")).createHash("sha256").update(modified).digest("hex"),
+    });
 
     await assert.rejects(
-      applyMigrations(pool, v9Directory),
+      migrationTestInternals.applyMigrationsWithManifests(pool, v9Directory, manifests),
       /required database role core_agent_identity_missing_for_test is absent/,
     );
     assert.equal(await readSchemaVersion(db), 9);
@@ -1017,7 +1020,6 @@ test("recorded schema 10 startup reconverges dirty direct ACLs and remains idemp
   await applyMigrations(pool, migrationsDirectory);
   await pool.query("grant select, insert, update, delete on table private_identity_pii to core_agent_app");
   await pool.query("grant select, update, delete on table conversations, secret_references, runtime_containers to core_agent_identity");
-  await pool.query("create sequence acl_drift_sequence; grant all on sequence acl_drift_sequence to core_agent_app, core_agent_identity, public");
 
   await applyMigrations(pool, migrationsDirectory);
   await applyMigrations(pool, migrationsDirectory);
@@ -1030,18 +1032,127 @@ test("recorded schema 10 startup reconverges dirty direct ACLs and remains idemp
       assert.equal((await pool.query("select has_table_privilege('core_agent_identity'::text, format('public.%I', $1::text), $2::text) as allowed", [table, privilege])).rows[0]?.allowed, false);
     }
   }
-  for (const role of ["core_agent_app", "core_agent_identity"]) {
-    assert.equal((await pool.query("select has_sequence_privilege($1::text, 'public.acl_drift_sequence'::text, 'USAGE') as allowed", [role])).rows[0]?.allowed, false);
-  }
-  assert.equal((await pool.query(
-    "select has_sequence_privilege(0, 'public.acl_drift_sequence'::text, 'USAGE') as allowed",
-  )).rows[0]?.allowed, false);
+});
+
+test("recorded schema 10 fails closed on an undeclared sequence", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await pool.query("create sequence acl_drift_sequence");
+  await assert.rejects(applyMigrations(pool, migrationsDirectory), /schema 10 manifest validation failed: sequence catalog/);
 });
 
 test("recorded schema 10 convergence fails closed for a malformed partial identity catalog", async () => {
   await applyMigrations(pool, migrationsDirectory);
   await pool.query("drop table public_rate_limits");
   await assert.rejects(applyMigrations(pool, migrationsDirectory), /schema 10 ACL convergence failed/);
+});
+
+test("an unknown migration 011 is rejected before SQL execution or recording", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "core-agent-unknown-migration-"));
+  try {
+    await cp(migrationsDirectory, directory, { recursive: true });
+    await writeFile(join(directory, "011_unknown.sql"), "create table unknown_manifest_side_effect (id text primary key);\n");
+    await assert.rejects(applyMigrations(pool, directory), /no binary-owned schema manifest for migration 11/);
+    assert.equal((await pool.query("select to_regclass('public.unknown_manifest_side_effect')::text as relation")).rows[0]?.relation, null);
+    assert.equal((await pool.query("select to_regclass('public.core_agent_schema_migrations')::text as relation")).rows[0]?.relation, null);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a registered migration 011 validates and records atomically", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "core-agent-registered-migration-"));
+  try {
+    await cp(migrationsDirectory, directory, { recursive: true });
+    const sql = "create table registered_manifest_object (id text primary key);\n";
+    await writeFile(join(directory, "011_registered.sql"), sql);
+    const manifests = new Map(migrationTestInternals.schemaManifests);
+    manifests.set(11, {
+      version: 11,
+      name: "registered",
+      checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
+      relations: ["registered_manifest_object"],
+      sequences: [],
+      validateAndConverge: async (client: PoolClient) => {
+        const result = await client.query("select to_regclass('public.registered_manifest_object')::text as relation");
+        if (result.rows[0]?.relation !== "registered_manifest_object") throw new Error("schema 11 manifest validation failed");
+      },
+    });
+    await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
+    assert.equal((await pool.query("select max(version) as version from core_agent_schema_migrations")).rows[0]?.version, 11);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a registered migration manifest failure rolls back both schema and record", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "core-agent-failing-manifest-"));
+  try {
+    await cp(migrationsDirectory, directory, { recursive: true });
+    const sql = "create table rolled_back_manifest_object (id text primary key);\n";
+    await writeFile(join(directory, "011_registered.sql"), sql);
+    const manifests = new Map(migrationTestInternals.schemaManifests);
+    manifests.set(11, {
+      version: 11,
+      name: "registered",
+      checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
+      relations: ["rolled_back_manifest_object"],
+      sequences: [],
+      validateAndConverge: async () => { throw new Error("schema 11 manifest validation failed"); },
+    });
+    await assert.rejects(migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests), /schema 11 manifest validation failed/);
+    assert.equal((await pool.query("select to_regclass('public.rolled_back_manifest_object')::text as relation")).rows[0]?.relation, null);
+    assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 11")).rows[0]?.count, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("recorded schema 10 rejects missing disabled or rebound authority trigger", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await pool.query("alter table memberships disable trigger memberships_ordinary_actor_authority_check");
+  await assert.rejects(applyMigrations(pool, migrationsDirectory), /schema 10 manifest validation failed: trigger/);
+});
+
+test("recorded schema 10 rejects altered constraint index function owner ACL sequence and column shapes", async (t) => {
+  const mutations: Array<[string, string]> = [
+    ["constraint", "alter table memberships drop constraint memberships_source_check"],
+    ["index", "drop index memberships_ordinary_actor_authority_idx"],
+    ["function definition", `create or replace function enforce_core_session_revoked_deletion() returns trigger language plpgsql as $$ begin return old; end $$`],
+    ["catalog", "alter table auth_subjects owner to core_agent_migrator"],
+    ["table revoke", "grant select on private_identity_pii to public"],
+    ["sequence catalog", "create sequence undeclared_manifest_sequence"],
+    ["column", "alter table auth_subjects alter column provider_subject drop not null"],
+  ];
+  for (const [category, mutation] of mutations) {
+    await t.test(category, async () => {
+      await resetDatabase();
+      await applyMigrations(pool, migrationsDirectory);
+      await pool.query(mutation);
+      if (category === "table revoke") {
+        await applyMigrations(pool, migrationsDirectory);
+        assert.equal((await pool.query("select has_table_privilege('public', 'private_identity_pii', 'select') as allowed")).rows[0]?.allowed, false);
+      } else {
+        await assert.rejects(applyMigrations(pool, migrationsDirectory), /schema 10 (manifest validation|ACL convergence) failed/);
+      }
+    });
+  }
+});
+
+test("schema 10 authority functions pin the reviewed search path", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  const functions = await pool.query<{ name: string; config: string[] | null }>(
+    `select proname as name, proconfig as config
+     from pg_proc
+     where pronamespace = 'public'::regnamespace
+       and proname = any($1::text[])
+     order by proname`,
+    [["enforce_core_session_revoked_deletion", "enforce_identity_worker_job_kind", "enforce_ordinary_membership_actor_authority"]],
+  );
+  assert.deepEqual(functions.rows, [
+    { name: "enforce_core_session_revoked_deletion", config: ["search_path=pg_catalog, public"] },
+    { name: "enforce_identity_worker_job_kind", config: ["search_path=pg_catalog, public"] },
+    { name: "enforce_ordinary_membership_actor_authority", config: ["search_path=pg_catalog, public"] },
+  ]);
 });
 
 test("real Identity login commits and atomically rolls back the Task 3 cross-table graph", async () => {

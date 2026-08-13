@@ -319,10 +319,19 @@ grant select, insert, update, delete on table private_identity_pii to core_agent
 grant select, update, delete on table conversations, secret_references, runtime_containers to core_agent_identity;
 grant temporary on database core_agent_runtime to core_agent_app, core_agent_identity, core_agent_migrator;
 grant create on schema public to public, core_agent_app, core_agent_identity;
-create sequence if not exists topology_acl_drift_sequence;
-alter sequence topology_acl_drift_sequence owner to core_agent_migrator;
-grant all on sequence topology_acl_drift_sequence to public, core_agent_app, core_agent_identity;
+create sequence topology_undeclared_sequence;
 SQL`,
+      );
+      command(
+        composeArguments(project, "run", "--rm", "--no-deps", "migrate"),
+        childEnvironment,
+        credentialValues,
+        1,
+      );
+      compose(
+        "run", "--rm", "--no-deps", "--user", "999:999", "--entrypoint", "sh", "postgres", "-ceu",
+        `export PGPASSWORD="$(cat /run/core-agent/database-credentials/database-password)"
+         exec psql -X -w -v ON_ERROR_STOP=1 -h postgres -U core_agent_bootstrap -d core_agent_runtime -c 'drop sequence topology_undeclared_sequence'`,
       );
       for (const service of ["identity-role-bootstrap", "migrate", "identity-role-bootstrap", "migrate"]) {
         compose("run", "--rm", "--no-deps", service);
@@ -337,12 +346,10 @@ SQL`,
              has_table_privilege('core_agent_identity', 'secret_references', 'delete')::int || '|' ||
              has_database_privilege('core_agent_app', current_database(), 'temporary')::int || '|' ||
              has_schema_privilege('public', 'public', 'create')::int || '|' ||
-             has_schema_privilege('core_agent_identity', 'public', 'create')::int || '|' ||
-             has_sequence_privilege(0, 'topology_acl_drift_sequence', 'usage')::int || '|' ||
-             has_sequence_privilege('core_agent_identity', 'topology_acl_drift_sequence', 'usage')::int
+             has_schema_privilege('core_agent_identity', 'public', 'create')::int
          "`,
       ).trim();
-      assert.match(acl, /0\|0\|0\|0\|0\|0\|0\|0/u);
+      assert.match(acl, /0\|0\|0\|0\|0\|0/u);
     }
 
     const applicationProbe = `
