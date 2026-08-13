@@ -1022,7 +1022,7 @@ test("fresh CI-equivalent protects command output and proves cleanup after succe
   assert.match(text, /assert\.rejects\([\s\S]*injected CI-equivalent failure/u);
   assert.match(text, /protectedRun\("npm", \["run", "test:postgres"\]/u);
   assert.match(text, /protectedRun\("npm", \["run", "test:integration"\]/u);
-  assert.match(text, /assertNodeTestSummaries\(postgresOutput, \[197, 14\]\)/u);
+  assert.match(text, /assertNodeTestSummaries\(postgresOutput, \[219, 14\]\)/u);
   assert.match(text, /assertNodeTestSummaries\(integrationOutput, \[78\]\)/u);
   assert.match(text, /protectedRun\("docker", \["logs", container\]/u);
   assert.match(text, /injectedOutputLeak/u);

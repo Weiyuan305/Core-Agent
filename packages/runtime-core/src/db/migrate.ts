@@ -23,18 +23,61 @@ type RoutineAclManifestEntry = readonly [
   grantee: string, privilege: "EXECUTE", grantable: boolean,
 ];
 
+type ColumnShape = Readonly<{
+  schema: "public";
+  relation: string;
+  relkind: Exclude<RelationKind, "S">;
+  name: string;
+  position: number;
+  type: string;
+  notNull: boolean;
+  defaultExpression: string;
+}>;
+type ConstraintShape = Readonly<{
+  schema: "public";
+  relation: string;
+  relkind: "r" | "p";
+  name: string;
+  type: string;
+  validated: boolean;
+  definition: string;
+}>;
+type IndexShape = Readonly<{
+  schema: "public";
+  relation: string;
+  relkind: "r" | "p" | "m";
+  name: string;
+  definition: string;
+}>;
+type ShapeAmendment<T> = Readonly<{
+  action: "add" | "replace" | "revoke";
+  before?: T;
+  after?: T;
+}>;
+type LegacyColumnShape = readonly [relation: string, name: string, type: string, notNull: boolean, defaultExpression: string];
+type LegacyConstraintShape = readonly [relation: string, name: string, type: string, validated: boolean, definition: string];
+type LegacyIndexShape = readonly [relation: string, name: string, definition: string];
+
 interface SchemaManifest {
   readonly checksum: string;
-  readonly columns?: readonly (readonly [relation: string, name: string, type: string, notNull: boolean, defaultExpression: string])[];
-  readonly constraints?: readonly (readonly [relation: string, name: string, type: string, validated: boolean, definition: string])[];
-  readonly indexes?: readonly (readonly [relation: string, name: string, definition: string])[];
+  readonly columns?: readonly (ColumnShape | LegacyColumnShape)[];
+  readonly columnAmendments?: readonly ShapeAmendment<ColumnShape>[];
+  readonly constraints?: readonly (ConstraintShape | LegacyConstraintShape)[];
+  readonly constraintAmendments?: readonly ShapeAmendment<ConstraintShape>[];
+  readonly indexes?: readonly (IndexShape | LegacyIndexShape)[];
+  readonly indexAmendments?: readonly ShapeAmendment<IndexShape>[];
   readonly name: string;
   readonly objects?: readonly RelationManifestEntry[];
   readonly relationAcls?: readonly RelationAclManifestEntry[];
   readonly routines?: readonly (readonly [kind: string, name: string, arguments: string, result: string, securityDefiner: boolean, config: readonly string[], definitionHash: string])[];
   readonly routineAcls?: readonly RoutineAclManifestEntry[];
   readonly triggers?: readonly (readonly [relation: string, name: string, enabled: string, definition: string])[];
-  readonly validateAndConverge?: (client: import("pg").PoolClient, maximumVersion: number) => Promise<void>;
+  readonly validateAndConverge?: (
+    client: import("pg").PoolClient,
+    maximumVersion: number,
+    manifests: ReadonlyMap<number, SchemaManifest>,
+    throughVersion: number,
+  ) => Promise<void>;
   readonly version: number;
 }
 
@@ -123,7 +166,12 @@ const schema10Routines = [
   ["f", "enforce_ordinary_membership_actor_authority", "", "trigger", false, ["search_path=pg_catalog, public"], "a19d30d4b4882b906aabeea0f680d0cd"],
 ] as const;
 
-async function convergeSchema10Acls(client: import("pg").PoolClient, maximumVersion = 10): Promise<void> {
+async function convergeSchema10Acls(
+  client: import("pg").PoolClient,
+  maximumVersion = 10,
+  manifests: ReadonlyMap<number, SchemaManifest> = schemaManifests,
+  throughVersion = maximumVersion,
+): Promise<void> {
   const catalog = await client.query<{ owner_matches: boolean; table_name: string }>(
     `select relation.relname as table_name, owner.rolname = current_user as owner_matches
      from pg_class relation
@@ -179,40 +227,7 @@ async function convergeSchema10Acls(client: import("pg").PoolClient, maximumVers
     || JSON.stringify(row.config) !== JSON.stringify(["search_path=pg_catalog, public"]))) {
     throw new Error("schema 10 manifest validation failed: function");
   }
-  const shape = await client.query<{ column_hash: string; constraint_hash: string; index_hash: string }>(
-    `select
-       (select md5(string_agg(format('%s|%s|%s|%s|%s', relation.relname, attribute.attname,
-          format_type(attribute.atttypid, attribute.atttypmod), attribute.attnotnull,
-          coalesce(pg_get_expr(default_value.adbin, default_value.adrelid), '')), E'\\n'
-          order by relation.relname, attribute.attnum))
-        from pg_class relation
-        join pg_namespace namespace on namespace.oid = relation.relnamespace
-        join pg_attribute attribute on attribute.attrelid = relation.oid and attribute.attnum > 0 and not attribute.attisdropped
-        left join pg_attrdef default_value on default_value.adrelid = relation.oid and default_value.adnum = attribute.attnum
-        where namespace.nspname = 'public' and relation.relname = any($1::text[])) as column_hash,
-       (select md5(string_agg(format('%s|%s|%s|%s|%s', catalog_constraint.conrelid::regclass::text,
-          catalog_constraint.conname, catalog_constraint.contype, catalog_constraint.convalidated,
-          pg_get_constraintdef(catalog_constraint.oid, true)), E'\\n'
-          order by catalog_constraint.conrelid::regclass::text, catalog_constraint.conname))
-        from pg_constraint catalog_constraint
-        where catalog_constraint.connamespace = 'public'::regnamespace
-          and catalog_constraint.conrelid::regclass::text = any($1::text[])
-          ) as constraint_hash,
-       (select md5(string_agg(format('%s|%s|%s', indexes.tablename, indexes.indexname, indexes.indexdef), E'\\n'
-          order by indexes.tablename, indexes.indexname))
-        from pg_indexes indexes
-        where indexes.schemaname = 'public' and indexes.tablename = any($1::text[])) as index_hash`,
-    [schema10Tables],
-  );
-  if (shape.rows[0]?.column_hash !== "26c38a64c8f7a6473cfd916bf896a2be") {
-    throw new Error("schema 10 manifest validation failed: column");
-  }
-  if (shape.rows[0]?.constraint_hash !== "3c16529462719fc465cb21215eba4569") {
-    throw new Error("schema 10 manifest validation failed: constraint");
-  }
-  if (shape.rows[0]?.index_hash !== "e35bb22408d7b171971cf0cd4aa4b5f5") {
-    throw new Error("schema 10 manifest validation failed: index");
-  }
+  await validateSchema10BaseShape(client, manifests, throughVersion);
   const definitions = await client.query<{ definition_hash: string; name: string }>(
     `select proname as name, md5(pg_get_functiondef(oid)) as definition_hash
      from pg_proc
@@ -301,6 +316,268 @@ function quoteIdentifier(value: string): string {
   return `"${value}"`;
 }
 
+type OwnedObject = Readonly<{ kind: RelationKind; version: number }>;
+
+function orderedManifests(manifests: ReadonlyMap<number, SchemaManifest>, throughVersion: number): SchemaManifest[] {
+  return [...manifests.values()]
+    .filter((manifest) => manifest.version <= throughVersion)
+    .sort((left, right) => left.version - right.version);
+}
+
+function collectOwnedObjects(manifests: ReadonlyMap<number, SchemaManifest>, throughVersion: number): Map<string, OwnedObject> {
+  const owned = new Map<string, OwnedObject>();
+  for (const manifest of orderedManifests(manifests, throughVersion)) {
+    for (const [schema, name, kind] of manifest.objects ?? []) {
+      const key = `${schema}|${name}`;
+      if (owned.has(key)) throw new Error("migration manifest contains duplicate object ownership");
+      owned.set(key, { kind, version: manifest.version });
+    }
+  }
+  return owned;
+}
+
+function normalizeColumn(
+  entry: ColumnShape | LegacyColumnShape,
+  index: number,
+  owned: ReadonlyMap<string, OwnedObject>,
+): ColumnShape {
+  if (!Array.isArray(entry)) return entry as ColumnShape;
+  const [relation, name, type, notNull, defaultExpression] = entry;
+  const owner = owned.get(`public|${relation}`);
+  if (owner === undefined || owner.kind === "S") throw new Error("migration manifest contains a column for an unowned relation");
+  return { schema: "public", relation, relkind: owner.kind, name, position: index + 1, type, notNull, defaultExpression };
+}
+
+function normalizeConstraint(
+  entry: ConstraintShape | LegacyConstraintShape,
+  _index: number,
+  owned: ReadonlyMap<string, OwnedObject>,
+): ConstraintShape {
+  if (!Array.isArray(entry)) return entry as ConstraintShape;
+  const [relation, name, type, validated, definition] = entry;
+  const owner = owned.get(`public|${relation}`);
+  if (owner === undefined || (owner.kind !== "r" && owner.kind !== "p")) {
+    throw new Error("migration manifest contains a constraint for an unsupported relation");
+  }
+  return { schema: "public", relation, relkind: owner.kind, name, type, validated, definition };
+}
+
+function normalizeIndex(entry: IndexShape | LegacyIndexShape, _index: number, owned: ReadonlyMap<string, OwnedObject>): IndexShape {
+  if (!Array.isArray(entry)) return entry as IndexShape;
+  const [relation, name, definition] = entry;
+  const owner = owned.get(`public|${relation}`);
+  if (owner === undefined || !new Set<RelationKind>(["r", "p", "m"]).has(owner.kind)) {
+    throw new Error("migration manifest contains an index for an unsupported relation");
+  }
+  return { schema: "public", relation, relkind: owner.kind as IndexShape["relkind"], name, definition };
+}
+
+function shapeKey(shape: { schema: string; relation: string; relkind: string; name: string }): string {
+  return `${shape.schema}|${shape.relation}|${shape.relkind}|${shape.name}`;
+}
+
+function sameShape(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function foldShapes<T extends { schema: "public"; relation: string; relkind: string; name: string }>(
+  manifests: ReadonlyMap<number, SchemaManifest>,
+  throughVersion: number,
+  field: "columns" | "constraints" | "indexes",
+  amendmentField: "columnAmendments" | "constraintAmendments" | "indexAmendments",
+  normalize: (entry: never, index: number, owned: ReadonlyMap<string, OwnedObject>) => T,
+): Map<string, T> {
+  const owned = collectOwnedObjects(manifests, throughVersion);
+  const folded = new Map<string, T>();
+  for (const manifest of orderedManifests(manifests, throughVersion)) {
+    for (const [index, entry] of (manifest[field] ?? []).entries()) {
+      const normalizedIndex = field === "columns" && Array.isArray(entry)
+        ? (manifest.columns ?? []).slice(0, index).filter((candidate) =>
+          Array.isArray(candidate) && candidate[0] === entry[0]).length
+        : index;
+      const shape = normalize(entry as never, normalizedIndex, owned);
+      const object = owned.get(`${shape.schema}|${shape.relation}`);
+      if (object?.version !== manifest.version || object.kind !== shape.relkind) {
+        throw new Error(`schema ${manifest.version} manifest validation failed: ${field} ownership`);
+      }
+      const key = shapeKey(shape);
+      if (folded.has(key)) throw new Error(`schema ${manifest.version} manifest validation failed: duplicate ${field}`);
+      folded.set(key, shape);
+    }
+    for (const amendment of (manifest[amendmentField] ?? []) as unknown as readonly ShapeAmendment<T>[]) {
+      const before = amendment.before;
+      const after = amendment.after;
+      const shape = after ?? before;
+      if (shape === undefined) throw new Error(`schema ${manifest.version} manifest validation failed: empty ${field} amendment`);
+      const object = owned.get(`${shape.schema}|${shape.relation}`);
+      if (object === undefined || object.kind !== shape.relkind || object.version >= manifest.version) {
+        throw new Error(`schema ${manifest.version} manifest validation failed: ${field} amendment ownership`);
+      }
+      const key = shapeKey(shape);
+      const current = folded.get(key);
+      if (amendment.action === "add") {
+        if (before !== undefined || after === undefined || current !== undefined) {
+          throw new Error(`schema ${manifest.version} manifest validation failed: invalid ${field} add`);
+        }
+        folded.set(key, after);
+      } else if (amendment.action === "replace") {
+        if (before === undefined || after === undefined || shapeKey(before) !== shapeKey(after)
+          || (current !== undefined && !sameShape(current, before))) {
+          throw new Error(`schema ${manifest.version} manifest validation failed: invalid ${field} replace`);
+        }
+        folded.set(key, after);
+      } else {
+        if (before === undefined || after !== undefined || (current !== undefined && !sameShape(current, before))) {
+          throw new Error(`schema ${manifest.version} manifest validation failed: invalid ${field} revoke`);
+        }
+        folded.delete(key);
+      }
+    }
+  }
+  return folded;
+}
+
+function validateManifestDeclarations(manifests: ReadonlyMap<number, SchemaManifest>, throughVersion: number): void {
+  collectOwnedObjects(manifests, throughVersion);
+  foldShapes(manifests, throughVersion, "columns", "columnAmendments", normalizeColumn as never);
+  foldShapes(manifests, throughVersion, "constraints", "constraintAmendments", normalizeConstraint as never);
+  foldShapes(manifests, throughVersion, "indexes", "indexAmendments", normalizeIndex as never);
+  for (const manifest of orderedManifests(manifests, throughVersion)) {
+    for (const [, schema, name, kind, arguments_] of manifest.routineAcls ?? []) {
+      quoteIdentifier(schema);
+      quoteIdentifier(name);
+      if (!new Set(["f", "p"]).has(kind) || /\0|;|--|\/\*|\*\//u.test(arguments_)) {
+        throw new Error(`schema ${manifest.version} manifest validation failed: routine ACL declaration`);
+      }
+    }
+  }
+}
+
+function reverseSchema10Amendments<T extends { schema: "public"; relation: string; relkind: string; name: string }>(
+  current: Map<string, T>,
+  manifests: ReadonlyMap<number, SchemaManifest>,
+  throughVersion: number,
+  field: "columnAmendments" | "constraintAmendments" | "indexAmendments",
+): Map<string, T> {
+  const owned = collectOwnedObjects(manifests, throughVersion);
+  for (const manifest of orderedManifests(manifests, throughVersion).reverse()) {
+    for (const amendment of [...(manifest[field] ?? [])].reverse() as unknown as ShapeAmendment<T>[]) {
+      const shape = amendment.after ?? amendment.before;
+      if (shape === undefined) continue;
+      const object = owned.get(`${shape.schema}|${shape.relation}`);
+      if (object === undefined || object.version > 10) continue;
+      const key = shapeKey(shape);
+      const existing = current.get(key);
+      if (amendment.action === "add") {
+        if (amendment.after === undefined || !sameShape(existing, amendment.after)) {
+          throw new Error(`schema 10 manifest validation failed: ${field.replace("Amendments", "")}`);
+        }
+        current.delete(key);
+      } else if (amendment.action === "replace") {
+        if (amendment.before === undefined || amendment.after === undefined || !sameShape(existing, amendment.after)) {
+          throw new Error(`schema 10 manifest validation failed: ${field.replace("Amendments", "")}`);
+        }
+        current.set(key, amendment.before);
+      } else {
+        if (amendment.before === undefined || existing !== undefined) {
+          throw new Error(`schema 10 manifest validation failed: ${field.replace("Amendments", "")}`);
+        }
+        current.set(key, amendment.before);
+      }
+    }
+  }
+  return current;
+}
+
+function md5Lines(lines: readonly string[]): string {
+  return createHash("md5").update(lines.join("\n")).digest("hex");
+}
+
+async function validateSchema10BaseShape(
+  client: import("pg").PoolClient,
+  manifests: ReadonlyMap<number, SchemaManifest>,
+  throughVersion: number,
+): Promise<void> {
+  const columnRows = (await client.query<{
+    default_expression: string; kind: Exclude<RelationKind, "S">; name: string; not_null: boolean;
+    position: number; relation: string; schema: "public"; type: string;
+  }>(
+    `select namespace.nspname as schema, relation.relname as relation, relation.relkind as kind,
+            attribute.attname as name, attribute.attnum as position,
+            format_type(attribute.atttypid, attribute.atttypmod) as type,
+            attribute.attnotnull as not_null,
+            coalesce(pg_get_expr(default_value.adbin, default_value.adrelid), '') as default_expression
+     from pg_class relation join pg_namespace namespace on namespace.oid = relation.relnamespace
+     join pg_attribute attribute on attribute.attrelid = relation.oid
+       and attribute.attnum > 0 and not attribute.attisdropped
+     left join pg_attrdef default_value on default_value.adrelid = relation.oid and default_value.adnum = attribute.attnum
+     where namespace.nspname = 'public' and relation.relname = any($1::text[])
+     order by relation.relname, attribute.attnum`,
+    [schema10Tables],
+  )).rows.map((row) => ({
+    schema: row.schema, relation: row.relation, relkind: row.kind, name: row.name, position: row.position,
+    type: row.type, notNull: row.not_null, defaultExpression: row.default_expression,
+  } satisfies ColumnShape));
+  const baseColumns = reverseSchema10Amendments(
+    new Map(columnRows.map((shape) => [shapeKey(shape), shape])), manifests, throughVersion, "columnAmendments",
+  );
+  const columnHash = md5Lines([...baseColumns.values()]
+    .sort((left, right) => left.relation.localeCompare(right.relation) || left.position - right.position)
+    .map((shape) => `${shape.relation}|${shape.name}|${shape.type}|${shape.notNull ? "t" : "f"}|${shape.defaultExpression}`));
+  if (columnHash !== "26c38a64c8f7a6473cfd916bf896a2be") {
+    throw new Error("schema 10 manifest validation failed: column");
+  }
+
+  const constraintRows = (await client.query<{
+    definition: string; kind: "r" | "p"; name: string; relation: string; schema: "public"; type: string; validated: boolean;
+  }>(
+    `select namespace.nspname as schema, relation.relname as relation, relation.relkind as kind,
+            catalog_constraint.conname as name, catalog_constraint.contype as type,
+            catalog_constraint.convalidated as validated, pg_get_constraintdef(catalog_constraint.oid, true) as definition
+     from pg_constraint catalog_constraint join pg_class relation on relation.oid = catalog_constraint.conrelid
+     join pg_namespace namespace on namespace.oid = relation.relnamespace
+     where namespace.nspname = 'public' and relation.relname = any($1::text[])
+     order by relation.relname, catalog_constraint.conname`,
+    [schema10Tables],
+  )).rows.map((row) => ({
+    schema: row.schema, relation: row.relation, relkind: row.kind, name: row.name,
+    type: row.type, validated: row.validated, definition: row.definition,
+  } satisfies ConstraintShape));
+  const baseConstraints = reverseSchema10Amendments(
+    new Map(constraintRows.map((shape) => [shapeKey(shape), shape])), manifests, throughVersion, "constraintAmendments",
+  );
+  const constraintHash = md5Lines([...baseConstraints.values()]
+    .sort((left, right) => left.relation.localeCompare(right.relation) || left.name.localeCompare(right.name))
+    .map((shape) => `${shape.relation}|${shape.name}|${shape.type}|${shape.validated ? "t" : "f"}|${shape.definition}`));
+  if (constraintHash !== "3c16529462719fc465cb21215eba4569") {
+    throw new Error("schema 10 manifest validation failed: constraint");
+  }
+
+  const indexRows = (await client.query<{
+    definition: string; kind: "r" | "p" | "m"; name: string; relation: string; schema: "public";
+  }>(
+    `select namespace.nspname as schema, relation.relname as relation, relation.relkind as kind,
+            index_relation.relname as name, pg_get_indexdef(index_relation.oid) as definition
+     from pg_index catalog_index join pg_class relation on relation.oid = catalog_index.indrelid
+     join pg_namespace namespace on namespace.oid = relation.relnamespace
+     join pg_class index_relation on index_relation.oid = catalog_index.indexrelid
+     where namespace.nspname = 'public' and relation.relname = any($1::text[])
+     order by relation.relname, index_relation.relname`,
+    [schema10Tables],
+  )).rows.map((row) => ({
+    schema: row.schema, relation: row.relation, relkind: row.kind, name: row.name, definition: row.definition,
+  } satisfies IndexShape));
+  const baseIndexes = reverseSchema10Amendments(
+    new Map(indexRows.map((shape) => [shapeKey(shape), shape])), manifests, throughVersion, "indexAmendments",
+  );
+  const indexHash = md5Lines([...baseIndexes.values()]
+    .sort((left, right) => left.relation.localeCompare(right.relation) || left.name.localeCompare(right.name))
+    .map((shape) => `${shape.relation}|${shape.name}|${shape.definition}`));
+  if (indexHash !== "e35bb22408d7b171971cf0cd4aa4b5f5") {
+    throw new Error("schema 10 manifest validation failed: index");
+  }
+}
+
 async function convergeManifestAcls(client: import("pg").PoolClient, manifest: SchemaManifest): Promise<void> {
   // Schema 10 has a single set-based, fail-closed convergence routine above. Forward manifests
   // use the same declarative rules directly so their SQL and reviewed ACL state remain atomic.
@@ -319,17 +596,29 @@ async function convergeManifestAcls(client: import("pg").PoolClient, manifest: S
     await client.query(`${verb} ${privilege} on ${target} ${quoteIdentifier(schema)}.${quoteIdentifier(name)} ${suffix} ${grantee === "PUBLIC" ? "PUBLIC" : quoteIdentifier(grantee)}${disposition === "grant" && grantable ? " with grant option" : ""}`);
   }
   for (const [disposition, schema, name, kind, arguments_, grantee, privilege, grantable] of manifest.routineAcls ?? []) {
-    if (!new Set(["f", "p"]).has(kind) || !/^[a-z0-9_, ]*$/u.test(arguments_)
+    if (!new Set(["f", "p"]).has(kind) || /\0|;|--|\/\*|\*\//u.test(arguments_)
       || !new Set(["PUBLIC", "core_agent_app", "core_agent_identity", "core_agent_worker"]).has(grantee)
       || privilege !== "EXECUTE" || (disposition === "revoke" && grantable)) {
       throw new Error(`schema ${manifest.version} manifest validation failed: routine ACL declaration`);
     }
+    const matches = await client.query<{ identity: string }>(
+      `select format('%I.%I(%s)', namespace.nspname, routine.proname,
+          pg_get_function_identity_arguments(routine.oid)) as identity
+       from pg_proc routine join pg_namespace namespace on namespace.oid = routine.pronamespace
+       where namespace.nspname = $1 and routine.proname = $2 and routine.prokind = $3
+         and pg_get_function_identity_arguments(routine.oid) = $4`,
+      [schema, name, kind, arguments_],
+    );
+    if (matches.rows.length !== 1) {
+      throw new Error(`schema ${manifest.version} manifest validation failed: routine ACL identity`);
+    }
+    const identity = matches.rows[0]!.identity;
     const verb = disposition === "grant" ? "grant" : "revoke";
     const suffix = disposition === "grant" ? "to" : "from";
     if (disposition === "grant") {
-      await client.query(`revoke grant option for EXECUTE on ${kind === "p" ? "procedure" : "function"} ${quoteIdentifier(schema)}.${quoteIdentifier(name)}(${arguments_}) from ${grantee === "PUBLIC" ? "PUBLIC" : quoteIdentifier(grantee)}`);
+      await client.query(`revoke grant option for EXECUTE on ${kind === "p" ? "procedure" : "function"} ${identity} from ${grantee === "PUBLIC" ? "PUBLIC" : quoteIdentifier(grantee)}`);
     }
-    await client.query(`${verb} EXECUTE on ${kind === "p" ? "procedure" : "function"} ${quoteIdentifier(schema)}.${quoteIdentifier(name)}(${arguments_}) ${suffix} ${grantee === "PUBLIC" ? "PUBLIC" : quoteIdentifier(grantee)}${disposition === "grant" && grantable ? " with grant option" : ""}`);
+    await client.query(`${verb} EXECUTE on ${kind === "p" ? "procedure" : "function"} ${identity} ${suffix} ${grantee === "PUBLIC" ? "PUBLIC" : quoteIdentifier(grantee)}${disposition === "grant" && grantable ? " with grant option" : ""}`);
   }
 }
 
@@ -428,62 +717,96 @@ async function validateRegisteredCatalog(
     throw new Error(`schema ${throughVersion} manifest validation failed: routine ACL`);
   }
 
-  const futureRelations = [...manifests.values()]
-    .filter((manifest) => manifest.version > 10 && manifest.version <= throughVersion)
-    .flatMap((manifest) => manifest.objects ?? [])
-    .filter((entry) => entry[2] === "r" || entry[2] === "p")
-    .map((entry) => entry[1])
-    .sort();
-  const expectedColumns = [...manifests.values()]
-    .filter((manifest) => manifest.version > 10 && manifest.version <= throughVersion)
-    .flatMap((manifest) => manifest.columns ?? [])
-    .sort((left, right) => `${left[0]}|${left[1]}`.localeCompare(`${right[0]}|${right[1]}`));
-  const actualColumns = futureRelations.length === 0 ? [] : (await client.query<{
-    default_expression: string; name: string; not_null: boolean; relation: string; type: string;
+  const ownedObjects = collectOwnedObjects(manifests, throughVersion);
+  const forwardRelationKeys = new Set([...ownedObjects.entries()]
+    .filter(([, object]) => object.version > 10 && object.kind !== "S")
+    .map(([key]) => key));
+  const amendmentKeys = <T extends { schema: string; relation: string; relkind: string; name: string }>(
+    field: "columnAmendments" | "constraintAmendments" | "indexAmendments",
+  ): Set<string> => new Set(orderedManifests(manifests, throughVersion).flatMap((manifest) => {
+    const amendments = (manifest[field] ?? []) as unknown as readonly ShapeAmendment<T>[];
+    return amendments.flatMap((amendment) => [amendment.before, amendment.after]
+      .filter((shape): shape is T => shape !== undefined).map((shape) => shapeKey(shape)));
+  }));
+
+  const expectedColumns = [...foldShapes<ColumnShape>(
+    manifests, throughVersion, "columns", "columnAmendments", normalizeColumn as never,
+  ).values()].filter((shape) => forwardRelationKeys.has(`${shape.schema}|${shape.relation}`)
+    || amendmentKeys<ColumnShape>("columnAmendments").has(shapeKey(shape)))
+    .sort((left, right) => shapeKey(left).localeCompare(shapeKey(right)) || left.position - right.position);
+  const columnAmendmentKeys = amendmentKeys<ColumnShape>("columnAmendments");
+  const actualColumns = (await client.query<{
+    default_expression: string; kind: Exclude<RelationKind, "S">; name: string; not_null: boolean;
+    position: number; relation: string; schema: "public"; type: string;
   }>(
-    `select relation.relname as relation, attribute.attname as name,
+    `select namespace.nspname as schema, relation.relname as relation, relation.relkind as kind,
+            attribute.attname as name, attribute.attnum as position,
             format_type(attribute.atttypid, attribute.atttypmod) as type,
             attribute.attnotnull as not_null,
             coalesce(pg_get_expr(default_value.adbin, default_value.adrelid), '') as default_expression
-     from pg_class relation join pg_attribute attribute on attribute.attrelid = relation.oid
+     from pg_class relation join pg_namespace namespace on namespace.oid = relation.relnamespace
+     join pg_attribute attribute on attribute.attrelid = relation.oid
        and attribute.attnum > 0 and not attribute.attisdropped
      left join pg_attrdef default_value on default_value.adrelid = relation.oid and default_value.adnum = attribute.attnum
-     where relation.relnamespace = 'public'::regnamespace and relation.relname = any($1::text[])
-     order by relation.relname, attribute.attnum`,
-    [futureRelations],
-  )).rows.map((row) => [row.relation, row.name, row.type, row.not_null, row.default_expression] as const);
+     where namespace.nspname = 'public' and relation.relkind in ('r', 'p', 'v', 'm')
+     order by namespace.nspname, relation.relname, relation.relkind, attribute.attnum`,
+  )).rows.map((row) => ({
+    schema: row.schema, relation: row.relation, relkind: row.kind, name: row.name, position: row.position,
+    type: row.type, notNull: row.not_null, defaultExpression: row.default_expression,
+  } satisfies ColumnShape)).filter((shape) => forwardRelationKeys.has(`${shape.schema}|${shape.relation}`)
+    || columnAmendmentKeys.has(shapeKey(shape)))
+    .sort((left, right) => shapeKey(left).localeCompare(shapeKey(right)) || left.position - right.position);
   if (JSON.stringify(actualColumns) !== JSON.stringify(expectedColumns)) {
     throw new Error(`schema ${throughVersion} manifest validation failed: column catalog`);
   }
-  const expectedConstraints = [...manifests.values()]
-    .filter((manifest) => manifest.version > 10 && manifest.version <= throughVersion)
-    .flatMap((manifest) => manifest.constraints ?? [])
-    .sort((left, right) => `${left[0]}|${left[1]}`.localeCompare(`${right[0]}|${right[1]}`));
-  const actualConstraints = futureRelations.length === 0 ? [] : (await client.query<{
-    definition: string; name: string; relation: string; type: string; validated: boolean;
+
+  const expectedConstraints = [...foldShapes<ConstraintShape>(
+    manifests, throughVersion, "constraints", "constraintAmendments", normalizeConstraint as never,
+  ).values()].filter((shape) => forwardRelationKeys.has(`${shape.schema}|${shape.relation}`)
+    || amendmentKeys<ConstraintShape>("constraintAmendments").has(shapeKey(shape)))
+    .sort((left, right) => shapeKey(left).localeCompare(shapeKey(right)));
+  const constraintAmendmentKeys = amendmentKeys<ConstraintShape>("constraintAmendments");
+  const actualConstraints = (await client.query<{
+    definition: string; kind: "r" | "p"; name: string; relation: string; schema: "public"; type: string; validated: boolean;
   }>(
-    `select catalog_constraint.conrelid::regclass::text as relation, catalog_constraint.conname as name,
-            catalog_constraint.contype as type, catalog_constraint.convalidated as validated,
-            pg_get_constraintdef(catalog_constraint.oid, true) as definition
-     from pg_constraint catalog_constraint
-     where catalog_constraint.connamespace = 'public'::regnamespace
-       and catalog_constraint.conrelid::regclass::text = any($1::text[])
-     order by catalog_constraint.conrelid::regclass::text, catalog_constraint.conname`,
-    [futureRelations],
-  )).rows.map((row) => [row.relation, row.name, row.type, row.validated, row.definition] as const);
+    `select namespace.nspname as schema, relation.relname as relation, relation.relkind as kind,
+            catalog_constraint.conname as name, catalog_constraint.contype as type,
+            catalog_constraint.convalidated as validated, pg_get_constraintdef(catalog_constraint.oid, true) as definition
+     from pg_constraint catalog_constraint join pg_class relation on relation.oid = catalog_constraint.conrelid
+     join pg_namespace namespace on namespace.oid = relation.relnamespace
+     where namespace.nspname = 'public' and relation.relkind in ('r', 'p')
+     order by namespace.nspname, relation.relname, relation.relkind, catalog_constraint.conname`,
+  )).rows.map((row) => ({
+    schema: row.schema, relation: row.relation, relkind: row.kind, name: row.name,
+    type: row.type, validated: row.validated, definition: row.definition,
+  } satisfies ConstraintShape)).filter((shape) => forwardRelationKeys.has(`${shape.schema}|${shape.relation}`)
+    || constraintAmendmentKeys.has(shapeKey(shape)))
+    .sort((left, right) => shapeKey(left).localeCompare(shapeKey(right)));
   if (JSON.stringify(actualConstraints) !== JSON.stringify(expectedConstraints)) {
     throw new Error(`schema ${throughVersion} manifest validation failed: constraint catalog`);
   }
-  const expectedIndexes = [...manifests.values()]
-    .filter((manifest) => manifest.version > 10 && manifest.version <= throughVersion)
-    .flatMap((manifest) => manifest.indexes ?? [])
-    .sort((left, right) => `${left[0]}|${left[1]}`.localeCompare(`${right[0]}|${right[1]}`));
-  const actualIndexes = futureRelations.length === 0 ? [] : (await client.query<{ definition: string; name: string; relation: string }>(
-    `select tablename as relation, indexname as name, indexdef as definition
-     from pg_indexes where schemaname = 'public' and tablename = any($1::text[])
-     order by tablename, indexname`,
-    [futureRelations],
-  )).rows.map((row) => [row.relation, row.name, row.definition] as const);
+
+  const expectedIndexes = [...foldShapes<IndexShape>(
+    manifests, throughVersion, "indexes", "indexAmendments", normalizeIndex as never,
+  ).values()].filter((shape) => forwardRelationKeys.has(`${shape.schema}|${shape.relation}`)
+    || amendmentKeys<IndexShape>("indexAmendments").has(shapeKey(shape)))
+    .sort((left, right) => shapeKey(left).localeCompare(shapeKey(right)));
+  const indexAmendmentKeys = amendmentKeys<IndexShape>("indexAmendments");
+  const actualIndexes = (await client.query<{
+    definition: string; kind: "r" | "p" | "m"; name: string; relation: string; schema: "public";
+  }>(
+    `select namespace.nspname as schema, relation.relname as relation, relation.relkind as kind,
+            index_relation.relname as name, pg_get_indexdef(index_relation.oid) as definition
+     from pg_index catalog_index join pg_class relation on relation.oid = catalog_index.indrelid
+     join pg_namespace namespace on namespace.oid = relation.relnamespace
+     join pg_class index_relation on index_relation.oid = catalog_index.indexrelid
+     where namespace.nspname = 'public' and relation.relkind in ('r', 'p', 'm')
+     order by namespace.nspname, relation.relname, relation.relkind, index_relation.relname`,
+  )).rows.map((row) => ({
+    schema: row.schema, relation: row.relation, relkind: row.kind, name: row.name, definition: row.definition,
+  } satisfies IndexShape)).filter((shape) => forwardRelationKeys.has(`${shape.schema}|${shape.relation}`)
+    || indexAmendmentKeys.has(shapeKey(shape)))
+    .sort((left, right) => shapeKey(left).localeCompare(shapeKey(right)));
   if (JSON.stringify(actualIndexes) !== JSON.stringify(expectedIndexes)) {
     throw new Error(`schema ${throughVersion} manifest validation failed: index catalog`);
   }
@@ -569,6 +892,7 @@ async function applyMigrationsWithManifests(
     }
   }
   const maximumVersion = Math.max(...manifests.keys());
+  validateManifestDeclarations(manifests, maximumVersion);
   const client = await pool.connect();
   let locked = false;
 
@@ -607,8 +931,10 @@ async function applyMigrationsWithManifests(
       await client.query("begin");
       try {
         await client.query(migration.sql);
-        await manifests.get(migration.version)?.validateAndConverge?.(client, maximumVersion);
-        await convergeManifestAcls(client, manifests.get(migration.version)!);
+        for (const manifest of orderedManifests(manifests, migration.version)) {
+          await manifest.validateAndConverge?.(client, maximumVersion, manifests, migration.version);
+          await convergeManifestAcls(client, manifest);
+        }
         await validateRegisteredCatalog(client, manifests, migration.version);
         await client.query(
           "insert into core_agent_schema_migrations (version, name, checksum, applied_at) values ($1, $2, $3, now())",
@@ -625,8 +951,9 @@ async function applyMigrationsWithManifests(
       await client.query("begin");
       try {
         for (const version of [...applied.keys()].sort((left, right) => left - right)) {
-          await manifests.get(version)?.validateAndConverge?.(client, maximumVersion);
-          await convergeManifestAcls(client, manifests.get(version)!);
+          const manifest = manifests.get(version)!;
+          await manifest.validateAndConverge?.(client, maximumVersion, manifests, Math.max(...applied.keys()));
+          await convergeManifestAcls(client, manifest);
         }
         const currentVersion = Math.max(...applied.keys());
         if (currentVersion !== maximumVersion) throw new Error("database schema is below this binary");
