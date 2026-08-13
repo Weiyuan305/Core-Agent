@@ -725,13 +725,16 @@ test("official PostgreSQL child cleanup waits for owned terminal state before dr
       closeOwned: [{
         close: async () => await new Promise<void>(() => undefined),
         forceClose: async () => undefined,
-        forceTerminate: async () => {
+        forceTerminate: () => {
+          const completion = (async () => {
           await new Promise((resolve) => setTimeout(resolve, 500));
           const result = await observer.query<{ exists: boolean }>(
             "select exists (select 1 from pg_database where datname = $1) as exists",
             [isolated.databaseName],
           );
           databaseExistedAtOwnedTerminal = result.rows[0]?.exists === true;
+          })();
+          return { completion, terminateAndReap: async () => { await completion; } };
         },
       }],
       timeoutMs: 6_000,

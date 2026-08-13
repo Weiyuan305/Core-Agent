@@ -7,6 +7,11 @@ import { LEAK_SENTINEL, testHarnessInternals } from "./harness.js";
 
 const databaseName = "core_agent_test_0123456789abcdef";
 
+function terminalOperation(work: () => void | Promise<void>) {
+  const completion = Promise.resolve().then(work);
+  return { completion, terminateAndReap: async () => { await completion; } };
+}
+
 test("isolated database teardown closes owned pools before exact active-backend termination and verifies absence", async () => {
   const calls: Array<{ readonly sql: string; readonly values?: readonly unknown[] } | string> = [];
   await testHarnessInternals.dropIsolatedDatabase({
@@ -795,32 +800,46 @@ test("terminal Pool tracking detaches listeners and neutralizes a next-tick acqu
 test("hung close and hung force cannot consume the reserved exact-termination slice", async () => {
   const calls: string[] = [];
   let terminal = false;
+  let clock = 0;
+  let clockReads = 0;
   const teardown = testHarnessInternals.dropIsolatedDatabase({
     databaseName,
     closeOwned: [{
       close: async () => { await new Promise(() => undefined); },
       forceClose: async () => { await new Promise(() => undefined); },
-      forceTerminate: async () => { terminal = true; calls.push("owned terminal"); },
+      forceTerminate: () => terminalOperation(() => { terminal = true; calls.push("owned terminal"); }),
     }],
     createAdminSession: () => ({
       connect: async () => { calls.push("admin connected"); },
       query: async (sql: string) => {
-        if (/pg_terminate_backend/iu.test(sql)) calls.push("exact terminated");
-        if (/select exists/iu.test(sql)) return { rows: [{ exists: false }] };
+        if (/pg_terminate_backend/iu.test(sql)) {
+          clock += 1_000;
+          calls.push("exact terminated");
+        }
+        if (sql.startsWith("drop database")) calls.push("drop attempted");
+        if (/select exists/iu.test(sql)) {
+          calls.push("absence verified");
+          return { rows: [{ exists: false }] };
+        }
         return { rows: [] };
       },
       close: async () => { calls.push("admin closed"); },
-      forceTerminate: async () => { calls.push("admin terminal"); },
+      forceTerminate: () => terminalOperation(() => { calls.push("admin terminal"); }),
     }),
     timeoutMs: 80,
     retryDelayMs: 1,
+    now: () => { clockReads += 1; return clock; },
   });
   await assert.rejects(Promise.race([
     teardown,
     delay(150).then(() => { throw new Error("cleanup exceeded its terminal deadline"); }),
   ]), /^Error: Integration stage failed: owned database connections$/);
   assert.equal(terminal, true);
-  assert.deepEqual(calls, ["admin connected", "exact terminated", "owned terminal", "admin closed"]);
+  assert.equal(clockReads > 0, true);
+  assert.deepEqual(calls, [
+    "admin connected", "exact terminated", "owned terminal",
+    "drop attempted", "absence verified", "admin closed",
+  ]);
 });
 
 test("hung admin connect is force-terminated and reaped before return", async () => {
@@ -832,7 +851,7 @@ test("hung admin connect is force-terminated and reaped before return", async ()
       connect: async () => { await new Promise(() => undefined); },
       query: async () => { assert.fail("hung connect must not query"); },
       close: async () => { await new Promise(() => undefined); },
-      forceTerminate: async () => { calls.push("admin reaped"); },
+      forceTerminate: () => terminalOperation(() => { calls.push("admin reaped"); }),
     }),
     timeoutMs: 60,
     retryDelayMs: 1,
@@ -841,4 +860,67 @@ test("hung admin connect is force-terminated and reaped before return", async ()
   const stable = [...calls];
   await delay(30);
   assert.deepEqual(calls, stable);
+});
+
+test("timed-out owned terminalization cannot mutate after teardown returns", async () => {
+  const calls: string[] = [];
+  let finishTerminal: (() => void) | undefined;
+  const teardown = testHarnessInternals.dropIsolatedDatabase({
+    databaseName,
+    closeOwned: [{
+      close: async () => { await new Promise(() => undefined); },
+      forceClose: async () => { await new Promise(() => undefined); },
+      forceTerminate: () => {
+        let cancelled = false;
+        const completion = new Promise<void>((resolve) => { finishTerminal = () => {
+          if (!cancelled) calls.push("late owned mutation");
+          resolve();
+        }; });
+        return { completion, terminateAndReap: async () => { cancelled = true; finishTerminal?.(); await completion; } };
+      },
+    }],
+    createAdminSession: () => ({
+      connect: async () => undefined,
+      query: async (sql: string) => /select exists/iu.test(sql) ? { rows: [{ exists: false }] } : { rows: [] },
+      close: async () => undefined,
+    }),
+    timeoutMs: 50,
+    retryDelayMs: 1,
+  });
+  await assert.rejects(teardown, /owned database connections/u);
+  finishTerminal?.();
+  await delay(10);
+  assert.deepEqual(calls, []);
+});
+
+test("hung admin terminalization uses a concrete bounded reap protocol", async () => {
+  const calls: string[] = [];
+  let finishTerminal: (() => void) | undefined;
+  const teardown = testHarnessInternals.dropIsolatedDatabase({
+    databaseName,
+    closeOwned: [],
+    createAdminSession: () => ({
+      connect: async () => { await new Promise(() => undefined); },
+      query: async () => ({ rows: [] }),
+      close: async () => { await new Promise(() => undefined); },
+      forceTerminate: () => {
+        let cancelled = false;
+        const completion = new Promise<void>((resolve) => { finishTerminal = () => {
+          if (!cancelled) calls.push("admin terminal settled");
+          resolve();
+        }; });
+        return { completion, terminateAndReap: async () => { cancelled = true; finishTerminal?.(); await completion; } };
+      },
+    }),
+    timeoutMs: 50,
+    retryDelayMs: 1,
+  });
+  const outcome = Promise.race([
+    teardown.then(() => "returned", () => "rejected"),
+    delay(100).then(() => "still-running"),
+  ]);
+  assert.notEqual(await outcome, "still-running");
+  finishTerminal?.();
+  await teardown.catch(() => undefined);
+  assert.deepEqual(calls, []);
 });

@@ -376,8 +376,26 @@ function shapeKey(shape: { schema: string; relation: string; relkind: string; na
   return `${shape.schema}|${shape.relation}|${shape.relkind}|${shape.name}`;
 }
 
+function canonicalShape(shape: unknown): readonly unknown[] | undefined {
+  if (shape === undefined || shape === null || typeof shape !== "object") return undefined;
+  const value = shape as Record<string, unknown>;
+  const identity = [value.schema, value.relation, value.relkind, value.name];
+  if ("position" in value) {
+    return [...identity, value.position, value.type, value.notNull, value.defaultExpression];
+  }
+  if ("validated" in value) {
+    return [...identity, value.type, value.validated, value.definition];
+  }
+  if ("definition" in value) return [...identity, value.definition];
+  return undefined;
+}
+
 function sameShape(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  const leftTuple = canonicalShape(left);
+  const rightTuple = canonicalShape(right);
+  return leftTuple !== undefined && rightTuple !== undefined
+    && leftTuple.length === rightTuple.length
+    && leftTuple.every((value, index) => value === rightTuple[index]);
 }
 
 function foldShapes<T extends { schema: "public"; relation: string; relkind: string; name: string }>(
@@ -422,12 +440,48 @@ function foldShapes<T extends { schema: "public"; relation: string; relkind: str
         folded.set(key, after);
       } else if (amendment.action === "replace") {
         if (before === undefined || after === undefined || shapeKey(before) !== shapeKey(after)
-          || (current !== undefined && !sameShape(current, before))) {
+          || current === undefined || !sameShape(current, before)) {
           throw new Error(`schema ${manifest.version} manifest validation failed: invalid ${field} replace`);
         }
         folded.set(key, after);
       } else {
-        if (before === undefined || after !== undefined || (current !== undefined && !sameShape(current, before))) {
+        if (before === undefined || after !== undefined || current === undefined || !sameShape(current, before)) {
+          throw new Error(`schema ${manifest.version} manifest validation failed: invalid ${field} revoke`);
+        }
+        folded.delete(key);
+      }
+    }
+  }
+  return folded;
+}
+
+type FoldedRelationAcl = readonly [schema: "public", name: string, kind: RelationKind, grantee: string, privilege: string, grantable: boolean];
+type FoldedRoutineAcl = readonly [schema: "public", name: string, kind: "f" | "p", arguments: string, grantee: string, privilege: "EXECUTE", grantable: boolean];
+
+function foldManifestAcls(
+  manifests: ReadonlyMap<number, SchemaManifest>,
+  throughVersion: number,
+  field: "relationAcls" | "routineAcls",
+): Map<string, FoldedRelationAcl | FoldedRoutineAcl> {
+  const folded = new Map<string, FoldedRelationAcl | FoldedRoutineAcl>();
+  for (const manifest of orderedManifests(manifests, throughVersion)) {
+    if (field === "routineAcls") {
+      for (const [kind, name, arguments_] of manifest.routines ?? []) {
+        const defaultAcl: FoldedRoutineAcl = ["public", name, kind as "f" | "p", arguments_, "PUBLIC", "EXECUTE", false];
+        folded.set(defaultAcl.slice(0, -1).join("|"), defaultAcl);
+      }
+    }
+    const seen = new Set<string>();
+    for (const entry of manifest[field] ?? []) {
+      const [disposition, ...acl] = entry as RelationAclManifestEntry | RoutineAclManifestEntry;
+      const state = acl as unknown as FoldedRelationAcl | FoldedRoutineAcl;
+      const key = state.slice(0, -1).join("|");
+      if (seen.has(key)) throw new Error(`schema ${manifest.version} manifest validation failed: duplicate ${field}`);
+      seen.add(key);
+      if (disposition === "grant") {
+        folded.set(key, state);
+      } else {
+        if (!folded.has(key) && manifest.version > 10) {
           throw new Error(`schema ${manifest.version} manifest validation failed: invalid ${field} revoke`);
         }
         folded.delete(key);
@@ -442,6 +496,8 @@ function validateManifestDeclarations(manifests: ReadonlyMap<number, SchemaManif
   foldShapes(manifests, throughVersion, "columns", "columnAmendments", normalizeColumn as never);
   foldShapes(manifests, throughVersion, "constraints", "constraintAmendments", normalizeConstraint as never);
   foldShapes(manifests, throughVersion, "indexes", "indexAmendments", normalizeIndex as never);
+  foldManifestAcls(manifests, throughVersion, "relationAcls");
+  foldManifestAcls(manifests, throughVersion, "routineAcls");
   for (const manifest of orderedManifests(manifests, throughVersion)) {
     for (const [, schema, name, kind, arguments_] of manifest.routineAcls ?? []) {
       quoteIdentifier(schema);
@@ -691,12 +747,8 @@ async function validateRegisteredCatalog(
     || JSON.stringify(normalizedRoutines) !== JSON.stringify(expectedRoutines)) {
     throw new Error(`schema ${throughVersion} manifest validation failed: routine catalog`);
   }
-  const expectedRoutineAcls = [...manifests.values()]
-    .filter((manifest) => manifest.version <= throughVersion)
-    .flatMap((manifest) => manifest.routineAcls ?? [])
-    .filter(([disposition]) => disposition === "grant")
-    .map(([, schema, name, kind, arguments_, grantee, privilege, grantable]) =>
-      [schema, name, kind, arguments_, grantee, privilege, grantable] as const)
+  const expectedRoutineAcls = [...foldManifestAcls(manifests, throughVersion, "routineAcls").values()]
+    .filter((entry): entry is FoldedRoutineAcl => entry.length === 7)
     .sort((left, right) => left.join("|").localeCompare(right.join("|")));
   const actualRoutineAcls = (await client.query<{
     arguments: string; grantable: boolean; grantee: string; kind: string; name: string; privilege: string; schema: string;
@@ -810,12 +862,8 @@ async function validateRegisteredCatalog(
   if (JSON.stringify(actualIndexes) !== JSON.stringify(expectedIndexes)) {
     throw new Error(`schema ${throughVersion} manifest validation failed: index catalog`);
   }
-  const expectedRelationAcls = [...manifests.values()]
-    .filter((manifest) => manifest.version <= throughVersion)
-    .flatMap((manifest) => manifest.relationAcls ?? [])
-    .filter(([disposition]) => disposition === "grant")
-    .map(([, schema, name, kind, grantee, privilege, grantable]) =>
-      [schema, name, kind, grantee, privilege, grantable] as const)
+  const expectedRelationAcls = [...foldManifestAcls(manifests, throughVersion, "relationAcls").values()]
+    .filter((entry): entry is FoldedRelationAcl => entry.length === 6)
     .sort((left, right) => left.join("|").localeCompare(right.join("|")));
   const actualRelationAcls = (await client.query<{
     grantable: boolean; grantee: string; kind: RelationKind; name: string; privilege: string; schema: string;

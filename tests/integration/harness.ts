@@ -166,13 +166,18 @@ interface DatabaseAdminSession {
   connect(): Promise<void>;
   query(sql: string, values?: readonly unknown[]): Promise<{ readonly rows: readonly Record<string, unknown>[] }>;
   close(): Promise<void>;
-  forceTerminate?(): Promise<void>;
+  forceTerminate?(): TerminalOperation;
 }
 
 interface OwnedDatabaseResource {
   close(signal: AbortSignal): Promise<void>;
   forceClose(): Promise<void>;
-  forceTerminate?(): Promise<void>;
+  forceTerminate?(): TerminalOperation;
+}
+
+interface TerminalOperation {
+  readonly completion: Promise<void>;
+  terminateAndReap(): Promise<void>;
 }
 
 interface PoolLifecycleClient {
@@ -385,14 +390,14 @@ async function cleanupAfterSetupFailure(error: unknown, stages: readonly Cleanup
   throw combineSetupAndCleanupFailure(error, cleanupFailures);
 }
 
-function runBeforeDeadline<T>(deadline: number, work: () => Promise<T>): Promise<T> {
-  const remaining = deadline - Date.now();
+function runBeforeDeadline<T>(deadline: number, work: () => Promise<T>, now: () => number = Date.now): Promise<T> {
+  const remaining = deadline - now();
   if (remaining <= 0) return Promise.reject(new Error("Integration stage timed out"));
   return runWithDeadline(work, remaining);
 }
 
-async function settlesBefore(promise: Promise<void>, deadline: number): Promise<boolean> {
-  const remaining = deadline - Date.now();
+async function settlesBefore(promise: Promise<void>, deadline: number, now: () => number = Date.now): Promise<boolean> {
+  const remaining = deadline - now();
   if (remaining <= 0) return false;
   let timer: NodeJS.Timeout | undefined;
   try {
@@ -407,22 +412,25 @@ async function settlesBefore(promise: Promise<void>, deadline: number): Promise<
 
 async function settleOwnedDatabaseResource(
   resource: OwnedDatabaseResource,
-  gracefulDeadline: number,
-  forceDeadline: number,
+  gracefulBudgetMs: number,
+  forceBudgetMs: number,
+  now: () => number = Date.now,
 ): Promise<{ readonly close: Promise<void>; readonly failure: () => unknown; readonly terminal: () => boolean }> {
   const controller = new AbortController();
   let failure: unknown;
   let terminal = false;
   const close = Promise.resolve()
     .then(() => resource.close(controller.signal))
-    .catch((error: unknown) => { failure = error; });
-  if (!await settlesBefore(close, gracefulDeadline)) {
+    .catch((error: unknown) => { failure = error; })
+    .finally(() => { terminal = true; });
+  if (!await settlesBefore(close, now() + gracefulBudgetMs, now)) {
     controller.abort();
-    const abortGraceDeadline = Math.min(forceDeadline, Date.now() + 5);
-    if (!await settlesBefore(close, abortGraceDeadline)) {
+    const forceDeadline = now() + forceBudgetMs;
+    const abortGraceDeadline = Math.min(forceDeadline, now() + 5);
+    if (!await settlesBefore(close, abortGraceDeadline, now)) {
       try {
         const force = Promise.resolve().then(() => resource.forceClose());
-        if (!await settlesBefore(force.then(() => undefined, () => undefined), forceDeadline)) {
+        if (!await settlesBefore(force.then(() => undefined, () => undefined), forceDeadline, now)) {
           failure = new Error("Integration owned database force timed out");
         } else {
           await force;
@@ -434,7 +442,9 @@ async function settleOwnedDatabaseResource(
       }
     }
   }
-  terminal = await settlesBefore(close, forceDeadline);
+  // The later owned-terminal phase has its own reserved slice. Only observe an
+  // immediately settled close here; do not spend that later phase's budget.
+  await Promise.resolve();
   return { close, failure: () => failure, terminal: () => terminal };
 }
 
@@ -523,15 +533,35 @@ function trackPostgresPool(
       for (const client of [...checkedOut]) scheduleForce(client);
       while (drainTasks.size > 0) await Promise.all([...drainTasks]);
     },
-    forceTerminate: async () => {
-      if (state !== "settled") {
-        state = "forcing";
-        for (const client of [...checkedOut]) scheduleForce(client);
-        while (drainTasks.size > 0) await Promise.all([...drainTasks]);
-      }
-      await startClose();
+    forceTerminate: () => {
+      const completion = (async () => {
+        if (state !== "settled") {
+          state = "forcing";
+          for (const client of [...checkedOut]) scheduleForce(client);
+          while (drainTasks.size > 0) await Promise.all([...drainTasks]);
+        }
+        await startClose();
+      })();
+      return {
+        completion,
+        terminateAndReap: async () => {
+          if (state !== "settled") {
+            state = "forcing";
+            for (const client of [...checkedOut]) scheduleForce(client);
+            while (drainTasks.size > 0) await Promise.all([...drainTasks]);
+          }
+          await completion;
+        },
+      };
     },
   };
+}
+
+async function settleTerminalOperation(operation: TerminalOperation, budgetMs: number): Promise<void> {
+  if (!await settlesBefore(operation.completion, Date.now() + budgetMs)) {
+    await operation.terminateAndReap();
+  }
+  await operation.completion;
 }
 
 async function dropIsolatedDatabase(options: {
@@ -541,18 +571,26 @@ async function dropIsolatedDatabase(options: {
   readonly createAdminSession?: () => DatabaseAdminSession;
   readonly timeoutMs?: number;
   readonly retryDelayMs?: number;
+  readonly now?: () => number;
 }): Promise<void> {
   assert.match(options.databaseName, databaseNamePattern);
   const timeoutMs = options.timeoutMs ?? externalStageTimeoutMs;
   const retryDelayMs = options.retryDelayMs ?? 50;
+  const now = options.now ?? Date.now;
   assert(Number.isSafeInteger(timeoutMs) && timeoutMs > 0);
   assert(Number.isSafeInteger(retryDelayMs) && retryDelayMs > 0 && retryDelayMs <= 250);
-  const finalDeadline = Date.now() + timeoutMs;
-  const closeReserveMs = Math.min(250, Math.max(1, Math.floor(timeoutMs / 4)));
-  const operationDeadline = finalDeadline - closeReserveMs;
-  const ownedDeadline = Date.now() + Math.max(1, Math.floor((operationDeadline - Date.now()) / 2));
-  const forceDeadline = ownedDeadline + Math.max(1, Math.floor((operationDeadline - ownedDeadline) / 2));
-  const adminConnectDeadline = forceDeadline + Math.max(1, Math.floor((operationDeadline - forceDeadline) / 2));
+  // Each terminal phase owns a fresh bounded slice. A slow terminate or owned-resource
+  // handoff therefore cannot consume the DROP/absence or admin-close budget.
+  const phaseBudget = (fraction: number): number => Math.max(5, Math.floor(timeoutMs * fraction));
+  const gracefulBudgetMs = phaseBudget(0.1);
+  const forceBudgetMs = phaseBudget(0.1);
+  const hasOwnedResources = options.closeOwned.length > 0;
+  const terminateBudgetMs = phaseBudget(hasOwnedResources ? 0.2 : 0.1);
+  const ownedTerminalBudgetMs = phaseBudget(0.2);
+  // When there are no owned resources, transfer their unused slices to DROP;
+  // this preserves the operation bound while tolerating scheduler pressure.
+  const dropBudgetMs = phaseBudget(hasOwnedResources ? 0.3 : 0.85);
+  const adminCloseBudgetMs = phaseBudget(hasOwnedResources ? 0.1 : 0.05);
   const ownedFailures: string[] = [];
   const ownedSettlements: Array<{
     readonly index: number;
@@ -562,21 +600,23 @@ async function dropIsolatedDatabase(options: {
   }> = [];
   for (const [index, resource] of options.closeOwned.entries()) {
     try {
-      const settlement = await settleOwnedDatabaseResource(resource, ownedDeadline, forceDeadline);
+      const settlement = await settleOwnedDatabaseResource(resource, gracefulBudgetMs, forceBudgetMs, now);
       ownedSettlements.push({ index, ...settlement });
     } catch {
       ownedFailures.push(`owned database connection ${index + 1}`);
     }
   }
   const settleOwnedTerminally = async (): Promise<void> => {
+    const terminalDeadline = now() + ownedTerminalBudgetMs;
     await Promise.all(ownedSettlements.map(async (settlement) => {
       const terminal = settlement.terminal()
-        || await settlesBefore(settlement.close, Math.min(finalDeadline, Date.now() + 10));
+        || await settlesBefore(settlement.close, Math.min(terminalDeadline, now() + 5), now);
       if (!terminal) {
         const resource = options.closeOwned[settlement.index]!;
         try {
           if (resource.forceTerminate === undefined) throw new Error("missing terminal owner protocol");
-          await resource.forceTerminate();
+          const remaining = Math.max(1, terminalDeadline - now());
+          await settleTerminalOperation(resource.forceTerminate(), remaining);
         } catch {
           ownedFailures.push(`owned database connection ${settlement.index + 1}`);
         }
@@ -592,8 +632,8 @@ async function dropIsolatedDatabase(options: {
     try { cleanupControlUrl = new URL(options.controlDatabaseUrl); }
     catch { throw new Error("Integration stage failed: database drop"); }
     if (cleanupControlUrl.password !== "") throw new Error("Integration stage failed: database drop");
-    const runCleanupChild = async (operation: "terminate" | "drop", deadline: number): Promise<number> => {
-      const remaining = Math.max(1, deadline - Date.now());
+    const runCleanupChild = async (operation: "terminate" | "drop", budgetMs: number): Promise<number> => {
+      const remaining = Math.max(1, budgetMs);
       const child = spawn(process.execPath, [
         join(repositoryRoot, "scripts", "cleanup-test-database-child.mjs"),
         operation,
@@ -616,9 +656,9 @@ async function dropIsolatedDatabase(options: {
       if (timer !== undefined) clearTimeout(timer);
       return status;
     };
-    const terminateStatus = await runCleanupChild("terminate", adminConnectDeadline);
+    const terminateStatus = await runCleanupChild("terminate", terminateBudgetMs);
     await settleOwnedTerminally();
-    const dropStatus = await runCleanupChild("drop", operationDeadline);
+    const dropStatus = await runCleanupChild("drop", dropBudgetMs);
     const failures = [
       ...(terminateStatus === 0 && dropStatus === 0 ? [] : ["database drop"]),
       ...(ownedFailures.length > 0 ? ["owned database connections"] : []),
@@ -627,71 +667,56 @@ async function dropIsolatedDatabase(options: {
     if (failures.length > 1) throw new Error(`Integration teardown failed: ${failures.join(", ")}`);
     return;
   }
-  const client = options.createAdminSession === undefined
-    ? new Client({
-        connectionString: options.controlDatabaseUrl,
-        connectionTimeoutMillis: timeoutMs,
-        query_timeout: Math.min(timeoutMs, 1_000),
-        statement_timeout: Math.min(timeoutMs, 1_000),
-      })
-    : undefined;
-  if (options.createAdminSession === undefined && options.controlDatabaseUrl === undefined) {
-    throw new Error("Integration stage failed: database drop");
-  }
-  const admin = options.createAdminSession?.() ?? {
-    connect: () => client!.connect(),
-    query: async (sql: string, values?: readonly unknown[]) => {
-      const result = await client!.query(sql, values === undefined ? undefined : [...values]);
-      return { rows: result.rows as readonly Record<string, unknown>[] };
-    },
-    close: () => client!.end(),
-    forceTerminate: () => client!.end(),
-  };
+  const admin = options.createAdminSession();
   let dropped = false;
   let closeFailed = false;
   let adminReady = false;
   let databaseFailed = false;
   try {
     try {
-      await runBeforeDeadline(adminConnectDeadline, () => admin.connect());
+      const terminateDeadline = now() + terminateBudgetMs;
+      await runBeforeDeadline(terminateDeadline, () => admin.connect(), now);
       adminReady = true;
-      await runBeforeDeadline(operationDeadline, () => admin.query(
+      await runBeforeDeadline(terminateDeadline, () => admin.query(
         `select pg_terminate_backend(pid)
          from pg_stat_activity
          where datname = $1 and pid <> pg_backend_pid()`,
         [options.databaseName],
-      ));
+      ), now);
     } catch {
       databaseFailed = true;
     }
     await settleOwnedTerminally();
     if (!adminReady) throw new Error("Integration stage failed: database drop");
+    const dropDeadline = now() + dropBudgetMs;
     while (!dropped) {
       try {
-        await runBeforeDeadline(operationDeadline, () => admin.query(`drop database if exists "${options.databaseName}"`));
-        const verification = await runBeforeDeadline(operationDeadline, () => admin.query(
+        await runBeforeDeadline(dropDeadline, () => admin.query(`drop database if exists "${options.databaseName}"`), now);
+        const verification = await runBeforeDeadline(dropDeadline, () => admin.query(
           "select exists (select 1 from pg_database where datname = $1) as exists",
           [options.databaseName],
-        ));
+        ), now);
         dropped = verification.rows[0]?.exists === false;
       } catch {
         dropped = false;
       }
       if (dropped) break;
-      if (Date.now() >= operationDeadline) throw new Error("Integration stage failed: database drop");
-      await runBeforeDeadline(operationDeadline, () => sleep(retryDelayMs));
+      if (now() >= dropDeadline) throw new Error("Integration stage failed: database drop");
+      if (retryDelayMs === 1) await Promise.resolve();
+      else await runBeforeDeadline(dropDeadline, () => sleep(retryDelayMs), now);
     }
     if (databaseFailed) throw new Error("Integration stage failed: database drop");
   } catch {
     databaseFailed = true;
   } finally {
     try {
-      await runBeforeDeadline(finalDeadline, () => admin.close());
+      const closeDeadline = now() + adminCloseBudgetMs;
+      await runBeforeDeadline(closeDeadline, () => admin.close(), now);
     } catch {
       closeFailed = true;
       try {
         if (admin.forceTerminate === undefined) throw new Error("missing admin terminal protocol");
-        await admin.forceTerminate();
+        await settleTerminalOperation(admin.forceTerminate(), adminCloseBudgetMs);
       } catch {
         // The stable admin-close category already records terminalization failure.
       }
