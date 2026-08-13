@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { createServer, type Socket } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 
@@ -388,6 +389,79 @@ test("tracked PostgreSQL pool never forces a released idle client even when remo
   pool.emit("remove", idle);
   assert.deepEqual(released, []);
   assert.equal("_clients" in pool, false);
+});
+
+test("production PostgreSQL pool teardown aborts and reaps a pre-auth connection before return", async () => {
+  const sockets = new Set<Socket>();
+  let acceptConnection: (() => void) | undefined;
+  const accepted = new Promise<void>((resolve) => { acceptConnection = resolve; });
+  const server = createServer((socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+    socket.resume();
+    acceptConnection?.();
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  assert(address !== null && typeof address !== "string");
+  const ownedPool = testHarnessInternals.createOwnedPostgresPool({
+    host: "127.0.0.1",
+    port: address.port,
+    user: "synthetic",
+    password: "synthetic",
+    database: "synthetic",
+    max: 1,
+    connectionTimeoutMillis: 6_000,
+  });
+  const pool = ownedPool.pool;
+  let acquired = 0;
+  pool.on("acquire", () => { acquired += 1; });
+  const connecting = pool.connect().then(
+    (client) => { client.release(); },
+    () => undefined,
+  );
+  await accepted;
+  const tracked = testHarnessInternals.trackPostgresPool(
+    pool,
+    () => pool.end(),
+    ownedPool.terminatePreAuthConnections,
+  );
+  const teardown = testHarnessInternals.dropIsolatedDatabase({
+    databaseName,
+    closeOwned: [tracked],
+    createAdminSession: () => ({
+      connect: async () => undefined,
+      query: async (sql: string) => /select exists/iu.test(sql)
+        ? { rows: [{ exists: false }] }
+        : { rows: [] },
+      close: async () => undefined,
+    }),
+    timeoutMs: 50,
+    retryDelayMs: 1,
+  });
+  try {
+    const outcome = await Promise.race([
+      teardown.then(() => "returned", () => "rejected"),
+      delay(250).then(() => "still-running"),
+    ]);
+    assert.notEqual(outcome, "still-running");
+    await teardown.catch(() => undefined);
+    await connecting;
+    assert.equal(acquired, 0);
+    assert.equal(sockets.size, 0);
+    await delay(30);
+    assert.equal(sockets.size, 0);
+  } finally {
+    for (const socket of sockets) socket.destroy();
+    await connecting;
+    await teardown.catch(() => undefined);
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error === undefined ? resolve() : reject(error));
+    });
+  }
 });
 
 test("tracked PostgreSQL pool forces one held checkout exactly once and never touches a foreign client", async () => {

@@ -316,6 +316,11 @@ function quoteIdentifier(value: string): string {
   return `"${value}"`;
 }
 
+function quoteCatalogIdentifier(value: string): string {
+  if (value.includes("\0")) throw new Error("migration catalog contains an invalid identifier");
+  return `"${value.replaceAll('"', '""')}"`;
+}
+
 type OwnedObject = Readonly<{ kind: RelationKind; version: number }>;
 
 function orderedManifests(manifests: ReadonlyMap<number, SchemaManifest>, throughVersion: number): SchemaManifest[] {
@@ -678,6 +683,93 @@ async function convergeManifestAcls(client: import("pg").PoolClient, manifest: S
   }
 }
 
+type ColumnAclCatalogEntry = Readonly<{
+  column: string;
+  grantable: boolean;
+  grantee: string | null;
+  granteeOid: string;
+  kind: Exclude<RelationKind, "S">;
+  privilege: string;
+  relation: string;
+  schema: string;
+}>;
+
+async function readOwnedColumnAcls(
+  client: import("pg").PoolClient,
+  manifests: ReadonlyMap<number, SchemaManifest>,
+  throughVersion: number,
+): Promise<ColumnAclCatalogEntry[]> {
+  const ownedObjects = collectOwnedObjects(manifests, throughVersion);
+  const ownedRelations = new Map([...ownedObjects.entries()]
+    .filter(([, object]) => object.kind !== "S")
+    .map(([key, object]) => [key, object.kind as Exclude<RelationKind, "S">]));
+  const rows = (await client.query<{
+    column_name: string; grantable: boolean; grantee: string | null; grantee_oid: string;
+    kind: Exclude<RelationKind, "S">; privilege: string; relation: string; schema: string;
+  }>(
+    `select namespace.nspname as schema, relation.relname as relation, relation.relkind as kind,
+            attribute.attname as column_name, privilege.grantee::text as grantee_oid,
+            grantee.rolname as grantee, privilege.privilege_type as privilege,
+            privilege.is_grantable as grantable
+     from pg_class relation
+     join pg_namespace namespace on namespace.oid = relation.relnamespace
+     join pg_attribute attribute on attribute.attrelid = relation.oid
+       and attribute.attnum > 0 and not attribute.attisdropped
+     cross join lateral aclexplode(attribute.attacl) privilege
+     left join pg_roles grantee on grantee.oid = privilege.grantee
+     where namespace.nspname = 'public' and relation.relkind in ('r', 'p', 'v', 'm')
+     order by namespace.nspname, relation.relname, relation.relkind, attribute.attnum,
+              privilege.grantee, privilege.privilege_type, privilege.is_grantable`,
+  )).rows;
+  return rows.filter((row) => ownedRelations.get(`${row.schema}|${row.relation}`) === row.kind)
+    .map((row) => ({
+      column: row.column_name,
+      grantable: row.grantable,
+      grantee: row.grantee,
+      granteeOid: row.grantee_oid,
+      kind: row.kind,
+      privilege: row.privilege,
+      relation: row.relation,
+      schema: row.schema,
+    }));
+}
+
+async function convergeOwnedColumnAcls(
+  client: import("pg").PoolClient,
+  manifests: ReadonlyMap<number, SchemaManifest>,
+  throughVersion: number,
+): Promise<void> {
+  const columnAcls = await readOwnedColumnAcls(client, manifests, throughVersion);
+  const allowedPrivileges = new Set(["SELECT", "INSERT", "UPDATE", "REFERENCES"]);
+  const groups = new Map<string, {
+    columns: string[]; grantee: string; privilege: string; relation: string; schema: string;
+  }>();
+  for (const acl of columnAcls) {
+    if (!allowedPrivileges.has(acl.privilege)) {
+      throw new Error(`schema ${throughVersion} manifest validation failed: column ACL privilege`);
+    }
+    const grantee = acl.granteeOid === "0" ? "PUBLIC" : acl.grantee;
+    if (grantee === null) {
+      throw new Error(`schema ${throughVersion} manifest validation failed: column ACL grantee`);
+    }
+    const key = [acl.schema, acl.relation, grantee, acl.privilege].join("|");
+    const group = groups.get(key) ?? {
+      columns: [], grantee, privilege: acl.privilege, relation: acl.relation, schema: acl.schema,
+    };
+    group.columns.push(acl.column);
+    groups.set(key, group);
+  }
+  for (const group of [...groups.values()].sort((left, right) =>
+    [left.schema, left.relation, left.grantee, left.privilege].join("|")
+      .localeCompare([right.schema, right.relation, right.grantee, right.privilege].join("|")))) {
+    const columns = [...new Set(group.columns)].sort().map(quoteCatalogIdentifier).join(", ");
+    const grantee = group.grantee === "PUBLIC" ? "PUBLIC" : quoteCatalogIdentifier(group.grantee);
+    await client.query(
+      `revoke ${group.privilege} (${columns}) on table ${quoteCatalogIdentifier(group.schema)}.${quoteCatalogIdentifier(group.relation)} from ${grantee} cascade`,
+    );
+  }
+}
+
 async function validateRegisteredCatalog(
   client: import("pg").PoolClient,
   manifests: ReadonlyMap<number, SchemaManifest>,
@@ -884,6 +976,9 @@ async function validateRegisteredCatalog(
   if (JSON.stringify(actualRelationAcls) !== JSON.stringify(expectedRelationAcls)) {
     throw new Error(`schema ${throughVersion} manifest validation failed: relation ACL`);
   }
+  if ((await readOwnedColumnAcls(client, manifests, throughVersion)).length !== 0) {
+    throw new Error(`schema ${throughVersion} manifest validation failed: column ACL`);
+  }
 }
 
 const migrationFilePattern = /^(?<version>[0-9]{3,})_(?<name>[a-z0-9][a-z0-9_-]*)\.sql$/;
@@ -983,6 +1078,7 @@ async function applyMigrationsWithManifests(
           await manifest.validateAndConverge?.(client, maximumVersion, manifests, migration.version);
           await convergeManifestAcls(client, manifest);
         }
+        await convergeOwnedColumnAcls(client, manifests, migration.version);
         await validateRegisteredCatalog(client, manifests, migration.version);
         await client.query(
           "insert into core_agent_schema_migrations (version, name, checksum, applied_at) values ($1, $2, $3, now())",
@@ -1005,6 +1101,7 @@ async function applyMigrationsWithManifests(
         }
         const currentVersion = Math.max(...applied.keys());
         if (currentVersion !== maximumVersion) throw new Error("database schema is below this binary");
+        await convergeOwnedColumnAcls(client, manifests, currentVersion);
         await validateRegisteredCatalog(client, manifests, currentVersion);
         await client.query("commit");
       } catch (error) {

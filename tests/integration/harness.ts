@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { createConnection } from "node:net";
+import { createConnection, Socket } from "node:net";
 import { spawn } from "node:child_process";
 
 import type { ProductEvent } from "@core-agent/contracts";
@@ -21,7 +21,7 @@ import {
 } from "@core-agent/runtime-core";
 import type { FastifyBaseLogger, FastifyInstance } from "fastify";
 import type { Kysely } from "kysely";
-import { Client, Pool } from "pg";
+import { Client, Pool, type ClientConfig, type PoolConfig } from "pg";
 
 import { buildControlPlaneApp } from "../../apps/control-plane-api/src/app.js";
 import type {
@@ -189,6 +189,11 @@ interface PoolLifecycleEvents {
   on(event: "release", listener: (error: Error | undefined, client: PoolLifecycleClient) => void): unknown;
   removeListener(event: "acquire" | "remove", listener: (client: PoolLifecycleClient) => void): unknown;
   removeListener(event: "release", listener: (error: Error | undefined, client: PoolLifecycleClient) => void): unknown;
+}
+
+interface OwnedPostgresPool {
+  readonly pool: Pool;
+  terminatePreAuthConnections(): Promise<void>;
 }
 
 interface CleanupStage {
@@ -451,6 +456,7 @@ async function settleOwnedDatabaseResource(
 function trackPostgresPool(
   pool: PoolLifecycleEvents,
   close: () => Promise<void>,
+  terminatePreAuthConnections: () => Promise<void> = async () => undefined,
 ): OwnedDatabaseResource {
   type PoolOwnershipState = "open" | "closing" | "forcing" | "settled";
   let state: PoolOwnershipState = "open";
@@ -545,6 +551,7 @@ function trackPostgresPool(
       return {
         completion,
         terminateAndReap: async () => {
+          await terminatePreAuthConnections();
           if (state !== "settled") {
             state = "forcing";
             for (const client of [...checkedOut]) scheduleForce(client);
@@ -553,6 +560,52 @@ function trackPostgresPool(
           await completion;
         },
       };
+    },
+  };
+}
+
+function createOwnedPostgresPool(options: PoolConfig): OwnedPostgresPool {
+  if (options.stream !== undefined || options.Client !== undefined) {
+    throw new Error("Integration PostgreSQL pool requires the owned connector");
+  }
+  const preAuthSockets = new Set<Socket>();
+  class OwnedClient extends Client {
+    public readonly ownedPreAuthSocket: Socket;
+
+    public constructor(config?: ClientConfig) {
+      let ownedSocket: Socket | undefined;
+      super({
+        ...config,
+        stream: () => {
+          const socket = new Socket();
+          ownedSocket = socket;
+          preAuthSockets.add(socket);
+          socket.once("close", () => preAuthSockets.delete(socket));
+          return socket;
+        },
+      });
+      assert(ownedSocket !== undefined);
+      this.ownedPreAuthSocket = ownedSocket;
+    }
+  }
+  const pool = new Pool({
+    ...options,
+    Client: OwnedClient as unknown as NonNullable<PoolConfig["Client"]>,
+  });
+  pool.on("connect", (client) => {
+    preAuthSockets.delete((client as OwnedClient).ownedPreAuthSocket);
+  });
+  return {
+    pool,
+    terminatePreAuthConnections: async () => {
+      const sockets = [...preAuthSockets];
+      await Promise.all(sockets.map(async (socket) => {
+        if (socket.closed) return;
+        const closed = new Promise<void>((resolve) => socket.once("close", resolve));
+        if (!socket.destroyed) socket.destroy();
+        await closed;
+      }));
+      await new Promise<void>((resolve) => setImmediate(resolve));
     },
   };
 }
@@ -1507,16 +1560,17 @@ export class IntegrationHarness {
     let fakeHermes: FakeHermes | undefined;
     let supervisor: FakeSupervisor | undefined;
     try {
-      childPool = new Pool({
+      const ownedChildPool = createOwnedPostgresPool({
         connectionString: isolated.databaseUrl,
         max: 12,
         connectionTimeoutMillis: externalStageTimeoutMs,
         query_timeout: externalStageTimeoutMs,
       });
+      childPool = ownedChildPool.pool;
       childPoolResource = trackPostgresPool(childPool, async () => {
         if (db !== undefined) await db.destroy();
         else await childPool!.end();
-      });
+      }, ownedChildPool.terminatePreAuthConnections);
       await boundedExternal(
         "database migrations",
         () => applyMigrations(childPool!, migrationsDirectory),
@@ -2093,6 +2147,7 @@ export const testHarnessInternals = Object.freeze({
   cleanupAfterSetupFailure,
   combineSetupAndCleanupFailure,
   createIsolatedDatabase,
+  createOwnedPostgresPool,
   dropIsolatedDatabase,
   runCleanupStages,
   trackPostgresPool,
