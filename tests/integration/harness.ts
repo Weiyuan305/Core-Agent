@@ -372,39 +372,67 @@ function trackPostgresPool(
   pool: PoolLifecycleEvents,
   close: () => Promise<void>,
 ): OwnedDatabaseResource {
+  type PoolOwnershipState = "open" | "closing" | "forcing" | "settled";
+  let state: PoolOwnershipState = "open";
   const checkedOut = new Set<PoolLifecycleClient>();
-  let forcePending: Set<PoolLifecycleClient> | undefined;
+  const forced = new WeakSet<PoolLifecycleClient>();
+  const drainTasks = new Set<Promise<void>>();
+  const forceFailures: unknown[] = [];
   const releaseOwnership = (client: PoolLifecycleClient): void => {
     checkedOut.delete(client);
-    forcePending?.delete(client);
   };
-  pool.on("acquire", (client) => checkedOut.add(client));
+  const scheduleForce = (client: PoolLifecycleClient): void => {
+    let task: Promise<void>;
+    task = Promise.resolve().then(() => {
+      if (state !== "forcing" || !checkedOut.has(client) || forced.has(client)) return;
+      checkedOut.delete(client);
+      forced.add(client);
+      try {
+        client.release(true);
+      } catch (error) {
+        forceFailures.push(error);
+      }
+    }).finally(() => drainTasks.delete(task));
+    drainTasks.add(task);
+  };
+  pool.on("acquire", (client) => {
+    checkedOut.add(client);
+    if (state === "forcing") scheduleForce(client);
+  });
   pool.on("release", (_error, client) => releaseOwnership(client));
   pool.on("remove", (client) => releaseOwnership(client));
   let closePromise: Promise<void> | undefined;
+  let closeSettlement: Promise<void> | undefined;
   let forcePromise: Promise<void> | undefined;
+  const startClose = (): Promise<void> => {
+    if (closePromise === undefined) {
+      if (state === "open") state = "closing";
+      closePromise = Promise.resolve().then(close);
+      closeSettlement = closePromise.then(
+        () => undefined,
+        () => undefined,
+      ).then(() => {
+        if (state === "closing") state = "settled";
+      });
+    }
+    return closePromise;
+  };
   return {
     close: async () => {
-      closePromise ??= close();
-      await closePromise;
+      await startClose();
     },
     forceClose: async () => {
-      forcePromise ??= Promise.resolve().then(() => {
-        const pending = new Set(checkedOut);
-        checkedOut.clear();
-        forcePending = pending;
-        const failures: unknown[] = [];
-        for (const client of [...pending]) {
-          if (!pending.delete(client)) continue;
-          try {
-            client.release(true);
-          } catch (error) {
-            failures.push(error);
-          }
+      forcePromise ??= Promise.resolve().then(async () => {
+        startClose();
+        state = "forcing";
+        for (const client of [...checkedOut]) scheduleForce(client);
+        await closeSettlement;
+        while (drainTasks.size > 0) {
+          await Promise.all([...drainTasks]);
         }
-        forcePending = undefined;
-        if (failures.length > 0) {
-          throw new AggregateError(failures, "Integration owned database force close failed");
+        state = "settled";
+        if (forceFailures.length > 0) {
+          throw new AggregateError(forceFailures, "Integration owned database force close failed");
         }
       });
       await forcePromise;

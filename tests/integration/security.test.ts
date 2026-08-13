@@ -603,3 +603,48 @@ test("official PostgreSQL teardown force-releases one real held child-pool check
     await isolated.controlPool.end();
   }
 });
+
+test("official PostgreSQL teardown drains a real checkout acquired after Pool.end begins", async () => {
+  const isolated = await testHarnessInternals.createIsolatedDatabase();
+  let connectCount = 0;
+  let releaseLateConnect: (() => void) | undefined;
+  let markLateConnectStarted: (() => void) | undefined;
+  const lateConnectStarted = new Promise<void>((resolve) => { markLateConnectStarted = resolve; });
+  const childPool = new Pool({
+    connectionString: isolated.databaseUrl,
+    max: 2,
+    onConnect: async () => {
+      connectCount += 1;
+      if (connectCount !== 2) return;
+      markLateConnectStarted?.();
+      await new Promise<void>((resolve) => { releaseLateConnect = resolve; });
+    },
+  });
+  const tracked = testHarnessInternals.trackPostgresPool(childPool, () => childPool.end());
+  const held = await childPool.connect();
+  let acquired = 0;
+  childPool.on("acquire", () => { acquired += 1; });
+  const lateCheckout = childPool.connect();
+  await lateConnectStarted;
+  const teardown = testHarnessInternals.dropIsolatedDatabase({
+    databaseName: isolated.databaseName,
+    controlDatabaseUrl: isolated.controlDatabaseUrl,
+    closeOwned: [tracked],
+    timeoutMs: 1_500,
+    retryDelayMs: 1,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  releaseLateConnect?.();
+  try {
+    await lateCheckout;
+    await teardown;
+    assert.equal(acquired, 1);
+    assert.equal(childPool.ended, true);
+  } finally {
+    if (!childPool.ended) {
+      try { held.release(true); } catch { /* already force-released */ }
+      await childPool.end().catch(() => undefined);
+    }
+    await isolated.controlPool.end();
+  }
+});

@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 import { createSmokeChildEnvironment, validateSmokeEnvironment } from "../../scripts/lib/managed-runtime-session.mjs";
+import { settleTopologyScenario } from "../../scripts/lib/database-topology-cleanup.mjs";
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const composeFile = join(repositoryRoot, "infra/runtime/compose.dev.yaml");
@@ -34,6 +35,19 @@ function command(args, environment, credentials, expectedStatus = 0, input) {
   const output = safeResult(result, credentials);
   assert.equal(result.status, expectedStatus, `disposable database topology command failed\n${output.slice(-4000)}`);
   return output;
+}
+
+function cleanupDocker(args, environment, credentials, absentPattern) {
+  const result = spawnSync("docker", args, {
+    cwd: repositoryRoot,
+    env: environment,
+    encoding: "buffer",
+    maxBuffer: 8 * 1024 * 1024,
+    timeout: 8 * 60 * 1000,
+  });
+  const output = safeResult(result, credentials);
+  if (result.status === 0 || absentPattern.test(output)) return;
+  throw new Error("Disposable topology cleanup command failed");
 }
 
 async function installShippedSchema9(environment, credentials, legacyContainer) {
@@ -127,6 +141,7 @@ async function scenario(kind) {
 
   const docker = (...args) => command(args, childEnvironment, credentialValues);
   const compose = (...args) => docker(...composeArguments(project, ...args));
+  let scenarioFailure;
   try {
     if (kind === "legacy") {
       docker(
@@ -382,12 +397,39 @@ async function scenario(kind) {
       compose("run", "--rm", "--no-deps", service);
     }
     assert.match(compose("run", "--rm", "--no-deps", "--entrypoint", "node", "api", "--input-type=module", "--eval", applicationProbe), /core_agent_app\|10/u);
-  } finally {
-    command(composeArguments(project, "down", "--volumes", "--remove-orphans"), childEnvironment, credentialValues);
-    spawnSync("docker", ["rm", "--force", legacyContainer], { env: childEnvironment, encoding: "buffer" });
-    spawnSync("docker", ["volume", "rm", `${project}_postgres-data`], { env: childEnvironment, encoding: "buffer" });
-    await rm(root, { recursive: true, force: true });
+  } catch (error) {
+    scenarioFailure = error;
   }
+  await settleTopologyScenario(scenarioFailure, [
+    {
+      category: "compose_down",
+      work: async () => {
+        command(composeArguments(project, "down", "--volumes", "--remove-orphans"), childEnvironment, credentialValues);
+      },
+    },
+    {
+      category: "legacy_container_remove",
+      work: async () => cleanupDocker(
+        ["rm", "--force", legacyContainer],
+        childEnvironment,
+        credentialValues,
+        /No such container/iu,
+      ),
+    },
+    {
+      category: "postgres_volume_remove",
+      work: async () => cleanupDocker(
+        ["volume", "rm", `${project}_postgres-data`],
+        childEnvironment,
+        credentialValues,
+        /No such volume/iu,
+      ),
+    },
+    {
+      category: "credential_root_remove",
+      work: async () => rm(root, { recursive: true, force: true }),
+    },
+  ]);
 }
 
 test("official PostgreSQL topology converges fresh and persisted legacy-trust volumes to protected SCRAM", { timeout: 20 * 60 * 1000 }, async () => {

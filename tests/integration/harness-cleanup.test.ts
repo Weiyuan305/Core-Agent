@@ -386,3 +386,153 @@ test("force failure still waits for the original pool close and leaves no post-r
   await delay(30);
   assert.deepEqual(calls, returnedCalls);
 });
+
+test("forcing drains a synchronous late acquire after the current release event stack", async () => {
+  const pool = new EventEmitter();
+  const released: string[] = [];
+  let settleClose: (() => void) | undefined;
+  const late = { release: (destroy?: boolean) => {
+    released.push(`late:${String(destroy)}`);
+    pool.emit("release", undefined, late);
+    settleClose?.();
+  } };
+  const first = { release: (destroy?: boolean) => {
+    released.push(`first:${String(destroy)}`);
+    pool.emit("remove", first);
+    pool.emit("acquire", late);
+  } };
+  const tracked = testHarnessInternals.trackPostgresPool(
+    pool,
+    async () => { await new Promise<void>((resolve) => { settleClose = resolve; }); },
+  );
+  pool.emit("acquire", first);
+  const close = tracked.close(new AbortController().signal);
+  const fallback = setTimeout(() => {
+    pool.emit("release", undefined, late);
+    settleClose?.();
+  }, 30);
+  await tracked.forceClose();
+  await close;
+  clearTimeout(fallback);
+  assert.deepEqual(released, ["first:true", "late:true"]);
+});
+
+test("forcing continuously drains an asynchronous late acquire", async () => {
+  const pool = new EventEmitter();
+  const released: string[] = [];
+  let settleClose: (() => void) | undefined;
+  const late = { release: (destroy?: boolean) => {
+    released.push(`late:${String(destroy)}`);
+    pool.emit("release", undefined, late);
+    settleClose?.();
+  } };
+  const first = { release: (destroy?: boolean) => {
+    released.push(`first:${String(destroy)}`);
+    pool.emit("remove", first);
+    setTimeout(() => pool.emit("acquire", late), 0);
+  } };
+  const tracked = testHarnessInternals.trackPostgresPool(
+    pool,
+    async () => { await new Promise<void>((resolve) => { settleClose = resolve; }); },
+  );
+  pool.emit("acquire", first);
+  const close = tracked.close(new AbortController().signal);
+  const fallback = setTimeout(() => {
+    pool.emit("release", undefined, late);
+    settleClose?.();
+  }, 30);
+  await tracked.forceClose();
+  await close;
+  clearTimeout(fallback);
+  assert.deepEqual(released, ["first:true", "late:true"]);
+});
+
+test("a late acquire normally released in the same event stack is never force-released", async () => {
+  const pool = new EventEmitter();
+  const released: string[] = [];
+  let settleClose: (() => void) | undefined;
+  const late = { release: (destroy?: boolean) => { released.push(`late:${String(destroy)}`); } };
+  const first = { release: (destroy?: boolean) => {
+    released.push(`first:${String(destroy)}`);
+    pool.emit("remove", first);
+    pool.emit("acquire", late);
+    pool.emit("release", undefined, late);
+    queueMicrotask(() => settleClose?.());
+  } };
+  const tracked = testHarnessInternals.trackPostgresPool(
+    pool,
+    async () => { await new Promise<void>((resolve) => { settleClose = resolve; }); },
+  );
+  pool.emit("acquire", first);
+  const close = tracked.close(new AbortController().signal);
+  await tracked.forceClose();
+  await close;
+  assert.deepEqual(released, ["first:true"]);
+});
+
+test("forcing drains multiple late-acquire waves and repeated force calls remain at-most-once", async () => {
+  const pool = new EventEmitter();
+  const released: string[] = [];
+  let settleClose: (() => void) | undefined;
+  const third = { release: (destroy?: boolean) => {
+    released.push(`third:${String(destroy)}`);
+    pool.emit("remove", third);
+    settleClose?.();
+  } };
+  const second = { release: (destroy?: boolean) => {
+    released.push(`second:${String(destroy)}`);
+    pool.emit("remove", second);
+    setTimeout(() => pool.emit("acquire", third), 0);
+  } };
+  const first = { release: (destroy?: boolean) => {
+    released.push(`first:${String(destroy)}`);
+    pool.emit("remove", first);
+    queueMicrotask(() => pool.emit("acquire", second));
+  } };
+  const tracked = testHarnessInternals.trackPostgresPool(
+    pool,
+    async () => { await new Promise<void>((resolve) => { settleClose = resolve; }); },
+  );
+  pool.emit("acquire", first);
+  const close = tracked.close(new AbortController().signal);
+  const fallback = setTimeout(() => settleClose?.(), 40);
+  await Promise.all([tracked.forceClose(), tracked.forceClose(), tracked.forceClose()]);
+  await close;
+  clearTimeout(fallback);
+  assert.deepEqual(released, ["first:true", "second:true", "third:true"]);
+});
+
+test("a force failure from a late checkout is aggregated only after close settles", async () => {
+  const pool = new EventEmitter();
+  const calls: string[] = [];
+  let settleClose: (() => void) | undefined;
+  const late = { release: () => {
+    calls.push("late force failed");
+    setTimeout(() => {
+      calls.push("pool close settled");
+      settleClose?.();
+    }, 5);
+    throw new Error("late force failure");
+  } };
+  const first = { release: () => {
+    calls.push("first forced");
+    pool.emit("remove", first);
+    queueMicrotask(() => pool.emit("acquire", late));
+  } };
+  const tracked = testHarnessInternals.trackPostgresPool(
+    pool,
+    async () => { await new Promise<void>((resolve) => { settleClose = resolve; }); },
+  );
+  pool.emit("acquire", first);
+  const close = tracked.close(new AbortController().signal);
+  await assert.rejects(tracked.forceClose(), (error: unknown) => {
+    assert(error instanceof AggregateError);
+    assert.equal(error.errors.length, 1);
+    return true;
+  });
+  await close;
+  assert.deepEqual(calls, ["first forced", "late force failed", "pool close settled"]);
+  const returnedCalls = [...calls];
+  await delay(20);
+  assert.deepEqual(calls, returnedCalls);
+});
