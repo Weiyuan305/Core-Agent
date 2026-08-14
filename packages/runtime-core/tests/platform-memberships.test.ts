@@ -9,7 +9,7 @@ import { Pool } from "pg";
 
 import { createRuntimeDatabase, type RuntimeDatabase } from "../src/db/database.js";
 import { applyMigrations } from "../src/db/migrate.js";
-import { DomainError } from "../src/domain/idempotency.js";
+import { canonicalPayloadHash, DomainError } from "../src/domain/idempotency.js";
 
 const runtime = await import("../src/index.js") as Record<string, unknown>;
 const databaseUrl = process.env.CONTROL_PLANE_TEST_DATABASE_URL;
@@ -23,11 +23,12 @@ const now = new Date("2026-08-14T06:00:00.000Z");
 let identityDb: Kysely<RuntimeDatabase>;
 
 type PlatformMembershipId = (actorId: string, tenantId: string) => string;
+type PlatformRoleAssignmentId = (actorId: string) => string;
 type ProjectPlatformMemberships = (
   db: Kysely<RuntimeDatabase>, assignmentId: string, cursor: string | null, limit: number,
 ) => Promise<{ processed: number; nextCursor: string | null; done: boolean }>;
 type PlatformRoleWrite = (
-  db: Kysely<RuntimeDatabase>, input: Record<string, unknown>,
+  dependencies: Record<string, unknown>, context: Record<string, unknown>, input: Record<string, unknown>,
 ) => Promise<Record<string, unknown>>;
 
 function requiredFunction<T>(name: string): T {
@@ -100,6 +101,29 @@ async function seedAssignment(status: "active" | "revoked" = "active", resourceV
     role: "platform_super_admin", status, resource_version: resourceVersion, created_at: now, updated_at: now,
   }).execute();
 }
+
+async function seedPlatformAuthority(actorId: string, assignmentId: string, tenantIds: readonly string[]): Promise<void> {
+  await identityDb.insertInto("platform_role_assignments").values({
+    platform_role_assignment_id: assignmentId, actor_id: actorId, role: "platform_super_admin",
+    status: "active", resource_version: 1, created_at: now, updated_at: now,
+  }).execute();
+  if (tenantIds.length > 0) {
+    await identityDb.insertInto("memberships").values(tenantIds.map((tenantId) => ({
+      tenant_id: tenantId, membership_id: requiredFunction<PlatformMembershipId>("platformMembershipId")(actorId, tenantId),
+      actor_id: actorId, schema_version: 1, resource_version: 1, roles: ["admin"],
+      membership_source: "platform" as const, seat_ref: null, status: "active" as const,
+      created_at: now, updated_at: now,
+    }))).execute();
+  }
+}
+
+function roleCommand(payload: Record<string, unknown>): Record<string, unknown> {
+  return { ...payload, payload_hash: canonicalPayloadHash(payload) };
+}
+
+const roleContext = Object.freeze({
+  performingActorId: "actor_platform_performer", requestId: "request_platform_role", traceId: "trace_platform_role",
+});
 
 test.before(async () => {
   await ensureIdentityRoles();
@@ -179,34 +203,134 @@ test("revoked platform authority projects revocation without deleting Membership
   assert.equal((await administratorPool.query("select count(*)::int as count from audit_events")).rows[0]?.count, 4);
 });
 
-test("platform role grant and revoke are optimistic and enqueue project_platform_memberships once per version", async () => {
+test("platform role service requires PostgreSQL authority and commits idempotency, per-Tenant audit/event/outbox, and projection job atomically", async () => {
   const grantPlatformRole = requiredFunction<PlatformRoleWrite>("grantPlatformRole");
   const revokePlatformRole = requiredFunction<PlatformRoleWrite>("revokePlatformRole");
+  await seedActor(roleContext.performingActorId);
   await seedActor("actor_platform_projection");
-  await seedTenants(1);
-  const grantInput = {
-    assignmentId: "platform_assignment_projection", actorId: "actor_platform_projection", now,
+  await seedTenants(2);
+  const targetAssignmentId = requiredFunction<PlatformRoleAssignmentId>("platformRoleAssignmentId")("actor_platform_projection");
+  const grantPayload = {
+    schema_version: 1, idempotency_key: "platform-role-grant-0001",
+    platform_role_assignment_id: targetAssignmentId, target_actor_id: "actor_platform_projection",
+    expected_resource_version: null,
   };
-  const granted = await grantPlatformRole(identityDb, grantInput);
-  const replay = await grantPlatformRole(identityDb, grantInput);
+  await assert.rejects(
+    grantPlatformRole({ db: identityDb, now: () => new Date(now) }, roleContext, roleCommand(grantPayload)),
+    (error: unknown) => error instanceof DomainError && error.code === "UNAUTHENTICATED",
+  );
+  assert.equal((await administratorPool.query("select count(*)::int as count from platform_role_assignments")).rows[0]?.count, 0);
+
+  await seedPlatformAuthority(roleContext.performingActorId, "platform_assignment_performer", ["tenant_platform_000", "tenant_platform_001"]);
+  const granted = await grantPlatformRole({ db: identityDb, now: () => new Date(now) }, roleContext, roleCommand(grantPayload));
+  const replay = await grantPlatformRole({ db: identityDb, now: () => new Date(now) }, roleContext, roleCommand(grantPayload));
   assert.deepEqual(replay, granted);
   assert.equal(granted.resource_version, 1);
+  await assert.rejects(
+    grantPlatformRole({ db: identityDb, now: () => new Date(now) }, roleContext, roleCommand({
+      ...grantPayload, expected_resource_version: 1,
+    })),
+    (error: unknown) => error instanceof DomainError && error.code === "IDEMPOTENCY_CONFLICT",
+  );
   assert.deepEqual((await administratorPool.query("select job_kind, payload_ref, status from worker_jobs")).rows, [{
-    job_kind: "project_platform_memberships", payload_ref: "platform_assignment_projection", status: "queued",
+    job_kind: "project_platform_memberships", payload_ref: targetAssignmentId, status: "queued",
   }]);
-  const revoked = await revokePlatformRole(identityDb, {
-    assignmentId: "platform_assignment_projection", actorId: "actor_platform_projection", expectedResourceVersion: 1,
-    now: new Date(now.getTime() + 1000),
-  });
+  assert.equal((await administratorPool.query("select count(*)::int as count from idempotency_records")).rows[0]?.count, 1);
+  const events = await administratorPool.query("select tenant_id, event_type, payload from product_events order by tenant_id");
+  assert.deepEqual(events.rows.map((row) => ({ ...row, payload: row.payload })), [
+    { tenant_id: "tenant_platform_000", event_type: "platform_role.changed", payload: {
+      platform_role_assignment_id: targetAssignmentId, actor_id: "actor_platform_projection", status: "active", resource_version: 1,
+    } },
+    { tenant_id: "tenant_platform_001", event_type: "platform_role.changed", payload: {
+      platform_role_assignment_id: targetAssignmentId, actor_id: "actor_platform_projection", status: "active", resource_version: 1,
+    } },
+  ]);
+  assert.equal((await administratorPool.query("select count(*)::int as count from audit_events where actor_id = 'actor_platform_performer'")).rows[0]?.count, 2);
+  assert.equal((await administratorPool.query("select count(*)::int as count from outbox")).rows[0]?.count, 2);
+
+  const revokePayload = {
+    schema_version: 1, idempotency_key: "platform-role-revoke-0001",
+    platform_role_assignment_id: targetAssignmentId, target_actor_id: "actor_platform_projection",
+    expected_resource_version: 1,
+  };
+  const revoked = await revokePlatformRole({ db: identityDb, now: () => new Date(now.getTime() + 1000) }, roleContext, roleCommand(revokePayload));
+  const revokeReplay = await revokePlatformRole({ db: identityDb, now: () => new Date(now.getTime() + 2000) }, roleContext, roleCommand(revokePayload));
+  assert.deepEqual(revokeReplay, revoked);
   assert.equal(revoked.resource_version, 2);
   assert.equal((await administratorPool.query("select count(*)::int as count from worker_jobs")).rows[0]?.count, 2);
+  assert.equal((await administratorPool.query("select count(*)::int as count from product_events")).rows[0]?.count, 4);
+  assert.equal((await administratorPool.query("select count(*)::int as count from audit_events")).rows[0]?.count, 4);
+  assert.equal((await administratorPool.query("select count(*)::int as count from outbox")).rows[0]?.count, 4);
   await assert.rejects(
-    revokePlatformRole(identityDb, {
-      assignmentId: "platform_assignment_projection", actorId: "actor_platform_projection", expectedResourceVersion: 1,
-      now: new Date(now.getTime() + 2000),
-    }),
+    revokePlatformRole({ db: identityDb }, roleContext, roleCommand({ ...revokePayload, idempotency_key: "platform-role-revoke-stale" })),
     (error: unknown) => error instanceof DomainError && error.code === "RESOURCE_VERSION_CONFLICT",
   );
+});
+
+test("zero-Tenant platform grant uses the approved bootstrap exception and later company creation projects it", async () => {
+  const grantPlatformRole = requiredFunction<PlatformRoleWrite>("grantPlatformRole");
+  const createB2bCompany = requiredFunction<PlatformRoleWrite>("createB2bCompany");
+  await seedActor(roleContext.performingActorId);
+  await seedActor("actor_first_target");
+  await seedPlatformAuthority(roleContext.performingActorId, "platform_assignment_performer", []);
+  const targetAssignmentId = requiredFunction<PlatformRoleAssignmentId>("platformRoleAssignmentId")("actor_first_target");
+  const payload = {
+    schema_version: 1, idempotency_key: "platform-zero-tenant-grant",
+    platform_role_assignment_id: targetAssignmentId, target_actor_id: "actor_first_target",
+    expected_resource_version: null,
+  };
+  const first = await grantPlatformRole({ db: identityDb, now: () => new Date(now) }, roleContext, roleCommand(payload));
+  const replay = await grantPlatformRole({ db: identityDb, now: () => new Date(now) }, roleContext, roleCommand(payload));
+  assert.deepEqual(replay, first);
+  assert.equal((await administratorPool.query("select count(*)::int as count from worker_jobs")).rows[0]?.count, 0);
+  assert.equal((await administratorPool.query("select count(*)::int as count from idempotency_records")).rows[0]?.count, 0);
+  assert.equal((await administratorPool.query("select count(*)::int as count from audit_events")).rows[0]?.count, 0);
+  assert.equal((await administratorPool.query("select count(*)::int as count from product_events")).rows[0]?.count, 0);
+  assert.equal((await administratorPool.query("select count(*)::int as count from outbox")).rows[0]?.count, 0);
+
+  const companyPayload = {
+    schema_version: 1, idempotency_key: "platform-zero-company", tenant_id: "tenant_after_zero",
+    display_name: "After Zero", invitation: {
+      invitation_id: "invitation_after_zero", membership_id: "membership_after_zero",
+      normalized_email: "admin@after-zero.test",
+    },
+  };
+  await createB2bCompany({
+    db: identityDb, emailHmacKey: Buffer.alloc(32, 0x45), now: () => new Date(now),
+    randomBytes: (size: number) => Buffer.alloc(size, 0x46),
+  }, { actorId: roleContext.performingActorId, requestId: "request_zero_company", traceId: "trace_zero_company" }, {
+    ...companyPayload, payload_hash: canonicalPayloadHash(companyPayload),
+  });
+  assert.equal((await administratorPool.query("select count(*)::int as count from memberships where actor_id = 'actor_first_target' and membership_source = 'platform'")).rows[0]?.count, 1);
+});
+
+test("platform role artifacts roll back with the assignment when projection enqueue fails", async () => {
+  const grantPlatformRole = requiredFunction<PlatformRoleWrite>("grantPlatformRole");
+  await seedActor(roleContext.performingActorId);
+  await seedActor("actor_atomic_target");
+  await seedTenants(1);
+  await seedPlatformAuthority(roleContext.performingActorId, "platform_assignment_performer", ["tenant_platform_000"]);
+  const assignmentId = requiredFunction<PlatformRoleAssignmentId>("platformRoleAssignmentId")("actor_atomic_target");
+  const collisionJobId = `job_platform_${createHash("sha256").update(`${assignmentId}:1`).digest("hex").slice(0, 32)}`;
+  await identityDb.insertInto("worker_jobs").values({
+    tenant_id: "tenant_platform_000", job_id: collisionJobId, job_kind: "project_platform_memberships",
+    status: "queued", attempt_count: 0, max_attempts: 5, lease_owner: null, lease_expires_at: null,
+    next_attempt_at: now, payload_ref: "different_assignment", runtime_command: null,
+    target_command_version: null, effect_state: "pre_effect", last_error_summary: null,
+    run_id: null, container_id: null, created_at: now, updated_at: now,
+  }).execute();
+  const payload = {
+    schema_version: 1, idempotency_key: "platform-role-atomic",
+    platform_role_assignment_id: assignmentId, target_actor_id: "actor_atomic_target", expected_resource_version: null,
+  };
+  await assert.rejects(grantPlatformRole(
+    { db: identityDb, now: () => new Date(now) }, roleContext, roleCommand(payload),
+  ));
+  assert.equal((await administratorPool.query("select count(*)::int as count from platform_role_assignments where platform_role_assignment_id = $1", [assignmentId])).rows[0]?.count, 0);
+  assert.equal((await administratorPool.query("select count(*)::int as count from idempotency_records")).rows[0]?.count, 0);
+  assert.equal((await administratorPool.query("select count(*)::int as count from audit_events")).rows[0]?.count, 0);
+  assert.equal((await administratorPool.query("select count(*)::int as count from product_events")).rows[0]?.count, 0);
+  assert.equal((await administratorPool.query("select count(*)::int as count from outbox")).rows[0]?.count, 0);
 });
 
 test("projector rejects unsafe cursors and limits before reading cross-Tenant state", async () => {

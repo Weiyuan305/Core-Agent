@@ -691,6 +691,11 @@ test("identity events use bounded ID, state, reason-code, and version payloads",
     ["identity.registered", { actor_id: "actor_01", tenant_id: "tenant_01", membership_id: "membership_01", profile_id: "profile_01", resource_version: 1 }],
     ["invitation.created", { invitation_id: "invitation_01", membership_id: "membership_01", status: "pending", resource_version: 1 }],
     ["invitation.accepted", { invitation_id: "invitation_01", membership_id: "membership_01", actor_id: "actor_01", status: "accepted", resource_version: 2 }],
+    ["invitation.changed", { invitation_id: "invitation_01", membership_id: "membership_01", status: "revoked", resource_version: 2 }],
+    ["invitation.changed", { invitation_id: "invitation_01", membership_id: "membership_01", status: "replaced", resource_version: 2, replacement_invitation_id: "invitation_02" }],
+    ["invitation.changed", { invitation_id: "invitation_01", membership_id: "membership_01", status: "expired", resource_version: 2 }],
+    ["platform_role.changed", { platform_role_assignment_id: "platform_role_01", actor_id: "actor_01", status: "active", resource_version: 1 }],
+    ["platform_role.changed", { platform_role_assignment_id: "platform_role_01", actor_id: "actor_01", status: "revoked", resource_version: 2 }],
     ["membership.changed", { membership_id: "membership_01", actor_id: "actor_01", status: "active", reason_code: "invitation_accepted", resource_version: 2 }],
     ["session.revoked", { session_id: "session_01", actor_id: "actor_01", status: "revoked", reason_code: "user_sign_out", resource_version: 2 }],
     ["account.deletion_requested", { account_deletion_id: "deletion_01", actor_id: "actor_01", status: "deletion_pending", resource_version: 1 }],
@@ -701,4 +706,14 @@ test("identity events use bounded ID, state, reason-code, and version payloads",
     assert.equal(validator.Check({ ...base, event_type, payload }), true, event_type);
     assert.equal(validator.Check({ ...base, event_type, payload: { ...payload, email: "student@example.test" } }), false, event_type);
   }
+  assert.equal(validator.Check({
+    ...base,
+    event_type: "invitation.changed",
+    payload: { invitation_id: "invitation_01", membership_id: "membership_01", status: "accepted", resource_version: 2 },
+  }), false);
+  assert.equal(validator.Check({
+    ...base,
+    event_type: "platform_role.changed",
+    payload: { platform_role_assignment_id: "platform_role_01", actor_id: "actor_01", status: "active", resource_version: 1, tenant_role: "admin" },
+  }), false);
 });

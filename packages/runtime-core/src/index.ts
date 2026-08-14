@@ -224,11 +224,17 @@ export {
   type StoredInvitationCredential,
 } from "./repositories/identity/invitations.js";
 export {
-  grantPlatformRole,
   platformMembershipId,
-  revokePlatformRole,
-  type PlatformRoleWriteResult,
+  platformRoleAssignmentId,
 } from "./repositories/identity/platform-roles.js";
+export {
+  grantPlatformRole,
+  revokePlatformRole,
+  type PlatformRoleCommand,
+  type PlatformRoleCommandContext,
+  type PlatformRoleCommandDependencies,
+  type PlatformRoleWriteResult,
+} from "./services/identity/change-platform-role.js";
 export {
   createB2bCompany,
   type CreateB2bCompanyCommand,
@@ -256,12 +262,16 @@ export {
   type AcceptInvitationResult,
 } from "./services/identity/accept-invitation.js";
 export {
-  changeMembershipRoles,
+  grantConsultantRole,
+  removeConsultantRole,
   suspendMembership,
-  type ChangeMembershipRolesCommand,
+  type ConsultantRoleGrantResult,
+  type ConsultantRoleRemoveResult,
+  type GrantConsultantRoleCommand,
   type MembershipMutationResult,
   type MembershipRoleCommandContext,
   type MembershipRoleCommandDependencies,
+  type RemoveConsultantRoleCommand,
   type SuspendMembershipCommand,
 } from "./services/identity/change-membership-roles.js";
 export {

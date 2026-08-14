@@ -343,6 +343,31 @@ const InvitationAcceptedEventSchema = createEventBranch("invitation.accepted", {
   status: Type.Literal("accepted"),
   resource_version: ResourceVersionSchema,
 });
+const InvitationRevokedEventSchema = createEventBranch("invitation.changed", {
+    invitation_id: OpaqueIdSchema,
+    membership_id: OpaqueIdSchema,
+    status: Type.Literal("revoked"),
+    resource_version: ResourceVersionSchema,
+});
+const InvitationReplacedEventSchema = createEventBranch("invitation.changed", {
+    invitation_id: OpaqueIdSchema,
+    membership_id: OpaqueIdSchema,
+    status: Type.Literal("replaced"),
+    replacement_invitation_id: OpaqueIdSchema,
+    resource_version: ResourceVersionSchema,
+});
+const InvitationExpiredEventSchema = createEventBranch("invitation.changed", {
+    invitation_id: OpaqueIdSchema,
+    membership_id: OpaqueIdSchema,
+    status: Type.Literal("expired"),
+    resource_version: ResourceVersionSchema,
+});
+const PlatformRoleChangedEventSchema = createEventBranch("platform_role.changed", {
+  platform_role_assignment_id: OpaqueIdSchema,
+  actor_id: OpaqueIdSchema,
+  status: Type.Union([Type.Literal("active"), Type.Literal("revoked")]),
+  resource_version: ResourceVersionSchema,
+});
 const MembershipChangedEventSchema = createEventBranch("membership.changed", {
   membership_id: OpaqueIdSchema,
   actor_id: OpaqueIdSchema,
@@ -380,6 +405,10 @@ const IdentityEventBranchSchemas = [
   IdentityRegisteredEventSchema,
   InvitationCreatedEventSchema,
   InvitationAcceptedEventSchema,
+  InvitationRevokedEventSchema,
+  InvitationReplacedEventSchema,
+  InvitationExpiredEventSchema,
+  PlatformRoleChangedEventSchema,
   MembershipChangedEventSchema,
   SessionRevokedEventSchema,
   AccountDeletionRequestedEventSchema,

@@ -230,6 +230,24 @@ test("inspection gives one RESOURCE_NOT_FOUND envelope for malformed unknown exp
   ));
 });
 
+test("inspection and acceptance hide invitations belonging to a closed Tenant", async () => {
+  const createInvitation = requiredFunction<CommandFunction>("createInvitation");
+  const inspectInvitation = requiredFunction<InspectFunction>("inspectInvitation");
+  const acceptInvitation = requiredFunction<CommandFunction>("acceptInvitation");
+  await seedCompany();
+  await seedActor("actor_consultant", "consultant@example.test");
+  const created = await createInvitation(dependencies(), adminContext(), command(createPayload()));
+  await identityDb.updateTable("tenants").set({ status: "closed", resource_version: 2, updated_at: now })
+    .where("tenant_id", "=", "tenant_invitation").execute();
+  const expected = (error: unknown) => error instanceof DomainError
+    && error.code === "RESOURCE_NOT_FOUND" && error.message === "RESOURCE_NOT_FOUND: Invitation was not found";
+  await assert.rejects(inspectInvitation(dependencies(), created.invitation_secret as string), expected);
+  await assert.rejects(acceptInvitation(dependencies(), {
+    actorId: "actor_consultant", normalizedEmail: "consultant@example.test",
+    requestId: "request_closed", traceId: "trace_closed",
+  }, command(acceptPayload(created.invitation_secret as string))), expected);
+});
+
 test("replace and revoke require exact optimistic versions and remain single-use", async () => {
   const createInvitation = requiredFunction<CommandFunction>("createInvitation");
   const replaceInvitation = requiredFunction<CommandFunction>("replaceInvitation");
@@ -263,11 +281,62 @@ test("replace and revoke require exact optimistic versions and remain single-use
     revokeInvitation(dependencies(), adminContext(), command({ ...revoke, idempotency_key: "revoke-stale" })),
     (error: unknown) => error instanceof DomainError && error.code === "RESOURCE_VERSION_CONFLICT",
   );
+  const lifecycle = await administratorPool.query("select event_type, payload from product_events order by payload->>'invitation_id', event_type desc");
+  assert.deepEqual(lifecycle.rows, [{
+    event_type: "invitation.created", payload: {
+      invitation_id: "invitation_consultant_0001", membership_id: "membership_consultant_0001", status: "pending", resource_version: 1,
+    },
+  }, {
+    event_type: "invitation.changed", payload: {
+      invitation_id: "invitation_consultant_0001", membership_id: "membership_consultant_0001", status: "replaced",
+      replacement_invitation_id: "invitation_consultant_0002", resource_version: 2,
+    },
+  }, {
+    event_type: "invitation.created", payload: {
+      invitation_id: "invitation_consultant_0002", membership_id: "membership_consultant_0001", status: "pending", resource_version: 1,
+    },
+  }, {
+    event_type: "invitation.changed", payload: {
+      invitation_id: "invitation_consultant_0002", membership_id: "membership_consultant_0001", status: "revoked", resource_version: 2,
+    },
+  }]);
+  assert.equal((await administratorPool.query("select count(*)::int as count from audit_events where actor_id = 'actor_company_admin'")).rows[0]?.count, 3);
+  assert.equal((await administratorPool.query("select count(*)::int as count from outbox")).rows[0]?.count, 4);
+});
+
+test("reinviting expires a pending row with database time and concurrent attempts leave one new pending invitation", async () => {
+  const createInvitation = requiredFunction<CommandFunction>("createInvitation");
+  await seedCompany();
+  const oldPayload = createPayload({ idempotency_key: "invite-expiry-old" });
+  await createInvitation(dependencies(new Date("2026-08-01T00:00:00.000Z")), adminContext(), command(oldPayload));
+  const nextA = createPayload({
+    idempotency_key: "invite-expiry-next-a", invitation_id: "invitation_expiry_next_a",
+    membership_id: "membership_expiry_next_a",
+  });
+  const nextB = createPayload({
+    idempotency_key: "invite-expiry-next-b", invitation_id: "invitation_expiry_next_b",
+    membership_id: "membership_expiry_next_b",
+  });
+  const outcomes = await Promise.allSettled([
+    createInvitation(dependencies(), adminContext(), command(nextA)),
+    createInvitation(dependencies(), adminContext(), command(nextB)),
+  ]);
+  assert.equal(outcomes.filter((outcome) => outcome.status === "fulfilled").length, 1);
+  assert.equal(outcomes.filter((outcome) => outcome.status === "rejected").length, 1);
+  const rows = await administratorPool.query("select status, resource_version::int from identity_invitations order by created_at, invitation_id");
+  assert.deepEqual(rows.rows.map((row) => row.status), ["expired", "pending"]);
+  assert.equal(rows.rows[0]?.resource_version, 2);
+  assert.equal((await administratorPool.query("select count(*)::int as count from identity_invitations where status = 'pending'")).rows[0]?.count, 1);
+  const lifecycle = await administratorPool.query("select event_type, payload->>'status' as status from product_events order by occurred_at, event_type");
+  assert.equal(lifecycle.rows.filter((row) => row.event_type === "invitation.changed" && row.status === "expired").length, 1);
+  assert.equal((await administratorPool.query("select count(*)::int as count from audit_events")).rows[0]?.count, 3);
+  assert.equal((await administratorPool.query("select count(*)::int as count from outbox")).rows[0]?.count, 3);
 });
 
 test("consultant acceptance creates one Profile, admin acceptance creates none, and identical replay converges", async () => {
   const createInvitation = requiredFunction<CommandFunction>("createInvitation");
   const acceptInvitation = requiredFunction<CommandFunction>("acceptInvitation");
+  const inspectInvitation = requiredFunction<InspectFunction>("inspectInvitation");
   await seedCompany();
   await seedActor("actor_consultant", "consultant@example.test");
   const created = await createInvitation(dependencies(), adminContext(), command(createPayload()));
@@ -283,6 +352,11 @@ test("consultant acceptance creates one Profile, admin acceptance creates none, 
     acceptance,
   );
   assert.deepEqual(replay, accepted);
+  await assert.rejects(
+    inspectInvitation(dependencies(), created.invitation_secret as string),
+    (error: unknown) => error instanceof DomainError && error.code === "RESOURCE_NOT_FOUND"
+      && error.message === "RESOURCE_NOT_FOUND: Invitation was not found",
+  );
   assert.equal((await administratorPool.query("select count(*)::int as count from profiles where profile_kind = 'consultant' and status = 'active'")).rows[0]?.count, 1);
   assert.deepEqual((await administratorPool.query("select roles, status, resource_version::int from memberships where membership_id = 'membership_consultant_0001'")).rows, [{
     roles: ["consultant"], status: "active", resource_version: 1,
@@ -363,7 +437,7 @@ test("concurrent accept and revoke reach one terminal invitation outcome without
   assert.equal(profileCount, invitation.rows[0]?.status === "accepted" ? 1 : 0);
 });
 
-test("concurrent accepted replay and suspension preserve Membership/Profile terminal consistency", async () => {
+test("controlled concurrent accepted replay and suspension report both outcomes and one versioned terminal graph", async () => {
   const createInvitation = requiredFunction<CommandFunction>("createInvitation");
   const acceptInvitation = requiredFunction<CommandFunction>("acceptInvitation");
   const suspendMembership = requiredFunction<CommandFunction>("suspendMembership");
@@ -379,13 +453,33 @@ test("concurrent accepted replay and suspension preserve Membership/Profile term
     schema_version: 1, idempotency_key: "suspend-accepted", tenant_id: "tenant_invitation",
     membership_id: "membership_consultant_0001", expected_resource_version: 1,
   };
-  await Promise.allSettled([
+  const blocker = await administratorPool.connect();
+  await blocker.query("begin");
+  await blocker.query("select actor_id from actors where actor_id = 'actor_consultant' for update");
+  const pending = [
     acceptInvitation(dependencies(), acceptContext, acceptance),
     suspendMembership(dependencies(), adminContext(), command(suspendPayload)),
-  ]);
-  const membership = await administratorPool.query("select status from memberships where membership_id = 'membership_consultant_0001'");
-  const profile = await administratorPool.query("select status from profiles where owner_actor_id = 'actor_consultant'");
-  assert.equal(profile.rows[0]?.status, membership.rows[0]?.status === "active" ? "active" : "suspended");
+  ];
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await blocker.query("commit");
+  blocker.release();
+  const outcomes = await Promise.allSettled(pending);
+  assert.equal(outcomes.filter((outcome) => outcome.status === "fulfilled").length, 2);
+  assert.equal(outcomes.filter((outcome) => outcome.status === "rejected").length, 0);
+  assert.deepEqual((await administratorPool.query(
+    "select status, resource_version::int from memberships where membership_id = 'membership_consultant_0001'",
+  )).rows, [{ status: "suspended", resource_version: 2 }]);
+  assert.deepEqual((await administratorPool.query(
+    "select status, resource_version::int from profiles where owner_actor_id = 'actor_consultant'",
+  )).rows, [{ status: "suspended", resource_version: 2 }]);
+  assert.deepEqual((await administratorPool.query(
+    "select status, resource_version::int from identity_invitations where invitation_id = 'invitation_consultant_0001'",
+  )).rows, [{ status: "accepted", resource_version: 2 }]);
+  assert.equal((await administratorPool.query("select count(*)::int as count from memberships where membership_id = 'membership_consultant_0001'")).rows[0]?.count, 1);
+  assert.equal((await administratorPool.query("select count(*)::int as count from profiles where owner_actor_id = 'actor_consultant'")).rows[0]?.count, 1);
+  assert.equal((await administratorPool.query("select count(*)::int as count from audit_events")).rows[0]?.count, 3);
+  assert.equal((await administratorPool.query("select count(*)::int as count from product_events")).rows[0]?.count, 3);
+  assert.equal((await administratorPool.query("select count(*)::int as count from outbox")).rows[0]?.count, 3);
 });
 
 test("identical Membership suspension replay converges without a second Profile transition", async () => {

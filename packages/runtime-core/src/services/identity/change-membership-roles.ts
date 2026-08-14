@@ -31,14 +31,46 @@ export interface MembershipRoleCommandDependencies {
   readonly now?: () => Date;
 }
 
-export interface ChangeMembershipRolesCommand {
+interface CommandEnvelope {
   readonly schema_version: 1;
   readonly idempotency_key: string;
   readonly payload_hash: string;
-  readonly tenant_id: string;
   readonly membership_id: string;
-  readonly expected_resource_version: number;
-  readonly roles: readonly ("admin" | "consultant")[];
+  readonly expected_membership_resource_version: number;
+}
+
+export type GrantConsultantRoleCommand = CommandEnvelope & (
+  | { readonly grant_mode: "create_profile" }
+  | {
+    readonly grant_mode: "reactivate_profile";
+    readonly profile_id: string;
+    readonly expected_profile_resource_version: number;
+  }
+);
+
+export interface RemoveConsultantRoleCommand extends CommandEnvelope {
+  readonly profile_id: string;
+  readonly expected_profile_resource_version: number;
+}
+
+export interface ConsultantRoleGrantResult {
+  readonly schema_version: 1;
+  readonly membership_id: string;
+  readonly roles: readonly ["admin", "consultant"];
+  readonly membership_resource_version: number;
+  readonly profile_id: string;
+  readonly profile_resource_version: number;
+  readonly profile_status: "active";
+}
+
+export interface ConsultantRoleRemoveResult {
+  readonly schema_version: 1;
+  readonly membership_id: string;
+  readonly roles: readonly ["admin"];
+  readonly membership_resource_version: number;
+  readonly profile_id: string;
+  readonly profile_resource_version: number;
+  readonly profile_status: "suspended";
 }
 
 export interface SuspendMembershipCommand {
@@ -56,7 +88,7 @@ export interface MembershipMutationResult {
   readonly membership_id: string;
   readonly actor_id: string;
   readonly roles: readonly ("admin" | "consultant")[];
-  readonly status: "active" | "suspended";
+  readonly status: "suspended";
   readonly resource_version: number;
   readonly profile_id?: string;
 }
@@ -78,50 +110,63 @@ function validId(value: unknown): value is string {
   return typeof value === "string" && value.length >= 1 && value.length <= 255;
 }
 
-function validateBase(value: Record<string, unknown>): boolean {
-  return value.schema_version === 1 && validId(value.idempotency_key) && validId(value.tenant_id)
-    && validId(value.membership_id) && typeof value.payload_hash === "string"
-    && /^sha256:[a-f0-9]{64}$/u.test(value.payload_hash)
-    && Number.isSafeInteger(value.expected_resource_version) && Number(value.expected_resource_version) >= 1;
+function validHash(value: unknown): value is string {
+  return typeof value === "string" && /^sha256:[a-f0-9]{64}$/u.test(value);
 }
 
-function assertContext(context: MembershipRoleCommandContext, tenantId: string): void {
+function validVersion(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) >= 1;
+}
+
+function assertContext(context: MembershipRoleCommandContext): void {
   if (!validId(context.actorId) || !validId(context.tenantId) || !validId(context.requestId) || !validId(context.traceId)) {
     throw new DomainError("INTERNAL_ERROR", "Membership command context is invalid");
   }
-  if (context.tenantId !== tenantId) throw new DomainError("UNAUTHENTICATED", "Membership Tenant authority is invalid");
 }
 
-function assertPayloadHash(command: { payload_hash: string }): void {
+function assertPayloadHash(command: { readonly payload_hash: string }): void {
   const { payload_hash: _payloadHash, ...payload } = command;
   if (command.payload_hash !== canonicalPayloadHash(payload)) {
     throw new DomainError("INVALID_REQUEST", "Payload hash does not match the canonical Membership command");
   }
 }
 
-function normalizeRoles(value: unknown): readonly ("admin" | "consultant")[] {
-  if (!Array.isArray(value)) throw new DomainError("INVALID_REQUEST", "Membership roles are invalid");
-  const roles = [...value];
-  if (
-    roles.length < 1 || roles.length > 2 || new Set(roles).size !== roles.length
-    || roles.some((role) => role !== "admin" && role !== "consultant")
-  ) throw new DomainError("INVALID_REQUEST", "Membership roles are invalid");
-  roles.sort((left, right) => left === right ? 0 : left === "admin" ? -1 : 1);
-  if (roles.some((role, index) => role !== value[index])) {
-    throw new DomainError("INVALID_REQUEST", "Membership roles must use canonical order");
+function assertGrantCommand(value: unknown): asserts value is GrantConsultantRoleCommand {
+  if (!isPlainObject(value)) throw new DomainError("INVALID_REQUEST", "Consultant grant command does not satisfy its contract");
+  const mode = value.grant_mode;
+  const keys = mode === "create_profile"
+    ? ["schema_version", "idempotency_key", "payload_hash", "membership_id", "expected_membership_resource_version", "grant_mode"]
+    : ["schema_version", "idempotency_key", "payload_hash", "membership_id", "expected_membership_resource_version", "grant_mode", "profile_id", "expected_profile_resource_version"];
+  if (!exactKeys(value, keys) || value.schema_version !== 1 || !validId(value.idempotency_key)
+    || !validHash(value.payload_hash) || !validId(value.membership_id)
+    || !validVersion(value.expected_membership_resource_version)
+    || (mode !== "create_profile" && mode !== "reactivate_profile")
+    || (mode === "reactivate_profile" && (!validId(value.profile_id) || !validVersion(value.expected_profile_resource_version)))) {
+    throw new DomainError("INVALID_REQUEST", "Consultant grant command does not satisfy its contract");
   }
-  return Object.freeze(roles as ("admin" | "consultant")[]);
+  assertPayloadHash(value as unknown as GrantConsultantRoleCommand);
+}
+
+function assertRemoveCommand(value: unknown): asserts value is RemoveConsultantRoleCommand {
+  if (!isPlainObject(value) || !exactKeys(value, [
+    "schema_version", "idempotency_key", "payload_hash", "membership_id",
+    "expected_membership_resource_version", "profile_id", "expected_profile_resource_version",
+  ]) || value.schema_version !== 1 || !validId(value.idempotency_key) || !validHash(value.payload_hash)
+    || !validId(value.membership_id) || !validVersion(value.expected_membership_resource_version)
+    || !validId(value.profile_id) || !validVersion(value.expected_profile_resource_version)) {
+    throw new DomainError("INVALID_REQUEST", "Consultant remove command does not satisfy its contract");
+  }
+  assertPayloadHash(value as unknown as RemoveConsultantRoleCommand);
 }
 
 function profileId(actorId: string, tenantId: string): string {
-  return `profile_consultant_${createHash("sha256")
-    .update(`${actorId}:${tenantId}`, "utf8").digest("hex").slice(0, 32)}`;
+  return `profile_consultant_${createHash("sha256").update(`${actorId}:${tenantId}`, "utf8").digest("hex").slice(0, 32)}`;
 }
 
 function safeVersion(value: string): number {
   const version = Number(value);
   if (!/^\d+$/u.test(value) || !Number.isSafeInteger(version) || version < 1) {
-    throw new DomainError("INTERNAL_ERROR", "Stored Membership version is invalid");
+    throw new DomainError("INTERNAL_ERROR", "Stored identity resource version is invalid");
   }
   return version;
 }
@@ -138,28 +183,22 @@ async function assertCompanyAdmin(
   trx: Transaction<RuntimeDatabase>, context: MembershipRoleCommandContext,
 ): Promise<string> {
   const authority = await loadActorIdentityAuthority(trx, context.actorId);
-  const membership = authority.memberships.find((candidate) => (
-    candidate.tenantId === context.tenantId && candidate.source === "company"
-    && candidate.status === "active" && candidate.roles.includes("admin")
-  ));
+  const membership = authority.memberships.find((candidate) => candidate.tenantId === context.tenantId
+    && candidate.source === "company" && candidate.status === "active" && candidate.roles.includes("admin"));
   if (membership === undefined) throw new DomainError("UNAUTHENTICATED", "Active company administrator authority is required");
   return membership.membershipId;
 }
 
-function assertReplay(value: unknown, expected: MembershipMutationResult): void {
-  if (!isPlainObject(value) || !exactKeys(value, Object.keys(expected))) {
-    throw new DomainError("INTERNAL_ERROR", "Stored Membership command response is invalid");
-  }
-  for (const [key, item] of Object.entries(expected)) {
-    const candidate = value[key];
-    if (Array.isArray(item)) {
-      if (!Array.isArray(candidate) || item.length !== candidate.length
-        || item.some((role, index) => role !== candidate[index])) {
-        throw new DomainError("INTERNAL_ERROR", "Stored Membership command response is invalid");
-      }
-    } else if (candidate !== item) {
-      throw new DomainError("INTERNAL_ERROR", "Stored Membership command response is invalid");
-    }
+function assertStoredRoleResponse(
+  value: unknown, status: "active" | "suspended",
+): asserts value is ConsultantRoleGrantResult | ConsultantRoleRemoveResult {
+  if (!isPlainObject(value) || !exactKeys(value, [
+    "schema_version", "membership_id", "roles", "membership_resource_version",
+    "profile_id", "profile_resource_version", "profile_status",
+  ]) || value.schema_version !== 1 || !validId(value.membership_id) || !validId(value.profile_id)
+    || !validVersion(value.membership_resource_version) || !validVersion(value.profile_resource_version)
+    || value.profile_status !== status || !Array.isArray(value.roles)) {
+    throw new DomainError("INTERNAL_ERROR", "Stored consultant role response is invalid");
   }
 }
 
@@ -197,24 +236,205 @@ async function appendMembershipMutation(
   });
 }
 
-export async function changeMembershipRoles(
+async function prepareRoleMutation(
+  dependencies: MembershipRoleCommandDependencies,
+  context: MembershipRoleCommandContext,
+  membershipId: string,
+  work: (input: {
+    trx: Transaction<RuntimeDatabase>; now: Date; adminMembershipId: string;
+    membership: {
+      actor_id: string; membership_source: "self" | "company" | "platform";
+      status: string;
+      roles: string[]; resource_version: string;
+    };
+  }) => Promise<ConsultantRoleGrantResult | ConsultantRoleRemoveResult>,
+): Promise<ConsultantRoleGrantResult | ConsultantRoleRemoveResult> {
+  const discovered = await dependencies.db.selectFrom("memberships").select("actor_id")
+    .where("tenant_id", "=", context.tenantId).where("membership_id", "=", membershipId).executeTakeFirst();
+  if (discovered === undefined) throw new DomainError("RESOURCE_NOT_FOUND", "Membership was not found");
+  return withDatabaseTransactionRetry(dependencies.db, async (trx) => {
+    const now = dependencies.now?.() ?? new Date();
+    await lockActors(trx, [context.actorId, discovered.actor_id]);
+    const tenant = await trx.selectFrom("tenants").select(["tenant_mode", "status"])
+      .where("tenant_id", "=", context.tenantId).forUpdate().executeTakeFirst();
+    if (tenant?.tenant_mode !== "b2b" || tenant.status !== "active") {
+      throw new DomainError("UNAUTHENTICATED", "Active B2B Tenant is required");
+    }
+    const adminMembershipId = await assertCompanyAdmin(trx, context);
+    const membership = await trx.selectFrom("memberships").selectAll()
+      .where("tenant_id", "=", context.tenantId).where("membership_id", "=", membershipId)
+      .forUpdate().executeTakeFirst();
+    if (membership === undefined || membership.actor_id !== discovered.actor_id) {
+      throw new DomainError("RESOURCE_NOT_FOUND", "Membership was not found");
+    }
+    if (membership.membership_source !== "company") {
+      throw new DomainError("INVALID_STATE_TRANSITION", "Platform Memberships are management-only");
+    }
+    if (membership.status !== "active") {
+      throw new DomainError("INVALID_STATE_TRANSITION", "Only active Membership roles may change");
+    }
+    return work({ trx, now, adminMembershipId, membership });
+  }, { isolationLevel: "serializable" });
+}
+
+export async function grantConsultantRole(
+  dependencies: MembershipRoleCommandDependencies,
+  context: MembershipRoleCommandContext,
+  input: unknown,
+): Promise<ConsultantRoleGrantResult> {
+  assertGrantCommand(input);
+  assertContext(context);
+  return prepareRoleMutation(dependencies, context, input.membership_id, async ({ trx, now, adminMembershipId, membership }) => {
+    const expectedProfileId = profileId(membership.actor_id, context.tenantId);
+    const profile = await trx.selectFrom("profiles").select(["profile_id", "status", "resource_version"])
+      .where("tenant_id", "=", context.tenantId).where("profile_id", "=", expectedProfileId)
+      .forUpdate().executeTakeFirst();
+    const tenantTransaction: TenantTransaction = { tenantId: context.tenantId, trx };
+    const operation = "identity.membership.grant-consultant";
+    const admission = await beginIdempotentCommand<ConsultantRoleGrantResult>(tenantTransaction, {
+      key: input.idempotency_key, payloadHash: input.payload_hash, operation, now,
+      expiresAt: new Date(now.getTime() + dayMs),
+    });
+    if (admission.kind === "replay") {
+      assertStoredRoleResponse(admission.response, "active");
+      return admission.response as ConsultantRoleGrantResult;
+    }
+    if (admission.kind === "in_progress") throw new DomainError("IDEMPOTENCY_CONFLICT", "Membership command is already in progress");
+    if (safeVersion(membership.resource_version) !== input.expected_membership_resource_version) {
+      throw new DomainError("RESOURCE_VERSION_CONFLICT", "Membership version changed");
+    }
+    if (membership.roles.length !== 1 || membership.roles[0] !== "admin") {
+      throw new DomainError("INVALID_STATE_TRANSITION", "Consultant role may only be granted to an administrator");
+    }
+    let profileResourceVersion: number;
+    if (input.grant_mode === "create_profile") {
+      if (profile !== undefined) throw new DomainError("INVALID_STATE_TRANSITION", "Consultant Profile already exists");
+      profileResourceVersion = 1;
+      await trx.insertInto("profiles").values({
+        tenant_id: context.tenantId, profile_id: expectedProfileId, schema_version: 1, resource_version: 1,
+        owner_actor_id: membership.actor_id, profile_kind: "consultant", hermes_profile_ref: `hermes_${expectedProfileId}`,
+        description: "Company consultant profile", status: "active",
+        provider_config_id: dependencies.consultantProfile.providerConfigId,
+        model_id: dependencies.consultantProfile.modelId, created_at: now, updated_at: now,
+      }).execute();
+    } else {
+      if (input.profile_id !== expectedProfileId || profile?.profile_id !== input.profile_id
+        || profile.status !== "suspended") {
+        throw new DomainError("INVALID_STATE_TRANSITION", "Suspended consultant Profile was not found");
+      }
+      const currentProfileVersion = safeVersion(profile.resource_version);
+      if (currentProfileVersion !== input.expected_profile_resource_version) {
+        throw new DomainError("RESOURCE_VERSION_CONFLICT", "Profile version changed");
+      }
+      profileResourceVersion = currentProfileVersion + 1;
+      await trx.updateTable("profiles").set({
+        status: "active", resource_version: profileResourceVersion, updated_at: now,
+      }).where("tenant_id", "=", context.tenantId).where("profile_id", "=", expectedProfileId).execute();
+    }
+    const membershipResourceVersion = input.expected_membership_resource_version + 1;
+    await trx.updateTable("memberships").set({
+      roles: ["admin", "consultant"], resource_version: membershipResourceVersion, updated_at: now,
+    }).where("tenant_id", "=", context.tenantId).where("membership_id", "=", input.membership_id).execute();
+    const result: ConsultantRoleGrantResult = Object.freeze({
+      schema_version: 1, membership_id: input.membership_id,
+      roles: Object.freeze(["admin", "consultant"] as const),
+      membership_resource_version: membershipResourceVersion, profile_id: expectedProfileId,
+      profile_resource_version: profileResourceVersion, profile_status: "active",
+    });
+    await appendMembershipMutation(tenantTransaction, context, {
+      idempotencyKey: input.idempotency_key, adminMembershipId, targetMembershipId: input.membership_id,
+      targetActorId: membership.actor_id, status: "active", reason: "consultant_role_granted",
+      resourceVersion: membershipResourceVersion, now, operation,
+    });
+    await completeIdempotentCommand(tenantTransaction, {
+      key: input.idempotency_key, payloadHash: input.payload_hash, operation,
+      resultRef: input.membership_id, response: result, updatedAt: now,
+    });
+    return result;
+  }) as Promise<ConsultantRoleGrantResult>;
+}
+
+export async function removeConsultantRole(
+  dependencies: MembershipRoleCommandDependencies,
+  context: MembershipRoleCommandContext,
+  input: unknown,
+): Promise<ConsultantRoleRemoveResult> {
+  assertRemoveCommand(input);
+  assertContext(context);
+  return prepareRoleMutation(dependencies, context, input.membership_id, async ({ trx, now, adminMembershipId, membership }) => {
+    const expectedProfileId = profileId(membership.actor_id, context.tenantId);
+    const profile = await trx.selectFrom("profiles").select(["profile_id", "status", "resource_version"])
+      .where("tenant_id", "=", context.tenantId).where("profile_id", "=", input.profile_id)
+      .forUpdate().executeTakeFirst();
+    const tenantTransaction: TenantTransaction = { tenantId: context.tenantId, trx };
+    const operation = "identity.membership.remove-consultant";
+    const admission = await beginIdempotentCommand<ConsultantRoleRemoveResult>(tenantTransaction, {
+      key: input.idempotency_key, payloadHash: input.payload_hash, operation, now,
+      expiresAt: new Date(now.getTime() + dayMs),
+    });
+    if (admission.kind === "replay") {
+      assertStoredRoleResponse(admission.response, "suspended");
+      return admission.response as ConsultantRoleRemoveResult;
+    }
+    if (admission.kind === "in_progress") throw new DomainError("IDEMPOTENCY_CONFLICT", "Membership command is already in progress");
+    if (safeVersion(membership.resource_version) !== input.expected_membership_resource_version) {
+      throw new DomainError("RESOURCE_VERSION_CONFLICT", "Membership version changed");
+    }
+    if (membership.roles.length !== 2 || membership.roles[0] !== "admin" || membership.roles[1] !== "consultant") {
+      throw new DomainError("INVALID_STATE_TRANSITION", "Consultant role is not active");
+    }
+    if (input.profile_id !== expectedProfileId || profile?.profile_id !== expectedProfileId || profile.status !== "active") {
+      throw new DomainError("INVALID_STATE_TRANSITION", "Active consultant Profile was not found");
+    }
+    const currentProfileVersion = safeVersion(profile.resource_version);
+    if (currentProfileVersion !== input.expected_profile_resource_version) {
+      throw new DomainError("RESOURCE_VERSION_CONFLICT", "Profile version changed");
+    }
+    const membershipResourceVersion = input.expected_membership_resource_version + 1;
+    const profileResourceVersion = currentProfileVersion + 1;
+    await trx.updateTable("memberships").set({
+      roles: ["admin"], resource_version: membershipResourceVersion, updated_at: now,
+    }).where("tenant_id", "=", context.tenantId).where("membership_id", "=", input.membership_id).execute();
+    await trx.updateTable("profiles").set({
+      status: "suspended", resource_version: profileResourceVersion, updated_at: now,
+    }).where("tenant_id", "=", context.tenantId).where("profile_id", "=", expectedProfileId).execute();
+    const result: ConsultantRoleRemoveResult = Object.freeze({
+      schema_version: 1, membership_id: input.membership_id, roles: Object.freeze(["admin"] as const),
+      membership_resource_version: membershipResourceVersion, profile_id: expectedProfileId,
+      profile_resource_version: profileResourceVersion, profile_status: "suspended",
+    });
+    await appendMembershipMutation(tenantTransaction, context, {
+      idempotencyKey: input.idempotency_key, adminMembershipId, targetMembershipId: input.membership_id,
+      targetActorId: membership.actor_id, status: "active", reason: "consultant_role_revoked",
+      resourceVersion: membershipResourceVersion, now, operation,
+    });
+    await completeIdempotentCommand(tenantTransaction, {
+      key: input.idempotency_key, payloadHash: input.payload_hash, operation,
+      resultRef: input.membership_id, response: result, updatedAt: now,
+    });
+    return result;
+  }) as Promise<ConsultantRoleRemoveResult>;
+}
+
+export async function suspendMembership(
   dependencies: MembershipRoleCommandDependencies,
   context: MembershipRoleCommandContext,
   input: unknown,
 ): Promise<MembershipMutationResult> {
   if (!isPlainObject(input) || !exactKeys(input, [
-    "schema_version", "idempotency_key", "payload_hash", "tenant_id", "membership_id",
-    "expected_resource_version", "roles",
-  ]) || !validateBase(input)) throw new DomainError("INVALID_REQUEST", "Change Membership roles command does not satisfy its contract");
-  const roles = normalizeRoles(input.roles);
-  const command = input as unknown as ChangeMembershipRolesCommand;
-  assertContext(context, command.tenant_id);
+    "schema_version", "idempotency_key", "payload_hash", "tenant_id", "membership_id", "expected_resource_version",
+  ]) || input.schema_version !== 1 || !validId(input.idempotency_key) || !validHash(input.payload_hash)
+    || !validId(input.tenant_id) || !validId(input.membership_id) || !validVersion(input.expected_resource_version)) {
+    throw new DomainError("INVALID_REQUEST", "Suspend Membership command does not satisfy its contract");
+  }
+  const command = input as unknown as SuspendMembershipCommand;
+  assertContext(context);
+  if (context.tenantId !== command.tenant_id) throw new DomainError("UNAUTHENTICATED", "Membership Tenant authority is invalid");
   assertPayloadHash(command);
   const discovered = await dependencies.db.selectFrom("memberships").select("actor_id")
-    .where("tenant_id", "=", command.tenant_id).where("membership_id", "=", command.membership_id)
-    .executeTakeFirst();
+    .where("tenant_id", "=", command.tenant_id).where("membership_id", "=", command.membership_id).executeTakeFirst();
   if (discovered === undefined) throw new DomainError("RESOURCE_NOT_FOUND", "Membership was not found");
-  const operation = "identity.membership.change-roles";
+  const operation = "identity.membership.suspend";
   return withDatabaseTransactionRetry(dependencies.db, async (trx) => {
     const now = dependencies.now?.() ?? new Date();
     await lockActors(trx, [context.actorId, discovered.actor_id]);
@@ -227,103 +447,17 @@ export async function changeMembershipRoles(
       .forUpdate().executeTakeFirst();
     if (membership === undefined || membership.actor_id !== discovered.actor_id) throw new DomainError("RESOURCE_NOT_FOUND", "Membership was not found");
     if (membership.membership_source !== "company") throw new DomainError("INVALID_STATE_TRANSITION", "Platform Memberships are management-only");
-    if (membership.status !== "active") throw new DomainError("INVALID_STATE_TRANSITION", "Only active Membership roles may change");
-    const hasConsultant = roles.includes("consultant");
     const consultantProfileId = profileId(membership.actor_id, context.tenantId);
-    const nextVersion = command.expected_resource_version + 1;
-    const result: MembershipMutationResult = Object.freeze({
-      schema_version: 1, tenant_id: context.tenantId, membership_id: command.membership_id,
-      actor_id: membership.actor_id, roles, status: "active", resource_version: nextVersion,
-      ...(hasConsultant ? { profile_id: consultantProfileId } : {}),
-    });
-    const tenantTransaction: TenantTransaction = { tenantId: context.tenantId, trx };
-    const admission = await beginIdempotentCommand<MembershipMutationResult>(tenantTransaction, {
-      key: command.idempotency_key, payloadHash: command.payload_hash, operation, now,
-      expiresAt: new Date(now.getTime() + dayMs),
-    });
-    if (admission.kind === "replay") {
-      assertReplay(admission.response, result);
-      return result;
-    }
-    if (admission.kind === "in_progress") throw new DomainError("IDEMPOTENCY_CONFLICT", "Membership command is already in progress");
-    const version = safeVersion(membership.resource_version);
-    if (version !== command.expected_resource_version) throw new DomainError("RESOURCE_VERSION_CONFLICT", "Membership version changed");
-    const hadConsultant = membership.roles.includes("consultant");
-    if (membership.roles.length === roles.length && membership.roles.every((role, index) => role === roles[index])) {
-      throw new DomainError("INVALID_STATE_TRANSITION", "Membership roles did not change");
-    }
-    const profile = await trx.selectFrom("profiles").select(["status", "resource_version"])
-      .where("tenant_id", "=", context.tenantId).where("profile_id", "=", consultantProfileId)
-      .forUpdate().executeTakeFirst();
-    await trx.updateTable("memberships").set({ roles: [...roles], resource_version: nextVersion, updated_at: now })
-      .where("tenant_id", "=", context.tenantId).where("membership_id", "=", command.membership_id).execute();
-    if (!hadConsultant && hasConsultant) {
-      if (profile === undefined) {
-        await trx.insertInto("profiles").values({
-          tenant_id: context.tenantId, profile_id: consultantProfileId, schema_version: 1, resource_version: 1,
-          owner_actor_id: membership.actor_id, profile_kind: "consultant", hermes_profile_ref: `hermes_${consultantProfileId}`,
-          description: "Company consultant profile", status: "active",
-          provider_config_id: dependencies.consultantProfile.providerConfigId,
-          model_id: dependencies.consultantProfile.modelId, created_at: now, updated_at: now,
-        }).execute();
-      } else if (profile.status === "suspended") {
-        await trx.updateTable("profiles").set({
-          status: "active", resource_version: safeVersion(profile.resource_version) + 1, updated_at: now,
-        }).where("tenant_id", "=", context.tenantId).where("profile_id", "=", consultantProfileId).execute();
-      } else throw new DomainError("INVALID_STATE_TRANSITION", "Consultant Profile lifecycle conflicts");
-    }
-    if (hadConsultant && !hasConsultant) {
-      if (profile?.status !== "active") throw new DomainError("INVALID_STATE_TRANSITION", "Active consultant Profile was not found");
-      await trx.updateTable("profiles").set({
-        status: "suspended", resource_version: safeVersion(profile.resource_version) + 1, updated_at: now,
-      }).where("tenant_id", "=", context.tenantId).where("profile_id", "=", consultantProfileId).execute();
-    }
-    await appendMembershipMutation(tenantTransaction, context, {
-      idempotencyKey: command.idempotency_key, adminMembershipId, targetMembershipId: command.membership_id,
-      targetActorId: membership.actor_id, status: "active",
-      reason: hasConsultant ? "consultant_role_granted" : "consultant_role_revoked",
-      resourceVersion: nextVersion, now, operation,
-    });
-    await completeIdempotentCommand(tenantTransaction, {
-      key: command.idempotency_key, payloadHash: command.payload_hash, operation,
-      resultRef: command.membership_id, response: result, updatedAt: now,
-    });
-    return result;
-  }, { isolationLevel: "serializable" });
-}
-
-export async function suspendMembership(
-  dependencies: MembershipRoleCommandDependencies,
-  context: MembershipRoleCommandContext,
-  input: unknown,
-): Promise<MembershipMutationResult> {
-  if (!isPlainObject(input) || !exactKeys(input, [
-    "schema_version", "idempotency_key", "payload_hash", "tenant_id", "membership_id", "expected_resource_version",
-  ]) || !validateBase(input)) throw new DomainError("INVALID_REQUEST", "Suspend Membership command does not satisfy its contract");
-  const command = input as unknown as SuspendMembershipCommand;
-  assertContext(context, command.tenant_id);
-  assertPayloadHash(command);
-  const discovered = await dependencies.db.selectFrom("memberships").select("actor_id")
-    .where("tenant_id", "=", command.tenant_id).where("membership_id", "=", command.membership_id)
-    .executeTakeFirst();
-  if (discovered === undefined) throw new DomainError("RESOURCE_NOT_FOUND", "Membership was not found");
-  const operation = "identity.membership.suspend";
-  return withDatabaseTransactionRetry(dependencies.db, async (trx) => {
-    const now = dependencies.now?.() ?? new Date();
-    await lockActors(trx, [context.actorId, discovered.actor_id]);
-    await trx.selectFrom("tenants").select("tenant_id").where("tenant_id", "=", context.tenantId).forUpdate().executeTakeFirstOrThrow();
-    const adminMembershipId = await assertCompanyAdmin(trx, context);
-    const membership = await trx.selectFrom("memberships").selectAll()
-      .where("tenant_id", "=", context.tenantId).where("membership_id", "=", command.membership_id)
-      .forUpdate().executeTakeFirst();
-    if (membership === undefined || membership.actor_id !== discovered.actor_id) throw new DomainError("RESOURCE_NOT_FOUND", "Membership was not found");
-    if (membership.membership_source !== "company") throw new DomainError("INVALID_STATE_TRANSITION", "Platform Memberships are management-only");
-    const consultantProfileId = profileId(membership.actor_id, context.tenantId);
-    const nextVersion = command.expected_resource_version + 1;
+    const profile = membership.roles.includes("consultant")
+      ? await trx.selectFrom("profiles").select(["status", "resource_version"])
+        .where("tenant_id", "=", context.tenantId).where("profile_id", "=", consultantProfileId)
+        .forUpdate().executeTakeFirst()
+      : undefined;
     const roles = Object.freeze(membership.roles as ("admin" | "consultant")[]);
     const result: MembershipMutationResult = Object.freeze({
       schema_version: 1, tenant_id: context.tenantId, membership_id: command.membership_id,
-      actor_id: membership.actor_id, roles, status: "suspended", resource_version: nextVersion,
+      actor_id: membership.actor_id, roles, status: "suspended",
+      resource_version: command.expected_resource_version + 1,
       ...(membership.roles.includes("consultant") ? { profile_id: consultantProfileId } : {}),
     });
     const tenantTransaction: TenantTransaction = { tenantId: context.tenantId, trx };
@@ -331,19 +465,13 @@ export async function suspendMembership(
       key: command.idempotency_key, payloadHash: command.payload_hash, operation, now,
       expiresAt: new Date(now.getTime() + dayMs),
     });
-    if (admission.kind === "replay") {
-      assertReplay(admission.response, result);
-      return result;
-    }
+    if (admission.kind === "replay") return admission.response;
     if (admission.kind === "in_progress") throw new DomainError("IDEMPOTENCY_CONFLICT", "Membership command is already in progress");
     const version = safeVersion(membership.resource_version);
     if (version !== command.expected_resource_version || membership.status !== "active") {
       throw new DomainError("RESOURCE_VERSION_CONFLICT", "Membership version changed");
     }
-    const profile = await trx.selectFrom("profiles").select(["status", "resource_version"])
-      .where("tenant_id", "=", context.tenantId).where("profile_id", "=", consultantProfileId)
-      .forUpdate().executeTakeFirst();
-    await trx.updateTable("memberships").set({ status: "suspended", resource_version: nextVersion, updated_at: now })
+    await trx.updateTable("memberships").set({ status: "suspended", resource_version: version + 1, updated_at: now })
       .where("tenant_id", "=", context.tenantId).where("membership_id", "=", command.membership_id).execute();
     if (membership.roles.includes("consultant")) {
       if (profile?.status !== "active") throw new DomainError("INVALID_STATE_TRANSITION", "Active consultant Profile was not found");
@@ -354,7 +482,7 @@ export async function suspendMembership(
     await appendMembershipMutation(tenantTransaction, context, {
       idempotencyKey: command.idempotency_key, adminMembershipId, targetMembershipId: command.membership_id,
       targetActorId: membership.actor_id, status: "suspended", reason: "administrator_suspended",
-      resourceVersion: nextVersion, now, operation,
+      resourceVersion: version + 1, now, operation,
     });
     await completeIdempotentCommand(tenantTransaction, {
       key: command.idempotency_key, payloadHash: command.payload_hash, operation,

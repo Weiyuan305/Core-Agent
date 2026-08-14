@@ -79,21 +79,22 @@ function credentialDigest(secret: string): { digest: Buffer; wellFormed: boolean
   };
 }
 
-export async function lockInvitationBySecret(
+async function invitationBySecret(
   trx: Transaction<RuntimeDatabase>,
   secret: string,
+  lock: boolean,
 ): Promise<StoredInvitationCredential> {
   if (typeof secret !== "string") invitationNotFound();
   const candidate = credentialDigest(secret);
-  const row = await trx.selectFrom("identity_invitations")
+  let query = trx.selectFrom("identity_invitations")
     .select([
       "invitation_id", "tenant_id", "membership_id", "invited_by_actor_id", "role",
       "secret_digest", "normalized_email_hmac", "status", "expires_at",
       "accepted_actor_id", "resource_version",
     ])
-    .where("secret_digest", "=", candidate.digest)
-    .forUpdate()
-    .executeTakeFirst();
+    .where("secret_digest", "=", candidate.digest);
+  if (lock) query = query.forUpdate();
+  const row = await query.executeTakeFirst();
   const comparedDigest = row === undefined ? Buffer.alloc(32) : Buffer.from(row.secret_digest);
   const matches = timingSafeEqual(candidate.digest, comparedDigest);
   if (!candidate.wellFormed || !matches || row === undefined) invitationNotFound();
@@ -109,6 +110,18 @@ export async function lockInvitationBySecret(
     acceptedActorId: row.accepted_actor_id,
     resourceVersion: safeVersion(row.resource_version),
   };
+}
+
+export async function lockInvitationBySecret(
+  trx: Transaction<RuntimeDatabase>, secret: string,
+): Promise<StoredInvitationCredential> {
+  return invitationBySecret(trx, secret, true);
+}
+
+export async function readInvitationBySecret(
+  trx: Transaction<RuntimeDatabase>, secret: string,
+): Promise<StoredInvitationCredential> {
+  return invitationBySecret(trx, secret, false);
 }
 
 export function constantTimeDigestMatches(left: Uint8Array, right: Uint8Array): boolean {

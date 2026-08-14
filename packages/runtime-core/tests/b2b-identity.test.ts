@@ -26,7 +26,7 @@ let identityDb: Kysely<RuntimeDatabase>;
 type CreateCompany = (
   dependencies: Record<string, unknown>, context: Record<string, unknown>, command: Record<string, unknown>,
 ) => Promise<Record<string, unknown>>;
-type ChangeRoles = (
+type RoleCommand = (
   dependencies: Record<string, unknown>, context: Record<string, unknown>, command: Record<string, unknown>,
 ) => Promise<Record<string, unknown>>;
 type LoadAuthority = (
@@ -205,8 +205,9 @@ test("platform claims without active Core PostgreSQL authority cannot create a c
   assert.equal((await administratorPool.query("select count(*)::int as count from identity_invitations")).rows[0]?.count, 0);
 });
 
-test("adding and removing consultant is a versioned command with one resumable consultant Profile", async () => {
-  const changeMembershipRoles = requiredFunction<ChangeRoles>("changeMembershipRoles");
+test("consultant grant/remove contracts version Membership and Profile across create, suspend, and reactivate", async () => {
+  const grantConsultantRole = requiredFunction<RoleCommand>("grantConsultantRole");
+  const removeConsultantRole = requiredFunction<RoleCommand>("removeConsultantRole");
   await seedActor("actor_company_admin");
   await seedActor("actor_target_admin");
   await seedTenant("tenant_roles");
@@ -218,36 +219,78 @@ test("adding and removing consultant is a versioned command with one resumable c
     consultantProfile: { providerConfigId: "provider_consultant", modelId: "model_consultant" },
   };
   const addPayload = {
-    schema_version: 1, idempotency_key: "roles-add-consultant", tenant_id: "tenant_roles",
-    membership_id: "membership_target", expected_resource_version: 1, roles: ["admin", "consultant"],
+    schema_version: 1, idempotency_key: "roles-add-consultant", membership_id: "membership_target",
+    expected_membership_resource_version: 1, grant_mode: "create_profile",
   };
   const add = { ...addPayload, payload_hash: canonicalPayloadHash(addPayload) };
-  const added = await changeMembershipRoles(roleDependencies, context, add);
-  const replay = await changeMembershipRoles(roleDependencies, context, add);
+  const added = await grantConsultantRole(roleDependencies, context, add);
+  const replay = await grantConsultantRole(roleDependencies, context, add);
   assert.deepEqual(replay, added);
-  assert.equal(added.resource_version, 2);
+  const expectedProfileId = `profile_consultant_${createHash("sha256").update("actor_target_admin:tenant_roles").digest("hex").slice(0, 32)}`;
+  assert.deepEqual(added, {
+    schema_version: 1, membership_id: "membership_target", roles: ["admin", "consultant"],
+    membership_resource_version: 2, profile_id: expectedProfileId,
+    profile_resource_version: 1, profile_status: "active",
+  });
   let profiles = await administratorPool.query("select profile_id, profile_kind, status, resource_version::int from profiles");
   assert.deepEqual(profiles.rows, [{
-    profile_id: `profile_consultant_${createHash("sha256").update("actor_target_admin:tenant_roles").digest("hex").slice(0, 32)}`,
+    profile_id: expectedProfileId,
     profile_kind: "consultant", status: "active", resource_version: 1,
   }]);
 
   const removePayload = {
-    schema_version: 1, idempotency_key: "roles-remove-consultant", tenant_id: "tenant_roles",
-    membership_id: "membership_target", expected_resource_version: 2, roles: ["admin"],
+    schema_version: 1, idempotency_key: "roles-remove-consultant", membership_id: "membership_target",
+    expected_membership_resource_version: 2, profile_id: expectedProfileId,
+    expected_profile_resource_version: 1,
   };
-  await changeMembershipRoles(roleDependencies, context, {
+  const remove = {
     ...removePayload, payload_hash: canonicalPayloadHash(removePayload),
+  };
+  const removed = await removeConsultantRole(roleDependencies, context, remove);
+  assert.deepEqual(await removeConsultantRole(roleDependencies, context, remove), removed);
+  assert.deepEqual(removed, {
+    schema_version: 1, membership_id: "membership_target", roles: ["admin"],
+    membership_resource_version: 3, profile_id: expectedProfileId,
+    profile_resource_version: 2, profile_status: "suspended",
   });
   profiles = await administratorPool.query("select profile_kind, status, resource_version::int from profiles");
   assert.deepEqual(profiles.rows, [{ profile_kind: "consultant", status: "suspended", resource_version: 2 }]);
+
+  const staleProfile = {
+    schema_version: 1, idempotency_key: "roles-reactivate-stale", membership_id: "membership_target",
+    expected_membership_resource_version: 3, grant_mode: "reactivate_profile",
+    profile_id: expectedProfileId, expected_profile_resource_version: 1,
+  };
+  await assert.rejects(
+    grantConsultantRole(roleDependencies, context, { ...staleProfile, payload_hash: canonicalPayloadHash(staleProfile) }),
+    (error: unknown) => error instanceof DomainError && error.code === "RESOURCE_VERSION_CONFLICT",
+  );
+  const reactivate = { ...staleProfile, idempotency_key: "roles-reactivate", expected_profile_resource_version: 2 };
+  const reactivated = await grantConsultantRole(roleDependencies, context, {
+    ...reactivate, payload_hash: canonicalPayloadHash(reactivate),
+  });
+  assert.deepEqual(reactivated, {
+    schema_version: 1, membership_id: "membership_target", roles: ["admin", "consultant"],
+    membership_resource_version: 4, profile_id: expectedProfileId,
+    profile_resource_version: 3, profile_status: "active",
+  });
+  assert.deepEqual(await grantConsultantRole(roleDependencies, context, {
+    ...reactivate, payload_hash: canonicalPayloadHash(reactivate),
+  }), reactivated);
+  const staleMember = { ...removePayload, idempotency_key: "roles-remove-stale-member" };
+  await assert.rejects(
+    removeConsultantRole(roleDependencies, context, {
+      ...staleMember, payload_hash: canonicalPayloadHash(staleMember),
+    }),
+    (error: unknown) => error instanceof DomainError && error.code === "RESOURCE_VERSION_CONFLICT",
+  );
   const loadActorIdentityAuthority = requiredFunction<LoadAuthority>("loadActorIdentityAuthority");
   const authority = await identityDb.transaction().execute((trx) => loadActorIdentityAuthority(trx, "actor_target_admin"));
   assert.deepEqual(authority.memberships.map((membership) => membership.membershipId), ["membership_target"]);
 });
 
 test("customer administrators cannot mutate source platform Memberships", async () => {
-  const changeMembershipRoles = requiredFunction<ChangeRoles>("changeMembershipRoles");
+  const grantConsultantRole = requiredFunction<RoleCommand>("grantConsultantRole");
   await seedActor("actor_company_admin");
   await seedActor("actor_platform_target");
   await seedTenant("tenant_platform_immutable");
@@ -261,11 +304,11 @@ test("customer administrators cannot mutate source platform Memberships", async 
     role: "platform_super_admin", status: "active", resource_version: 1, created_at: now, updated_at: now,
   }).execute();
   const payload = {
-    schema_version: 1, idempotency_key: "platform-edit-forbidden", tenant_id: "tenant_platform_immutable",
-    membership_id: "membership_platform_target", expected_resource_version: 1, roles: ["admin", "consultant"],
+    schema_version: 1, idempotency_key: "platform-edit-forbidden", membership_id: "membership_platform_target",
+    expected_membership_resource_version: 1, grant_mode: "create_profile",
   };
   await assert.rejects(
-    changeMembershipRoles(
+    grantConsultantRole(
       { db: identityDb, now: () => new Date(now), consultantProfile: { providerConfigId: "provider", modelId: "model" } },
       { tenantId: "tenant_platform_immutable", actorId: "actor_company_admin", requestId: "request", traceId: "trace" },
       { ...payload, payload_hash: canonicalPayloadHash(payload) },

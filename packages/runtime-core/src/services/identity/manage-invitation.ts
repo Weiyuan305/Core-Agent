@@ -15,8 +15,8 @@ import {
   deriveIdentityCommandId,
   invitationEmailHmac,
   issueInvitationSecret,
-  lockInvitationBySecret,
   publicInvitationNotFound,
+  readInvitationBySecret,
   type InvitationRandomBytes,
 } from "../../repositories/identity/invitations.js";
 
@@ -202,6 +202,64 @@ async function appendInvitationCreated(
   });
 }
 
+async function appendInvitationChanged(
+  tenantTransaction: TenantTransaction,
+  context: InvitationCommandContext,
+  input: {
+    invitationId: string; membershipId: string; idempotencyKey: string; now: Date;
+    status: "revoked" | "replaced" | "expired"; resourceVersion: number;
+    replacementInvitationId?: string;
+  },
+): Promise<void> {
+  const envelope = {
+    schema_version: 1 as const,
+    event_id: deriveIdentityCommandId("event_invitation_change", `${input.idempotencyKey}:${input.invitationId}`),
+    occurred_at: input.now.toISOString(), tenant_id: context.tenantId,
+    request_id: context.requestId, trace_id: context.traceId,
+    correlation_id: deriveIdentityCommandId("correlation_invitation", input.idempotencyKey),
+    causation_id: deriveIdentityCommandId("causation_invitation", input.idempotencyKey),
+    event_type: "invitation.changed" as const,
+  };
+  const event = input.status === "replaced"
+    ? { ...envelope, payload: {
+      invitation_id: input.invitationId, membership_id: input.membershipId, status: "replaced" as const,
+      replacement_invitation_id: input.replacementInvitationId!, resource_version: input.resourceVersion,
+    } }
+    : input.status === "revoked"
+      ? { ...envelope, payload: {
+        invitation_id: input.invitationId, membership_id: input.membershipId, status: "revoked" as const,
+        resource_version: input.resourceVersion,
+      } }
+      : { ...envelope, payload: {
+        invitation_id: input.invitationId, membership_id: input.membershipId, status: "expired" as const,
+        resource_version: input.resourceVersion,
+      } };
+  await appendProductEvents(tenantTransaction, {
+    streamId: input.invitationId,
+    deliveryTarget: "internal_event_stream",
+    events: [event],
+  });
+}
+
+async function appendInvitationTransitionAudit(
+  tenantTransaction: TenantTransaction,
+  context: InvitationCommandContext,
+  input: {
+    invitationId: string; adminMembershipId: string; idempotencyKey: string; now: Date;
+    action: string; resourceVersion: number; summary: string;
+  },
+): Promise<void> {
+  await appendAuditEvent(tenantTransaction, {
+    schema_version: 1,
+    audit_event_id: deriveIdentityCommandId("audit_invitation_change", `${input.idempotencyKey}:${input.invitationId}`),
+    occurred_at: input.now.toISOString(), tenant_id: context.tenantId, actor_id: context.actorId,
+    membership_id: input.adminMembershipId, effective_role: "admin", action: input.action,
+    resource_type: "identity_invitation", resource_id: input.invitationId,
+    decision: "allowed", outcome: "succeeded", request_id: context.requestId, trace_id: context.traceId,
+    reason_summary: input.summary, resource_version: input.resourceVersion,
+  });
+}
+
 export async function createInvitation(
   dependencies: InvitationCommandDependencies,
   context: InvitationCommandContext,
@@ -237,6 +295,29 @@ export async function createInvitation(
       return storedResult;
     }
     if (admission.kind === "in_progress") throw new DomainError("IDEMPOTENCY_CONFLICT", "Invitation command is already in progress");
+    const databaseTimestamp = await databaseNow(trx);
+    const expired = await trx.selectFrom("identity_invitations").selectAll()
+      .where("tenant_id", "=", context.tenantId)
+      .where("normalized_email_hmac", "=", emailHmac)
+      .where("status", "=", "pending")
+      .where("expires_at", "<=", databaseTimestamp)
+      .forUpdate().executeTakeFirst();
+    if (expired !== undefined) {
+      const expiredVersion = safeVersion(expired.resource_version) + 1;
+      await trx.updateTable("identity_invitations").set({
+        status: "expired", resource_version: expiredVersion, updated_at: databaseTimestamp,
+      }).where("tenant_id", "=", context.tenantId).where("invitation_id", "=", expired.invitation_id).execute();
+      await appendInvitationChanged(tenantTransaction, context, {
+        invitationId: expired.invitation_id, membershipId: expired.membership_id,
+        idempotencyKey: command.idempotency_key, now: databaseTimestamp,
+        status: "expired", resourceVersion: expiredVersion,
+      });
+      await appendInvitationTransitionAudit(tenantTransaction, context, {
+        invitationId: expired.invitation_id, adminMembershipId, idempotencyKey: command.idempotency_key,
+        now: databaseTimestamp, action: "identity.invitation.expire", resourceVersion: expiredVersion,
+        summary: "Expired a pending B2B identity invitation using database time",
+      });
+    }
     await trx.insertInto("identity_invitations").values({
       invitation_id: command.invitation_id,
       tenant_id: command.tenant_id,
@@ -271,9 +352,12 @@ export async function inspectInvitation(
   invitationSecret: string,
 ): Promise<Readonly<{ schema_version: 1; tenant_id: string; invitation_id: string; membership_id: string; role: "admin" | "consultant"; expires_at: string }>> {
   return dependencies.db.transaction().execute(async (trx) => {
-    const invitation = await lockInvitationBySecret(trx, invitationSecret);
+    const invitation = await readInvitationBySecret(trx, invitationSecret);
+    const tenant = await trx.selectFrom("tenants").select(["tenant_mode", "status"])
+      .where("tenant_id", "=", invitation.tenantId).executeTakeFirst();
     const now = await databaseNow(trx);
-    if (invitation.status !== "pending" || invitation.expiresAt.getTime() <= now.getTime()) publicInvitationNotFound();
+    if (tenant?.tenant_mode !== "b2b" || tenant.status !== "active"
+      || invitation.status !== "pending" || invitation.expiresAt.getTime() <= now.getTime()) publicInvitationNotFound();
     return Object.freeze({
       schema_version: 1,
       tenant_id: invitation.tenantId,
@@ -341,6 +425,11 @@ export async function replaceInvitation(
     }).where("invitation_id", "=", command.invitation_id).execute();
     await trx.updateTable("identity_invitations").set({ status: "pending" })
       .where("invitation_id", "=", command.replacement_invitation_id).execute();
+    await appendInvitationChanged(tenantTransaction, context, {
+      invitationId: command.invitation_id, membershipId: old.membership_id,
+      idempotencyKey: command.idempotency_key, now, status: "replaced",
+      resourceVersion: oldVersion + 1, replacementInvitationId: command.replacement_invitation_id,
+    });
     await appendInvitationCreated(tenantTransaction, context, {
       invitationId: command.replacement_invitation_id, membershipId: old.membership_id,
       adminMembershipId, idempotencyKey: command.idempotency_key, now, action: operation,
@@ -392,21 +481,9 @@ export async function revokeInvitation(
     await trx.updateTable("identity_invitations").set({
       status: "revoked", resource_version: version + 1, updated_at: now,
     }).where("invitation_id", "=", command.invitation_id).execute();
-    await appendProductEvents(tenantTransaction, {
-      streamId: invitation.membership_id,
-      deliveryTarget: "internal_event_stream",
-      events: [{
-        schema_version: 1, event_id: deriveIdentityCommandId("event_invitation_revoke", command.idempotency_key),
-        occurred_at: now.toISOString(), tenant_id: context.tenantId,
-        request_id: context.requestId, trace_id: context.traceId,
-        correlation_id: deriveIdentityCommandId("correlation_invitation", command.idempotency_key),
-        causation_id: deriveIdentityCommandId("causation_invitation", command.idempotency_key),
-        event_type: "membership.changed",
-        payload: {
-          membership_id: invitation.membership_id, actor_id: context.actorId, status: "revoked",
-          reason_code: "administrator_revoked", resource_version: version + 1,
-        },
-      }],
+    await appendInvitationChanged(tenantTransaction, context, {
+      invitationId: command.invitation_id, membershipId: invitation.membership_id,
+      idempotencyKey: command.idempotency_key, now, status: "revoked", resourceVersion: version + 1,
     });
     await appendAuditEvent(tenantTransaction, {
       schema_version: 1, audit_event_id: deriveIdentityCommandId("audit_invitation_revoke", command.idempotency_key),
