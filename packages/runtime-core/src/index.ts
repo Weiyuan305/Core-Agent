@@ -202,6 +202,19 @@ export {
   type TenantProvisioningRequest,
 } from "./services/provision-tenant.js";
 export {
+  registerB2c,
+  type B2cRegistrationResult,
+  type RegisterB2cCommand,
+  type RegisterB2cContext,
+  type RegisterB2cDependencies,
+  type RegisterB2cInsertStage,
+  type VerifiedAuthSubjectInput,
+} from "./services/identity/register-b2c.js";
+export {
+  loadActorIdentityAuthority,
+  type ActorIdentityAuthority,
+} from "./repositories/identity/identity-authority.js";
+export {
   RuntimeCommandRequestSchema,
   commandRuntime,
   getTenantRuntime,

@@ -1,0 +1,358 @@
+import assert from "node:assert/strict";
+import { createHash, createHmac, randomBytes } from "node:crypto";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import test from "node:test";
+
+import { Pool } from "pg";
+
+import { applyMigrations } from "../src/db/migrate.js";
+import { createRuntimeDatabase, type RuntimeDatabase } from "../src/db/database.js";
+import { canonicalPayloadHash, DomainError } from "../src/domain/idempotency.js";
+import {
+  registerB2c,
+  type RegisterB2cCommand,
+  type RegisterB2cDependencies,
+} from "../src/services/identity/register-b2c.js";
+import type { Kysely } from "kysely";
+
+const databaseUrl = process.env.CONTROL_PLANE_TEST_DATABASE_URL;
+if (databaseUrl === undefined || !new URL(databaseUrl).pathname.slice(1).startsWith("core_agent_")) {
+  throw new Error("CONTROL_PLANE_TEST_DATABASE_URL must name a disposable core_agent_ database");
+}
+
+const administratorPool = new Pool({ connectionString: databaseUrl });
+const migrationsDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
+const now = new Date("2026-08-14T01:02:03.000Z");
+const normalizedEmailHmacKey = Buffer.from("registration-email-hmac-key-v1!!", "utf8");
+const defaultProfile = Object.freeze({
+  providerConfigId: "provider_personal_default",
+  modelId: "model_personal_default",
+});
+
+let identityPool: Pool;
+let identityDb: Kysely<RuntimeDatabase>;
+
+async function ensureIdentityRoles(): Promise<void> {
+  await administratorPool.query(`do $$
+    begin
+      if not exists (select 1 from pg_roles where rolname = 'core_agent_app') then
+        create role core_agent_app login nosuperuser nocreatedb nocreaterole noinherit noreplication nobypassrls;
+      end if;
+      if not exists (select 1 from pg_roles where rolname = 'core_agent_identity') then
+        create role core_agent_identity login nosuperuser nocreatedb nocreaterole noinherit noreplication nobypassrls;
+      end if;
+    end
+  $$`);
+}
+
+async function setIdentityPassword(password: string | null): Promise<void> {
+  const setting = password === null ? "" : password;
+  const client = await administratorPool.connect();
+  try {
+    await client.query("begin");
+    await client.query("set local password_encryption = 'scram-sha-256'");
+    await client.query("select set_config('core_agent.test_identity_password', $1, true)", [setting]);
+    await client.query(`do $password$
+      begin
+        if current_setting('core_agent.test_identity_password') = '' then
+          alter role core_agent_identity password null;
+        else
+          execute format(
+            'alter role core_agent_identity password %L',
+            current_setting('core_agent.test_identity_password')
+          );
+        end if;
+        perform set_config('core_agent.test_identity_password', '', true);
+      end
+    $password$`);
+    await client.query("commit");
+  } catch (error) {
+    await client.query("rollback").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function resetDatabase(): Promise<void> {
+  await administratorPool.query("drop schema public cascade; create schema public;");
+  await applyMigrations(administratorPool, migrationsDirectory);
+}
+
+function command(overrides: Partial<RegisterB2cCommand> = {}): RegisterB2cCommand {
+  const base = {
+    schema_version: 1 as const,
+    idempotency_key: "register-personal-account-0001",
+    auth_subject: {
+      provider: "supabase" as const,
+      providerSubject: "supabase-user-0001",
+      identityKind: "email_password" as const,
+      normalizedEmail: "student@example.test",
+      verifiedAt: "2026-08-14T01:00:00.000Z",
+    },
+    display_name: "Personal Student",
+    ...overrides,
+  };
+  const withoutHash = {
+    schema_version: base.schema_version,
+    idempotency_key: base.idempotency_key,
+    auth_subject: base.auth_subject,
+    display_name: base.display_name,
+  };
+  return { ...base, payload_hash: canonicalPayloadHash(withoutHash) };
+}
+
+function dependencies(
+  afterInsert?: RegisterB2cDependencies["afterInsert"],
+): RegisterB2cDependencies {
+  return {
+    db: identityDb,
+    now: () => new Date(now),
+    defaultProfile,
+    privatePii: {
+      normalizedEmailHmacKey,
+      encryptionKeyRef: "identity-email-key-v1",
+      async encryptNormalizedEmail(value) {
+        return createHash("sha256").update(`encrypted:${value}`, "utf8").digest();
+      },
+    },
+    afterInsert,
+  };
+}
+
+const context = Object.freeze({
+  requestId: "request-registration-0001",
+  traceId: "trace-registration-0001",
+});
+
+async function tableCount(table: string): Promise<number> {
+  const result = await administratorPool.query<{ count: number }>(
+    `select count(*)::int as count from ${table}`,
+  );
+  return result.rows[0]?.count ?? -1;
+}
+
+async function assertRegistrationTablesEmpty(): Promise<void> {
+  for (const table of [
+    "actors",
+    "tenants",
+    "memberships",
+    "profiles",
+    "auth_subjects",
+    "private_identity_pii",
+    "idempotency_records",
+    "stream_sequences",
+    "product_events",
+    "audit_events",
+    "outbox",
+  ]) {
+    assert.equal(await tableCount(table), 0, `${table} must roll back`);
+  }
+}
+
+test.before(async () => {
+  await ensureIdentityRoles();
+  const password = randomBytes(32).toString("base64url");
+  await setIdentityPassword(password);
+  const target = new URL(databaseUrl);
+  target.username = "core_agent_identity";
+  target.password = password;
+  identityPool = new Pool({ connectionString: target.toString(), max: 4 });
+  identityDb = createRuntimeDatabase(identityPool);
+});
+
+test.beforeEach(resetDatabase);
+
+test.after(async () => {
+  await identityDb?.destroy().catch(() => undefined);
+  await setIdentityPassword(null).catch(() => undefined);
+  await administratorPool.end();
+});
+
+test("registerB2c creates only the personal identity graph and replays byte-equivalent public IDs", async () => {
+  assert.equal(
+    (await identityPool.query<{ current_user: string }>("select current_user")).rows[0]?.current_user,
+    "core_agent_identity",
+  );
+  const registration = command();
+  const first = await registerB2c(dependencies(), context, registration);
+  const replay = await registerB2c(dependencies(), context, registration);
+
+  assert.deepEqual(replay, first);
+  assert.equal(JSON.stringify(replay), JSON.stringify(first));
+  assert.deepEqual(Object.keys(first).sort(), [
+    "actor_id",
+    "auth_subject_id",
+    "membership_id",
+    "profile_id",
+    "schema_version",
+    "tenant_id",
+  ]);
+  assert.equal(JSON.stringify(first).includes(registration.auth_subject.normalizedEmail), false);
+  assert.equal(JSON.stringify(first).includes(registration.auth_subject.providerSubject), false);
+
+  const actor = await administratorPool.query(
+    "select actor_id, actor_kind, display_name, status from actors where actor_id = $1",
+    [first.actor_id],
+  );
+  assert.deepEqual(actor.rows, [{
+    actor_id: first.actor_id,
+    actor_kind: "human",
+    display_name: registration.display_name,
+    status: "active",
+  }]);
+  const tenant = await administratorPool.query(
+    "select tenant_id, tenant_mode, display_name, status from tenants where tenant_id = $1",
+    [first.tenant_id],
+  );
+  assert.deepEqual(tenant.rows, [{
+    tenant_id: first.tenant_id,
+    tenant_mode: "b2c",
+    display_name: registration.display_name,
+    status: "active",
+  }]);
+  const membership = await administratorPool.query(
+    "select membership_id, actor_id, roles, membership_source, status from memberships where tenant_id = $1",
+    [first.tenant_id],
+  );
+  assert.deepEqual(membership.rows, [{
+    membership_id: first.membership_id,
+    actor_id: first.actor_id,
+    roles: ["student"],
+    membership_source: "self",
+    status: "active",
+  }]);
+  const profile = await administratorPool.query(
+    "select profile_id, owner_actor_id, profile_kind, status, provider_config_id, model_id from profiles where tenant_id = $1",
+    [first.tenant_id],
+  );
+  assert.deepEqual(profile.rows, [{
+    profile_id: first.profile_id,
+    owner_actor_id: first.actor_id,
+    profile_kind: "default",
+    status: "active",
+    provider_config_id: defaultProfile.providerConfigId,
+    model_id: defaultProfile.modelId,
+  }]);
+  const subject = await administratorPool.query(
+    "select auth_subject_id, actor_id, provider, provider_subject, provider_identity_kind, status from auth_subjects where auth_subject_id = $1",
+    [first.auth_subject_id],
+  );
+  assert.deepEqual(subject.rows, [{
+    auth_subject_id: first.auth_subject_id,
+    actor_id: first.actor_id,
+    provider: "supabase",
+    provider_subject: registration.auth_subject.providerSubject,
+    provider_identity_kind: registration.auth_subject.identityKind,
+    status: "active",
+  }]);
+  const pii = await administratorPool.query<{
+    actor_id: string;
+    normalized_email_hmac: Buffer;
+    encrypted_email: Buffer;
+    encryption_key_ref: string;
+  }>(
+    "select actor_id, normalized_email_hmac, encrypted_email, encryption_key_ref from private_identity_pii where actor_id = $1",
+    [first.actor_id],
+  );
+  assert.equal(pii.rows.length, 1);
+  assert.equal(pii.rows[0]?.actor_id, first.actor_id);
+  assert.deepEqual(
+    pii.rows[0]?.normalized_email_hmac,
+    createHmac("sha256", normalizedEmailHmacKey).update(registration.auth_subject.normalizedEmail, "utf8").digest(),
+  );
+  assert.equal(pii.rows[0]?.encrypted_email.length, 32);
+  assert.equal(pii.rows[0]?.encryption_key_ref, "identity-email-key-v1");
+
+  assert.equal(await tableCount("runtime_containers"), 0);
+  assert.equal(await tableCount("worker_jobs"), 0);
+  assert.equal(await tableCount("core_sessions"), 0);
+  assert.equal(await tableCount("platform_role_assignments"), 0);
+  assert.equal((await administratorPool.query<{ relation: string | null }>(
+    "select to_regclass('public.entitlements')::text as relation",
+  )).rows[0]?.relation, null);
+  assert.equal(await tableCount("product_events"), 1);
+  assert.equal(await tableCount("audit_events"), 1);
+  assert.equal(await tableCount("outbox"), 1);
+  assert.equal(await tableCount("idempotency_records"), 1);
+
+  const persistedPublicRecords = await administratorPool.query<{
+    payload: unknown;
+    event_json: unknown;
+  }>(`select product.payload, audit.event_json
+      from product_events product
+      join audit_events audit on audit.tenant_id = product.tenant_id
+      where product.tenant_id = $1`, [first.tenant_id]);
+  const publicSerialization = JSON.stringify(persistedPublicRecords.rows);
+  assert.equal(publicSerialization.includes(registration.auth_subject.normalizedEmail), false);
+  assert.equal(publicSerialization.includes(registration.auth_subject.providerSubject), false);
+  assert.deepEqual(persistedPublicRecords.rows[0]?.payload, {
+    actor_id: first.actor_id,
+    tenant_id: first.tenant_id,
+    membership_id: first.membership_id,
+    profile_id: first.profile_id,
+    resource_version: 1,
+  });
+});
+
+test("registerB2c rejects idempotency reuse when any identity-bearing payload changes", async () => {
+  const original = command();
+  await registerB2c(dependencies(), context, original);
+  const variants = [
+    command({
+      auth_subject: { ...original.auth_subject, providerSubject: "different-supabase-user" },
+    }),
+    command({
+      auth_subject: { ...original.auth_subject, normalizedEmail: "different@example.test" },
+    }),
+    command({ display_name: "Different Student" }),
+  ];
+
+  for (const variant of variants) {
+    await assert.rejects(
+      registerB2c(dependencies(), context, variant),
+      (error: unknown) => error instanceof DomainError && error.code === "IDEMPOTENCY_CONFLICT",
+    );
+  }
+  assert.equal(await tableCount("actors"), 1);
+  assert.equal(await tableCount("tenants"), 1);
+  assert.equal(await tableCount("idempotency_records"), 1);
+});
+
+test("registerB2c rolls the whole identity graph back after every insert boundary", async () => {
+  const stages = [
+    "actor",
+    "tenant",
+    "idempotency",
+    "membership",
+    "profile",
+    "auth_subject",
+    "private_pii",
+    "stream_sequence",
+    "product_event",
+    "audit_event",
+    "outbox",
+  ] as const;
+
+  for (const [index, targetStage] of stages.entries()) {
+    const registration = command({
+      idempotency_key: `register-rollback-${index}`,
+      auth_subject: {
+        provider: "supabase",
+        providerSubject: `supabase-rollback-${index}`,
+        identityKind: "email_password",
+        normalizedEmail: `rollback-${index}@example.test`,
+        verifiedAt: "2026-08-14T01:00:00.000Z",
+      },
+      display_name: `Rollback ${index}`,
+    });
+    await assert.rejects(
+      registerB2c(dependencies((stage) => {
+        if (stage === targetStage) throw new Error(`injected failure after ${stage}`);
+      }), context, registration),
+      new RegExp(`injected failure after ${targetStage}`),
+    );
+    await assertRegistrationTablesEmpty();
+  }
+});
