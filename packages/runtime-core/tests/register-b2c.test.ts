@@ -368,6 +368,7 @@ test("registerB2c creates only the personal identity graph and replays byte-equi
     "profiles",
     "auth_subjects",
     "private_identity_pii",
+    "stream_sequences",
     "product_events",
     "audit_events",
     "outbox",
@@ -384,6 +385,17 @@ test("registerB2c creates only the personal identity graph and replays byte-equi
   assert.equal(await tableCount("audit_events"), 1);
   assert.equal(await tableCount("outbox"), 1);
   assert.equal(await tableCount("idempotency_records"), 1);
+
+  const streamSequence = await administratorPool.query<{
+    tenant_id: string;
+    stream_id: string;
+    last_sequence: string;
+  }>("select tenant_id, stream_id, last_sequence::text from stream_sequences");
+  assert.deepEqual(streamSequence.rows, [{
+    tenant_id: first.tenant_id,
+    stream_id: first.actor_id,
+    last_sequence: "1",
+  }]);
 
   const idempotency = await administratorPool.query<{
     status: string;

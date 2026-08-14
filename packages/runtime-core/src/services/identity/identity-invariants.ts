@@ -46,7 +46,10 @@ export function assertIdentityAuthorityInvariants(
       if (!hasExactRole(membership.roles, "admin")) {
         invariant("Platform Membership requires exactly the admin role");
       }
-      if (!platformRoles.includes("platform_super_admin")) {
+      if (membership.status !== "active" && membership.status !== "revoked") {
+        invariant("Platform Membership must be active or revoked");
+      }
+      if (membership.status === "active" && !platformRoles.includes("platform_super_admin")) {
         invariant("Platform Membership requires active platform_super_admin authority");
       }
     }

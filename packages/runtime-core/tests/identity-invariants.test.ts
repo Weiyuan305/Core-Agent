@@ -292,6 +292,90 @@ test("loadActorIdentityAuthority allows an explicitly assigned service platform 
   }]);
 });
 
+test("loadActorIdentityAuthority retains revoked platform Membership history after authority revocation", async () => {
+  await identityDb.transaction().execute(async (trx) => {
+    const actorId = "actor_platform_revoked_history";
+    await seedActor(trx, actorId, "active", "service");
+    await seedPlatformRole(trx, actorId);
+    for (const suffix of ["a", "b"]) {
+      const tenantId = `tenant_platform_revoked_history_${suffix}`;
+      await seedTenant(trx, tenantId, "b2b");
+      await seedMembership(trx, {
+        tenantId,
+        membershipId: `membership_platform_revoked_history_${suffix}`,
+        actorId,
+        roles: ["admin"],
+        source: "platform",
+      });
+    }
+
+    const active = await loadActorIdentityAuthority(trx, actorId);
+    assert.deepEqual(active.platformRoles, ["platform_super_admin"]);
+    assert.deepEqual(active.memberships.map((membership) => membership.status), ["active", "active"]);
+
+    await trx.updateTable("platform_role_assignments")
+      .set({ status: "revoked", resource_version: 2, updated_at: timestamp })
+      .where("actor_id", "=", actorId)
+      .executeTakeFirstOrThrow();
+    await trx.updateTable("memberships")
+      .set({ status: "revoked", resource_version: 2, updated_at: timestamp })
+      .where("actor_id", "=", actorId)
+      .where("membership_source", "=", "platform")
+      .execute();
+
+    const revoked = await loadActorIdentityAuthority(trx, actorId);
+    assert.deepEqual(revoked.platformRoles, []);
+    assert.deepEqual(revoked.memberships.map((membership) => ({
+      source: membership.source,
+      roles: membership.roles,
+      status: membership.status,
+    })), [{ source: "platform", roles: ["admin"], status: "revoked" }, {
+      source: "platform", roles: ["admin"], status: "revoked",
+    }]);
+  });
+});
+
+test("loadActorIdentityAuthority rejects an active platform Membership after role revocation", async () => {
+  await assert.rejects(identityDb.transaction().execute(async (trx) => {
+    const actorId = "actor_platform_role_revoked";
+    await seedActor(trx, actorId, "active", "service");
+    await seedPlatformRole(trx, actorId);
+    await seedTenant(trx, "tenant_platform_role_revoked", "b2b");
+    await seedMembership(trx, {
+      tenantId: "tenant_platform_role_revoked",
+      membershipId: "membership_platform_role_revoked",
+      actorId,
+      roles: ["admin"],
+      source: "platform",
+    });
+    await trx.updateTable("platform_role_assignments")
+      .set({ status: "revoked", resource_version: 2, updated_at: timestamp })
+      .where("actor_id", "=", actorId)
+      .executeTakeFirstOrThrow();
+    await loadActorIdentityAuthority(trx, actorId);
+  }), /platform Membership requires active platform_super_admin authority/i);
+});
+
+test("loadActorIdentityAuthority fails closed on invited or suspended platform Membership states", async () => {
+  for (const status of ["invited", "suspended"] as const) {
+    await assert.rejects(identityDb.transaction().execute(async (trx) => {
+      const actorId = `actor_platform_invalid_${status}`;
+      await seedActor(trx, actorId, "active", "service");
+      await seedPlatformRole(trx, actorId);
+      await seedTenant(trx, `tenant_platform_invalid_${status}`, "b2b");
+      await seedMembership(trx, {
+        tenantId: `tenant_platform_invalid_${status}`,
+        membershipId: `membership_platform_invalid_${status}`,
+        actorId,
+        roles: ["admin"],
+        source: "platform",
+        status,
+      });
+      await loadActorIdentityAuthority(trx, actorId);
+    }), /platform Membership must be active or revoked/i);
+  }
+});
+
 test("loadActorIdentityAuthority rejects a platform Membership in a B2C Tenant", async () => {
   await assert.rejects(identityDb.transaction().execute(async (trx) => {
     const actorId = "actor_platform_b2c";
