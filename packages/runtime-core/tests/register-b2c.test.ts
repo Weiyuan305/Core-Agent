@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { createHash, createHmac, randomBytes } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  createHmac,
+  randomBytes,
+} from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -25,6 +32,10 @@ const administratorPool = new Pool({ connectionString: databaseUrl });
 const migrationsDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
 const now = new Date("2026-08-14T01:02:03.000Z");
 const normalizedEmailHmacKey = Buffer.from("registration-email-hmac-key-v1!!", "utf8");
+const fakePiiEncryptionKey = createHash("sha256").update("task-3-test-only-aead-key", "utf8").digest();
+const fakePiiNonce = Buffer.from("000102030405060708090a0b", "hex");
+const fakePiiMagic = Buffer.from("PII1", "ascii");
+const fakePiiAad = Buffer.from("private_identity_pii:v1", "utf8");
 const defaultProfile = Object.freeze({
   providerConfigId: "provider_personal_default",
   modelId: "model_personal_default",
@@ -103,9 +114,34 @@ function command(overrides: Partial<RegisterB2cCommand> = {}): RegisterB2cComman
   return { ...base, payload_hash: canonicalPayloadHash(withoutHash) };
 }
 
-function dependencies(
-  afterInsert?: RegisterB2cDependencies["afterInsert"],
-): RegisterB2cDependencies {
+function fakeEncryptNormalizedEmail(value: string): Buffer {
+  const cipher = createCipheriv("aes-256-gcm", fakePiiEncryptionKey, fakePiiNonce);
+  cipher.setAAD(fakePiiAad);
+  const ciphertext = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
+  return Buffer.concat([fakePiiMagic, fakePiiNonce, cipher.getAuthTag(), ciphertext]);
+}
+
+function fakeDecryptNormalizedEmail(envelope: Uint8Array): string {
+  const bytes = Buffer.from(envelope);
+  assert(bytes.length > fakePiiMagic.length + fakePiiNonce.length + 16);
+  assert.deepEqual(bytes.subarray(0, fakePiiMagic.length), fakePiiMagic);
+  const nonceStart = fakePiiMagic.length;
+  const tagStart = nonceStart + fakePiiNonce.length;
+  const ciphertextStart = tagStart + 16;
+  const decipher = createDecipheriv(
+    "aes-256-gcm",
+    fakePiiEncryptionKey,
+    bytes.subarray(nonceStart, tagStart),
+  );
+  decipher.setAAD(fakePiiAad);
+  decipher.setAuthTag(bytes.subarray(tagStart, ciphertextStart));
+  return Buffer.concat([
+    decipher.update(bytes.subarray(ciphertextStart)),
+    decipher.final(),
+  ]).toString("utf8");
+}
+
+function dependencies(): RegisterB2cDependencies {
   return {
     db: identityDb,
     now: () => new Date(now),
@@ -114,10 +150,9 @@ function dependencies(
       normalizedEmailHmacKey,
       encryptionKeyRef: "identity-email-key-v1",
       async encryptNormalizedEmail(value) {
-        return createHash("sha256").update(`encrypted:${value}`, "utf8").digest();
+        return fakeEncryptNormalizedEmail(value);
       },
     },
-    afterInsert,
   };
 }
 
@@ -148,6 +183,64 @@ async function assertRegistrationTablesEmpty(): Promise<void> {
     "outbox",
   ]) {
     assert.equal(await tableCount(table), 0, `${table} must roll back`);
+  }
+}
+
+const insertFailureTables = new Set([
+  "actors",
+  "tenants",
+  "idempotency_records",
+  "memberships",
+  "profiles",
+  "auth_subjects",
+  "private_identity_pii",
+  "stream_sequences",
+  "product_events",
+  "audit_events",
+  "outbox",
+]);
+
+async function withDatabaseInsertFailure<T>(table: string, work: () => Promise<T>): Promise<T> {
+  assert(insertFailureTables.has(table));
+  await administratorPool.query(`create function task3_test_fail_after_insert()
+    returns trigger language plpgsql
+    set search_path = pg_catalog, public
+    as $failure$
+      begin
+        raise exception 'injected failure after %', tg_table_name;
+      end
+    $failure$`);
+  await administratorPool.query(`create trigger task3_test_fail_after_insert
+    after insert on ${table}
+    for each row execute function task3_test_fail_after_insert()`);
+  try {
+    return await work();
+  } finally {
+    await administratorPool.query(`drop trigger if exists task3_test_fail_after_insert on ${table}`);
+    await administratorPool.query("drop function if exists task3_test_fail_after_insert()");
+  }
+}
+
+async function captureError(work: () => Promise<unknown>): Promise<Error> {
+  try {
+    await work();
+  } catch (error) {
+    assert(error instanceof Error);
+    return error;
+  }
+  throw new assert.AssertionError({ message: "Expected operation to reject" });
+}
+
+function assertOpaqueIdentityCollision(error: Error, sentinels: readonly string[]): void {
+  assert(error instanceof DomainError);
+  assert.equal(error.code, "IDEMPOTENCY_CONFLICT");
+  assert.equal(error.message, "IDEMPOTENCY_CONFLICT: Identity registration conflicts with existing authority");
+  assert.equal(Object.prototype.hasOwnProperty.call(error, "cause"), false);
+  const descriptorValues = Object.values(Object.getOwnPropertyDescriptors(error))
+    .flatMap((descriptor) => "value" in descriptor && typeof descriptor.value === "string" ? [descriptor.value] : []);
+  const surfaces = [error.message, error.stack ?? "", JSON.stringify(error), ...descriptorValues];
+  for (const sentinel of sentinels) {
+    assert.equal(surfaces.some((surface) => surface.includes(sentinel)), false, `collision leaked ${sentinel}`);
   }
 }
 
@@ -262,9 +355,24 @@ test("registerB2c creates only the personal identity graph and replays byte-equi
     pii.rows[0]?.normalized_email_hmac,
     createHmac("sha256", normalizedEmailHmacKey).update(registration.auth_subject.normalizedEmail, "utf8").digest(),
   );
-  assert.equal(pii.rows[0]?.encrypted_email.length, 32);
+  assert.equal(fakeDecryptNormalizedEmail(pii.rows[0]!.encrypted_email), registration.auth_subject.normalizedEmail);
+  const tamperedEnvelope = Buffer.from(pii.rows[0]!.encrypted_email);
+  tamperedEnvelope[tamperedEnvelope.length - 1] ^= 1;
+  assert.throws(() => fakeDecryptNormalizedEmail(tamperedEnvelope));
   assert.equal(pii.rows[0]?.encryption_key_ref, "identity-email-key-v1");
 
+  for (const table of [
+    "actors",
+    "tenants",
+    "memberships",
+    "profiles",
+    "auth_subjects",
+    "private_identity_pii",
+    "product_events",
+    "audit_events",
+    "outbox",
+    "idempotency_records",
+  ]) assert.equal(await tableCount(table), 1, `${table} must contain exactly the registration row`);
   assert.equal(await tableCount("runtime_containers"), 0);
   assert.equal(await tableCount("worker_jobs"), 0);
   assert.equal(await tableCount("core_sessions"), 0);
@@ -276,6 +384,43 @@ test("registerB2c creates only the personal identity graph and replays byte-equi
   assert.equal(await tableCount("audit_events"), 1);
   assert.equal(await tableCount("outbox"), 1);
   assert.equal(await tableCount("idempotency_records"), 1);
+
+  const idempotency = await administratorPool.query<{
+    status: string;
+    result_ref: string | null;
+    response_json: unknown;
+    payload_hash: string;
+    operation: string;
+  }>(`select status, result_ref, response_json, payload_hash, operation
+      from idempotency_records where tenant_id = $1 and idempotency_key = $2`, [
+    first.tenant_id,
+    registration.idempotency_key,
+  ]);
+  assert.deepEqual(idempotency.rows, [{
+    status: "completed",
+    result_ref: first.actor_id,
+    response_json: first,
+    payload_hash: registration.payload_hash,
+    operation: "identity.register-b2c",
+  }]);
+  const linkage = await administratorPool.query<{
+    tenant_id: string;
+    outbox_event_id: string;
+    product_event_id: string;
+    delivery_target: string;
+    status: string;
+  }>(`select outbox.tenant_id, outbox.event_id as outbox_event_id,
+        product.event_id as product_event_id, outbox.delivery_target, outbox.status
+      from outbox
+      join product_events product
+        on product.tenant_id = outbox.tenant_id and product.event_id = outbox.event_id`);
+  assert.deepEqual(linkage.rows, [{
+    tenant_id: first.tenant_id,
+    outbox_event_id: linkage.rows[0]?.product_event_id,
+    product_event_id: linkage.rows[0]?.product_event_id,
+    delivery_target: "internal_event_stream",
+    status: "pending",
+  }]);
 
   const persistedPublicRecords = await administratorPool.query<{
     payload: unknown;
@@ -294,6 +439,94 @@ test("registerB2c creates only the personal identity graph and replays byte-equi
     profile_id: first.profile_id,
     resource_version: 1,
   });
+});
+
+test("registerB2c maps provider-subject uniqueness to one opaque fixed DomainError", async () => {
+  const providerSubject = "provider-subject-collision-sentinel";
+  const first = command({
+    idempotency_key: "provider-collision-first",
+    auth_subject: {
+      provider: "supabase",
+      providerSubject,
+      identityKind: "email_password",
+      normalizedEmail: "provider-first@example.test",
+      verifiedAt: "2026-08-14T01:00:00.000Z",
+    },
+  });
+  const second = command({
+    idempotency_key: "provider-collision-second",
+    auth_subject: {
+      ...first.auth_subject,
+      normalizedEmail: "provider-second@example.test",
+    },
+  });
+  await registerB2c(dependencies(), context, first);
+
+  const error = await captureError(() => registerB2c(dependencies(), context, second));
+
+  assertOpaqueIdentityCollision(error, [providerSubject]);
+  assert.equal(await tableCount("actors"), 1);
+  assert.equal(await tableCount("auth_subjects"), 1);
+  assert.equal(await tableCount("idempotency_records"), 1);
+});
+
+test("registerB2c maps normalized-email uniqueness without leaking email or HMAC", async () => {
+  const normalizedEmail = "email-collision-sentinel@example.test";
+  const normalizedEmailHmac = createHmac("sha256", normalizedEmailHmacKey)
+    .update(normalizedEmail, "utf8")
+    .digest("hex");
+  const first = command({
+    idempotency_key: "email-collision-first",
+    auth_subject: {
+      provider: "supabase",
+      providerSubject: "email-collision-provider-first",
+      identityKind: "email_password",
+      normalizedEmail,
+      verifiedAt: "2026-08-14T01:00:00.000Z",
+    },
+  });
+  const second = command({
+    idempotency_key: "email-collision-second",
+    auth_subject: {
+      ...first.auth_subject,
+      providerSubject: "email-collision-provider-second",
+    },
+  });
+  await registerB2c(dependencies(), context, first);
+
+  const error = await captureError(() => registerB2c(dependencies(), context, second));
+
+  assertOpaqueIdentityCollision(error, [normalizedEmail, normalizedEmailHmac, `\\x${normalizedEmailHmac}`]);
+  assert.equal(await tableCount("actors"), 1);
+  assert.equal(await tableCount("auth_subjects"), 1);
+  assert.equal(await tableCount("private_identity_pii"), 1);
+  assert.equal(await tableCount("idempotency_records"), 1);
+});
+
+test("registerB2c never copies an adversarial idempotency identity into ProductEvent correlation", async () => {
+  const sentinel = "correlation-sentinel@example.test";
+  const registration = command({
+    idempotency_key: sentinel,
+    auth_subject: {
+      provider: "supabase",
+      providerSubject: sentinel,
+      identityKind: "email_password",
+      normalizedEmail: sentinel,
+      verifiedAt: "2026-08-14T01:00:00.000Z",
+    },
+  });
+  await registerB2c(dependencies(), context, registration);
+
+  const event = await administratorPool.query<{
+    correlation_id: string;
+    causation_id: string;
+    payload: unknown;
+  }>("select correlation_id, causation_id, payload from product_events");
+
+  assert.equal(event.rows.length, 1);
+  assert.match(event.rows[0]!.correlation_id, /^correlation_identity_[a-f0-9]{32}$/u);
+  assert.match(event.rows[0]!.causation_id, /^causation_identity_[a-f0-9]{32}$/u);
+  assert.equal(JSON.stringify(event.rows).includes(sentinel), false);
 });
 
 test("registerB2c rejects idempotency reuse when any identity-bearing payload changes", async () => {
@@ -321,21 +554,21 @@ test("registerB2c rejects idempotency reuse when any identity-bearing payload ch
 });
 
 test("registerB2c rolls the whole identity graph back after every insert boundary", async () => {
-  const stages = [
-    "actor",
-    "tenant",
-    "idempotency",
-    "membership",
-    "profile",
-    "auth_subject",
-    "private_pii",
-    "stream_sequence",
-    "product_event",
-    "audit_event",
-    "outbox",
+  const insertions = [
+    ["actor", "actors"],
+    ["tenant", "tenants"],
+    ["idempotency", "idempotency_records"],
+    ["membership", "memberships"],
+    ["profile", "profiles"],
+    ["auth_subject", "auth_subjects"],
+    ["private_pii", "private_identity_pii"],
+    ["stream_sequence", "stream_sequences"],
+    ["product_event", "product_events"],
+    ["audit_event", "audit_events"],
+    ["outbox", "outbox"],
   ] as const;
 
-  for (const [index, targetStage] of stages.entries()) {
+  for (const [index, [targetStage, table]] of insertions.entries()) {
     const registration = command({
       idempotency_key: `register-rollback-${index}`,
       auth_subject: {
@@ -348,11 +581,19 @@ test("registerB2c rolls the whole identity graph back after every insert boundar
       display_name: `Rollback ${index}`,
     });
     await assert.rejects(
-      registerB2c(dependencies((stage) => {
-        if (stage === targetStage) throw new Error(`injected failure after ${stage}`);
-      }), context, registration),
-      new RegExp(`injected failure after ${targetStage}`),
+      withDatabaseInsertFailure(table, () => registerB2c(dependencies(), context, registration)),
+      new RegExp(`injected failure after ${table}`),
     );
     await assertRegistrationTablesEmpty();
   }
+});
+
+test("registration fault injection remains database-only and absent from the public production API", async () => {
+  const sourceRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
+  const [serviceSource, publicIndexSource] = await Promise.all([
+    readFile(join(sourceRoot, "services", "identity", "register-b2c.ts"), "utf8"),
+    readFile(join(sourceRoot, "index.ts"), "utf8"),
+  ]);
+  assert.doesNotMatch(serviceSource, /afterInsert|RegisterB2cInsertStage/u);
+  assert.doesNotMatch(publicIndexSource, /RegisterB2cInsertStage/u);
 });

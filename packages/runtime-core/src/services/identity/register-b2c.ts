@@ -49,19 +49,6 @@ export interface RegisterB2cContext {
   readonly traceId: string;
 }
 
-export type RegisterB2cInsertStage =
-  | "actor"
-  | "tenant"
-  | "idempotency"
-  | "membership"
-  | "profile"
-  | "auth_subject"
-  | "private_pii"
-  | "stream_sequence"
-  | "product_event"
-  | "audit_event"
-  | "outbox";
-
 export interface RegisterB2cDependencies {
   readonly db: Kysely<RuntimeDatabase>;
   readonly defaultProfile: {
@@ -70,7 +57,6 @@ export interface RegisterB2cDependencies {
   };
   readonly privatePii: PrivateIdentityPiiProtection;
   readonly now?: () => Date;
-  readonly afterInsert?: (stage: RegisterB2cInsertStage) => void | Promise<void>;
 }
 
 interface DerivedRegistrationIds {
@@ -83,14 +69,42 @@ interface DerivedRegistrationIds {
   readonly eventId: string;
   readonly auditEventId: string;
   readonly outboxId: string;
+  readonly correlationId: string;
+  readonly causationId: string;
 }
 
 const operation = "identity.register-b2c";
 const dayMs = 24 * 60 * 60 * 1_000;
 const payloadHashPattern = /^sha256:[a-f0-9]{64}$/u;
+const identityCollisionConstraints = new Set([
+  "auth_subjects_provider_provider_subject_key",
+  "private_identity_pii_normalized_email_hmac_key",
+]);
 
 function invalid(message: string): never {
   throw new DomainError("INVALID_REQUEST", message);
+}
+
+function ownStringData(value: unknown, key: string): string | undefined {
+  try {
+    if (typeof value !== "object" || value === null) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor !== undefined && "value" in descriptor && typeof descriptor.value === "string"
+      ? descriptor.value
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function rethrowRegistrationError(error: unknown): never {
+  if (
+    ownStringData(error, "code") === "23505"
+    && identityCollisionConstraints.has(ownStringData(error, "constraint") ?? "")
+  ) {
+    throw new DomainError("IDEMPOTENCY_CONFLICT", "Identity registration conflicts with existing authority");
+  }
+  throw error;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -162,6 +176,8 @@ function deriveRegistrationIds(idempotencyKey: string): DerivedRegistrationIds {
     eventId: deriveIdentityId("event_identity", idempotencyKey),
     auditEventId: deriveIdentityId("audit_identity", idempotencyKey),
     outboxId: deriveIdentityId("outbox_identity", idempotencyKey),
+    correlationId: deriveIdentityId("correlation_identity", idempotencyKey),
+    causationId: deriveIdentityId("causation_identity", idempotencyKey),
   };
 }
 
@@ -196,10 +212,6 @@ function assertServerConfiguration(dependencies: RegisterB2cDependencies, contex
     || context.traceId.length < 1
     || context.traceId.length > 255
   ) throw new DomainError("INTERNAL_ERROR", "B2C registration server configuration is invalid");
-}
-
-async function inserted(dependencies: RegisterB2cDependencies, stage: RegisterB2cInsertStage): Promise<void> {
-  await dependencies.afterInsert?.(stage);
 }
 
 async function serializable<T>(
@@ -237,7 +249,6 @@ export async function registerB2c(
     }).onConflict((conflict) => conflict.column("actor_id").doNothing())
       .returning("actor_id")
       .executeTakeFirst();
-    if (actorInsert !== undefined) await inserted(dependencies, "actor");
     const actor = await trx.selectFrom("actors")
       .select(["actor_kind", "display_name", "status"])
       .where("actor_id", "=", ids.actorId)
@@ -256,7 +267,6 @@ export async function registerB2c(
     }).onConflict((conflict) => conflict.column("tenant_id").doNothing())
       .returning("tenant_id")
       .executeTakeFirst();
-    if (tenantInsert !== undefined) await inserted(dependencies, "tenant");
     const tenantTransaction: TenantTransaction = { tenantId: ids.tenantId, trx };
     const admission = await beginIdempotentCommand<B2cRegistrationResult>(tenantTransaction, {
       key: input.idempotency_key,
@@ -275,7 +285,6 @@ export async function registerB2c(
     if (admission.kind === "in_progress") {
       throw new DomainError("IDEMPOTENCY_CONFLICT", "B2C registration command is already in progress");
     }
-    await inserted(dependencies, "idempotency");
     if (
       actorInsert === undefined
       || tenantInsert === undefined
@@ -297,7 +306,6 @@ export async function registerB2c(
       created_at: now,
       updated_at: now,
     }).execute();
-    await inserted(dependencies, "membership");
     await trx.insertInto("profiles").values({
       tenant_id: ids.tenantId,
       profile_id: ids.profileId,
@@ -313,7 +321,6 @@ export async function registerB2c(
       created_at: now,
       updated_at: now,
     }).execute();
-    await inserted(dependencies, "profile");
     await loadActorIdentityAuthority(trx, ids.actorId);
 
     await trx.insertInto("auth_subjects").values({
@@ -328,21 +335,18 @@ export async function registerB2c(
       created_at: now,
       updated_at: now,
     }).execute();
-    await inserted(dependencies, "auth_subject");
     await insertPrivateIdentityPii(trx, {
       actorId: ids.actorId,
       normalizedEmail: input.auth_subject.normalizedEmail,
       protection: dependencies.privatePii,
       now,
     });
-    await inserted(dependencies, "private_pii");
 
     await trx.insertInto("stream_sequences").values({
       tenant_id: ids.tenantId,
       stream_id: ids.actorId,
       last_sequence: 1,
     }).execute();
-    await inserted(dependencies, "stream_sequence");
     const event = {
       schema_version: 1 as const,
       event_id: ids.eventId,
@@ -351,8 +355,8 @@ export async function registerB2c(
       tenant_id: ids.tenantId,
       request_id: context.requestId,
       trace_id: context.traceId,
-      correlation_id: input.idempotency_key,
-      causation_id: input.idempotency_key,
+      correlation_id: ids.correlationId,
+      causation_id: ids.causationId,
       profile_id: ids.profileId,
       event_type: "identity.registered" as const,
       payload: {
@@ -374,8 +378,8 @@ export async function registerB2c(
       occurred_at: now,
       request_id: context.requestId,
       trace_id: context.traceId,
-      correlation_id: input.idempotency_key,
-      causation_id: input.idempotency_key,
+      correlation_id: ids.correlationId,
+      causation_id: ids.causationId,
       profile_id: ids.profileId,
       conversation_id: null,
       run_id: null,
@@ -386,7 +390,6 @@ export async function registerB2c(
       capability_id: null,
       payload: event.payload,
     }).execute();
-    await inserted(dependencies, "product_event");
     await appendAuditEvent(tenantTransaction, {
       schema_version: 1,
       audit_event_id: ids.auditEventId,
@@ -405,14 +408,12 @@ export async function registerB2c(
       reason_summary: "Registered personal B2C identity graph",
       resource_version: 1,
     });
-    await inserted(dependencies, "audit_event");
     await enqueueOutbox(tenantTransaction, {
       outboxId: ids.outboxId,
       eventId: ids.eventId,
       deliveryTarget: "internal_event_stream",
       now,
     });
-    await inserted(dependencies, "outbox");
 
     const response = result(ids);
     await completeIdempotentCommand(tenantTransaction, {
@@ -424,5 +425,5 @@ export async function registerB2c(
       updatedAt: now,
     });
     return response;
-  });
+  }).catch(rethrowRegistrationError);
 }

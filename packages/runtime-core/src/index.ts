@@ -207,7 +207,6 @@ export {
   type RegisterB2cCommand,
   type RegisterB2cContext,
   type RegisterB2cDependencies,
-  type RegisterB2cInsertStage,
   type VerifiedAuthSubjectInput,
 } from "./services/identity/register-b2c.js";
 export {

@@ -29,6 +29,7 @@ function hasExactRole(roles: readonly IdentityAuthorityRole[], role: IdentityAut
 }
 
 export function assertIdentityAuthorityInvariants(
+  platformRoles: readonly "platform_super_admin"[],
   memberships: readonly IdentityAuthorityMembershipFacts[],
   ownedProfiles: readonly IdentityAuthorityProfileFacts[],
   b2cProfileCounts: ReadonlyMap<string, number>,
@@ -40,6 +41,15 @@ export function assertIdentityAuthorityInvariants(
   if (ordinaryAuthority.length > 1) invariant("Actor has duplicate ordinary authority");
 
   for (const membership of memberships) {
+    if (membership.source === "platform") {
+      if (membership.tenantMode !== "b2b") invariant("Platform Membership requires a B2B Tenant");
+      if (!hasExactRole(membership.roles, "admin")) {
+        invariant("Platform Membership requires exactly the admin role");
+      }
+      if (!platformRoles.includes("platform_super_admin")) {
+        invariant("Platform Membership requires active platform_super_admin authority");
+      }
+    }
     if (
       membership.tenantMode === "b2c"
       && (membership.source !== "self" || !hasExactRole(membership.roles, "student"))

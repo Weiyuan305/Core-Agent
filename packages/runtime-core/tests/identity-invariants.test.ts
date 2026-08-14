@@ -67,14 +67,31 @@ async function resetDatabase(): Promise<void> {
   await applyMigrations(administratorPool, migrationsDirectory);
 }
 
-async function seedActor(trx: Transaction<RuntimeDatabase>, actorId: string, status: "active" | "disabled" = "active") {
+async function seedActor(
+  trx: Transaction<RuntimeDatabase>,
+  actorId: string,
+  status: "active" | "disabled" = "active",
+  actorKind: "human" | "service" = "human",
+) {
   await trx.insertInto("actors").values({
     actor_id: actorId,
     schema_version: 1,
     resource_version: 1,
-    actor_kind: "human",
+    actor_kind: actorKind,
     display_name: "Authority Student",
     status,
+    created_at: timestamp,
+    updated_at: timestamp,
+  }).execute();
+}
+
+async function seedPlatformRole(trx: Transaction<RuntimeDatabase>, actorId: string) {
+  await trx.insertInto("platform_role_assignments").values({
+    platform_role_assignment_id: `platform_role_${actorId}`,
+    actor_id: actorId,
+    role: "platform_super_admin",
+    status: "active",
+    resource_version: 1,
     created_at: timestamp,
     updated_at: timestamp,
   }).execute();
@@ -223,6 +240,73 @@ test("loadActorIdentityAuthority rejects duplicate active ordinary authority bef
     });
     await loadActorIdentityAuthority(trx, "actor_duplicate");
   }), /duplicate ordinary authority/i);
+});
+
+test("loadActorIdentityAuthority rejects one or two platform Memberships without an active platform role", async () => {
+  for (const membershipCount of [1, 2]) {
+    await assert.rejects(identityDb.transaction().execute(async (trx) => {
+      const actorId = `actor_platform_missing_role_${membershipCount}`;
+      await seedActor(trx, actorId, "active", membershipCount === 1 ? "service" : "human");
+      for (let index = 0; index < membershipCount; index += 1) {
+        const tenantId = `tenant_platform_missing_role_${membershipCount}_${index}`;
+        await seedTenant(trx, tenantId, "b2b");
+        await seedMembership(trx, {
+          tenantId,
+          membershipId: `membership_platform_missing_role_${membershipCount}_${index}`,
+          actorId,
+          roles: ["admin"],
+          source: "platform",
+        });
+      }
+      await loadActorIdentityAuthority(trx, actorId);
+    }), /platform Membership requires active platform_super_admin authority/i);
+  }
+});
+
+test("loadActorIdentityAuthority allows an explicitly assigned service platform Actor across B2B Tenants", async () => {
+  const authority = await identityDb.transaction().execute(async (trx) => {
+    const actorId = "actor_platform_service";
+    await seedActor(trx, actorId, "active", "service");
+    await seedPlatformRole(trx, actorId);
+    for (const suffix of ["a", "b"]) {
+      const tenantId = `tenant_platform_service_${suffix}`;
+      await seedTenant(trx, tenantId, "b2b");
+      await seedMembership(trx, {
+        tenantId,
+        membershipId: `membership_platform_service_${suffix}`,
+        actorId,
+        roles: ["admin"],
+        source: "platform",
+      });
+    }
+    return loadActorIdentityAuthority(trx, actorId);
+  });
+
+  assert.deepEqual(authority.platformRoles, ["platform_super_admin"]);
+  assert.deepEqual(authority.memberships.map((membership) => ({
+    tenantMode: membership.tenantMode,
+    source: membership.source,
+    roles: membership.roles,
+  })), [{ tenantMode: "b2b", source: "platform", roles: ["admin"] }, {
+    tenantMode: "b2b", source: "platform", roles: ["admin"],
+  }]);
+});
+
+test("loadActorIdentityAuthority rejects a platform Membership in a B2C Tenant", async () => {
+  await assert.rejects(identityDb.transaction().execute(async (trx) => {
+    const actorId = "actor_platform_b2c";
+    await seedActor(trx, actorId);
+    await seedPlatformRole(trx, actorId);
+    await seedTenant(trx, "tenant_platform_b2c", "b2c");
+    await seedMembership(trx, {
+      tenantId: "tenant_platform_b2c",
+      membershipId: "membership_platform_b2c",
+      actorId,
+      roles: ["admin"],
+      source: "platform",
+    });
+    await loadActorIdentityAuthority(trx, actorId);
+  }), /platform Membership requires a B2B Tenant/i);
 });
 
 test("loadActorIdentityAuthority rejects non-student B2C authority", async () => {

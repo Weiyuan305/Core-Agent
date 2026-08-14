@@ -112,6 +112,12 @@ export async function loadActorIdentityAuthority(
     }
     return { profileId: row.profile_id, tenantId: row.tenant_id, profileKind: row.profile_kind };
   });
+  const platformRoles = roleRows
+    .filter((row) => row.status === "active")
+    .map((row) => {
+      if (row.role !== "platform_super_admin") invalidAuthority("Stored platform authority is invalid");
+      return row.role;
+    });
   const b2cTenantIds = memberships
     .filter((membership) => membership.tenantMode === "b2c")
     .map((membership) => membership.tenantId);
@@ -124,14 +130,7 @@ export async function loadActorIdentityAuthority(
       .execute();
     for (const row of counts) b2cProfileCounts.set(row.tenant_id, Number(row.count));
   }
-  assertIdentityAuthorityInvariants(memberships, ownedProfiles, b2cProfileCounts);
-
-  const platformRoles = roleRows
-    .filter((row) => row.status === "active")
-    .map((row) => {
-      if (row.role !== "platform_super_admin") invalidAuthority("Stored platform authority is invalid");
-      return row.role;
-    });
+  assertIdentityAuthorityInvariants(platformRoles, memberships, ownedProfiles, b2cProfileCounts);
   const frozenMemberships = memberships.map((membership) => Object.freeze({
     ...membership,
     roles: Object.freeze([...membership.roles]),
