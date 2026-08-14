@@ -628,7 +628,12 @@ function cloneBoundedTlsBytes(value: unknown, field: string): string | Buffer | 
       if (typedArrayByteLengthGetter === undefined) {
         throw new Error("Integration PostgreSQL pool TLS buffer validation is unavailable");
       }
-      const byteLength = Reflect.apply(typedArrayByteLengthGetter, item, []) as number;
+      let byteLength: number;
+      try {
+        byteLength = Reflect.apply(typedArrayByteLengthGetter, item, []) as number;
+      } catch {
+        throw new Error(`Integration PostgreSQL pool TLS configuration field ${field} must contain strings or buffers`);
+      }
       if (byteLength > 1_048_576) {
         throw new Error(`Integration PostgreSQL pool TLS configuration field ${field} is too large`);
       }

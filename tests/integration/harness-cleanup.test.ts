@@ -710,6 +710,72 @@ test("owned PostgreSQL pool accepts only inert plain-data TLS configuration", as
     }))),
   );
 
+  const prototypeLookalikeObservations: Array<{
+    readonly field: "ca" | "cert" | "key";
+    readonly form: "array" | "direct";
+    readonly message: string;
+    readonly byteLengthHits: number;
+    readonly lengthHits: number;
+    readonly toStringTagHits: number;
+  }> = [];
+  for (const field of ["ca", "cert", "key"] as const) {
+    for (const form of ["direct", "array"] as const) {
+      let byteLengthHits = 0;
+      let lengthHits = 0;
+      let toStringTagHits = 0;
+      const lookalike = Object.create(Buffer.prototype) as object;
+      Object.defineProperties(lookalike, {
+        byteLength: {
+          configurable: true,
+          get: () => {
+            byteLengthHits += 1;
+            return 1;
+          },
+        },
+        length: {
+          configurable: true,
+          get: () => {
+            lengthHits += 1;
+            return 1;
+          },
+        },
+        [Symbol.toStringTag]: {
+          configurable: true,
+          get: () => {
+            toStringTagHits += 1;
+            return "Buffer";
+          },
+        },
+      });
+      const input = form === "direct" ? lookalike : [lookalike];
+      let caught: unknown;
+      try {
+        testHarnessInternals.createOwnedPostgresPool({ ssl: { [field]: input } } as never);
+      } catch (error) {
+        caught = error;
+      }
+      prototypeLookalikeObservations.push({
+        field,
+        form,
+        message: caught instanceof Error ? caught.message : "non-error",
+        byteLengthHits,
+        lengthHits,
+        toStringTagHits,
+      });
+    }
+  }
+  assert.deepEqual(
+    prototypeLookalikeObservations,
+    ["ca", "cert", "key"].flatMap((field) => ["direct", "array"].map((form) => ({
+      field,
+      form,
+      message: `Integration PostgreSQL pool TLS configuration field ${field} must contain strings or buffers`,
+      byteLengthHits: 0,
+      lengthHits: 0,
+      toStringTagHits: 0,
+    }))),
+  );
+
   for (const field of ["ca", "cert", "key"] as const) {
     for (const form of ["direct", "array"] as const) {
       const maximum = Buffer.alloc(1_048_576);
