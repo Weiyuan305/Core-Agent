@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import type { Kysely } from "kysely";
@@ -56,6 +59,21 @@ function dependencies(transactionError: unknown): RegisterB2cDependencies {
 }
 
 const context = Object.freeze({ requestId: "collision-probe-request", traceId: "collision-probe-trace" });
+
+test("runtime-core PostgreSQL gate includes both Task 3 suites serially", async () => {
+  const packageDirectory = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const packageJson = JSON.parse(await readFile(join(packageDirectory, "package.json"), "utf8")) as {
+    scripts?: { "test:postgres"?: unknown };
+  };
+  const script = packageJson.scripts?.["test:postgres"];
+  assert.equal(typeof script, "string");
+  const arguments_ = script.split(/\s+/u);
+
+  assert.equal(arguments_.filter((value) => value === "--test-concurrency=1").length, 1);
+  for (const path of ["tests/register-b2c.test.ts", "tests/identity-invariants.test.ts"]) {
+    assert.equal(arguments_.filter((value) => value === path).length, 1, `${path} must run exactly once`);
+  }
+});
 
 test("registerB2c collision classification never invokes accessor-bearing error fields", async () => {
   let codeReads = 0;
