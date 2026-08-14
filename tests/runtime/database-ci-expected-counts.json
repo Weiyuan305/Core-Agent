@@ -1,6 +1,6 @@
 {
   "runtimeCorePostgres": {
-    "testCount": 270,
+    "testCount": 287,
     "suitePaths": [
       "tests/migrations.test.ts",
       "tests/tenant-isolation.test.ts",
@@ -15,7 +15,10 @@
       "tests/agent-run-execution.test.ts",
       "tests/agent-run-conversation-lock.test.ts",
       "tests/register-b2c.test.ts",
-      "tests/identity-invariants.test.ts"
+      "tests/identity-invariants.test.ts",
+      "tests/b2b-identity.test.ts",
+      "tests/invitations.test.ts",
+      "tests/platform-memberships.test.ts"
     ]
   },
   "controlPlaneApiPostgres": {

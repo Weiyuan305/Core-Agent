@@ -60,7 +60,7 @@ function dependencies(transactionError: unknown): RegisterB2cDependencies {
 
 const context = Object.freeze({ requestId: "collision-probe-request", traceId: "collision-probe-trace" });
 
-test("runtime-core PostgreSQL gate includes both Task 3 suites serially", async () => {
+test("runtime-core PostgreSQL gate includes all Identity Task 3 and 4 suites serially", async () => {
   const packageDirectory = join(dirname(fileURLToPath(import.meta.url)), "..");
   const packageJson = JSON.parse(await readFile(join(packageDirectory, "package.json"), "utf8")) as {
     scripts?: { "test:postgres"?: unknown };
@@ -70,7 +70,13 @@ test("runtime-core PostgreSQL gate includes both Task 3 suites serially", async 
   const arguments_ = script.split(/\s+/u);
 
   assert.equal(arguments_.filter((value) => value === "--test-concurrency=1").length, 1);
-  for (const path of ["tests/register-b2c.test.ts", "tests/identity-invariants.test.ts"]) {
+  for (const path of [
+    "tests/register-b2c.test.ts",
+    "tests/identity-invariants.test.ts",
+    "tests/b2b-identity.test.ts",
+    "tests/invitations.test.ts",
+    "tests/platform-memberships.test.ts",
+  ]) {
     assert.equal(arguments_.filter((value) => value === path).length, 1, `${path} must run exactly once`);
   }
 });

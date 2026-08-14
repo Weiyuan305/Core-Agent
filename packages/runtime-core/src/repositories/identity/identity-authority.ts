@@ -85,6 +85,7 @@ export async function loadActorIdentityAuthority(
     trx.selectFrom("profiles")
       .select(["profile_id", "tenant_id", "profile_kind"])
       .where("owner_actor_id", "=", actorId)
+      .where("status", "=", "active")
       .orderBy("tenant_id", "asc")
       .orderBy("profile_id", "asc")
       .execute(),

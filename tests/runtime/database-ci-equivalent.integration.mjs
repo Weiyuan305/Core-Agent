@@ -159,6 +159,9 @@ async function runCiEquivalentScenario({ injectedFailure = false, injectedOutput
     assertNodeTestSummaries(postgresOutput, [expectedCounts.runtimeCorePostgres.testCount, expectedCounts.controlPlaneApiPostgres.testCount]);
     assert.match(postgresOutput, /schema 10 grants only the documented Identity Task 3-9 table-operation matrix/u);
     assert.match(postgresOutput, /real Identity login commits and atomically rolls back the Task 3 cross-table graph/u);
+    assert.match(postgresOutput, /only a real platform_super_admin creates a B2B Tenant/u);
+    assert.match(postgresOutput, /concurrent accept and revoke reach one terminal invitation outcome/u);
+    assert.match(postgresOutput, /projector processes at most 100 Tenants/u);
     const integrationOutput = protectedRun("npm", ["run", "test:integration"], environment, credential, credentialFile);
     assertNodeTestSummaries(integrationOutput, [expectedCounts.integration.testCount]);
     assert.match(integrationOutput, /provision, converse, stream, restart, and resume/u);

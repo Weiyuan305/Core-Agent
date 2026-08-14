@@ -14,7 +14,10 @@ interface ClaimedJobBase {
   leaseExpiresAt: Date;
 }
 
-export const workerJobKinds = ["provision_runtime", "reconcile_runtime", "execute_agent_run", "dispatch_outbox"] as const;
+export const workerJobKinds = [
+  "provision_runtime", "reconcile_runtime", "execute_agent_run", "dispatch_outbox",
+  "project_platform_memberships",
+] as const;
 export type WorkerJobKind = (typeof workerJobKinds)[number];
 export const runtimeCommandIntents = ["start", "stop", "restart", "delete"] as const;
 export type RuntimeCommandIntent = (typeof runtimeCommandIntents)[number];
@@ -25,7 +28,7 @@ export type AgentRunEffectState = WorkerEffectState;
 export type ClaimedJob =
   | (ClaimedJobBase & { jobKind: "reconcile_runtime"; runtimeCommand: RuntimeCommandIntent; targetCommandVersion: number; effectState: ReconcileEffectState })
   | (ClaimedJobBase & { jobKind: "execute_agent_run"; runtimeCommand: null; targetCommandVersion: null; effectState: AgentRunEffectState })
-  | (ClaimedJobBase & { jobKind: "provision_runtime" | "dispatch_outbox"; runtimeCommand: null; targetCommandVersion: null; effectState: "pre_effect" });
+  | (ClaimedJobBase & { jobKind: "provision_runtime" | "dispatch_outbox" | "project_platform_memberships"; runtimeCommand: null; targetCommandVersion: null; effectState: "pre_effect" });
 
 function workerEffectState(value: string): WorkerEffectState {
   if (!workerEffectStates.includes(value as WorkerEffectState)) throw new Error("Stored worker job effect state is invalid");
@@ -39,7 +42,10 @@ function runtimeCommandIntent(value: string | null): RuntimeCommandIntent {
 }
 
 function nonReconcileJobKind(value: string): Exclude<WorkerJobKind, "reconcile_runtime"> {
-  if (value === "provision_runtime" || value === "execute_agent_run" || value === "dispatch_outbox") return value;
+  if (
+    value === "provision_runtime" || value === "execute_agent_run" || value === "dispatch_outbox"
+    || value === "project_platform_memberships"
+  ) return value;
   throw new Error("Stored worker job kind is invalid");
 }
 

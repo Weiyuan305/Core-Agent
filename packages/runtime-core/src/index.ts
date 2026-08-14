@@ -214,6 +214,61 @@ export {
   type ActorIdentityAuthority,
 } from "./repositories/identity/identity-authority.js";
 export {
+  constantTimeDigestMatches,
+  deriveIdentityCommandId,
+  invitationEmailHmac,
+  issueInvitationSecret,
+  lockInvitationBySecret,
+  publicInvitationNotFound,
+  type InvitationRandomBytes,
+  type StoredInvitationCredential,
+} from "./repositories/identity/invitations.js";
+export {
+  grantPlatformRole,
+  platformMembershipId,
+  revokePlatformRole,
+  type PlatformRoleWriteResult,
+} from "./repositories/identity/platform-roles.js";
+export {
+  createB2bCompany,
+  type CreateB2bCompanyCommand,
+  type CreateB2bCompanyContext,
+  type CreateB2bCompanyDependencies,
+  type CreateB2bCompanyResult,
+} from "./services/identity/create-b2b-company.js";
+export {
+  createInvitation,
+  inspectInvitation,
+  replaceInvitation,
+  revokeInvitation,
+  type CreateInvitationCommand,
+  type InvitationCommandContext,
+  type InvitationCommandDependencies,
+  type InvitationCommandResult,
+  type ReplaceInvitationCommand,
+  type RevokeInvitationCommand,
+} from "./services/identity/manage-invitation.js";
+export {
+  acceptInvitation,
+  type AcceptInvitationCommand,
+  type AcceptInvitationContext,
+  type AcceptInvitationDependencies,
+  type AcceptInvitationResult,
+} from "./services/identity/accept-invitation.js";
+export {
+  changeMembershipRoles,
+  suspendMembership,
+  type ChangeMembershipRolesCommand,
+  type MembershipMutationResult,
+  type MembershipRoleCommandContext,
+  type MembershipRoleCommandDependencies,
+  type SuspendMembershipCommand,
+} from "./services/identity/change-membership-roles.js";
+export {
+  projectPlatformMemberships,
+  type PlatformMembershipProjectionPage,
+} from "./services/identity/project-platform-memberships.js";
+export {
   RuntimeCommandRequestSchema,
   commandRuntime,
   getTenantRuntime,
