@@ -100,13 +100,22 @@ function projectionJobId(assignmentId: string, resourceVersion: number): string 
   return `job_platform_${createHash("sha256").update(`${assignmentId}:${resourceVersion}`, "utf8").digest("hex").slice(0, 32)}`;
 }
 
-async function lockActiveActors(
-  trx: Transaction<RuntimeDatabase>, actorIds: readonly string[],
+async function lockCommandActors(
+  trx: Transaction<RuntimeDatabase>, performingActorId: string, targetActorId: string,
+  desiredStatus: "active" | "revoked",
 ): Promise<void> {
-  for (const actorId of [...new Set(actorIds)].sort()) {
+  const statuses = new Map<string, "active" | "disabled" | "deletion_pending" | "deleted">();
+  for (const actorId of [...new Set([performingActorId, targetActorId])].sort()) {
     const actor = await trx.selectFrom("actors").select("status")
       .where("actor_id", "=", actorId).forUpdate().executeTakeFirst();
-    if (actor?.status !== "active") throw new DomainError("UNAUTHENTICATED", "Active platform Actor authority is required");
+    if (actor !== undefined) statuses.set(actorId, actor.status);
+  }
+  if (statuses.get(performingActorId) !== "active") {
+    throw new DomainError("UNAUTHENTICATED", "Active platform Actor authority is required");
+  }
+  const targetStatus = statuses.get(targetActorId);
+  if (targetStatus === undefined || (desiredStatus === "active" && targetStatus !== "active")) {
+    throw new DomainError("RESOURCE_NOT_FOUND", "Platform role target Actor was not found");
   }
 }
 
@@ -199,13 +208,14 @@ async function changePlatformRole(
   const operation = `identity.platform-role.${operationKind}`;
   return withDatabaseTransactionRetry(dependencies.db, async (trx) => {
     const now = dependencies.now?.() ?? new Date();
-    await lockActiveActors(trx, [context.performingActorId, input.target_actor_id]);
+    await lockCommandActors(trx, context.performingActorId, input.target_actor_id, desiredStatus);
     const authority = await loadActorIdentityAuthority(trx, context.performingActorId);
     if (authority.actorStatus !== "active" || !authority.platformRoles.includes("platform_super_admin")) {
       throw new DomainError("UNAUTHENTICATED", "Active platform_super_admin authority is required");
     }
-    const tenantRows = await trx.selectFrom("tenants").select("tenant_id")
-      .where("tenant_mode", "=", "b2b").orderBy("tenant_id", "asc").execute();
+    const tenantRows = await trx.selectFrom("tenants").select(["tenant_id", "created_at"])
+      .where("tenant_mode", "=", "b2b")
+      .orderBy("created_at", "asc").orderBy("tenant_id", "asc").execute();
     const tenantIds = tenantRows.map((row) => row.tenant_id);
     const scopeTenantId = tenantIds[0];
     if (scopeTenantId !== undefined) {
@@ -244,12 +254,15 @@ async function changePlatformRole(
       if (existing.actor_id !== input.target_actor_id || existing.role !== "platform_super_admin") {
         throw new DomainError("IDEMPOTENCY_CONFLICT", "Platform role assignment identity conflicts");
       }
-      if (scopeTenantId === undefined && desiredStatus === "active" && existing.status === "active"
-        && input.expected_resource_version === null) {
-        return Object.freeze({
-          schema_version: 1, platform_role_assignment_id: input.platform_role_assignment_id,
-          actor_id: input.target_actor_id, status: "active", resource_version: version,
-        });
+      if (scopeTenantId === undefined && existing.status === desiredStatus) {
+        const naturallyReplayed = input.expected_resource_version === version - 1
+          || (desiredStatus === "active" && version === 1 && input.expected_resource_version === null);
+        if (naturallyReplayed) {
+          return Object.freeze({
+            schema_version: 1, platform_role_assignment_id: input.platform_role_assignment_id,
+            actor_id: input.target_actor_id, status: desiredStatus, resource_version: version,
+          });
+        }
       }
       if (input.expected_resource_version !== version || existing.status === desiredStatus) {
         throw new DomainError("RESOURCE_VERSION_CONFLICT", "Platform role assignment version changed");
