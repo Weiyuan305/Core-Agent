@@ -124,7 +124,7 @@ function roleCommand(payload: Record<string, unknown>): Record<string, unknown> 
   return { ...payload, payload_hash: canonicalPayloadHash(payload) };
 }
 
-async function createFirstCompanyAfterRoleResponseLoss(suffix: string): Promise<string> {
+async function createFirstCompanyFromBootstrap(suffix: string): Promise<string> {
   const createB2bCompany = requiredFunction<PlatformRoleWrite>("createB2bCompany");
   const tenantId = `tenant_cross_${suffix}`;
   const companyPayload = {
@@ -145,38 +145,21 @@ async function createFirstCompanyAfterRoleResponseLoss(suffix: string): Promise<
   return tenantId;
 }
 
-async function assertNoHistoricalPlatformRoleArtifacts(idempotencyKey: string): Promise<void> {
-  assert.equal((await administratorPool.query(
-    "select count(*)::int as count from idempotency_records where idempotency_key = $1", [idempotencyKey],
-  )).rows[0]?.count, 0);
-  assert.equal((await administratorPool.query(
-    "select count(*)::int as count from audit_events where action like 'identity.platform-role.%'",
-  )).rows[0]?.count, 0);
-  assert.equal((await administratorPool.query(
-    "select count(*)::int as count from product_events where event_type = 'platform_role.changed'",
-  )).rows[0]?.count, 0);
-  assert.equal((await administratorPool.query(`select count(*)::int as count from outbox
-    inner join product_events using (tenant_id, event_id) where product_events.event_type = 'platform_role.changed'`)).rows[0]?.count, 0);
-  assert.equal((await administratorPool.query(
-    "select count(*)::int as count from worker_jobs where job_kind = 'project_platform_memberships'",
-  )).rows[0]?.count, 0);
-}
-
-async function assertChangedRetryRejected(
-  command: PlatformRoleWrite, payload: Record<string, unknown>, expectedVersion: number,
-): Promise<void> {
-  await assert.rejects(
-    command({ db: identityDb }, roleContext, roleCommand({ ...payload, expected_resource_version: expectedVersion })),
-    (error: unknown) => error instanceof DomainError && error.code === "RESOURCE_VERSION_CONFLICT",
-  );
-  await assert.rejects(
-    command({ db: identityDb }, roleContext, { ...roleCommand(payload), schema_version: 2 }),
-    (error: unknown) => error instanceof DomainError && error.code === "INVALID_REQUEST",
-  );
-  await assert.rejects(
-    command({ db: identityDb }, roleContext, { ...roleCommand(payload), payload_hash: `sha256:${"0".repeat(64)}` }),
-    (error: unknown) => error instanceof DomainError && error.code === "INVALID_REQUEST",
-  );
+async function platformBootstrapBoundarySnapshot(): Promise<Record<string, unknown>> {
+  const [actors, assignments, counts] = await Promise.all([
+    administratorPool.query("select actor_id, status, resource_version::int from actors order by actor_id"),
+    administratorPool.query(`select platform_role_assignment_id, actor_id, status, resource_version::int
+      from platform_role_assignments order by platform_role_assignment_id`),
+    administratorPool.query(`select
+      (select count(*)::int from tenants) as tenants,
+      (select count(*)::int from memberships) as memberships,
+      (select count(*)::int from idempotency_records) as idempotency,
+      (select count(*)::int from audit_events) as audits,
+      (select count(*)::int from product_events) as events,
+      (select count(*)::int from outbox) as outbox,
+      (select count(*)::int from worker_jobs) as jobs`),
+  ]);
+  return { actors: actors.rows, assignments: assignments.rows, counts: counts.rows[0] };
 }
 
 const roleContext = Object.freeze({
@@ -353,156 +336,97 @@ test("platform role replay keeps its earliest-created Tenant scope after a lexic
   assert.equal((await administratorPool.query("select count(*)::int as count from worker_jobs")).rows[0]?.count, 1);
 });
 
-test("zero-Tenant platform grant uses the approved bootstrap exception and later company creation projects it", async () => {
+test("protected bootstrap fixture creates the first company before stable tenant command replay", async () => {
   const grantPlatformRole = requiredFunction<PlatformRoleWrite>("grantPlatformRole");
-  const revokePlatformRole = requiredFunction<PlatformRoleWrite>("revokePlatformRole");
-  const createB2bCompany = requiredFunction<PlatformRoleWrite>("createB2bCompany");
   await seedActor(roleContext.performingActorId);
-  await seedActor("actor_first_target");
+  await seedActor("actor_bootstrap_target");
   await seedPlatformAuthority(roleContext.performingActorId, "platform_assignment_performer", []);
-  const targetAssignmentId = requiredFunction<PlatformRoleAssignmentId>("platformRoleAssignmentId")("actor_first_target");
+  const tenantId = await createFirstCompanyFromBootstrap("bootstrap");
+  const targetAssignmentId = requiredFunction<PlatformRoleAssignmentId>("platformRoleAssignmentId")("actor_bootstrap_target");
   const payload = {
-    schema_version: 1, idempotency_key: "platform-zero-tenant-grant",
-    platform_role_assignment_id: targetAssignmentId, target_actor_id: "actor_first_target",
+    schema_version: 1, idempotency_key: "platform-after-bootstrap-grant",
+    platform_role_assignment_id: targetAssignmentId, target_actor_id: "actor_bootstrap_target",
     expected_resource_version: null,
   };
-  const first = await grantPlatformRole({ db: identityDb, now: () => new Date(now) }, roleContext, roleCommand(payload));
-  const replay = await grantPlatformRole({ db: identityDb, now: () => new Date(now) }, roleContext, roleCommand(payload));
-  assert.deepEqual(replay, first);
-  const revokePayload = {
-    ...payload, idempotency_key: "platform-zero-tenant-revoke", expected_resource_version: 1,
-  };
-  const revoked = await revokePlatformRole({ db: identityDb, now: () => new Date(now.getTime() + 1000) }, roleContext, roleCommand(revokePayload));
-  assert.deepEqual(revoked, {
-    schema_version: 1, platform_role_assignment_id: targetAssignmentId,
-    actor_id: "actor_first_target", status: "revoked", resource_version: 2,
-  });
+  const granted = await grantPlatformRole({ db: identityDb, now: () => new Date(now.getTime() + 1_000) }, roleContext, roleCommand(payload));
   assert.deepEqual(
-    await revokePlatformRole({ db: identityDb, now: () => new Date(now.getTime() + 2000) }, roleContext, roleCommand(revokePayload)),
-    revoked,
-  );
-  const reactivatePayload = {
-    ...payload, idempotency_key: "platform-zero-tenant-reactivate", expected_resource_version: 2,
-  };
-  const reactivated = await grantPlatformRole({ db: identityDb, now: () => new Date(now.getTime() + 3000) }, roleContext, roleCommand(reactivatePayload));
-  assert.deepEqual(reactivated, {
-    schema_version: 1, platform_role_assignment_id: targetAssignmentId,
-    actor_id: "actor_first_target", status: "active", resource_version: 3,
-  });
-  assert.deepEqual(
-    await grantPlatformRole({ db: identityDb, now: () => new Date(now.getTime() + 4000) }, roleContext, roleCommand(reactivatePayload)),
-    reactivated,
+    await grantPlatformRole({ db: identityDb, now: () => new Date(now.getTime() + 2_000) }, roleContext, roleCommand(payload)),
+    granted,
   );
   await assert.rejects(
-    grantPlatformRole({ db: identityDb }, roleContext, roleCommand({ ...reactivatePayload, expected_resource_version: 3 })),
+    grantPlatformRole({ db: identityDb }, roleContext, roleCommand({
+      ...payload, idempotency_key: "platform-after-bootstrap-stale",
+    })),
     (error: unknown) => error instanceof DomainError && error.code === "RESOURCE_VERSION_CONFLICT",
   );
-  assert.equal((await administratorPool.query("select count(*)::int as count from worker_jobs")).rows[0]?.count, 0);
-  assert.equal((await administratorPool.query("select count(*)::int as count from idempotency_records")).rows[0]?.count, 0);
-  assert.equal((await administratorPool.query("select count(*)::int as count from audit_events")).rows[0]?.count, 0);
-  assert.equal((await administratorPool.query("select count(*)::int as count from product_events")).rows[0]?.count, 0);
-  assert.equal((await administratorPool.query("select count(*)::int as count from outbox")).rows[0]?.count, 0);
-
-  const companyPayload = {
-    schema_version: 1, idempotency_key: "platform-zero-company", tenant_id: "tenant_after_zero",
-    display_name: "After Zero", invitation: {
-      invitation_id: "invitation_after_zero", membership_id: "membership_after_zero",
-      normalized_email: "admin@after-zero.test",
-    },
-  };
-  await createB2bCompany({
-    db: identityDb, emailHmacKey: Buffer.alloc(32, 0x45), now: () => new Date(now),
-    randomBytes: (size: number) => Buffer.alloc(size, 0x46),
-  }, { actorId: roleContext.performingActorId, requestId: "request_zero_company", traceId: "trace_zero_company" }, {
-    ...companyPayload, payload_hash: canonicalPayloadHash(companyPayload),
-  });
-  assert.equal((await administratorPool.query("select count(*)::int as count from memberships where actor_id = 'actor_first_target' and membership_source = 'platform'")).rows[0]?.count, 1);
-});
-
-test("zero-Tenant grant response loss naturally replays after the first company is created", async () => {
-  const grantPlatformRole = requiredFunction<PlatformRoleWrite>("grantPlatformRole");
-  const revokePlatformRole = requiredFunction<PlatformRoleWrite>("revokePlatformRole");
-  await seedActor(roleContext.performingActorId);
-  await seedActor("actor_cross_grant");
-  await seedPlatformAuthority(roleContext.performingActorId, "platform_assignment_performer", []);
-  const assignmentId = requiredFunction<PlatformRoleAssignmentId>("platformRoleAssignmentId")("actor_cross_grant");
-  const payload = {
-    schema_version: 1, idempotency_key: "platform-cross-grant", platform_role_assignment_id: assignmentId,
-    target_actor_id: "actor_cross_grant", expected_resource_version: null,
-  };
-  const committed = await grantPlatformRole({ db: identityDb, now: () => new Date(now) }, roleContext, roleCommand(payload));
-  const tenantId = await createFirstCompanyAfterRoleResponseLoss("grant");
-  assert.deepEqual(await grantPlatformRole({ db: identityDb }, roleContext, roleCommand(payload)), committed);
-  await assertChangedRetryRejected(grantPlatformRole, payload, 1);
-  await assert.rejects(
-    revokePlatformRole({ db: identityDb }, roleContext, roleCommand(payload)),
-    (error: unknown) => error instanceof DomainError && error.code === "INVALID_REQUEST",
-  );
-  await assertNoHistoricalPlatformRoleArtifacts(payload.idempotency_key);
   assert.deepEqual((await administratorPool.query(
-    "select status, resource_version::int from memberships where tenant_id = $1 and actor_id = 'actor_cross_grant'", [tenantId],
-  )).rows, [{ status: "active", resource_version: 1 }]);
+    "select status, membership_source from memberships where tenant_id = $1 and actor_id = $2", [tenantId, roleContext.performingActorId],
+  )).rows, [{ status: "active", membership_source: "platform" }]);
+  assert.deepEqual((await administratorPool.query(
+    "select tenant_id, status from idempotency_records where idempotency_key = $1", [payload.idempotency_key],
+  )).rows, [{ tenant_id: tenantId, status: "completed" }]);
 });
 
-test("zero-Tenant revoke response loss naturally replays after the first company is created", async () => {
+test("regular platform grant fails closed before the protected zero-Tenant bootstrap", async () => {
   const grantPlatformRole = requiredFunction<PlatformRoleWrite>("grantPlatformRole");
+  await seedActor(roleContext.performingActorId);
+  await seedActor("actor_zero_grant");
+  await seedPlatformAuthority(roleContext.performingActorId, "platform_assignment_performer", []);
+  const assignmentId = requiredFunction<PlatformRoleAssignmentId>("platformRoleAssignmentId")("actor_zero_grant");
+  const payload = {
+    schema_version: 1, idempotency_key: "platform-zero-grant-rejected", platform_role_assignment_id: assignmentId,
+    target_actor_id: "actor_zero_grant", expected_resource_version: null,
+  };
+  const before = await platformBootstrapBoundarySnapshot();
+  await assert.rejects(
+    grantPlatformRole({ db: identityDb }, roleContext, roleCommand(payload)),
+    (error: unknown) => error instanceof DomainError && error.code === "INVALID_STATE_TRANSITION",
+  );
+  assert.deepEqual(await platformBootstrapBoundarySnapshot(), before);
+});
+
+test("regular platform revoke fails closed before the protected zero-Tenant bootstrap", async () => {
   const revokePlatformRole = requiredFunction<PlatformRoleWrite>("revokePlatformRole");
   await seedActor(roleContext.performingActorId);
-  await seedActor("actor_cross_revoke");
+  await seedActor("actor_zero_revoke");
   await seedPlatformAuthority(roleContext.performingActorId, "platform_assignment_performer", []);
-  const assignmentId = requiredFunction<PlatformRoleAssignmentId>("platformRoleAssignmentId")("actor_cross_revoke");
+  const assignmentId = requiredFunction<PlatformRoleAssignmentId>("platformRoleAssignmentId")("actor_zero_revoke");
   await identityDb.insertInto("platform_role_assignments").values({
-    platform_role_assignment_id: assignmentId, actor_id: "actor_cross_revoke", role: "platform_super_admin",
+    platform_role_assignment_id: assignmentId, actor_id: "actor_zero_revoke", role: "platform_super_admin",
     status: "active", resource_version: 1, created_at: now, updated_at: now,
   }).execute();
   const payload = {
-    schema_version: 1, idempotency_key: "platform-cross-revoke", platform_role_assignment_id: assignmentId,
-    target_actor_id: "actor_cross_revoke", expected_resource_version: 1,
+    schema_version: 1, idempotency_key: "platform-zero-revoke-rejected", platform_role_assignment_id: assignmentId,
+    target_actor_id: "actor_zero_revoke", expected_resource_version: 1,
   };
-  const committed = await revokePlatformRole({ db: identityDb, now: () => new Date(now) }, roleContext, roleCommand(payload));
-  const tenantId = await createFirstCompanyAfterRoleResponseLoss("revoke");
-  assert.deepEqual(await revokePlatformRole({ db: identityDb }, roleContext, roleCommand(payload)), committed);
-  await assertChangedRetryRejected(revokePlatformRole, payload, 2);
+  const before = await platformBootstrapBoundarySnapshot();
   await assert.rejects(
-    grantPlatformRole({ db: identityDb }, roleContext, roleCommand(payload)),
-    (error: unknown) => error instanceof DomainError && error.code === "RESOURCE_VERSION_CONFLICT",
+    revokePlatformRole({ db: identityDb }, roleContext, roleCommand(payload)),
+    (error: unknown) => error instanceof DomainError && error.code === "INVALID_STATE_TRANSITION",
   );
-  await assertNoHistoricalPlatformRoleArtifacts(payload.idempotency_key);
-  assert.deepEqual((await administratorPool.query(
-    "select status from memberships where tenant_id = $1 and actor_id = 'actor_cross_revoke'", [tenantId],
-  )).rows, []);
-  assert.deepEqual((await administratorPool.query(
-    "select status from memberships where tenant_id = $1 and actor_id = $2", [tenantId, roleContext.performingActorId],
-  )).rows, [{ status: "active" }]);
+  assert.deepEqual(await platformBootstrapBoundarySnapshot(), before);
 });
 
-test("zero-Tenant reactivation response loss naturally replays after the first company is created", async () => {
+test("regular platform reactivation fails closed before the protected zero-Tenant bootstrap", async () => {
   const grantPlatformRole = requiredFunction<PlatformRoleWrite>("grantPlatformRole");
-  const revokePlatformRole = requiredFunction<PlatformRoleWrite>("revokePlatformRole");
   await seedActor(roleContext.performingActorId);
-  await seedActor("actor_cross_reactivate");
+  await seedActor("actor_zero_reactivate");
   await seedPlatformAuthority(roleContext.performingActorId, "platform_assignment_performer", []);
-  const assignmentId = requiredFunction<PlatformRoleAssignmentId>("platformRoleAssignmentId")("actor_cross_reactivate");
+  const assignmentId = requiredFunction<PlatformRoleAssignmentId>("platformRoleAssignmentId")("actor_zero_reactivate");
   await identityDb.insertInto("platform_role_assignments").values({
-    platform_role_assignment_id: assignmentId, actor_id: "actor_cross_reactivate", role: "platform_super_admin",
+    platform_role_assignment_id: assignmentId, actor_id: "actor_zero_reactivate", role: "platform_super_admin",
     status: "revoked", resource_version: 2, created_at: now, updated_at: now,
   }).execute();
   const payload = {
-    schema_version: 1, idempotency_key: "platform-cross-reactivate", platform_role_assignment_id: assignmentId,
-    target_actor_id: "actor_cross_reactivate", expected_resource_version: 2,
+    schema_version: 1, idempotency_key: "platform-zero-reactivate-rejected", platform_role_assignment_id: assignmentId,
+    target_actor_id: "actor_zero_reactivate", expected_resource_version: 2,
   };
-  const committed = await grantPlatformRole({ db: identityDb, now: () => new Date(now) }, roleContext, roleCommand(payload));
-  const tenantId = await createFirstCompanyAfterRoleResponseLoss("reactivate");
-  assert.deepEqual(await grantPlatformRole({ db: identityDb }, roleContext, roleCommand(payload)), committed);
-  await assertChangedRetryRejected(grantPlatformRole, payload, 3);
+  const before = await platformBootstrapBoundarySnapshot();
   await assert.rejects(
-    revokePlatformRole({ db: identityDb }, roleContext, roleCommand(payload)),
-    (error: unknown) => error instanceof DomainError && error.code === "RESOURCE_VERSION_CONFLICT",
+    grantPlatformRole({ db: identityDb }, roleContext, roleCommand(payload)),
+    (error: unknown) => error instanceof DomainError && error.code === "INVALID_STATE_TRANSITION",
   );
-  await assertNoHistoricalPlatformRoleArtifacts(payload.idempotency_key);
-  assert.deepEqual((await administratorPool.query(
-    "select status, resource_version::int from memberships where tenant_id = $1 and actor_id = 'actor_cross_reactivate'", [tenantId],
-  )).rows, [{ status: "active", resource_version: 1 }]);
+  assert.deepEqual(await platformBootstrapBoundarySnapshot(), before);
 });
 
 test("disabled platform target can be revoked and remains revoked after Actor reactivation", async () => {

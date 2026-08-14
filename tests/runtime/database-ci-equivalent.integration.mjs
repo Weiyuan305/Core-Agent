@@ -167,10 +167,10 @@ async function runCiEquivalentScenario({ injectedFailure = false, injectedOutput
     assert.match(postgresOutput, /projector processes at most 100 Tenants/u);
     assert.match(postgresOutput, /platform role service requires PostgreSQL authority/u);
     assert.match(postgresOutput, /platform role replay keeps its earliest-created Tenant scope/u);
-    assert.match(postgresOutput, /zero-Tenant platform grant uses the approved bootstrap exception/u);
-    assert.match(postgresOutput, /zero-Tenant grant response loss naturally replays after the first company/u);
-    assert.match(postgresOutput, /zero-Tenant revoke response loss naturally replays after the first company/u);
-    assert.match(postgresOutput, /zero-Tenant reactivation response loss naturally replays after the first company/u);
+    assert.match(postgresOutput, /protected bootstrap fixture creates the first company before stable tenant command replay/u);
+    assert.match(postgresOutput, /regular platform grant fails closed before the protected zero-Tenant bootstrap/u);
+    assert.match(postgresOutput, /regular platform revoke fails closed before the protected zero-Tenant bootstrap/u);
+    assert.match(postgresOutput, /regular platform reactivation fails closed before the protected zero-Tenant bootstrap/u);
     assert.match(postgresOutput, /disabled platform target can be revoked/u);
     assert.match(postgresOutput, /platform role service hides a missing target/u);
     const integrationOutput = protectedRun("npm", ["run", "test:integration"], environment, credential, credentialFile);

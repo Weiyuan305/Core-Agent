@@ -218,67 +218,27 @@ async function changePlatformRole(
       .orderBy("created_at", "asc").orderBy("tenant_id", "asc").execute();
     const tenantIds = tenantRows.map((row) => row.tenant_id);
     const scopeTenantId = tenantIds[0];
-    let tenantAdmissionAcquired = false;
-    if (scopeTenantId !== undefined) {
-      const existingAdmission = await trx.selectFrom("idempotency_records").select("idempotency_key")
-        .where("tenant_id", "=", scopeTenantId).where("idempotency_key", "=", input.idempotency_key)
-        .forUpdate().executeTakeFirst();
-      if (existingAdmission !== undefined) {
-        const admission = await beginIdempotentCommand<PlatformRoleWriteResult>({ tenantId: scopeTenantId, trx }, {
-          key: input.idempotency_key, payloadHash: input.payload_hash, operation, now,
-          expiresAt: new Date(now.getTime() + dayMs),
-        });
-        if (admission.kind === "replay") {
-          assertReplay(admission.response);
-          return Object.freeze(admission.response);
-        }
-        if (admission.kind === "in_progress") {
-          throw new DomainError("IDEMPOTENCY_CONFLICT", "Platform role command is already in progress");
-        }
-        tenantAdmissionAcquired = true;
-      }
+    if (scopeTenantId === undefined) {
+      throw new DomainError(
+        "INVALID_STATE_TRANSITION",
+        "Regular platform role commands require the protected B2B bootstrap to be complete",
+      );
+    }
+    const admission = await beginIdempotentCommand<PlatformRoleWriteResult>({ tenantId: scopeTenantId, trx }, {
+      key: input.idempotency_key, payloadHash: input.payload_hash, operation, now,
+      expiresAt: new Date(now.getTime() + dayMs),
+    });
+    if (admission.kind === "replay") {
+      assertReplay(admission.response);
+      return Object.freeze(admission.response);
+    }
+    if (admission.kind === "in_progress") {
+      throw new DomainError("IDEMPOTENCY_CONFLICT", "Platform role command is already in progress");
     }
 
     const existing = await trx.selectFrom("platform_role_assignments").selectAll()
       .where("platform_role_assignment_id", "=", input.platform_role_assignment_id)
       .forUpdate().executeTakeFirst();
-    let existingVersion: number | undefined;
-    if (existing !== undefined) {
-      existingVersion = safeVersion(existing.resource_version);
-      if (existing.actor_id !== input.target_actor_id || existing.role !== "platform_super_admin") {
-        throw new DomainError("IDEMPOTENCY_CONFLICT", "Platform role assignment identity conflicts");
-      }
-      const tenantScopedHistory = scopeTenantId === undefined ? undefined : await trx
-        .selectFrom("product_events").select("event_id")
-        .where("tenant_id", "=", scopeTenantId)
-        .where("stream_id", "=", input.platform_role_assignment_id)
-        .where("event_type", "=", "platform_role.changed")
-        .limit(1).executeTakeFirst();
-      if (tenantScopedHistory === undefined && existing.status === desiredStatus) {
-        const naturallyReplayed = input.expected_resource_version === existingVersion - 1
-          || (desiredStatus === "active" && existingVersion === 1 && input.expected_resource_version === null);
-        if (naturallyReplayed) {
-          return Object.freeze({
-            schema_version: 1, platform_role_assignment_id: input.platform_role_assignment_id,
-            actor_id: input.target_actor_id, status: desiredStatus, resource_version: existingVersion,
-          });
-        }
-      }
-    }
-    if (scopeTenantId !== undefined && !tenantAdmissionAcquired) {
-      const admission = await beginIdempotentCommand<PlatformRoleWriteResult>({ tenantId: scopeTenantId, trx }, {
-        key: input.idempotency_key, payloadHash: input.payload_hash, operation, now,
-        expiresAt: new Date(now.getTime() + dayMs),
-      });
-      if (admission.kind === "replay") {
-        assertReplay(admission.response);
-        return Object.freeze(admission.response);
-      }
-      if (admission.kind === "in_progress") {
-        throw new DomainError("IDEMPOTENCY_CONFLICT", "Platform role command is already in progress");
-      }
-      tenantAdmissionAcquired = true;
-    }
     let result: PlatformRoleWriteResult;
     if (existing === undefined) {
       if (desiredStatus !== "active" || input.expected_resource_version !== null) {
@@ -294,10 +254,14 @@ async function changePlatformRole(
         actor_id: input.target_actor_id, status: "active", resource_version: 1,
       });
     } else {
-      if (input.expected_resource_version !== existingVersion || existing.status === desiredStatus) {
+      const version = safeVersion(existing.resource_version);
+      if (existing.actor_id !== input.target_actor_id || existing.role !== "platform_super_admin") {
+        throw new DomainError("IDEMPOTENCY_CONFLICT", "Platform role assignment identity conflicts");
+      }
+      if (input.expected_resource_version !== version || existing.status === desiredStatus) {
         throw new DomainError("RESOURCE_VERSION_CONFLICT", "Platform role assignment version changed");
       }
-      const nextVersion = existingVersion + 1;
+      const nextVersion = version + 1;
       await trx.updateTable("platform_role_assignments").set({
         status: desiredStatus, resource_version: nextVersion, updated_at: now,
       }).where("platform_role_assignment_id", "=", input.platform_role_assignment_id).execute();
@@ -307,7 +271,6 @@ async function changePlatformRole(
       });
     }
 
-    if (scopeTenantId === undefined) return result;
     await appendPlatformRoleArtifacts(trx, context, input, tenantIds, result, now, operation);
     await enqueueProjection(trx, scopeTenantId, result, now);
     await completeIdempotentCommand({ tenantId: scopeTenantId, trx }, {
