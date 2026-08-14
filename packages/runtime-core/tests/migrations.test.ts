@@ -111,6 +111,34 @@ async function resetDatabase(): Promise<void> {
   await pool.query("drop schema public cascade; create schema public;");
 }
 
+async function probeRelationSemantics(sqlText: string, names: readonly string[]): Promise<unknown[]> {
+  await pool.query("begin");
+  try {
+    await pool.query(sqlText);
+    return (await pool.query(`
+      select namespace.nspname as schema, relation.relname as name, relation.relkind as relkind,
+        case when relation.relkind in ('v', 'm') then pg_get_viewdef(relation.oid, true) else '' end as definition,
+        case when relation.relkind = 'p' then pg_get_partkeydef(relation.oid) else '' end as "partitionKey",
+        coalesce(parent_namespace.nspname || '.' || parent.relname, '') as parent,
+        case when relation.relispartition then pg_get_expr(relation.relpartbound, relation.oid, true) else '' end as bound,
+        coalesce(format_type(sequence.seqtypid, null), '') as "dataType",
+        coalesce(sequence.seqstart::text, '') as start, coalesce(sequence.seqincrement::text, '') as increment,
+        coalesce(sequence.seqmin::text, '') as min, coalesce(sequence.seqmax::text, '') as max,
+        coalesce(sequence.seqcache::text, '') as cache, coalesce(sequence.seqcycle, false) as cycle
+      from pg_class relation
+      join pg_namespace namespace on namespace.oid = relation.relnamespace
+      left join pg_inherits inheritance on inheritance.inhrelid = relation.oid
+      left join pg_class parent on parent.oid = inheritance.inhparent
+      left join pg_namespace parent_namespace on parent_namespace.oid = parent.relnamespace
+      left join pg_sequence sequence on sequence.seqrelid = relation.oid
+      where namespace.nspname = 'public' and relation.relname = any($1::text[])
+      order by relation.relname
+    `, [names])).rows;
+  } finally {
+    await pool.query("rollback");
+  }
+}
+
 async function ensureIdentityTestRoles(): Promise<void> {
   await pool.query(`do $$
     begin
@@ -1128,6 +1156,10 @@ test("registered views and materialized views reconverge column ACLs to exact em
   `;
   await pool.query("drop role if exists core_agent_forward_column_acl; create role core_agent_forward_column_acl");
   try {
+    const relationSemantics = await probeRelationSemantics(migrationSql, [
+      "registered_column_acl_partitioned", "registered_column_acl_partition",
+      "registered_column_acl_view", "registered_column_acl_materialized",
+    ]);
     await cp(migrationsDirectory, directory, { recursive: true });
     await writeFile(join(directory, "011_forward_column_acl.sql"), migrationSql);
     const manifests = new Map(migrationTestInternals.schemaManifests);
@@ -1142,6 +1174,7 @@ test("registered views and materialized views reconverge column ACLs to exact em
         ["public", "registered_column_acl_view", "v", "current_user"],
         ["public", "registered_column_acl_materialized", "m", "current_user"],
       ],
+      relationSemantics,
       columns: [
         { schema: "public", relation: "registered_column_acl_source", relkind: "r", name: "id", position: 1, type: "integer", notNull: true, defaultExpression: "" },
         { schema: "public", relation: "registered_column_acl_source", relkind: "r", name: "label", position: 2, type: "text", notNull: false, defaultExpression: "" },
@@ -1315,6 +1348,272 @@ test("a registered migration manifest failure rolls back both schema and record"
   }
 });
 
+test("registered relation semantics validate exact kind-specific catalogs and amendments", async () => {
+  await resetDatabase();
+  const directory = await mkdtemp(join(tmpdir(), "core-agent-relation-semantics-"));
+  const v11Sql = `
+    create view registered_semantic_view as select 1::integer as id;
+    create materialized view registered_semantic_mat as select 1::integer as id;
+    create table registered_semantic_parent (id integer) partition by range (id);
+    create table registered_semantic_child partition of registered_semantic_parent for values from (0) to (10);
+    create sequence registered_semantic_sequence as integer start 5 increment 2 minvalue 1 maxvalue 99 cache 3 cycle;
+  `;
+  const readSemantics = async () => (await pool.query(`
+    select namespace.nspname as schema, relation.relname as name, relation.relkind as relkind,
+      case when relation.relkind in ('v', 'm') then pg_get_viewdef(relation.oid, true) else '' end as definition,
+      case when relation.relkind = 'p' then pg_get_partkeydef(relation.oid) else '' end as "partitionKey",
+      coalesce(parent_namespace.nspname || '.' || parent.relname, '') as parent,
+      case when relation.relispartition then pg_get_expr(relation.relpartbound, relation.oid, true) else '' end as bound,
+      coalesce(format_type(sequence.seqtypid, null), '') as "dataType",
+      coalesce(sequence.seqstart::text, '') as start, coalesce(sequence.seqincrement::text, '') as increment,
+      coalesce(sequence.seqmin::text, '') as min, coalesce(sequence.seqmax::text, '') as max,
+      coalesce(sequence.seqcache::text, '') as cache, coalesce(sequence.seqcycle, false) as cycle
+    from pg_class relation
+    join pg_namespace namespace on namespace.oid = relation.relnamespace
+    left join pg_inherits inheritance on inheritance.inhrelid = relation.oid
+    left join pg_class parent on parent.oid = inheritance.inhparent
+    left join pg_namespace parent_namespace on parent_namespace.oid = parent.relnamespace
+    left join pg_sequence sequence on sequence.seqrelid = relation.oid
+    where namespace.nspname = 'public' and relation.relname like 'registered_semantic_%'
+    order by relation.relname
+  `)).rows;
+  try {
+    await pool.query("begin");
+    await pool.query(v11Sql);
+    const semantics = await readSemantics();
+    await pool.query("rollback");
+    await cp(migrationsDirectory, directory, { recursive: true });
+    await writeFile(join(directory, "011_relation_semantics.sql"), v11Sql);
+    const manifests = new Map(migrationTestInternals.schemaManifests);
+    manifests.set(11, {
+      version: 11, name: "relation_semantics",
+      checksum: (await import("node:crypto")).createHash("sha256").update(v11Sql).digest("hex"),
+      objects: [
+        ["public", "registered_semantic_view", "v", "current_user"],
+        ["public", "registered_semantic_mat", "m", "current_user"],
+        ["public", "registered_semantic_parent", "p", "current_user"],
+        ["public", "registered_semantic_child", "r", "current_user"],
+        ["public", "registered_semantic_sequence", "S", "current_user"],
+      ],
+      relationSemantics: semantics,
+      columns: [
+        { schema: "public", relation: "registered_semantic_view", relkind: "v", name: "id", position: 1, type: "integer", notNull: false, defaultExpression: "" },
+        { schema: "public", relation: "registered_semantic_mat", relkind: "m", name: "id", position: 1, type: "integer", notNull: false, defaultExpression: "" },
+        { schema: "public", relation: "registered_semantic_parent", relkind: "p", name: "id", position: 1, type: "integer", notNull: false, defaultExpression: "" },
+        { schema: "public", relation: "registered_semantic_child", relkind: "r", name: "id", position: 1, type: "integer", notNull: false, defaultExpression: "" },
+      ],
+    } as never);
+    await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
+    await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
+
+    const semanticDrifts = [
+      ["alter sequence registered_semantic_sequence increment by 7 cache 1 no cycle", "alter sequence registered_semantic_sequence increment by 2 cache 3 cycle"],
+      ["create or replace view registered_semantic_view as select 9::integer as id", "create or replace view registered_semantic_view as select 1::integer as id"],
+      ["drop materialized view registered_semantic_mat; create materialized view registered_semantic_mat as select 9::integer as id", "drop materialized view registered_semantic_mat; create materialized view registered_semantic_mat as select 1::integer as id"],
+      [
+        "drop table registered_semantic_parent cascade; create table registered_semantic_parent (id integer) partition by hash (id); create table registered_semantic_child partition of registered_semantic_parent for values with (modulus 4, remainder 0)",
+        "drop table registered_semantic_parent cascade; create table registered_semantic_parent (id integer) partition by range (id); create table registered_semantic_child partition of registered_semantic_parent for values from (0) to (10)",
+      ],
+      ["drop table registered_semantic_child; create table registered_semantic_child partition of registered_semantic_parent for values from (10) to (20)", "drop table registered_semantic_child; create table registered_semantic_child partition of registered_semantic_parent for values from (0) to (10)"],
+    ] as const;
+    for (const [mutate, restore] of semanticDrifts) {
+      await pool.query(mutate);
+      await assert.rejects(
+        migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests),
+        /relation semantic catalog/u,
+      );
+      await pool.query(restore);
+    }
+    const v12Sql = "create or replace view registered_semantic_view as select 2::integer as id;\n";
+    await writeFile(join(directory, "012_relation_semantic_amendment.sql"), v12Sql);
+    await pool.query("begin");
+    const beforeView = (await readSemantics()).find((entry) => entry.name === "registered_semantic_view");
+    await pool.query(v12Sql);
+    const afterView = (await readSemantics()).find((entry) => entry.name === "registered_semantic_view");
+    await pool.query("rollback");
+    manifests.set(12, {
+      version: 12, name: "relation_semantic_amendment",
+      checksum: (await import("node:crypto")).createHash("sha256").update(v12Sql).digest("hex"),
+      relationSemanticAmendments: [{ action: "replace", before: beforeView, after: afterView }],
+    } as never);
+    await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
+    await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
+    assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 12")).rows[0]?.count, 1);
+
+    const v13Sql = "create or replace view registered_semantic_view as select 3::integer as id;\n";
+    await writeFile(join(directory, "013_missing_relation_semantic_amendment.sql"), v13Sql);
+    manifests.set(13, {
+      version: 13, name: "missing_relation_semantic_amendment",
+      checksum: (await import("node:crypto")).createHash("sha256").update(v13Sql).digest("hex"),
+    } as never);
+    await assert.rejects(migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests), /relation semantic catalog/u);
+    assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 13")).rows[0]?.count, 0);
+    assert.equal((await readSemantics()).find((entry) => entry.name === "registered_semantic_view")?.definition, afterView.definition);
+  } finally {
+    await pool.query("rollback").catch(() => undefined);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("migration transaction control is rejected before connect and cannot escape atomic rollback", async () => {
+  await resetDatabase();
+  const directory = await mkdtemp(join(tmpdir(), "core-agent-transaction-control-"));
+  const sql = `
+    create table transaction_escape_probe (id integer);
+    commit;
+    create table transaction_escape_after_commit (id integer);
+  `;
+  try {
+    await cp(migrationsDirectory, directory, { recursive: true });
+    await writeFile(join(directory, "011_transaction_escape.sql"), sql);
+    const manifests = new Map(migrationTestInternals.schemaManifests);
+    manifests.set(11, {
+      version: 11, name: "transaction_escape",
+      checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
+      objects: [],
+    } as never);
+    await assert.rejects(migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests));
+    assert.equal((await pool.query("select to_regclass('public.transaction_escape_probe')::text as relation")).rows[0]?.relation, null);
+    assert.equal((await pool.query("select to_regclass('public.transaction_escape_after_commit')::text as relation")).rows[0]?.relation, null);
+    assert.equal((await pool.query("select to_regclass('public.core_agent_schema_migrations')::text as relation")).rows[0]?.relation, null);
+
+    for (const command of [
+      "begin", "start transaction", "commit", "end", "rollback", "abort", "savepoint guarded",
+      "release savepoint guarded", "rollback to savepoint guarded", "prepare transaction 'guarded'",
+      "commit prepared 'guarded'", "rollback prepared 'guarded'",
+      "set transaction isolation level serializable",
+      "set session characteristics as transaction isolation level serializable",
+    ]) {
+      const commandSql = `${command};\n`;
+      await writeFile(join(directory, "011_transaction_escape.sql"), commandSql);
+      manifests.set(11, {
+        version: 11, name: "transaction_escape",
+        checksum: (await import("node:crypto")).createHash("sha256").update(commandSql).digest("hex"), objects: [],
+      } as never);
+      let rejectedConnects = 0;
+      await assert.rejects(
+        migrationTestInternals.applyMigrationsWithManifests({
+          connect: async () => { rejectedConnects += 1; throw new Error("transaction control reached connect"); },
+        } as never, directory, manifests),
+        /transaction control/u,
+      );
+      assert.equal(rejectedConnects, 0);
+    }
+
+    const safeSql = `
+      -- begin; commit; rollback;
+      /* outer commit; /* nested abort; */ release savepoint hidden; */
+      select 'begin; commit', E'rollback\\' escaped', "commit", $$ start transaction; $$;
+      create function public.transaction_word_probe() returns text language sql as $body$ select 'prepare transaction' $body$;
+    `;
+    await writeFile(join(directory, "011_transaction_escape.sql"), safeSql);
+    manifests.set(11, {
+      version: 11, name: "transaction_escape",
+      checksum: (await import("node:crypto")).createHash("sha256").update(safeSql).digest("hex"), objects: [],
+    } as never);
+    let connects = 0;
+    await assert.rejects(
+      migrationTestInternals.applyMigrationsWithManifests({
+        connect: async () => { connects += 1; throw new Error("safe SQL reached connect"); },
+      } as never, directory, manifests),
+      /safe SQL reached connect/u,
+    );
+    assert.equal(connects, 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("registered columns validate collation identity and generated semantics atomically", async () => {
+  await resetDatabase();
+  const directory = await mkdtemp(join(tmpdir(), "core-agent-column-semantics-"));
+  const sql = `create table registered_column_semantics (
+    id bigint not null,
+    source text collate "C",
+    collated text collate "C",
+    derived text generated always as (source || '!') stored
+  );\n`;
+  const readColumns = async () => (await pool.query(`select 'public' as schema, relation.relname as relation,
+      relation.relkind as relkind, attribute.attname as name, attribute.attnum as position,
+      format_type(attribute.atttypid, attribute.atttypmod) as type, attribute.attnotnull as "notNull",
+      coalesce(pg_get_expr(default_value.adbin, default_value.adrelid), '') as "defaultExpression",
+      case when catalog_collation.oid is null then ''
+        else format('%I.%I', collation_namespace.nspname, catalog_collation.collname) end as "collation",
+      attribute.attidentity as identity, attribute.attgenerated as generated
+    from pg_class relation join pg_attribute attribute on attribute.attrelid = relation.oid
+      and attribute.attnum > 0 and not attribute.attisdropped
+    left join pg_attrdef default_value on default_value.adrelid = relation.oid and default_value.adnum = attribute.attnum
+    left join pg_collation catalog_collation on catalog_collation.oid = attribute.attcollation and attribute.attcollation <> 0
+    left join pg_namespace collation_namespace on collation_namespace.oid = catalog_collation.collnamespace
+    where relation.oid = 'public.registered_column_semantics'::regclass order by attribute.attnum`)).rows;
+  try {
+    await pool.query("begin");
+    await pool.query(sql);
+    const columns = await readColumns();
+    await pool.query("rollback");
+    await cp(migrationsDirectory, directory, { recursive: true });
+    await writeFile(join(directory, "011_column_semantics.sql"), sql);
+    const manifests = new Map(migrationTestInternals.schemaManifests);
+    manifests.set(11, {
+      version: 11, name: "column_semantics",
+      checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
+      objects: [["public", "registered_column_semantics", "r", "current_user"]], columns,
+    } as never);
+    await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
+    await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
+    manifests.set(11, {
+      ...manifests.get(11),
+      columns: columns.map((column) => column.name === "derived" ? { ...column, generated: "" } : column),
+    } as never);
+    await assert.rejects(migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests), /column catalog/u);
+    manifests.set(11, { ...manifests.get(11), columns } as never);
+    await pool.query("alter table registered_column_semantics alter column collated type text collate \"POSIX\"");
+    await assert.rejects(migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests), /column catalog/u);
+    await pool.query("alter table registered_column_semantics alter column collated type text collate \"C\"");
+
+    const v12Sql = "alter table registered_column_semantics alter column id add generated always as identity (sequence name registered_column_semantics_identity_seq);\n";
+    await pool.query("begin");
+    await pool.query(v12Sql);
+    const identityColumns = await readColumns();
+    const identitySemantic = (await pool.query(`select 'public' as schema, relation.relname as name,
+        relation.relkind as relkind, '' as definition, '' as "partitionKey", '' as parent, '' as bound,
+        format_type(sequence.seqtypid, null) as "dataType", sequence.seqstart::text as start,
+        sequence.seqincrement::text as increment, sequence.seqmin::text as min, sequence.seqmax::text as max,
+        sequence.seqcache::text as cache, sequence.seqcycle as cycle
+      from pg_class relation join pg_sequence sequence on sequence.seqrelid = relation.oid
+      where relation.oid = 'public.registered_column_semantics_identity_seq'::regclass`)).rows[0];
+    await pool.query("rollback");
+    await writeFile(join(directory, "012_column_identity.sql"), v12Sql);
+    const beforeId = columns.find((column) => column.name === "id");
+    const afterId = identityColumns.find((column) => column.name === "id");
+    manifests.set(12, {
+      version: 12, name: "column_identity",
+      checksum: (await import("node:crypto")).createHash("sha256").update(v12Sql).digest("hex"),
+      objects: [["public", "registered_column_semantics_identity_seq", "S", "current_user"]],
+      relationSemantics: [identitySemantic],
+      columnAmendments: [{ action: "replace", before: beforeId, after: afterId }],
+    } as never);
+    await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
+    await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
+    assert.equal((await pool.query(`select attidentity from pg_attribute
+      where attrelid = 'public.registered_column_semantics'::regclass and attname = 'id'`)).rows[0]?.attidentity, "a");
+
+    const v13Sql = "alter table registered_column_semantics alter column id set generated by default;\n";
+    await writeFile(join(directory, "013_missing_identity_amendment.sql"), v13Sql);
+    manifests.set(13, {
+      version: 13, name: "missing_identity_amendment",
+      checksum: (await import("node:crypto")).createHash("sha256").update(v13Sql).digest("hex"),
+    } as never);
+    await assert.rejects(migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests), /column catalog/u);
+    assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 13")).rows[0]?.count, 0);
+    assert.equal((await pool.query(`select attidentity from pg_attribute
+      where attrelid = 'public.registered_column_semantics'::regclass and attname = 'id'`)).rows[0]?.attidentity, "a");
+  } finally {
+    await pool.query("rollback").catch(() => undefined);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("registered migration 011 forward security objects validate and record in one transaction", async () => {
   const directory = await mkdtemp(join(tmpdir(), "core-agent-forward-security-"));
   try {
@@ -1329,6 +1628,7 @@ test("registered migration 011 forward security objects validate and record in o
         for each row execute function registered_security_trigger();
       create view registered_security_view as select id from registered_security_object;
     `;
+    const relationSemantics = await probeRelationSemantics(sql, ["registered_security_sequence", "registered_security_view"]);
     await writeFile(join(directory, "011_registered_security.sql"), sql);
     const manifests = new Map(migrationTestInternals.schemaManifests);
     manifests.set(11, {
@@ -1340,6 +1640,7 @@ test("registered migration 011 forward security objects validate and record in o
         ["public", "registered_security_sequence", "S", "current_user"],
         ["public", "registered_security_view", "v", "current_user"],
       ],
+      relationSemantics,
       columns: [
         ["registered_security_object", "id", "bigint", true, ""],
         {
@@ -1599,6 +1900,7 @@ test("recorded registered view rejects replacement by a materialized view with t
   try {
     await cp(migrationsDirectory, directory, { recursive: true });
     const sql = "create view registered_relkind_object as select 1::integer as id;\n";
+    const relationSemantics = await probeRelationSemantics(sql, ["registered_relkind_object"]);
     await writeFile(join(directory, "011_registered_relkind.sql"), sql);
     const manifests = new Map(migrationTestInternals.schemaManifests);
     manifests.set(11, {
@@ -1606,6 +1908,7 @@ test("recorded registered view rejects replacement by a materialized view with t
       name: "registered_relkind",
       checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
       objects: [["public", "registered_relkind_object", "v", "current_user"]],
+      relationSemantics,
       columns: [{
         schema: "public", relation: "registered_relkind_object", relkind: "v",
         name: "id", position: 1, type: "integer", notNull: false, defaultExpression: "",
@@ -1685,12 +1988,16 @@ test("registered relation identities reject relkind owner and same-name category
       try {
         await cp(migrationsDirectory, directory, { recursive: true });
         await writeFile(join(directory, "011_object_identity.sql"), scenario.sql);
+        const relationSemantics = scenario.object[2] === "S"
+          ? await probeRelationSemantics(scenario.sql, ["registered_identity_object"])
+          : undefined;
         const manifests = new Map(migrationTestInternals.schemaManifests);
         manifests.set(11, {
           version: 11,
           name: "object_identity",
           checksum: (await import("node:crypto")).createHash("sha256").update(scenario.sql).digest("hex"),
           objects: [scenario.object],
+          relationSemantics,
           columns: scenario.columns,
         });
         await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
@@ -2012,6 +2319,7 @@ test("registered views and materialized views require exact ordered column shape
           const directory = await mkdtemp(join(tmpdir(), "core-agent-view-shape-"));
           const sql = `create ${kind} registered_column_view as select 1::integer as id, 'safe'::text as label;\n`;
           try {
+            const relationSemantics = await probeRelationSemantics(sql, ["registered_column_view"]);
             await cp(migrationsDirectory, directory, { recursive: true });
             await writeFile(join(directory, "011_view_shape.sql"), sql);
             const manifests = new Map(migrationTestInternals.schemaManifests);
@@ -2020,6 +2328,7 @@ test("registered views and materialized views require exact ordered column shape
               name: "view_shape",
               checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
               objects: [["public", "registered_column_view", kind === "view" ? "v" : "m", "current_user"]],
+              relationSemantics,
               columns: [
                 { schema: "public", relation: "registered_column_view", relkind: kind === "view" ? "v" : "m", name: "id", position: 1, type: "integer", notNull: false, defaultExpression: "" },
                 { schema: "public", relation: "registered_column_view", relkind: kind === "view" ? "v" : "m", name: "label", position: 2, type: "text", notNull: false, defaultExpression: "" },
@@ -2027,7 +2336,7 @@ test("registered views and materialized views require exact ordered column shape
             } as never);
             await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
             await pool.query(`drop ${kind} registered_column_view; create ${kind} registered_column_view as select ${selection}`);
-            await assert.rejects(migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests), /column catalog/u);
+            await assert.rejects(migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests), /(?:relation semantic|column) catalog/u);
           } finally {
             await rm(directory, { recursive: true, force: true });
           }

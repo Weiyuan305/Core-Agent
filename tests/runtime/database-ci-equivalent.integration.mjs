@@ -153,7 +153,7 @@ async function runCiEquivalentScenario({ injectedFailure = false, injectedOutput
       throw new Error("injected CI-equivalent output leak rejected");
     }
     const postgresOutput = protectedRun("npm", ["run", "test:postgres"], environment, credential, credentialFile);
-    assertNodeTestSummaries(postgresOutput, [245, 14]);
+    assertNodeTestSummaries(postgresOutput, [248, 14]);
     assert.match(postgresOutput, /schema 10 grants only the documented Identity Task 3-9 table-operation matrix/u);
     assert.match(postgresOutput, /real Identity login commits and atomically rolls back the Task 3 cross-table graph/u);
     const integrationOutput = protectedRun("npm", ["run", "test:integration"], environment, credential, credentialFile);

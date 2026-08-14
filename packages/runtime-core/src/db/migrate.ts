@@ -32,6 +32,26 @@ type ColumnShape = Readonly<{
   type: string;
   notNull: boolean;
   defaultExpression: string;
+  collation: string;
+  identity: string;
+  generated: string;
+}>;
+
+type RelationSemanticShape = Readonly<{
+  schema: "public";
+  name: string;
+  relkind: RelationKind;
+  definition: string;
+  partitionKey: string;
+  parent: string;
+  bound: string;
+  dataType: string;
+  start: string;
+  increment: string;
+  min: string;
+  max: string;
+  cache: string;
+  cycle: boolean;
 }>;
 type ConstraintShape = Readonly<{
   schema: "public";
@@ -66,6 +86,8 @@ interface SchemaManifest {
   readonly constraintAmendments?: readonly ShapeAmendment<ConstraintShape>[];
   readonly indexes?: readonly (IndexShape | LegacyIndexShape)[];
   readonly indexAmendments?: readonly ShapeAmendment<IndexShape>[];
+  readonly relationSemantics?: readonly RelationSemanticShape[];
+  readonly relationSemanticAmendments?: readonly ShapeAmendment<RelationSemanticShape>[];
   readonly name: string;
   readonly objects?: readonly RelationManifestEntry[];
   readonly relationAcls?: readonly RelationAclManifestEntry[];
@@ -346,11 +368,26 @@ function normalizeColumn(
   index: number,
   owned: ReadonlyMap<string, OwnedObject>,
 ): ColumnShape {
-  if (!Array.isArray(entry)) return entry as ColumnShape;
+  if (!Array.isArray(entry)) return normalizeColumnSemantics(entry as ColumnShape);
   const [relation, name, type, notNull, defaultExpression] = entry;
   const owner = owned.get(`public|${relation}`);
   if (owner === undefined || owner.kind === "S") throw new Error("migration manifest contains a column for an unowned relation");
-  return { schema: "public", relation, relkind: owner.kind, name, position: index + 1, type, notNull, defaultExpression };
+  return normalizeColumnSemantics({ schema: "public", relation, relkind: owner.kind, name, position: index + 1, type, notNull, defaultExpression } as ColumnShape);
+}
+
+function defaultColumnCollation(type: string): string {
+  return /^(?:text|character(?: varying)?(?:\([0-9]+\))?|varchar(?:\([0-9]+\))?|name)$/u.test(type)
+    ? 'pg_catalog."default"'
+    : "";
+}
+
+function normalizeColumnSemantics(shape: ColumnShape): ColumnShape {
+  return {
+    ...shape,
+    collation: shape.collation ?? defaultColumnCollation(shape.type),
+    identity: shape.identity ?? "",
+    generated: shape.generated ?? "",
+  };
 }
 
 function normalizeConstraint(
@@ -386,7 +423,8 @@ function canonicalShape(shape: unknown): readonly unknown[] | undefined {
   const value = shape as Record<string, unknown>;
   const identity = [value.schema, value.relation, value.relkind, value.name];
   if ("position" in value) {
-    return [...identity, value.position, value.type, value.notNull, value.defaultExpression];
+    return [...identity, value.position, value.type, value.notNull, value.defaultExpression,
+      value.collation ?? defaultColumnCollation(String(value.type)), value.identity ?? "", value.generated ?? ""];
   }
   if ("validated" in value) {
     return [...identity, value.type, value.validated, value.definition];
@@ -428,8 +466,12 @@ function foldShapes<T extends { schema: "public"; relation: string; relkind: str
       folded.set(key, shape);
     }
     for (const amendment of (manifest[amendmentField] ?? []) as unknown as readonly ShapeAmendment<T>[]) {
-      const before = amendment.before;
-      const after = amendment.after;
+      const before = field === "columns" && amendment.before !== undefined
+        ? normalizeColumnSemantics(amendment.before as unknown as ColumnShape) as unknown as T
+        : amendment.before;
+      const after = field === "columns" && amendment.after !== undefined
+        ? normalizeColumnSemantics(amendment.after as unknown as ColumnShape) as unknown as T
+        : amendment.after;
       const shape = after ?? before;
       if (shape === undefined) throw new Error(`schema ${manifest.version} manifest validation failed: empty ${field} amendment`);
       const object = owned.get(`${shape.schema}|${shape.relation}`);
@@ -452,6 +494,87 @@ function foldShapes<T extends { schema: "public"; relation: string; relkind: str
       } else {
         if (before === undefined || after !== undefined || current === undefined || !sameShape(current, before)) {
           throw new Error(`schema ${manifest.version} manifest validation failed: invalid ${field} revoke`);
+        }
+        folded.delete(key);
+      }
+    }
+  }
+  return folded;
+}
+
+function relationSemanticKey(shape: Pick<RelationSemanticShape, "schema" | "name" | "relkind">): string {
+  return `${shape.schema}|${shape.name}|${shape.relkind}`;
+}
+
+function canonicalRelationSemantic(shape: RelationSemanticShape | undefined): readonly unknown[] | undefined {
+  return shape === undefined ? undefined : [
+    shape.schema, shape.name, shape.relkind, shape.definition, shape.partitionKey, shape.parent, shape.bound,
+    shape.dataType, shape.start, shape.increment, shape.min, shape.max, shape.cache, shape.cycle,
+  ];
+}
+
+function sameRelationSemantic(left: RelationSemanticShape | undefined, right: RelationSemanticShape | undefined): boolean {
+  const leftTuple = canonicalRelationSemantic(left);
+  const rightTuple = canonicalRelationSemantic(right);
+  return leftTuple !== undefined && rightTuple !== undefined
+    && leftTuple.length === rightTuple.length && leftTuple.every((value, index) => value === rightTuple[index]);
+}
+
+function defaultRelationSemantic(schema: "public", name: string, relkind: RelationKind): RelationSemanticShape {
+  return {
+    schema, name, relkind, definition: "", partitionKey: "", parent: "", bound: "", dataType: "",
+    start: "", increment: "", min: "", max: "", cache: "", cycle: false,
+  };
+}
+
+function foldRelationSemantics(
+  manifests: ReadonlyMap<number, SchemaManifest>, throughVersion: number,
+): Map<string, RelationSemanticShape> {
+  const owned = collectOwnedObjects(manifests, throughVersion);
+  const folded = new Map<string, RelationSemanticShape>();
+  for (const manifest of orderedManifests(manifests, throughVersion)) {
+    for (const semantic of manifest.relationSemantics ?? []) {
+      const object = owned.get(`${semantic.schema}|${semantic.name}`);
+      if (object?.version !== manifest.version || object.kind !== semantic.relkind) {
+        throw new Error(`schema ${manifest.version} manifest validation failed: relation semantic ownership`);
+      }
+      const key = relationSemanticKey(semantic);
+      if (folded.has(key)) {
+        throw new Error(`schema ${manifest.version} manifest validation failed: duplicate relation semantics`);
+      }
+      folded.set(key, semantic);
+    }
+    for (const [schema, name, relkind] of manifest.objects ?? []) {
+      if (manifest.version > 10) {
+        const key = relationSemanticKey({ schema, name, relkind });
+        if (!folded.has(key)) folded.set(key, defaultRelationSemantic(schema, name, relkind));
+      }
+    }
+    for (const amendment of manifest.relationSemanticAmendments ?? []) {
+      const shape = amendment.after ?? amendment.before;
+      if (shape === undefined) throw new Error(`schema ${manifest.version} manifest validation failed: empty relation semantic amendment`);
+      const object = owned.get(`${shape.schema}|${shape.name}`);
+      if (object === undefined || object.kind !== shape.relkind || object.version >= manifest.version) {
+        throw new Error(`schema ${manifest.version} manifest validation failed: relation semantic amendment ownership`);
+      }
+      const key = relationSemanticKey(shape);
+      const current = folded.get(key);
+      if (amendment.action === "add") {
+        if (amendment.before !== undefined || amendment.after === undefined || current !== undefined) {
+          throw new Error(`schema ${manifest.version} manifest validation failed: invalid relation semantic add`);
+        }
+        folded.set(key, amendment.after);
+      } else if (amendment.action === "replace") {
+        if (amendment.before === undefined || amendment.after === undefined
+          || relationSemanticKey(amendment.before) !== relationSemanticKey(amendment.after)
+          || current === undefined || !sameRelationSemantic(current, amendment.before)) {
+          throw new Error(`schema ${manifest.version} manifest validation failed: invalid relation semantic replace`);
+        }
+        folded.set(key, amendment.after);
+      } else {
+        if (amendment.before === undefined || amendment.after !== undefined
+          || current === undefined || !sameRelationSemantic(current, amendment.before)) {
+          throw new Error(`schema ${manifest.version} manifest validation failed: invalid relation semantic revoke`);
         }
         folded.delete(key);
       }
@@ -501,6 +624,7 @@ function validateManifestDeclarations(manifests: ReadonlyMap<number, SchemaManif
   foldShapes(manifests, throughVersion, "columns", "columnAmendments", normalizeColumn as never);
   foldShapes(manifests, throughVersion, "constraints", "constraintAmendments", normalizeConstraint as never);
   foldShapes(manifests, throughVersion, "indexes", "indexAmendments", normalizeIndex as never);
+  foldRelationSemantics(manifests, throughVersion);
   foldManifestAcls(manifests, throughVersion, "relationAcls");
   foldManifestAcls(manifests, throughVersion, "routineAcls");
   for (const manifest of orderedManifests(manifests, throughVersion)) {
@@ -523,27 +647,33 @@ function reverseSchema10Amendments<T extends { schema: "public"; relation: strin
   const owned = collectOwnedObjects(manifests, throughVersion);
   for (const manifest of orderedManifests(manifests, throughVersion).reverse()) {
     for (const amendment of [...(manifest[field] ?? [])].reverse() as unknown as ShapeAmendment<T>[]) {
-      const shape = amendment.after ?? amendment.before;
+      const before = field === "columnAmendments" && amendment.before !== undefined
+        ? normalizeColumnSemantics(amendment.before as unknown as ColumnShape) as unknown as T
+        : amendment.before;
+      const after = field === "columnAmendments" && amendment.after !== undefined
+        ? normalizeColumnSemantics(amendment.after as unknown as ColumnShape) as unknown as T
+        : amendment.after;
+      const shape = after ?? before;
       if (shape === undefined) continue;
       const object = owned.get(`${shape.schema}|${shape.relation}`);
       if (object === undefined || object.version > 10) continue;
       const key = shapeKey(shape);
       const existing = current.get(key);
       if (amendment.action === "add") {
-        if (amendment.after === undefined || !sameShape(existing, amendment.after)) {
+        if (after === undefined || !sameShape(existing, after)) {
           throw new Error(`schema 10 manifest validation failed: ${field.replace("Amendments", "")}`);
         }
         current.delete(key);
       } else if (amendment.action === "replace") {
-        if (amendment.before === undefined || amendment.after === undefined || !sameShape(existing, amendment.after)) {
+        if (before === undefined || after === undefined || !sameShape(existing, after)) {
           throw new Error(`schema 10 manifest validation failed: ${field.replace("Amendments", "")}`);
         }
-        current.set(key, amendment.before);
+        current.set(key, before);
       } else {
-        if (amendment.before === undefined || existing !== undefined) {
+        if (before === undefined || existing !== undefined) {
           throw new Error(`schema 10 manifest validation failed: ${field.replace("Amendments", "")}`);
         }
-        current.set(key, amendment.before);
+        current.set(key, before);
       }
     }
   }
@@ -560,6 +690,7 @@ async function validateSchema10BaseShape(
   throughVersion: number,
 ): Promise<void> {
   const columnRows = (await client.query<{
+    collation: string; generated: string; identity: string;
     default_expression: string; kind: Exclude<RelationKind, "S">; name: string; not_null: boolean;
     position: number; relation: string; schema: "public"; type: string;
   }>(
@@ -567,17 +698,23 @@ async function validateSchema10BaseShape(
             attribute.attname as name, attribute.attnum as position,
             format_type(attribute.atttypid, attribute.atttypmod) as type,
             attribute.attnotnull as not_null,
-            coalesce(pg_get_expr(default_value.adbin, default_value.adrelid), '') as default_expression
+            coalesce(pg_get_expr(default_value.adbin, default_value.adrelid), '') as default_expression,
+            case when catalog_collation.oid is null then ''
+              else format('%I.%I', collation_namespace.nspname, catalog_collation.collname) end as collation,
+            attribute.attidentity as identity, attribute.attgenerated as generated
      from pg_class relation join pg_namespace namespace on namespace.oid = relation.relnamespace
      join pg_attribute attribute on attribute.attrelid = relation.oid
        and attribute.attnum > 0 and not attribute.attisdropped
      left join pg_attrdef default_value on default_value.adrelid = relation.oid and default_value.adnum = attribute.attnum
+     left join pg_collation catalog_collation on catalog_collation.oid = attribute.attcollation and attribute.attcollation <> 0
+     left join pg_namespace collation_namespace on collation_namespace.oid = catalog_collation.collnamespace
      where namespace.nspname = 'public' and relation.relname = any($1::text[])
      order by relation.relname, attribute.attnum`,
     [schema10Tables],
   )).rows.map((row) => ({
     schema: row.schema, relation: row.relation, relkind: row.kind, name: row.name, position: row.position,
     type: row.type, notNull: row.not_null, defaultExpression: row.default_expression,
+    collation: row.collation, identity: row.identity, generated: row.generated,
   } satisfies ColumnShape));
   const baseColumns = reverseSchema10Amendments(
     new Map(columnRows.map((shape) => [shapeKey(shape), shape])), manifests, throughVersion, "columnAmendments",
@@ -779,7 +916,7 @@ async function validateRegisteredCatalog(
   const expectedObjects = [...manifests.values()]
     .filter((manifest) => manifest.version <= throughVersion)
     .flatMap((manifest) => manifest.objects ?? [])
-    .sort((left, right) => left.join("|").localeCompare(right.join("|")));
+    .sort((left, right) => left[0].localeCompare(right[0]) || left[1].localeCompare(right[1]) || left[2].localeCompare(right[2]));
   const catalogResult = await client.query<{ kind: RelationKind; name: string; owner: string; schema: "public"; expected_owner: string }>(
     `select namespace.nspname as schema, relation.relname as name, relation.relkind as kind,
             owner.rolname as owner, current_user as expected_owner
@@ -795,6 +932,40 @@ async function validateRegisteredCatalog(
   const actualObjects = catalogResult.rows.map((row) => [row.schema, row.name, row.kind, row.owner] as const);
   if (JSON.stringify(actualObjects) !== JSON.stringify(normalizedExpectedObjects)) {
     throw new Error(`schema ${throughVersion} manifest validation failed: relation catalog`);
+  }
+  const expectedRelationSemantics = [...foldRelationSemantics(manifests, throughVersion).values()]
+    .sort((left, right) => relationSemanticKey(left).localeCompare(relationSemanticKey(right)));
+  const semanticKeys = new Set(expectedRelationSemantics.map(relationSemanticKey));
+  const actualRelationSemantics = (await client.query<{
+    bound: string; cache: string; cycle: boolean; dataType: string; definition: string; increment: string;
+    max: string; min: string; name: string; parent: string; partitionKey: string; relkind: RelationKind;
+    schema: "public"; start: string;
+  }>(
+    `select namespace.nspname as schema, relation.relname as name, relation.relkind as relkind,
+            case when relation.relkind in ('v', 'm') then pg_get_viewdef(relation.oid, true) else '' end as definition,
+            case when relation.relkind = 'p' then pg_get_partkeydef(relation.oid) else '' end as "partitionKey",
+            coalesce(parent_namespace.nspname || '.' || parent.relname, '') as parent,
+            case when relation.relispartition then pg_get_expr(relation.relpartbound, relation.oid, true) else '' end as bound,
+            coalesce(format_type(sequence.seqtypid, null), '') as "dataType",
+            coalesce(sequence.seqstart::text, '') as start,
+            coalesce(sequence.seqincrement::text, '') as increment,
+            coalesce(sequence.seqmin::text, '') as min,
+            coalesce(sequence.seqmax::text, '') as max,
+            coalesce(sequence.seqcache::text, '') as cache,
+            coalesce(sequence.seqcycle, false) as cycle
+     from pg_class relation
+     join pg_namespace namespace on namespace.oid = relation.relnamespace
+     left join pg_inherits inheritance on inheritance.inhrelid = relation.oid
+     left join pg_class parent on parent.oid = inheritance.inhparent
+     left join pg_namespace parent_namespace on parent_namespace.oid = parent.relnamespace
+     left join pg_sequence sequence on sequence.seqrelid = relation.oid
+     where namespace.nspname = 'public' and relation.relkind in ('r', 'p', 'v', 'm', 'S')
+     order by namespace.nspname, relation.relname, relation.relkind`,
+  )).rows.filter((row) => semanticKeys.has(relationSemanticKey(row)))
+    .sort((left, right) => relationSemanticKey(left).localeCompare(relationSemanticKey(right)));
+  if (actualRelationSemantics.length !== expectedRelationSemantics.length
+    || actualRelationSemantics.some((row, index) => !sameRelationSemantic(row, expectedRelationSemantics[index]))) {
+    throw new Error(`schema ${throughVersion} manifest validation failed: relation semantic catalog`);
   }
   if (throughVersion < 10) return;
 
@@ -880,6 +1051,7 @@ async function validateRegisteredCatalog(
     .sort((left, right) => shapeKey(left).localeCompare(shapeKey(right)) || left.position - right.position);
   const columnAmendmentKeys = amendmentKeys<ColumnShape>("columnAmendments");
   const actualColumns = (await client.query<{
+    collation: string; generated: string; identity: string;
     default_expression: string; kind: Exclude<RelationKind, "S">; name: string; not_null: boolean;
     position: number; relation: string; schema: "public"; type: string;
   }>(
@@ -887,16 +1059,22 @@ async function validateRegisteredCatalog(
             attribute.attname as name, attribute.attnum as position,
             format_type(attribute.atttypid, attribute.atttypmod) as type,
             attribute.attnotnull as not_null,
-            coalesce(pg_get_expr(default_value.adbin, default_value.adrelid), '') as default_expression
+            coalesce(pg_get_expr(default_value.adbin, default_value.adrelid), '') as default_expression,
+            case when catalog_collation.oid is null then ''
+              else format('%I.%I', collation_namespace.nspname, catalog_collation.collname) end as collation,
+            attribute.attidentity as identity, attribute.attgenerated as generated
      from pg_class relation join pg_namespace namespace on namespace.oid = relation.relnamespace
      join pg_attribute attribute on attribute.attrelid = relation.oid
        and attribute.attnum > 0 and not attribute.attisdropped
      left join pg_attrdef default_value on default_value.adrelid = relation.oid and default_value.adnum = attribute.attnum
+     left join pg_collation catalog_collation on catalog_collation.oid = attribute.attcollation and attribute.attcollation <> 0
+     left join pg_namespace collation_namespace on collation_namespace.oid = catalog_collation.collnamespace
      where namespace.nspname = 'public' and relation.relkind in ('r', 'p', 'v', 'm')
      order by namespace.nspname, relation.relname, relation.relkind, attribute.attnum`,
   )).rows.map((row) => ({
     schema: row.schema, relation: row.relation, relkind: row.kind, name: row.name, position: row.position,
     type: row.type, notNull: row.not_null, defaultExpression: row.default_expression,
+    collation: row.collation, identity: row.identity, generated: row.generated,
   } satisfies ColumnShape)).filter((shape) => forwardRelationKeys.has(`${shape.schema}|${shape.relation}`)
     || columnAmendmentKeys.has(shapeKey(shape)))
     .sort((left, right) => shapeKey(left).localeCompare(shapeKey(right)) || left.position - right.position);
@@ -983,6 +1161,88 @@ async function validateRegisteredCatalog(
 
 const migrationFilePattern = /^(?<version>[0-9]{3,})_(?<name>[a-z0-9][a-z0-9_-]*)\.sql$/;
 
+function isTransactionControlStatement(tokens: readonly string[]): boolean {
+  const [first, second, third, fourth] = tokens;
+  if (new Set(["BEGIN", "COMMIT", "END", "ROLLBACK", "ABORT", "SAVEPOINT", "RELEASE"]).has(first ?? "")) return true;
+  if ((first === "START" || first === "PREPARE") && second === "TRANSACTION") return true;
+  if (first === "SET" && second === "TRANSACTION") return true;
+  return first === "SET" && second === "SESSION" && third === "CHARACTERISTICS" && fourth === "AS"
+    && tokens[4] === "TRANSACTION";
+}
+
+function assertNoTopLevelTransactionControl(sql: string): void {
+  let index = 0;
+  let tokens: string[] = [];
+  const finishStatement = () => {
+    if (isTransactionControlStatement(tokens)) {
+      throw new Error("migration SQL contains top-level transaction control");
+    }
+    tokens = [];
+  };
+  while (index < sql.length) {
+    const current = sql[index]!;
+    const next = sql[index + 1];
+    if (/\s/u.test(current)) { index += 1; continue; }
+    if (current === ";") { finishStatement(); index += 1; continue; }
+    if (current === "-" && next === "-") {
+      index += 2;
+      while (index < sql.length && sql[index] !== "\n" && sql[index] !== "\r") index += 1;
+      continue;
+    }
+    if (current === "/" && next === "*") {
+      index += 2;
+      let depth = 1;
+      while (index < sql.length && depth > 0) {
+        if (sql[index] === "/" && sql[index + 1] === "*") { depth += 1; index += 2; }
+        else if (sql[index] === "*" && sql[index + 1] === "/") { depth -= 1; index += 2; }
+        else index += 1;
+      }
+      if (depth !== 0) throw new Error("migration SQL contains an unterminated block comment");
+      continue;
+    }
+    if (current === "'") {
+      index += 1;
+      let closed = false;
+      while (index < sql.length) {
+        if (sql[index] === "\\") { index += Math.min(2, sql.length - index); continue; }
+        if (sql[index] === "'" && sql[index + 1] === "'") { index += 2; continue; }
+        if (sql[index] === "'") { index += 1; closed = true; break; }
+        index += 1;
+      }
+      if (!closed) throw new Error("migration SQL contains an unterminated string literal");
+      continue;
+    }
+    if (current === '"') {
+      index += 1;
+      let closed = false;
+      while (index < sql.length) {
+        if (sql[index] === '"' && sql[index + 1] === '"') { index += 2; continue; }
+        if (sql[index] === '"') { index += 1; closed = true; break; }
+        index += 1;
+      }
+      if (!closed) throw new Error("migration SQL contains an unterminated quoted identifier");
+      continue;
+    }
+    if (current === "$") {
+      const delimiter = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/u.exec(sql.slice(index))?.[0];
+      if (delimiter !== undefined) {
+        const end = sql.indexOf(delimiter, index + delimiter.length);
+        if (end < 0) throw new Error("migration SQL contains an unterminated dollar-quoted body");
+        index = end + delimiter.length;
+        continue;
+      }
+    }
+    if (/[A-Za-z_]/u.test(current)) {
+      const match = /^[A-Za-z_][A-Za-z0-9_$]*/u.exec(sql.slice(index))![0];
+      if (tokens.length < 5) tokens.push(match.toUpperCase());
+      index += match.length;
+      continue;
+    }
+    index += 1;
+  }
+  finishStatement();
+}
+
 async function readMigrations(directory: string): Promise<Migration[]> {
   const entries = await readdir(directory, { withFileTypes: true });
   const migrations = await Promise.all(entries
@@ -997,6 +1257,7 @@ async function readMigrations(directory: string): Promise<Migration[]> {
         throw new Error(`Invalid migration filename: ${entry.name}`);
       }
       const sql = await readFile(join(directory, entry.name), "utf8");
+      assertNoTopLevelTransactionControl(sql);
       return {
         version: Number(version),
         name,
