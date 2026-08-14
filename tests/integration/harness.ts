@@ -612,6 +612,9 @@ const inertTlsFields = new Set([
   "ca", "cert", "ciphers", "key", "maxVersion", "minVersion", "passphrase",
   "rejectUnauthorized", "servername",
 ]);
+const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype) as object;
+const typedArrayByteLengthGetter = Object.getOwnPropertyDescriptor(typedArrayPrototype, "byteLength")?.get;
+const typedArraySet = Uint8Array.prototype.set;
 
 function cloneBoundedTlsBytes(value: unknown, field: string): string | Buffer | readonly (string | Buffer)[] {
   const cloneOne = (item: unknown): string | Buffer => {
@@ -622,10 +625,16 @@ function cloneBoundedTlsBytes(value: unknown, field: string): string | Buffer | 
       return item;
     }
     if (Buffer.isBuffer(item)) {
-      if (item.byteLength > 1_048_576) {
+      if (typedArrayByteLengthGetter === undefined) {
+        throw new Error("Integration PostgreSQL pool TLS buffer validation is unavailable");
+      }
+      const byteLength = Reflect.apply(typedArrayByteLengthGetter, item, []) as number;
+      if (byteLength > 1_048_576) {
         throw new Error(`Integration PostgreSQL pool TLS configuration field ${field} is too large`);
       }
-      return Buffer.from(item);
+      const clone = Buffer.alloc(byteLength);
+      Reflect.apply(typedArraySet, clone, [item]);
+      return clone;
     }
     throw new Error(`Integration PostgreSQL pool TLS configuration field ${field} must contain strings or buffers`);
   };

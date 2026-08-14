@@ -649,6 +649,105 @@ test("owned PostgreSQL pool accepts only inert plain-data TLS configuration", as
     await aliasPool.pool.end();
   }
 
+  const getterObservations: Array<{
+    readonly field: "ca" | "cert" | "key";
+    readonly form: "array" | "direct";
+    readonly byteLengthHits: number;
+    readonly lengthHits: number;
+  }> = [];
+  for (const field of ["ca", "cert", "key"] as const) {
+    for (const form of ["direct", "array"] as const) {
+      const expectedMaterial = Buffer.from(`synthetic-${field}-${form}`);
+      const sourceBuffer = Buffer.from(expectedMaterial);
+      const sourceByteLength = expectedMaterial.length;
+      let byteLengthHits = 0;
+      let lengthHits = 0;
+      Object.defineProperty(sourceBuffer, "byteLength", {
+        configurable: true,
+        get: () => {
+          byteLengthHits += 1;
+          return sourceByteLength;
+        },
+      });
+      Object.defineProperty(sourceBuffer, "length", {
+        configurable: true,
+        get: () => {
+          lengthHits += 1;
+          return sourceByteLength;
+        },
+      });
+      const sourceValue = form === "direct" ? sourceBuffer : [sourceBuffer];
+      const getterPool = testHarnessInternals.createOwnedPostgresPool({
+        ssl: { [field]: sourceValue },
+      } as never);
+      const acceptedValue = (getterPool.pool as unknown as {
+        readonly options: { readonly ssl: Record<string, unknown> };
+      }).options.ssl[field];
+      const acceptedBuffer = form === "direct"
+        ? acceptedValue
+        : Array.isArray(acceptedValue) ? acceptedValue[0] : undefined;
+      assert(Buffer.isBuffer(acceptedBuffer));
+      assert.notEqual(acceptedBuffer, sourceBuffer);
+      assert.equal(acceptedBuffer.toString("utf8"), expectedMaterial.toString("utf8"));
+      if (form === "array") {
+        assert(Array.isArray(acceptedValue));
+        assert.equal(Object.isFrozen(acceptedValue), true);
+        assert.notEqual(acceptedValue, sourceValue);
+      }
+      sourceBuffer[0] = 0x78;
+      assert.equal(acceptedBuffer.toString("utf8"), expectedMaterial.toString("utf8"));
+      getterObservations.push({ field, form, byteLengthHits, lengthHits });
+      await getterPool.pool.end();
+    }
+  }
+  assert.deepEqual(
+    getterObservations,
+    ["ca", "cert", "key"].flatMap((field) => ["direct", "array"].map((form) => ({
+      field,
+      form,
+      byteLengthHits: 0,
+      lengthHits: 0,
+    }))),
+  );
+
+  for (const field of ["ca", "cert", "key"] as const) {
+    for (const form of ["direct", "array"] as const) {
+      const maximum = Buffer.alloc(1_048_576);
+      const maximumValue = form === "direct" ? maximum : [maximum];
+      const maximumPool = testHarnessInternals.createOwnedPostgresPool({
+        ssl: { [field]: maximumValue },
+      } as never);
+      await maximumPool.pool.end();
+
+      const oversized = Buffer.alloc(1_048_577);
+      const oversizedValue = form === "direct" ? oversized : [oversized];
+      assert.throws(
+        () => testHarnessInternals.createOwnedPostgresPool({ ssl: { [field]: oversizedValue } } as never),
+        new RegExp(`TLS configuration field ${field} is too large`, "u"),
+      );
+    }
+
+    let fakeByteLengthHits = 0;
+    const fakeBuffer = Object.defineProperty({ [Symbol.toStringTag]: "Buffer" }, "byteLength", {
+      enumerable: true,
+      get: () => {
+        fakeByteLengthHits += 1;
+        return 1;
+      },
+    });
+    for (const candidate of [new Uint8Array([1]), fakeBuffer]) {
+      assert.throws(
+        () => testHarnessInternals.createOwnedPostgresPool({ ssl: { [field]: candidate } } as never),
+        new RegExp(`TLS configuration field ${field} must contain strings or buffers`, "u"),
+      );
+      assert.throws(
+        () => testHarnessInternals.createOwnedPostgresPool({ ssl: { [field]: [candidate] } } as never),
+        new RegExp(`TLS configuration field ${field} must contain strings or buffers`, "u"),
+      );
+    }
+    assert.equal(fakeByteLengthHits, 0);
+  }
+
   const ownedPool = testHarnessInternals.createOwnedPostgresPool({
     ssl: { rejectUnauthorized: false, servername: "localhost", minVersion: "TLSv1.2", maxVersion: "TLSv1.3" },
   });
