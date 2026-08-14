@@ -590,6 +590,65 @@ test("owned PostgreSQL pool accepts only inert plain-data TLS configuration", as
     /TLS configuration field rejectUnauthorized must be a boolean/u,
   );
 
+  let indexGetterHits = 0;
+  const accessorArray = new Array<string>(1);
+  Object.defineProperty(accessorArray, "0", {
+    enumerable: true,
+    get: () => {
+      indexGetterHits += 1;
+      return "synthetic-ca";
+    },
+  });
+  let accessorError: unknown;
+  let accessorPool: ReturnType<typeof testHarnessInternals.createOwnedPostgresPool> | undefined;
+  try {
+    accessorPool = testHarnessInternals.createOwnedPostgresPool({ ssl: { ca: accessorArray } } as never);
+  } catch (error) {
+    accessorError = error;
+  } finally {
+    await accessorPool?.pool.end();
+  }
+  assert.equal(indexGetterHits, 0);
+  assert.match(String(accessorError), /TLS configuration field ca must be an exact inert array/u);
+
+  const sparse = new Array<string>(1);
+  const customPrototype = ["synthetic-ca"];
+  Object.setPrototypeOf(customPrototype, null);
+  const symbolKey = ["synthetic-ca"];
+  Object.defineProperty(symbolKey, Symbol("hidden"), { value: "synthetic", enumerable: true });
+  const hiddenKey = ["synthetic-ca"];
+  Object.defineProperty(hiddenKey, "hidden", { value: "synthetic", enumerable: false });
+  const extraKey = ["synthetic-ca"] as string[] & { extra?: string };
+  extraKey.extra = "synthetic";
+  const abnormalLength = ["synthetic-ca"];
+  Object.defineProperty(abnormalLength, "length", { writable: false });
+  for (const candidate of [sparse, customPrototype, symbolKey, hiddenKey, extraKey, abnormalLength]) {
+    assert.throws(
+      () => testHarnessInternals.createOwnedPostgresPool({ ssl: { ca: candidate } } as never),
+      /TLS configuration field ca must be an exact inert array/u,
+    );
+  }
+
+  for (const field of ["ca", "cert", "key"] as const) {
+    const sourceBuffer = Buffer.from("synthetic-tls-material");
+    const sourceArray: Array<string | Buffer> = [sourceBuffer, "synthetic-tls-material"];
+    const aliasPool = testHarnessInternals.createOwnedPostgresPool({ ssl: { [field]: sourceArray } } as never);
+    const accepted = (aliasPool.pool as unknown as {
+      readonly options: { readonly ssl: Record<string, unknown> };
+    }).options.ssl[field];
+    assert(Array.isArray(accepted));
+    assert.equal(Object.isFrozen(accepted), true);
+    assert.notEqual(accepted, sourceArray);
+    assert(Buffer.isBuffer(accepted[0]));
+    assert.notEqual(accepted[0], sourceBuffer);
+    sourceBuffer.fill(0x78);
+    sourceArray[0] = "mutated";
+    sourceArray[1] = "mutated";
+    assert.equal((accepted[0] as Buffer).toString("utf8"), "synthetic-tls-material");
+    assert.equal(accepted[1], "synthetic-tls-material");
+    await aliasPool.pool.end();
+  }
+
   const ownedPool = testHarnessInternals.createOwnedPostgresPool({
     ssl: { rejectUnauthorized: false, servername: "localhost", minVersion: "TLSv1.2", maxVersion: "TLSv1.3" },
   });

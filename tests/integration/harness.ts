@@ -630,10 +630,41 @@ function cloneBoundedTlsBytes(value: unknown, field: string): string | Buffer | 
     throw new Error(`Integration PostgreSQL pool TLS configuration field ${field} must contain strings or buffers`);
   };
   if (Array.isArray(value)) {
-    if (value.length > 32) {
+    if (Object.getPrototypeOf(value) !== Array.prototype) {
+      throw new Error(`Integration PostgreSQL pool TLS configuration field ${field} must be an exact inert array`);
+    }
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+    if (
+      lengthDescriptor === undefined
+      || !("value" in lengthDescriptor)
+      || !Number.isSafeInteger(lengthDescriptor.value)
+      || lengthDescriptor.value < 0
+      || lengthDescriptor.enumerable
+      || lengthDescriptor.configurable
+      || !lengthDescriptor.writable
+    ) {
+      throw new Error(`Integration PostgreSQL pool TLS configuration field ${field} must be an exact inert array`);
+    }
+    const length = lengthDescriptor.value as number;
+    if (length > 32) {
       throw new Error(`Integration PostgreSQL pool TLS configuration field ${field} has too many entries`);
     }
-    return Object.freeze(value.map(cloneOne));
+    const keys = Reflect.ownKeys(value);
+    if (
+      keys.length !== length + 1
+      || keys.some((key) => typeof key !== "string" || (key !== "length" && !/^(?:0|[1-9][0-9]*)$/u.test(key)))
+    ) {
+      throw new Error(`Integration PostgreSQL pool TLS configuration field ${field} must be an exact inert array`);
+    }
+    const clone: Array<string | Buffer> = [];
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) {
+        throw new Error(`Integration PostgreSQL pool TLS configuration field ${field} must be an exact inert array`);
+      }
+      clone.push(cloneOne(descriptor.value));
+    }
+    return Object.freeze(clone);
   }
   return cloneOne(value);
 }
