@@ -576,7 +576,15 @@ function foldRelationSemantics(
           || current === undefined || !sameRelationSemantic(current, amendment.before)) {
           throw new Error(`schema ${manifest.version} manifest validation failed: invalid relation semantic revoke`);
         }
-        folded.delete(key);
+        throw new Error(`schema ${manifest.version} manifest validation failed: invalid relation semantic revoke`);
+      }
+    }
+  }
+  for (const manifest of orderedManifests(manifests, throughVersion)) {
+    if (manifest.version <= 10) continue;
+    for (const [schema, name, relkind] of manifest.objects ?? []) {
+      if (!folded.has(relationSemanticKey({ schema, name, relkind }))) {
+        throw new Error(`schema ${manifest.version} manifest validation failed: missing relation semantics`);
       }
     }
   }

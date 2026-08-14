@@ -1455,6 +1455,198 @@ test("registered relation semantics validate exact kind-specific catalogs and am
   }
 });
 
+test("a semantic revoke cannot disable validation for still-owned special relations", async () => {
+  await resetDatabase();
+  const directory = await mkdtemp(join(tmpdir(), "core-agent-relation-semantic-revoke-"));
+  const v11Sql = `
+    create view semantic_revoke_view as select 1::integer as id;
+    create materialized view semantic_revoke_mat as select 1::integer as id;
+    create table semantic_revoke_parent (id integer) partition by range (id);
+    create table semantic_revoke_child partition of semantic_revoke_parent for values from (0) to (10);
+    create sequence semantic_revoke_sequence as integer start 5 increment 2 minvalue 1 maxvalue 99 cache 3 cycle;
+  `;
+  const v12Sql = `
+    create or replace view semantic_revoke_view as select 2::integer as id;
+    drop materialized view semantic_revoke_mat;
+    create materialized view semantic_revoke_mat as select 2::integer as id;
+    drop table semantic_revoke_parent cascade;
+    create table semantic_revoke_parent (id integer) partition by hash (id);
+    create table semantic_revoke_child partition of semantic_revoke_parent for values with (modulus 4, remainder 0);
+    alter sequence semantic_revoke_sequence increment by 7 cache 1 no cycle;
+  `;
+  const names = [
+    "semantic_revoke_view", "semantic_revoke_mat", "semantic_revoke_parent",
+    "semantic_revoke_child", "semantic_revoke_sequence",
+  ];
+  try {
+    const before = await probeRelationSemantics(v11Sql, names);
+    await cp(migrationsDirectory, directory, { recursive: true });
+    await writeFile(join(directory, "011_semantic_revoke_base.sql"), v11Sql);
+    const manifests = new Map(migrationTestInternals.schemaManifests);
+    manifests.set(11, {
+      version: 11,
+      name: "semantic_revoke_base",
+      checksum: (await import("node:crypto")).createHash("sha256").update(v11Sql).digest("hex"),
+      objects: [
+        ["public", "semantic_revoke_view", "v", "current_user"],
+        ["public", "semantic_revoke_mat", "m", "current_user"],
+        ["public", "semantic_revoke_parent", "p", "current_user"],
+        ["public", "semantic_revoke_child", "r", "current_user"],
+        ["public", "semantic_revoke_sequence", "S", "current_user"],
+      ],
+      relationSemantics: before,
+      columns: [
+        { schema: "public", relation: "semantic_revoke_view", relkind: "v", name: "id", position: 1, type: "integer", notNull: false, defaultExpression: "" },
+        { schema: "public", relation: "semantic_revoke_mat", relkind: "m", name: "id", position: 1, type: "integer", notNull: false, defaultExpression: "" },
+        { schema: "public", relation: "semantic_revoke_parent", relkind: "p", name: "id", position: 1, type: "integer", notNull: false, defaultExpression: "" },
+        { schema: "public", relation: "semantic_revoke_child", relkind: "r", name: "id", position: 1, type: "integer", notNull: false, defaultExpression: "" },
+      ],
+    } as never);
+    await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
+    await writeFile(join(directory, "012_semantic_revoke_drift.sql"), v12Sql);
+    manifests.set(12, {
+      version: 12,
+      name: "semantic_revoke_drift",
+      checksum: (await import("node:crypto")).createHash("sha256").update(v12Sql).digest("hex"),
+      relationSemanticAmendments: before.map((semantic) => ({ action: "revoke", before: semantic })),
+    } as never);
+
+    let rejected = false;
+    try {
+      await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
+    } catch (error) {
+      rejected = /invalid relation semantic revoke/u.test(String(error));
+    }
+    let restartAccepted = false;
+    if (!rejected) {
+      await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
+      restartAccepted = true;
+    }
+    const after = (await pool.query(`
+      select namespace.nspname as schema, relation.relname as name, relation.relkind as relkind,
+        case when relation.relkind in ('v', 'm') then pg_get_viewdef(relation.oid, true) else '' end as definition,
+        case when relation.relkind = 'p' then pg_get_partkeydef(relation.oid) else '' end as "partitionKey",
+        coalesce(parent_namespace.nspname || '.' || parent.relname, '') as parent,
+        case when relation.relispartition then pg_get_expr(relation.relpartbound, relation.oid, true) else '' end as bound,
+        coalesce(format_type(sequence.seqtypid, null), '') as "dataType",
+        coalesce(sequence.seqstart::text, '') as start, coalesce(sequence.seqincrement::text, '') as increment,
+        coalesce(sequence.seqmin::text, '') as min, coalesce(sequence.seqmax::text, '') as max,
+        coalesce(sequence.seqcache::text, '') as cache, coalesce(sequence.seqcycle, false) as cycle
+      from pg_class relation
+      join pg_namespace namespace on namespace.oid = relation.relnamespace
+      left join pg_inherits inheritance on inheritance.inhrelid = relation.oid
+      left join pg_class parent on parent.oid = inheritance.inhparent
+      left join pg_namespace parent_namespace on parent_namespace.oid = parent.relnamespace
+      left join pg_sequence sequence on sequence.seqrelid = relation.oid
+      where namespace.nspname = 'public' and relation.relname = any($1::text[])
+      order by relation.relname
+    `, [names])).rows;
+    assert.deepEqual({
+      rejected,
+      restartAccepted,
+      record: (await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 12")).rows[0]?.count,
+      objects: after.length,
+      semantics: after,
+    }, { rejected: true, restartAccepted: false, record: 0, objects: 5, semantics: before });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("semantic revoke then re-add is rejected within and across manifest versions", async () => {
+  const runScenario = async (crossVersion: boolean): Promise<{ rejected: boolean; records: number }> => {
+    await resetDatabase();
+    const directory = await mkdtemp(join(tmpdir(), "core-agent-semantic-readd-"));
+    const v11Sql = "create view semantic_readd_view as select 1::integer as id;\n";
+    try {
+      const [semantic] = await probeRelationSemantics(v11Sql, ["semantic_readd_view"]);
+      await cp(migrationsDirectory, directory, { recursive: true });
+      await writeFile(join(directory, "011_semantic_readd_base.sql"), v11Sql);
+      const manifests = new Map(migrationTestInternals.schemaManifests);
+      manifests.set(11, {
+        version: 11, name: "semantic_readd_base",
+        checksum: (await import("node:crypto")).createHash("sha256").update(v11Sql).digest("hex"),
+        objects: [["public", "semantic_readd_view", "v", "current_user"]],
+        relationSemantics: [semantic],
+        columns: [{ schema: "public", relation: "semantic_readd_view", relkind: "v", name: "id", position: 1, type: "integer", notNull: false, defaultExpression: "" }],
+      } as never);
+      await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
+      const v12Sql = "select 12;\n";
+      await writeFile(join(directory, "012_semantic_readd_revoke.sql"), v12Sql);
+      manifests.set(12, {
+        version: 12, name: "semantic_readd_revoke",
+        checksum: (await import("node:crypto")).createHash("sha256").update(v12Sql).digest("hex"),
+        relationSemanticAmendments: crossVersion
+          ? [{ action: "revoke", before: semantic }]
+          : [{ action: "revoke", before: semantic }, { action: "add", after: semantic }],
+      } as never);
+      if (crossVersion) {
+        const v13Sql = "select 13;\n";
+        await writeFile(join(directory, "013_semantic_readd_restore.sql"), v13Sql);
+        manifests.set(13, {
+          version: 13, name: "semantic_readd_restore",
+          checksum: (await import("node:crypto")).createHash("sha256").update(v13Sql).digest("hex"),
+          relationSemanticAmendments: [{ action: "add", after: semantic }],
+        } as never);
+      }
+      let rejected = false;
+      try {
+        await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
+      } catch (error) {
+        rejected = /invalid relation semantic revoke/u.test(String(error));
+      }
+      return {
+        rejected,
+        records: (await pool.query("select count(*)::int as count from core_agent_schema_migrations where version >= 12")).rows[0]?.count,
+      };
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  };
+  assert.deepEqual(await runScenario(false), { rejected: true, records: 0 });
+  assert.deepEqual(await runScenario(true), { rejected: true, records: 0 });
+});
+
+test("relation semantic declarations reject missing duplicate wrong and unowned shapes", async () => {
+  const scenarios = ["missing", "duplicate", "wrong", "unowned"] as const;
+  for (const scenario of scenarios) {
+    await resetDatabase();
+    const directory = await mkdtemp(join(tmpdir(), `core-agent-semantic-${scenario}-`));
+    const relation = `semantic_${scenario}_view`;
+    const sql = `create view ${relation} as select 1::integer as id;\n`;
+    try {
+      const [actual] = await probeRelationSemantics(sql, [relation]);
+      await cp(migrationsDirectory, directory, { recursive: true });
+      await writeFile(join(directory, `011_semantic_${scenario}.sql`), sql);
+      const manifests = new Map(migrationTestInternals.schemaManifests);
+      const wrong = { ...actual as Record<string, unknown>, definition: " SELECT 99 AS id;" };
+      manifests.set(11, {
+        version: 11,
+        name: `semantic_${scenario}`,
+        checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
+        objects: scenario === "unowned" ? [] : [["public", relation, "v", "current_user"]],
+        relationSemantics: scenario === "missing" ? []
+          : scenario === "duplicate" ? [actual, actual]
+            : scenario === "wrong" ? [wrong] : [actual],
+        columns: scenario === "unowned" ? [] : [
+          { schema: "public", relation, relkind: "v", name: "id", position: 1, type: "integer", notNull: false, defaultExpression: "" },
+        ],
+      } as never);
+      await assert.rejects(
+        migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests),
+        /relation semantic|relation semantics/u,
+      );
+      assert.equal((await pool.query("select to_regclass($1)::text as relation", [`public.${relation}`])).rows[0]?.relation, null);
+      const migrationTable = (await pool.query("select to_regclass('public.core_agent_schema_migrations')::text as relation")).rows[0]?.relation;
+      const record = migrationTable === null ? 0
+        : (await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 11")).rows[0]?.count;
+      assert.equal(record, 0);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+});
+
 test("migration transaction control is rejected before connect and cannot escape atomic rollback", async () => {
   await resetDatabase();
   const directory = await mkdtemp(join(tmpdir(), "core-agent-transaction-control-"));
