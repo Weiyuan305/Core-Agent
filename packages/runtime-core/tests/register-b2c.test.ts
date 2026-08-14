@@ -70,7 +70,7 @@ async function setIdentityPassword(password: string | null): Promise<void> {
           alter role core_agent_identity password null;
         else
           execute format(
-            'alter role core_agent_identity password %L',
+            'alter role core_agent_identity login password %L',
             current_setting('core_agent.test_identity_password')
           );
         end if;

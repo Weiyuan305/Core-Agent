@@ -1014,6 +1014,19 @@ test("CI preserves contracts and separates deterministic runtime gates", async (
 test("fresh CI-equivalent protects command output and proves cleanup after success failure and leak", async () => {
   const text = await source("tests/runtime/database-ci-equivalent.integration.mjs");
   const runner = await source("scripts/run-protected-ci-command.mjs");
+  const expectedCountsSource = await source("tests/runtime/database-ci-expected-counts.json");
+  assert.notEqual(expectedCountsSource, "", "tracked database CI counts must exist");
+  const expectedCounts = JSON.parse(expectedCountsSource);
+  const runtimeCorePackage = JSON.parse(await source("packages/runtime-core/package.json"));
+  const runtimeCorePostgresSuites = runtimeCorePackage.scripts["test:postgres"]
+    .split(/\s+/u)
+    .filter((argument) => argument.startsWith("tests/") && argument.endsWith(".test.ts"));
+  assert.deepEqual(expectedCounts.runtimeCorePostgres.suitePaths, runtimeCorePostgresSuites);
+  for (const count of [
+    expectedCounts.runtimeCorePostgres.testCount,
+    expectedCounts.controlPlaneApiPostgres.testCount,
+    expectedCounts.integration.testCount,
+  ]) assert(Number.isSafeInteger(count) && count > 0);
   assert.match(text, /docker", \["volume", "create"/u);
   assert.match(text, /docker", \["network", "create"/u);
   assert.match(text, /--volume", `\$\{dataVolume\}:\/var\/lib\/postgresql\/data`/u);
@@ -1022,8 +1035,9 @@ test("fresh CI-equivalent protects command output and proves cleanup after succe
   assert.match(text, /assert\.rejects\([\s\S]*injected CI-equivalent failure/u);
   assert.match(text, /protectedRun\("npm", \["run", "test:postgres"\]/u);
   assert.match(text, /protectedRun\("npm", \["run", "test:integration"\]/u);
-  assert.match(text, /assertNodeTestSummaries\(postgresOutput, \[251, 14\]\)/u);
-  assert.match(text, /assertNodeTestSummaries\(integrationOutput, \[87\]\)/u);
+  assert.match(text, /database-ci-expected-counts\.json/u);
+  assert.match(text, /assertNodeTestSummaries\(postgresOutput, \[expectedCounts\.runtimeCorePostgres\.testCount, expectedCounts\.controlPlaneApiPostgres\.testCount\]\)/u);
+  assert.match(text, /assertNodeTestSummaries\(integrationOutput, \[expectedCounts\.integration\.testCount\]\)/u);
   assert.match(text, /protectedRun\("docker", \["logs", container\]/u);
   assert.match(text, /injectedOutputLeak/u);
   assert.match(runner, /candidate\.includes\(secret\)[\s\S]*terminate\(child\)/u);

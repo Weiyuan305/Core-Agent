@@ -1,0 +1,27 @@
+{
+  "runtimeCorePostgres": {
+    "testCount": 270,
+    "suitePaths": [
+      "tests/migrations.test.ts",
+      "tests/tenant-isolation.test.ts",
+      "tests/optimistic-concurrency.test.ts",
+      "tests/idempotency.test.ts",
+      "tests/jobs.test.ts",
+      "tests/events.test.ts",
+      "tests/outbox.test.ts",
+      "tests/provision-tenant.test.ts",
+      "tests/create-conversation.test.ts",
+      "tests/create-agent-run.test.ts",
+      "tests/agent-run-execution.test.ts",
+      "tests/agent-run-conversation-lock.test.ts",
+      "tests/register-b2c.test.ts",
+      "tests/identity-invariants.test.ts"
+    ]
+  },
+  "controlPlaneApiPostgres": {
+    "testCount": 14
+  },
+  "integration": {
+    "testCount": 87
+  }
+}

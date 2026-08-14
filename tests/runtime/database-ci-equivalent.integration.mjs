@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { chmod, lstat, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -9,6 +9,9 @@ import test from "node:test";
 import { assertNodeTestSummaries } from "../../scripts/lib/node-test-summary.mjs";
 
 const repositoryRoot = new URL("../..", import.meta.url).pathname;
+const expectedCounts = JSON.parse(await readFile(
+  new URL("./database-ci-expected-counts.json", import.meta.url), "utf8",
+));
 const lock = JSON.parse(await import("node:fs/promises").then(({ readFile }) => readFile(
   new URL("../../infra/runtime/base-images.lock.json", import.meta.url), "utf8",
 )));
@@ -153,11 +156,11 @@ async function runCiEquivalentScenario({ injectedFailure = false, injectedOutput
       throw new Error("injected CI-equivalent output leak rejected");
     }
     const postgresOutput = protectedRun("npm", ["run", "test:postgres"], environment, credential, credentialFile);
-    assertNodeTestSummaries(postgresOutput, [251, 14]);
+    assertNodeTestSummaries(postgresOutput, [expectedCounts.runtimeCorePostgres.testCount, expectedCounts.controlPlaneApiPostgres.testCount]);
     assert.match(postgresOutput, /schema 10 grants only the documented Identity Task 3-9 table-operation matrix/u);
     assert.match(postgresOutput, /real Identity login commits and atomically rolls back the Task 3 cross-table graph/u);
     const integrationOutput = protectedRun("npm", ["run", "test:integration"], environment, credential, credentialFile);
-    assertNodeTestSummaries(integrationOutput, [87]);
+    assertNodeTestSummaries(integrationOutput, [expectedCounts.integration.testCount]);
     assert.match(integrationOutput, /provision, converse, stream, restart, and resume/u);
     protectedRun("docker", ["logs", container], environment, credential, credentialFile);
     const changed = spawnSync("git", ["diff", "--name-only", "-z"], { cwd: repositoryRoot, env: environment, encoding: "buffer" });
