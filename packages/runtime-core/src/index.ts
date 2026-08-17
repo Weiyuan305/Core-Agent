@@ -241,7 +241,8 @@ export {
 } from "./services/identity/core-session.js";
 export {
   requireRecentReauthentication,
-  type ReauthenticationDependencies,
+  type ReauthenticationContext,
+  type RequireRecentReauthenticationInput,
 } from "./services/identity/reauthentication.js";
 export {
   constantTimeDigestMatches,

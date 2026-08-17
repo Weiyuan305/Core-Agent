@@ -116,21 +116,17 @@ function assertIssueInput(input: IssueCoreSessionInput): void {
   ) throw new DomainError("INVALID_REQUEST", "Core Session issuance input is invalid");
 }
 
-function clearStoredDigests(input: { secretDigest: Buffer; csrfDigest: Buffer | null }): void {
-  input.secretDigest.fill(0);
-  input.csrfDigest?.fill(0);
-}
-
 export async function issueCoreSession(
   dependencies: CoreSessionDependencies,
   input: IssueCoreSessionInput,
 ): Promise<IssuedCoreSession> {
   assertIssueInput(input);
   const sessionCredential = issueOpaqueCoreSessionCredential(dependencies.randomBytes);
-  const csrfCredential = input.clientKind === "web"
-    ? issueOpaqueCoreSessionCredential(dependencies.randomBytes)
-    : undefined;
+  let csrfCredential: ReturnType<typeof issueOpaqueCoreSessionCredential> | undefined;
   try {
+    csrfCredential = input.clientKind === "web"
+      ? issueOpaqueCoreSessionCredential(dependencies.randomBytes)
+      : undefined;
     const session = await withDatabaseTransactionRetry(dependencies.db, async (trx) => {
       const now = await databaseNow(dependencies, trx);
       const actor = await trx.selectFrom("actors").select("status")
@@ -161,11 +157,7 @@ export async function issueCoreSession(
         idleExpiresAt: new Date(now.getTime() + 7 * dayMs),
         absoluteExpiresAt,
       });
-      try {
-        return stored.session;
-      } finally {
-        clearStoredDigests(stored);
-      }
+      return stored.session;
     });
     return Object.freeze({
       session,
@@ -173,8 +165,8 @@ export async function issueCoreSession(
       ...(csrfCredential === undefined ? {} : { csrfSecret: csrfCredential.secret }),
     });
   } finally {
-    sessionCredential.digest.fill(0);
-    csrfCredential?.digest.fill(0);
+    sessionCredential.clear();
+    csrfCredential?.clear();
   }
 }
 
@@ -213,39 +205,31 @@ export async function authenticateCoreSession(
       ...(input.csrfSecret === undefined ? {} : { csrfSecret: input.csrfSecret }),
       ...(input.requireCsrf === undefined ? {} : { requireCsrf: input.requireCsrf }),
     });
-    try {
-      if (stored.session.status !== "active") return undefined;
-      const now = await databaseNow(dependencies, trx);
-      const idleExpiry = Date.parse(stored.session.idle_expires_at);
-      const absoluteExpiry = Date.parse(stored.session.absolute_expires_at);
-      if (now.getTime() >= idleExpiry || now.getTime() >= absoluteExpiry) {
-        await expireCoreSession(trx, stored.session.session_id, now, stored.session.resource_version);
-        return undefined;
-      }
-      const authority = await loadActorIdentityAuthority(trx, discovered.actorId);
-      if (authority.actorStatus !== "active") return undefined;
-      const nextIdleExpiry = new Date(Math.min(now.getTime() + 7 * dayMs, absoluteExpiry));
-      const updated = await updateCoreSessionActivity(trx, {
-        sessionId: stored.session.session_id,
-        now,
-        idleExpiresAt: nextIdleExpiry,
-        expectedResourceVersion: stored.session.resource_version,
-      });
-      try {
-        const authSubject: CoreSessionAuthSubjectAuthority = Object.freeze({
-          authSubjectId: subjectRow.auth_subject_id,
-          actorId: subjectRow.actor_id,
-          provider: subjectRow.provider,
-          identityKind: subjectRow.provider_identity_kind,
-          status: subjectRow.status,
-        });
-        return Object.freeze({ session: updated.session, authority, authSubject });
-      } finally {
-        clearStoredDigests(updated);
-      }
-    } finally {
-      clearStoredDigests(stored);
+    if (stored.session.status !== "active") return undefined;
+    const now = await databaseNow(dependencies, trx);
+    const idleExpiry = Date.parse(stored.session.idle_expires_at);
+    const absoluteExpiry = Date.parse(stored.session.absolute_expires_at);
+    if (now.getTime() >= idleExpiry || now.getTime() >= absoluteExpiry) {
+      await expireCoreSession(trx, stored.session.session_id, now, stored.session.resource_version);
+      return undefined;
     }
+    const authority = await loadActorIdentityAuthority(trx, discovered.actorId);
+    if (authority.actorStatus !== "active") return undefined;
+    const nextIdleExpiry = new Date(Math.min(now.getTime() + 7 * dayMs, absoluteExpiry));
+    const updated = await updateCoreSessionActivity(trx, {
+      sessionId: stored.session.session_id,
+      now,
+      idleExpiresAt: nextIdleExpiry,
+      expectedResourceVersion: stored.session.resource_version,
+    });
+    const authSubject: CoreSessionAuthSubjectAuthority = Object.freeze({
+      authSubjectId: subjectRow.auth_subject_id,
+      actorId: subjectRow.actor_id,
+      provider: subjectRow.provider,
+      identityKind: subjectRow.provider_identity_kind,
+      status: subjectRow.status,
+    });
+    return Object.freeze({ session: updated.session, authority, authSubject });
   });
   if (authenticated === undefined) publicCoreSessionInvalid();
   return authenticated;
@@ -273,23 +257,15 @@ export async function revokeCoreSession(
     if (actor === undefined) publicCoreSessionInvalid();
     const stored = await lockCoreSessionById(trx, input.actorId, input.sessionId);
     if (stored === undefined) publicCoreSessionInvalid();
-    try {
-      if (stored.session.status === "revoked") return stored.session;
-      const now = await databaseNow(dependencies, trx);
-      const revoked = await revokeLockedCoreSession(trx, {
-        sessionId: input.sessionId,
-        reason: input.reason,
-        now,
-        expectedResourceVersion: stored.session.resource_version,
-      });
-      try {
-        return revoked.session;
-      } finally {
-        clearStoredDigests(revoked);
-      }
-    } finally {
-      clearStoredDigests(stored);
-    }
+    if (stored.session.status === "revoked") return stored.session;
+    const now = await databaseNow(dependencies, trx);
+    const revoked = await revokeLockedCoreSession(trx, {
+      sessionId: input.sessionId,
+      reason: input.reason,
+      now,
+      expectedResourceVersion: stored.session.resource_version,
+    });
+    return revoked.session;
   });
 }
 

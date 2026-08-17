@@ -232,6 +232,8 @@ test("formal PostgreSQL registration includes both Task 6 suites exactly once an
     "utf8",
   );
   assert.match(ciEquivalent, /Session lifetime uses the injected database clock/u);
+  assert.match(ciEquivalent, /owned Session credential buffers are cleared after use/u);
+  assert.match(ciEquivalent, /recent reauthentication rejects stale snapshots after durable revoke expiry or timestamp change/u);
   assert.match(ciEquivalent, /public fixed-window rate limits persist only account and IP-device HMACs/u);
   const repositorySource = await readFile(
     join(repositoryRoot, "packages", "runtime-core", "src", "repositories", "identity", "public-rate-limits.ts"),

@@ -16,12 +16,11 @@ export type CoreSessionRevocationReason = NonNullable<CoreSession["revocation_re
 export interface IssuedOpaqueCredential {
   readonly secret: string;
   readonly digest: Buffer;
+  clear(): void;
 }
 
 export interface StoredCoreSessionAuthority {
   readonly session: CoreSession;
-  readonly secretDigest: Buffer;
-  readonly csrfDigest: Buffer | null;
 }
 
 const opaqueSecretPattern = /^[A-Za-z0-9_-]{43}$/u;
@@ -47,13 +46,23 @@ export function issueOpaqueCoreSessionCredential(
     if (Buffer.isBuffer(bytes)) bytes.fill(0);
     throw new DomainError("INTERNAL_ERROR", "Core Session entropy failed");
   }
+  let temporaryDigest: Buffer | undefined;
   try {
+    const secret = bytes.toString("base64url");
+    temporaryDigest = createHash("sha256").update(bytes).digest();
+    temporaryDigest.copy(bytes);
     return Object.freeze({
-      secret: bytes.toString("base64url"),
-      digest: createHash("sha256").update(bytes).digest(),
+      secret,
+      digest: bytes,
+      clear() {
+        bytes.fill(0);
+      },
     });
-  } finally {
+  } catch (error) {
     bytes.fill(0);
+    throw error;
+  } finally {
+    temporaryDigest?.fill(0);
   }
 }
 
@@ -68,42 +77,59 @@ function credentialCandidate(secret: unknown): CredentialCandidate {
   const bytes = wellFormed ? Buffer.from(secret, "base64url") : Buffer.alloc(32);
   const validLength = bytes.length === 32;
   const fixedBytes = validLength ? bytes : Buffer.alloc(32);
-  const digest = createHash("sha256").update(fixedBytes).digest();
-  if (fixedBytes !== bytes) fixedBytes.fill(0);
-  return {
-    digest,
-    wellFormed: wellFormed && validLength,
-    clear() {
-      bytes.fill(0);
-      digest.fill(0);
-    },
-  };
-}
-
-function constantTimeDigestMatch(candidate: Buffer, stored: Uint8Array | null): boolean {
-  const storedDigest = stored === null ? Buffer.alloc(32) : Buffer.from(stored);
+  let digest: Buffer | undefined;
   try {
-    if (candidate.length !== 32 || storedDigest.length !== 32) {
-      const safeCandidate = createHash("sha256").update(candidate).digest();
-      const safeStored = createHash("sha256").update(storedDigest).digest();
-      try {
-        timingSafeEqual(safeCandidate, safeStored);
-      } finally {
-        safeCandidate.fill(0);
-        safeStored.fill(0);
-      }
-      return false;
-    }
-    return timingSafeEqual(candidate, storedDigest);
+    digest = createHash("sha256").update(fixedBytes).digest();
+    const ownedDigest = digest;
+    return {
+      digest: ownedDigest,
+      wellFormed: wellFormed && validLength,
+      clear() {
+        bytes.fill(0);
+        ownedDigest.fill(0);
+      },
+    };
+  } catch (error) {
+    bytes.fill(0);
+    digest?.fill(0);
+    throw error;
   } finally {
-    storedDigest.fill(0);
+    if (fixedBytes !== bytes) fixedBytes.fill(0);
   }
 }
 
-function rowToStoredCoreSession(row: {
+function constantTimeOwnedDigestMatch(candidate: Buffer, stored: Buffer): boolean {
+  try {
+    if (candidate.length !== 32 || stored.length !== 32) {
+      let safeCandidate: Buffer | undefined;
+      let safeStored: Buffer | undefined;
+      try {
+        safeCandidate = createHash("sha256").update(candidate).digest();
+        safeStored = createHash("sha256").update(stored).digest();
+        timingSafeEqual(safeCandidate, safeStored);
+      } finally {
+        safeCandidate?.fill(0);
+        safeStored?.fill(0);
+      }
+      return false;
+    }
+    return timingSafeEqual(candidate, stored);
+  } finally {
+    candidate.fill(0);
+    stored.fill(0);
+  }
+}
+
+export const coreSessionSecretTestInternals = Object.freeze({
+  constantTimeOwnedDigestMatch,
+});
+
+function ownedDriverDigest(digest: Uint8Array | null | undefined): Buffer {
+  return digest === null || digest === undefined ? Buffer.alloc(32) : Buffer.from(digest);
+}
+
+function rowToCoreSessionAuthority(row: {
   session_id: string;
-  secret_digest: Buffer;
-  csrf_digest: Buffer | null;
   actor_id: string;
   auth_subject_id: string;
   client_kind: "web" | "iphone" | "macos";
@@ -139,16 +165,16 @@ function rowToStoredCoreSession(row: {
   };
   return Object.freeze({
     session: Object.freeze(session),
-    secretDigest: Buffer.from(row.secret_digest),
-    csrfDigest: row.csrf_digest === null ? null : Buffer.from(row.csrf_digest),
   });
 }
 
 const sessionColumns = [
-  "session_id", "secret_digest", "csrf_digest", "actor_id", "auth_subject_id", "client_kind",
+  "session_id", "actor_id", "auth_subject_id", "client_kind",
   "status", "device_label", "created_at", "last_seen_at", "idle_expires_at", "absolute_expires_at",
   "reauthenticated_at", "revocation_reason", "resource_version", "updated_at",
 ] as const;
+
+const sessionCredentialColumns = [...sessionColumns, "secret_digest", "csrf_digest"] as const;
 
 export async function insertCoreSession(
   trx: Transaction<RuntimeDatabase>,
@@ -183,7 +209,7 @@ export async function insertCoreSession(
     resource_version: 1,
     updated_at: input.now,
   }).returning(sessionColumns).executeTakeFirstOrThrow();
-  return rowToStoredCoreSession(row);
+  return rowToCoreSessionAuthority(row);
 }
 
 export async function discoverCoreSessionBySecret(
@@ -196,7 +222,7 @@ export async function discoverCoreSessionBySecret(
       .select(["session_id", "actor_id", "secret_digest"])
       .where("secret_digest", "=", candidate.digest)
       .executeTakeFirst();
-    const matches = constantTimeDigestMatch(candidate.digest, row?.secret_digest ?? null);
+    const matches = constantTimeOwnedDigestMatch(candidate.digest, ownedDriverDigest(row?.secret_digest));
     if (!candidate.wellFormed || !matches || row === undefined) invalidSession();
     return Object.freeze({ sessionId: row.session_id, actorId: row.actor_id });
   } finally {
@@ -215,26 +241,30 @@ export async function lockCoreSessionCredential(
   },
 ): Promise<StoredCoreSessionAuthority> {
   const sessionCandidate = credentialCandidate(input.sessionSecret);
-  const csrfCandidate = credentialCandidate(input.csrfSecret);
+  let csrfCandidate: CredentialCandidate | undefined;
   try {
-    const row = await trx.selectFrom("core_sessions").select(sessionColumns)
+    csrfCandidate = credentialCandidate(input.csrfSecret);
+    const row = await trx.selectFrom("core_sessions").select(sessionCredentialColumns)
       .where("session_id", "=", input.sessionId)
       .where("actor_id", "=", input.actorId)
       .forUpdate()
       .executeTakeFirst();
-    const sessionMatches = constantTimeDigestMatch(sessionCandidate.digest, row?.secret_digest ?? null);
+    const sessionMatches = constantTimeOwnedDigestMatch(
+      sessionCandidate.digest,
+      ownedDriverDigest(row?.secret_digest),
+    );
     const csrfMatches = input.requireCsrf !== true
-      || constantTimeDigestMatch(csrfCandidate.digest, row?.csrf_digest ?? null);
+      || constantTimeOwnedDigestMatch(csrfCandidate.digest, ownedDriverDigest(row?.csrf_digest));
     if (
       !sessionCandidate.wellFormed
       || !sessionMatches
       || (input.requireCsrf === true && (!csrfCandidate.wellFormed || !csrfMatches))
       || row === undefined
     ) invalidSession();
-    return rowToStoredCoreSession(row);
+    return rowToCoreSessionAuthority(row);
   } finally {
     sessionCandidate.clear();
-    csrfCandidate.clear();
+    csrfCandidate?.clear();
   }
 }
 
@@ -258,7 +288,7 @@ export async function updateCoreSessionActivity(
     .returning(sessionColumns)
     .executeTakeFirst();
   if (row === undefined) invalidSession();
-  return rowToStoredCoreSession(row);
+  return rowToCoreSessionAuthority(row);
 }
 
 export async function expireCoreSession(
@@ -287,7 +317,7 @@ export async function lockCoreSessionById(
     .where("session_id", "=", sessionId)
     .forUpdate()
     .executeTakeFirst();
-  return row === undefined ? undefined : rowToStoredCoreSession(row);
+  return row === undefined ? undefined : rowToCoreSessionAuthority(row);
 }
 
 export async function revokeLockedCoreSession(
@@ -310,7 +340,7 @@ export async function revokeLockedCoreSession(
     .returning(sessionColumns)
     .executeTakeFirst();
   if (row === undefined) invalidSession();
-  return rowToStoredCoreSession(row);
+  return rowToCoreSessionAuthority(row);
 }
 
 export async function revokeCoreSessionsByScope(

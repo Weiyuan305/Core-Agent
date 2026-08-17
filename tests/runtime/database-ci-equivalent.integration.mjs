@@ -174,6 +174,8 @@ async function runCiEquivalentScenario({ injectedFailure = false, injectedOutput
     assert.match(postgresOutput, /disabled platform target can be revoked/u);
     assert.match(postgresOutput, /platform role service hides a missing target/u);
     assert.match(postgresOutput, /Session lifetime uses the injected database clock/u);
+    assert.match(postgresOutput, /owned Session credential buffers are cleared after use/u);
+    assert.match(postgresOutput, /recent reauthentication rejects stale snapshots after durable revoke expiry or timestamp change/u);
     assert.match(postgresOutput, /public fixed-window rate limits persist only account and IP-device HMACs/u);
     const integrationOutput = protectedRun("npm", ["run", "test:integration"], environment, credential, credentialFile);
     assertNodeTestSummaries(integrationOutput, [expectedCounts.integration.testCount]);
