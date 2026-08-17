@@ -214,6 +214,36 @@ export {
   type ActorIdentityAuthority,
 } from "./repositories/identity/identity-authority.js";
 export {
+  issueOpaqueCoreSessionCredential,
+  type CoreSessionRandomBytes,
+  type CoreSessionRevocationReason,
+  type IssuedOpaqueCredential,
+} from "./repositories/identity/core-sessions.js";
+export {
+  consumePublicRateLimit,
+  type ConsumePublicRateLimitDependencies,
+  type ConsumePublicRateLimitInput,
+  type PublicRateLimitBucketKind,
+} from "./repositories/identity/public-rate-limits.js";
+export {
+  authenticateCoreSession,
+  issueCoreSession,
+  revokeCoreSession,
+  revokeCoreSessions,
+  type AuthenticateCoreSessionInput,
+  type AuthenticatedCoreSession,
+  type CoreSessionAuthSubjectAuthority,
+  type CoreSessionDependencies,
+  type IssueCoreSessionInput,
+  type IssuedCoreSession,
+  type RevokeCoreSessionInput,
+  type RevokeCoreSessionsInput,
+} from "./services/identity/core-session.js";
+export {
+  requireRecentReauthentication,
+  type ReauthenticationDependencies,
+} from "./services/identity/reauthentication.js";
+export {
   constantTimeDigestMatches,
   deriveIdentityCommandId,
   invitationEmailHmac,

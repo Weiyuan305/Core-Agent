@@ -173,6 +173,8 @@ async function runCiEquivalentScenario({ injectedFailure = false, injectedOutput
     assert.match(postgresOutput, /regular platform reactivation fails closed before the protected zero-Tenant bootstrap/u);
     assert.match(postgresOutput, /disabled platform target can be revoked/u);
     assert.match(postgresOutput, /platform role service hides a missing target/u);
+    assert.match(postgresOutput, /Session lifetime uses the injected database clock/u);
+    assert.match(postgresOutput, /public fixed-window rate limits persist only account and IP-device HMACs/u);
     const integrationOutput = protectedRun("npm", ["run", "test:integration"], environment, credential, credentialFile);
     assertNodeTestSummaries(integrationOutput, [expectedCounts.integration.testCount]);
     assert.match(integrationOutput, /provision, converse, stream, restart, and resume/u);
