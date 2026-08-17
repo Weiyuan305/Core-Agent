@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import test from "node:test";
 
 import type { AuthProviderAdapter } from "../src/providers/auth-provider.js";
@@ -67,20 +66,20 @@ test("deterministic fake implements the closed adapter and returns only verified
     email: "new-user@example.test",
     password: "a sufficiently long password",
   }), { kind: "verification_pending" });
-  assert.equal(await provider.beginPasswordReset("unknown@example.test"), undefined);
+  const unknownBinding = await provider.beginPasswordReset("unknown@example.test");
+  assert.deepEqual(Object.keys(unknownBinding).sort(), ["expires_at", "state", "transaction_id"]);
+  assert.equal(Object.isFrozen(unknownBinding), true);
+  assert.equal(JSON.stringify(unknownBinding).includes("unknown@example.test"), false);
   await expectFailure(() => provider.completePasswordReset({
-    transaction_id: "password_reset_fake_0001",
+    binding: unknownBinding,
     authorization_code: "fake-recovery-code",
-    state: createHash("sha256").update("reset-state:password_reset_fake_0001").digest("hex"),
-    redirect_uri: "https://fake-auth.invalid/password-reset",
     new_password: "must not reset another account",
   }), "AUTH_INVALID");
-  assert.equal(await provider.beginPasswordReset(credential.email), undefined);
+  const binding = await provider.beginPasswordReset(credential.email);
+  assert.equal(binding.expires_at, "2026-08-17T01:07:03.000Z");
   assert.equal((await provider.completePasswordReset({
-    transaction_id: "password_reset_fake_0002",
+    binding,
     authorization_code: "fake-recovery-code",
-    state: createHash("sha256").update("reset-state:password_reset_fake_0002").digest("hex"),
-    redirect_uri: "https://fake-auth.invalid/password-reset",
     new_password: "a new sufficiently long password",
   })).providerSubject, "provider-subject-1");
   await expectFailure(() => provider.signInEmail(credential), "AUTH_INVALID");

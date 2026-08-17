@@ -17,6 +17,7 @@ import type {
   ProviderClientKind,
   ProviderProof,
   PasswordResetCompletionInput,
+  PasswordResetStart,
   VerifiedProviderSubject,
 } from "./auth-provider.js";
 import {
@@ -64,6 +65,20 @@ interface SupabaseClientPort {
   readonly auth: SupabaseAuthPort;
 }
 
+interface NativeLinkAuthorizationInput {
+  readonly supabaseUrl: string;
+  readonly publishableKey: string;
+  readonly accessToken: string;
+  readonly redirectUri: string;
+  readonly state: string;
+  readonly nonce: string;
+  readonly codeChallenge: string;
+}
+
+interface NativeLinkAuthorizationPort {
+  authorize(input: NativeLinkAuthorizationInput): Promise<string>;
+}
+
 export type SupabaseClientFactory = (
   url: string,
   key: string,
@@ -104,6 +119,7 @@ export interface SupabaseAuthProviderOptions {
   readonly transactionStore: OAuthTransactionStore;
   readonly transactionProtector: TransactionProtector;
   readonly createClient?: SupabaseClientFactory;
+  readonly nativeLinkAuthorization?: NativeLinkAuthorizationPort;
   readonly now?: () => Date;
   readonly randomBytes?: (length: number) => Uint8Array;
 }
@@ -182,6 +198,44 @@ const defaultClientFactory: SupabaseClientFactory = (url, key, options) => {
   }
   Object.defineProperty(auth, "storage", { ...storage, value: options.auth.storage });
   return client as SupabaseClientPort;
+};
+
+const defaultNativeLinkAuthorization: NativeLinkAuthorizationPort = {
+  async authorize(input) {
+    const endpoint = new URL("/auth/v1/user/identities/authorize", input.supabaseUrl);
+    endpoint.searchParams.set("provider", "apple");
+    endpoint.searchParams.set("redirect_to", input.redirectUri);
+    endpoint.searchParams.set("code_challenge", input.codeChallenge);
+    endpoint.searchParams.set("code_challenge_method", "S256");
+    endpoint.searchParams.set("state", input.state);
+    endpoint.searchParams.set("nonce", input.nonce);
+    endpoint.searchParams.set("skip_http_redirect", "true");
+
+    let response: Response;
+    try {
+      response = await fetch(endpoint, {
+        method: "GET",
+        headers: {
+          apikey: input.publishableKey,
+          Authorization: `Bearer ${input.accessToken}`,
+        },
+      });
+    } catch (error) {
+      throw mapProviderFailure(error);
+    }
+    if (!response.ok) {
+      throw mapProviderFailure(Object.freeze({ status: response.status }), "AUTH_CONFLICT");
+    }
+    let data: unknown;
+    try {
+      data = await response.json();
+    } catch (error) {
+      throw mapProviderFailure(error);
+    }
+    const authorizationUrl = ownString(data, "url");
+    if (authorizationUrl === undefined) throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+    return authorizationUrl;
+  },
 };
 
 function ownData(value: unknown, key: string): unknown {
@@ -410,6 +464,7 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
   readonly #transactionStore: OAuthTransactionStore;
   readonly #transactionProtector: TransactionProtector;
   readonly #createClient: SupabaseClientFactory;
+  readonly #nativeLinkAuthorization: NativeLinkAuthorizationPort;
   readonly #now: () => Date;
   readonly #randomBytes: (length: number) => Uint8Array;
 
@@ -422,6 +477,7 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
     this.#transactionStore = options.transactionStore;
     this.#transactionProtector = options.transactionProtector;
     this.#createClient = options.createClient ?? defaultClientFactory;
+    this.#nativeLinkAuthorization = options.nativeLinkAuthorization ?? defaultNativeLinkAuthorization;
     this.#now = options.now ?? (() => new Date());
     this.#randomBytes = options.randomBytes ?? ((length) => Uint8Array.from(nodeRandomBytes(length)));
   }
@@ -465,16 +521,13 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
     return this.#passwordSubject(credential);
   }
 
-  async beginPasswordReset(email: string): Promise<void> {
+  async beginPasswordReset(email: string): Promise<PasswordResetStart> {
     if (typeof email !== "string" || !validEmail(normalizeEmail(email))) {
       throw new ProviderFailure("AUTH_INVALID");
     }
     const transactionId = `oauth_${encodeOpaque(this.#randomBytes(18))}`;
     const state = encodeOpaque(this.#randomBytes(32));
-    const redirect = new URL(this.#passwordResetRedirectUri);
-    redirect.searchParams.set("transaction_id", transactionId);
-    redirect.searchParams.set("state", state);
-    const exactRedirect = redirect.toString();
+    const exactRedirect = this.#passwordResetRedirectUri;
     const expiresAt = new Date(this.#now().getTime() + oauthTransactionTtlMs).toISOString();
     const { client, storage, storageKey } = this.#newClient(undefined, transactionId);
     let verifierBytes: Uint8Array | undefined;
@@ -513,6 +566,11 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
         status: "pending",
         expires_at: expiresAt,
       })));
+      return Object.freeze({
+        transaction_id: transactionId,
+        state,
+        expires_at: expiresAt,
+      });
     } finally {
       verifierBytes?.fill(0);
       storage.clear();
@@ -559,12 +617,30 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
           queryParams: { state, nonce },
         },
       } as const;
-      const result = flowKind === "apple_link"
-        ? await safeProviderCall(() => client.auth.linkIdentity(oauthRequest), "AUTH_CONFLICT")
-        : await safeProviderCall(() => client.auth.signInWithOAuth(oauthRequest), "AUTH_CALLBACK_INVALID");
-      const data = requireResultData(result, flowKind === "apple_link" ? "AUTH_CONFLICT" : "AUTH_CALLBACK_INVALID");
-      const rawAuthorizationUrl = ownString(data, "url");
-      const flowId = ownString(data, "flowId");
+      let rawAuthorizationUrl: string | undefined;
+      let flowId: string | undefined;
+      if (flowKind === "apple_link" && parsed.clientKind !== "web") {
+        flowId = encodeOpaque(this.#randomBytes(12));
+        rawAuthorizationUrl = await safeProviderCall(() => this.#nativeLinkAuthorization.authorize({
+          supabaseUrl: this.#url,
+          publishableKey: this.#publishableKey,
+          accessToken: accessToken!,
+          redirectUri: parsed.redirectUri,
+          state,
+          nonce,
+          codeChallenge: parsed.pkceChallenge!,
+        }), "AUTH_CONFLICT");
+      } else {
+        const result = flowKind === "apple_link"
+          ? await safeProviderCall(() => client.auth.linkIdentity(oauthRequest), "AUTH_CONFLICT")
+          : await safeProviderCall(() => client.auth.signInWithOAuth(oauthRequest), "AUTH_CALLBACK_INVALID");
+        const data = requireResultData(
+          result,
+          flowKind === "apple_link" ? "AUTH_CONFLICT" : "AUTH_CALLBACK_INVALID",
+        );
+        rawAuthorizationUrl = ownString(data, "url");
+        flowId = ownString(data, "flowId");
+      }
       if (rawAuthorizationUrl === undefined || flowId === undefined || !/^[A-Za-z0-9_-]{8,64}$/u.test(flowId)) {
         throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
       }
@@ -637,25 +713,27 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
   }
 
   async completePasswordReset(input: PasswordResetCompletionInput): Promise<VerifiedProviderSubject> {
-    const transactionId = ownString(input, "transaction_id");
+    const binding = ownData(input, "binding");
+    const transactionId = ownString(binding, "transaction_id");
     const authorizationCode = ownString(input, "authorization_code");
-    const state = ownString(input, "state");
-    const redirectUri = ownString(input, "redirect_uri");
+    const state = ownString(binding, "state");
+    const bindingExpiresAtText = ownString(binding, "expires_at");
+    const bindingExpiresAt = bindingExpiresAtText === undefined
+      ? Number.NaN
+      : new Date(bindingExpiresAtText).getTime();
     const newPassword = ownString(input, "new_password");
     if (transactionId === undefined || transactionId.length === 0 || transactionId.length > 256
       || authorizationCode === undefined || authorizationCode.length < 8 || authorizationCode.length > 8_192
       || state === undefined || state.length < 8 || state.length > 4_096
-      || redirectUri === undefined || redirectUri.length > 2_048
+      || bindingExpiresAtText === undefined || bindingExpiresAtText.length > 64
+      || !Number.isFinite(bindingExpiresAt)
       || newPassword === undefined || newPassword.length < 8 || newPassword.length > 1_024) {
       throw new ProviderFailure("AUTH_CALLBACK_INVALID");
     }
     const transaction = await this.#consumeTransaction(transactionId);
-    const expectedRedirect = new URL(this.#passwordResetRedirectUri);
-    expectedRedirect.searchParams.set("transaction_id", transactionId);
-    expectedRedirect.searchParams.set("state", state);
     if (transaction.flowKind !== "password_reset" || transaction.actorId !== null
-      || transaction.clientKind !== "web" || transaction.redirectUri !== redirectUri
-      || transaction.redirectUri !== expectedRedirect.toString()
+      || transaction.clientKind !== "web" || transaction.redirectUri !== this.#passwordResetRedirectUri
+      || transaction.expiresAt !== bindingExpiresAt
       || transaction.expiresAt <= this.#now().getTime()
       || !equalDigest(transaction.stateDigest, sha256(state))) {
       throw new ProviderFailure("AUTH_CALLBACK_INVALID");

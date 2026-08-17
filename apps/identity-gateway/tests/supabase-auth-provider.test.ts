@@ -19,6 +19,7 @@ import {
 const fixedNow = new Date("2026-08-17T02:00:00.000Z");
 const callbackUri = "https://identity.example.test/auth/v1/apple/callback";
 const nativeCallbackUri = "coreagent://auth/callback";
+const passwordResetCallbackUri = "https://identity.example.test/auth/v1/password/reset/callback";
 const credential = Object.freeze({
   email: "USER@EXAMPLE.TEST",
   password: "correct horse battery staple",
@@ -231,7 +232,7 @@ function createHarness(input: {
       publishableKey: "publishable-key-not-secret",
       serviceRoleKey,
       appleRedirectUris: [callbackUri, nativeCallbackUri],
-      passwordResetRedirectUri: "https://identity.example.test/auth/v1/password/reset/callback",
+      passwordResetRedirectUri: passwordResetCallbackUri,
       transactionStore: store,
       transactionProtector: input.transactionProtector ?? protector,
       createClient: factory,
@@ -329,10 +330,9 @@ test("Supabase email, proof, reset, current-session revoke, and deletion use fre
   assert.equal(JSON.stringify(harness.store.records).includes(currentJwt), false);
   const resetArguments = harness.methodCalls.find((call) => call.name === "resetPasswordForEmail")?.arguments;
   assert.equal(resetArguments?.[0], "user@example.test");
-  const resetUrl = new URL((resetArguments?.[1] as { readonly redirectTo: string }).redirectTo);
-  assert.equal(`${resetUrl.origin}${resetUrl.pathname}`, "https://identity.example.test/auth/v1/password/reset/callback");
-  assert.match(resetUrl.searchParams.get("transaction_id") ?? "", /^oauth_[A-Za-z0-9_-]+$/u);
-  assert.match(resetUrl.searchParams.get("state") ?? "", /^[A-Za-z0-9_-]+$/u);
+  assert.equal((resetArguments?.[1] as { readonly redirectTo: string }).redirectTo, passwordResetCallbackUri);
+  assert.deepEqual(Object.keys(outputs[4] as object).sort(), ["expires_at", "state", "transaction_id"]);
+  assert.equal(Object.isFrozen(outputs[4]), true);
   assert.deepEqual(harness.methodCalls.find((call) => call.name === "deleteUser")?.arguments, [
     "provider-subject-1",
     false,
@@ -823,21 +823,95 @@ test("Supabase Apple link start/callback mirror released Web/native shapes plus 
   assert.equal(harness.methodCalls.filter((call) => call.name === "linkIdentity").length, 1);
 });
 
+test("installed Supabase 2.112.2 native Apple link sends the caller S256 challenge to the authenticated endpoint", async () => {
+  const runtimePackage = createRequire(import.meta.url)("@supabase/supabase-js/package.json") as {
+    readonly version?: unknown;
+  };
+  assert.equal(runtimePackage.version, "2.112.2");
+
+  const originalFetch = globalThis.fetch;
+  const serverRequests: Request[] = [];
+  const accessToken = [
+    Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url"),
+    Buffer.from(JSON.stringify({ exp: 4_102_444_800 })).toString("base64url"),
+    "unsigned-test-sentinel",
+  ].join(".");
+  globalThis.fetch = async (input, init) => {
+    const request = new Request(input, init);
+    serverRequests.push(request);
+    const requestUrl = new URL(request.url);
+    if (requestUrl.pathname === "/auth/v1/user") {
+      return Response.json({ user: {
+        id: "provider-subject-1",
+        email: "User@Example.Test",
+        email_confirmed_at: "2026-08-01T00:00:00.000Z",
+        app_metadata: { provider: "email" },
+      } });
+    }
+    if (requestUrl.pathname === "/auth/v1/user/identities/authorize") {
+      const authorizationUrl = new URL("https://appleid.apple.com/auth/authorize");
+      for (const key of ["state", "nonce", "code_challenge", "code_challenge_method"] as const) {
+        const value = requestUrl.searchParams.get(key);
+        if (value !== null) authorizationUrl.searchParams.set(key, value);
+      }
+      return Response.json({ url: authorizationUrl.toString() });
+    }
+    return Response.json({ code: "unexpected_test_request" }, { status: 500 });
+  };
+
+  try {
+    const provider = new SupabaseAuthProvider({
+      supabaseUrl: "https://example.supabase.co",
+      publishableKey: "publishable-key-not-secret",
+      serviceRoleKey,
+      appleRedirectUris: [nativeCallbackUri],
+      passwordResetRedirectUri: callbackUri,
+      transactionStore: new MemoryTransactionStore(),
+      transactionProtector: protector,
+      now: () => new Date(fixedNow),
+    });
+
+    await provider.beginAppleLink({
+      ...nativeAppleStart(),
+      authenticatedActorId: "actor-1",
+      providerProof: { accessToken },
+    });
+
+    const authorizationRequest = serverRequests.find(
+      (request) => new URL(request.url).pathname === "/auth/v1/user/identities/authorize",
+    );
+    assert(authorizationRequest !== undefined);
+    const authorizationRequestUrl = new URL(authorizationRequest.url);
+    assert.equal(authorizationRequestUrl.searchParams.get("code_challenge"), nativePkceChallenge);
+    assert.equal(authorizationRequestUrl.searchParams.get("code_challenge_method"), "S256");
+    assert.equal(authorizationRequest.headers.get("authorization"), `Bearer ${accessToken}`);
+    assert.equal(authorizationRequest.headers.get("apikey"), "publishable-key-not-secret");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("Supabase password recovery persists a one-time transaction, updates password, and globally revokes without token output", async () => {
   const harness = createHarness();
-  await harness.provider.beginPasswordReset("USER@EXAMPLE.TEST");
+  const binding = await harness.provider.beginPasswordReset("USER@EXAMPLE.TEST");
   const resetCall = harness.methodCalls.find((call) => call.name === "resetPasswordForEmail");
-  const resetRedirect = new URL((resetCall?.arguments[1] as { redirectTo: string }).redirectTo);
-  const transactionId = resetRedirect.searchParams.get("transaction_id") ?? "";
-  const state = resetRedirect.searchParams.get("state") ?? "";
-  const transaction = harness.store.records.get(transactionId);
+  const sentRedirect = (resetCall?.arguments[1] as { redirectTo: string }).redirectTo;
+  assert.equal(sentRedirect, passwordResetCallbackUri);
+  assert.equal(new URL(sentRedirect).search, "");
+  assert.deepEqual(Object.keys(binding).sort(), ["expires_at", "state", "transaction_id"]);
+  assert.equal(Object.isFrozen(binding), true);
+  assert.match(binding.transaction_id, /^oauth_[A-Za-z0-9_-]+$/u);
+  assert.match(binding.state, /^[A-Za-z0-9_-]+$/u);
+  assert.equal(binding.expires_at, "2026-08-17T02:05:00.000Z");
+  assert.equal(JSON.stringify(binding).includes("user@example.test"), false);
+  assert.equal(JSON.stringify(binding).includes(recoveryVerifier), false);
+  assert.equal(JSON.stringify(binding).includes(providerAccessToken), false);
+  const transaction = harness.store.records.get(binding.transaction_id);
   assert.equal(transaction?.flow_kind, "password_reset");
-  assert.equal(transaction?.redirect_uri, resetRedirect.toString());
+  assert.equal(transaction?.redirect_uri, passwordResetCallbackUri);
   const result = await harness.provider.completePasswordReset({
-    transaction_id: transactionId,
+    binding,
     authorization_code: "one-time-recovery-code",
-    state,
-    redirect_uri: resetRedirect.toString(),
     new_password: "new correct horse battery staple",
   });
   assert.equal(result.providerSubject, "provider-subject-1");
@@ -847,32 +921,21 @@ test("Supabase password recovery persists a one-time transaction, updates passwo
   assert.deepEqual(harness.methodCalls.filter((call) => call.name === "signOut").at(-1)?.arguments,
     [{ scope: "global" }]);
   assert.equal(JSON.stringify(result).includes(providerAccessToken), false);
-  assert.equal(harness.store.records.has(transactionId), false);
+  assert.equal(harness.store.records.has(binding.transaction_id), false);
   await expectFailure(() => harness.provider.completePasswordReset({
-    transaction_id: transactionId, authorization_code: "one-time-recovery-code", state,
-    redirect_uri: resetRedirect.toString(), new_password: "another valid password",
+    binding, authorization_code: "one-time-recovery-code", new_password: "another valid password",
   }), "AUTH_CALLBACK_INVALID");
 
   for (const mutate of [
-    (input: { state: string; redirect_uri: string }) => ({ ...input, state: `${input.state}-changed` }),
-    (input: { state: string; redirect_uri: string }) => ({
-      ...input,
-      redirect_uri: input.redirect_uri.replace("/callback", "/other"),
-    }),
+    (input: typeof binding) => ({ ...input, state: `${input.state}-changed` }),
+    (input: typeof binding) => ({ ...input, expires_at: "2026-08-17T02:04:59.000Z" }),
   ]) {
     const isolated = createHarness();
-    await isolated.provider.beginPasswordReset("USER@EXAMPLE.TEST");
-    const isolatedResetCall = isolated.methodCalls.find((call) => call.name === "resetPasswordForEmail");
-    const isolatedRedirect = new URL((isolatedResetCall?.arguments[1] as { redirectTo: string }).redirectTo);
-    const isolatedInput = mutate({
-      state: isolatedRedirect.searchParams.get("state") ?? "",
-      redirect_uri: isolatedRedirect.toString(),
-    });
+    const isolatedBinding = await isolated.provider.beginPasswordReset("USER@EXAMPLE.TEST");
+    const isolatedInput = mutate(isolatedBinding);
     await expectFailure(() => isolated.provider.completePasswordReset({
-      transaction_id: isolatedRedirect.searchParams.get("transaction_id") ?? "",
+      binding: isolatedInput,
       authorization_code: "one-time-recovery-code",
-      state: isolatedInput.state,
-      redirect_uri: isolatedInput.redirect_uri,
       new_password: "another valid password",
     }), "AUTH_CALLBACK_INVALID");
     assert.equal(isolated.methodCalls.some((call) => call.name === "exchangeCodeForSession"), false);

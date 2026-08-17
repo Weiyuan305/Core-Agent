@@ -11,6 +11,7 @@ import type {
   ProviderClientKind,
   ProviderProof,
   PasswordResetCompletionInput,
+  PasswordResetStart,
   VerifiedProviderSubject,
 } from "./auth-provider.js";
 import { ProviderFailure } from "./provider-errors.js";
@@ -153,13 +154,14 @@ export class FakeAuthProvider implements AuthProviderAdapter {
     return this.signInEmail(input);
   }
 
-  async beginPasswordReset(email: string): Promise<void> {
+  async beginPasswordReset(email: string): Promise<PasswordResetStart> {
     if (typeof email !== "string" || !validEmail(normalizeEmail(email))) {
       throw new ProviderFailure("AUTH_INVALID");
     }
     this.#transactionCounter += 1;
     const transactionId = `password_reset_fake_${this.#transactionCounter.toString().padStart(4, "0")}`;
     const state = digest(`reset-state:${transactionId}`);
+    const expiresAt = this.#now().getTime() + oauthTtlMs;
     this.#transactions.set(transactionId, {
       flowKind: "password_reset",
       actorId: null,
@@ -169,7 +171,12 @@ export class FakeAuthProvider implements AuthProviderAdapter {
       stateDigest: digest(state),
       nonceDigest: digest(`reset-nonce:${transactionId}`),
       pkceChallenge: null,
-      expiresAt: this.#now().getTime() + oauthTtlMs,
+      expiresAt,
+    });
+    return Object.freeze({
+      transaction_id: transactionId,
+      state,
+      expires_at: new Date(expiresAt).toISOString(),
     });
   }
 
@@ -185,20 +192,24 @@ export class FakeAuthProvider implements AuthProviderAdapter {
   }
 
   async completePasswordReset(input: PasswordResetCompletionInput): Promise<VerifiedProviderSubject> {
-    const transactionId = ownString(input, "transaction_id");
+    const binding = ownData(input, "binding");
+    const transactionId = ownString(binding, "transaction_id");
     const authorizationCode = ownString(input, "authorization_code");
-    const state = ownString(input, "state");
-    const redirectUri = ownString(input, "redirect_uri");
+    const state = ownString(binding, "state");
+    const expiresAt = ownString(binding, "expires_at");
     const password = ownString(input, "new_password");
     if (transactionId === undefined || authorizationCode === undefined || authorizationCode.length < 8
-      || state === undefined || redirectUri === undefined || password === undefined
+      || state === undefined || expiresAt === undefined || !Number.isFinite(new Date(expiresAt).getTime())
+      || password === undefined
       || password.length < 8 || password.length > 1_024) {
       throw new ProviderFailure("AUTH_CALLBACK_INVALID");
     }
     const transaction = this.#transactions.get(transactionId);
     this.#transactions.delete(transactionId);
     if (transaction === undefined || transaction.flowKind !== "password_reset"
-      || transaction.redirectUri !== redirectUri || transaction.expiresAt <= this.#now().getTime()
+      || transaction.redirectUri !== "https://fake-auth.invalid/password-reset"
+      || new Date(transaction.expiresAt).toISOString() !== expiresAt
+      || transaction.expiresAt <= this.#now().getTime()
       || transaction.stateDigest !== digest(state)) {
       throw new ProviderFailure("AUTH_CALLBACK_INVALID");
     }

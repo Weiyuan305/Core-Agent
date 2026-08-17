@@ -35,11 +35,19 @@ export type AppleLinkInput = AppleIdentityLinkRequest & {
   readonly providerProof: ProviderProof;
 };
 
-export interface PasswordResetCompletionInput {
+/**
+ * Internal recovery binding. Task 7 must transport this only in a Secure,
+ * HttpOnly, SameSite cookie and must never serialize it into public JSON.
+ */
+export interface PasswordResetStart {
   readonly transaction_id: string;
-  readonly authorization_code: string;
   readonly state: string;
-  readonly redirect_uri: string;
+  readonly expires_at: string;
+}
+
+export interface PasswordResetCompletionInput {
+  readonly binding: PasswordResetStart;
+  readonly authorization_code: string;
   readonly new_password: string;
 }
 
@@ -51,7 +59,7 @@ export interface AuthProviderAdapter {
   completeApple(input: AppleAuthorizationCallback): Promise<VerifiedProviderSubject>;
   verifyCurrentSubject(input: ProviderProof): Promise<VerifiedProviderSubject>;
   reauthenticatePassword(input: EmailCredentialInput): Promise<VerifiedProviderSubject>;
-  beginPasswordReset(email: string): Promise<void>;
+  beginPasswordReset(email: string): Promise<PasswordResetStart>;
   completePasswordReset(input: PasswordResetCompletionInput): Promise<VerifiedProviderSubject>;
   linkApple(input: AppleLinkInput): Promise<VerifiedProviderSubject>;
   revokeCurrentProviderSession(input: ProviderProof): Promise<void>;

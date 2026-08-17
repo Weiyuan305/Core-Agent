@@ -529,6 +529,12 @@ Use one closed interface:
 ```ts
 export type VerifiedProviderSubject = VerifiedAuthSubjectInput;
 
+export interface PasswordResetStart {
+  readonly transaction_id: string;
+  readonly state: string;
+  readonly expires_at: string;
+}
+
 export interface AuthProviderAdapter {
   signUpEmail(input: EmailCredentialInput): Promise<{ readonly kind: "verification_pending" }>;
   signInEmail(input: EmailCredentialInput): Promise<VerifiedProviderSubject>;
@@ -536,9 +542,10 @@ export interface AuthProviderAdapter {
   completeApple(input: AppleAuthorizationCallback): Promise<VerifiedProviderSubject>;
   verifyCurrentSubject(input: ProviderProof): Promise<VerifiedProviderSubject>;
   reauthenticatePassword(input: EmailCredentialInput): Promise<VerifiedProviderSubject>;
-  beginPasswordReset(email: string): Promise<void>;
+  beginPasswordReset(email: string): Promise<PasswordResetStart>;
+  completePasswordReset(input: PasswordResetCompletionInput): Promise<VerifiedProviderSubject>;
   linkApple(input: AppleLinkInput): Promise<VerifiedProviderSubject>;
-  revokeProviderSessions(providerSubject: string): Promise<void>;
+  revokeCurrentProviderSession(input: ProviderProof): Promise<void>;
   deleteProviderSubject(providerSubject: string): Promise<void>;
 }
 ```
@@ -574,6 +581,11 @@ Do not branch on public error-message text. Use provider status/code internally,
 Create a fresh server-side Supabase client per operation with persistence, auto-refresh, and URL session detection disabled. Keep access/refresh tokens inside the adapter call, validate `email_confirmed_at`, copy only the allowlisted subject facts, sign out the transient provider client, and release references.
 
 Apple flow must persist a one-time OAuth transaction digest containing state, nonce, PKCE verifier digest, exact redirect URI, client kind, expiry, and optional authenticated Actor for linking. Callback validates all fields before exchanging the code. A callback failure creates no Core Actor, AuthSubject, or Core Session.
+
+Password recovery sends the configured Supabase redirect URI unchanged. Its
+one-time transaction/state/expiry binding is adapter-internal transport state,
+contains no email or provider token, and is consumed by completion together
+with the callback code and new password.
 
 - [ ] **Step 5: Verify and commit**
 
@@ -687,6 +699,10 @@ Inject requests and prove:
 - OAuth redirects match an exact configured allowlist;
 - account/invitation/Tenant enumeration returns identical status, body shape, and bounded timing class; and
 - provider/internal/cookie/key/database details never enter responses.
+- password-reset start returns its opaque binding only in a dedicated
+  `Secure; HttpOnly; SameSite=Lax` recovery Cookie; the binding never enters
+  public JSON, and the provider redirect remains the exact configured URL with
+  no per-transaction query parameters.
 
 - [ ] **Step 2: Implement strict configuration**
 
@@ -714,6 +730,11 @@ Map `AUTH_INVALID`, unknown Session, unknown invitation, and unknown account to 
 - [ ] **Step 4: Implement cookie and native transport separation**
 
 Web receives Session secret only in `Set-Cookie`; the JSON body contains `AuthSessionView`. Native Apple clients receive the opaque secret once in the TLS response and no Cookie. Both paths create the same database resource. Reject a Web request attempting native response mode and vice versa.
+
+Password-reset completion reads the recovery transaction/state/expiry only
+from the dedicated HttpOnly Cookie, combines it with the provider callback code
+and submitted new password, consumes it once, and clears the Cookie on every
+terminal outcome.
 
 - [ ] **Step 5: Verify and commit**
 
