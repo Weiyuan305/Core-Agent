@@ -236,8 +236,10 @@ test("formal PostgreSQL registration includes both Task 6 suites exactly once an
   assert.match(ciEquivalent, /authentication clears original query-result digest Buffers/u);
   assert.match(ciEquivalent, /Session authentication rejects non-canonical base64url credential aliases/u);
   assert.match(ciEquivalent, /verified password reauthentication durably establishes the exact 10-minute authority boundary/u);
+  assert.match(ciEquivalent, /external provider work stays outside retry while the durable Session command rechecks current authority/u);
   assert.match(ciEquivalent, /a normally issued Apple Session becomes eligible after verified password reauthentication/u);
   assert.match(ciEquivalent, /protected reauthenticated mutations serialize behind disable unlink and revoke/u);
+  assert.match(ciEquivalent, /transaction-scoped guard retains canonical locks through a real protected Session command/u);
   assert.match(ciEquivalent, /public fixed-window rate limits persist only account and IP-device HMACs/u);
   const repositorySource = await readFile(
     join(repositoryRoot, "packages", "runtime-core", "src", "repositories", "identity", "public-rate-limits.ts"),

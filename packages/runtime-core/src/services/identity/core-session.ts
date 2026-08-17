@@ -28,6 +28,8 @@ export interface CoreSessionDependencies {
   readonly databaseNow?: (trx: Transaction<RuntimeDatabase>) => Promise<Date>;
 }
 
+export type CoreSessionTransactionDependencies = Pick<CoreSessionDependencies, "databaseNow">;
+
 export interface IssueCoreSessionInput {
   readonly sessionId: string;
   readonly actorId: string;
@@ -241,6 +243,42 @@ function assertRevokeIdentity(actorId: string, sessionId?: string): void {
   }
 }
 
+async function revokeCoreSessionInLockedTransaction(
+  dependencies: CoreSessionTransactionDependencies,
+  trx: Transaction<RuntimeDatabase>,
+  input: RevokeCoreSessionInput,
+): Promise<CoreSession> {
+  const actor = await trx.selectFrom("actors").select("actor_id")
+    .where("actor_id", "=", input.actorId)
+    .forUpdate()
+    .executeTakeFirst();
+  if (actor === undefined) publicCoreSessionInvalid();
+  const stored = await lockCoreSessionById(trx, input.actorId, input.sessionId);
+  if (stored === undefined) publicCoreSessionInvalid();
+  if (stored.session.status === "revoked") return stored.session;
+  const now = await databaseNow(dependencies, trx);
+  const revoked = await revokeLockedCoreSession(trx, {
+    sessionId: input.sessionId,
+    reason: input.reason,
+    now,
+    expectedResourceVersion: stored.session.resource_version,
+  });
+  return revoked.session;
+}
+
+/** Transaction-aware variant for composition after current-authority guards. */
+export async function revokeCoreSessionInTransaction(
+  dependencies: CoreSessionTransactionDependencies,
+  trx: Transaction<RuntimeDatabase>,
+  input: RevokeCoreSessionInput,
+): Promise<CoreSession> {
+  assertRevokeIdentity(input.actorId, input.sessionId);
+  if (input.reason !== "user_sign_out" && input.reason !== "administrator_revoked") {
+    throw new DomainError("INVALID_REQUEST", "Core Session revocation reason is invalid");
+  }
+  return revokeCoreSessionInLockedTransaction(dependencies, trx, input);
+}
+
 export async function revokeCoreSession(
   dependencies: CoreSessionDependencies,
   input: RevokeCoreSessionInput,
@@ -249,24 +287,9 @@ export async function revokeCoreSession(
   if (input.reason !== "user_sign_out" && input.reason !== "administrator_revoked") {
     throw new DomainError("INVALID_REQUEST", "Core Session revocation reason is invalid");
   }
-  return withDatabaseTransactionRetry(dependencies.db, async (trx) => {
-    const actor = await trx.selectFrom("actors").select("actor_id")
-      .where("actor_id", "=", input.actorId)
-      .forUpdate()
-      .executeTakeFirst();
-    if (actor === undefined) publicCoreSessionInvalid();
-    const stored = await lockCoreSessionById(trx, input.actorId, input.sessionId);
-    if (stored === undefined) publicCoreSessionInvalid();
-    if (stored.session.status === "revoked") return stored.session;
-    const now = await databaseNow(dependencies, trx);
-    const revoked = await revokeLockedCoreSession(trx, {
-      sessionId: input.sessionId,
-      reason: input.reason,
-      now,
-      expectedResourceVersion: stored.session.resource_version,
-    });
-    return revoked.session;
-  });
+  return withDatabaseTransactionRetry(dependencies.db, async (trx) => (
+    revokeCoreSessionInLockedTransaction(dependencies, trx, input)
+  ));
 }
 
 export async function revokeCoreSessions(

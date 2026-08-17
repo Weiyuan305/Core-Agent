@@ -178,8 +178,10 @@ async function runCiEquivalentScenario({ injectedFailure = false, injectedOutput
     assert.match(postgresOutput, /authentication clears original query-result digest Buffers/u);
     assert.match(postgresOutput, /Session authentication rejects non-canonical base64url credential aliases/u);
     assert.match(postgresOutput, /verified password reauthentication durably establishes the exact 10-minute authority boundary/u);
+    assert.match(postgresOutput, /external provider work stays outside retry while the durable Session command rechecks current authority/u);
     assert.match(postgresOutput, /a normally issued Apple Session becomes eligible after verified password reauthentication/u);
     assert.match(postgresOutput, /protected reauthenticated mutations serialize behind disable unlink and revoke/u);
+    assert.match(postgresOutput, /transaction-scoped guard retains canonical locks through a real protected Session command/u);
     assert.match(postgresOutput, /public fixed-window rate limits persist only account and IP-device HMACs/u);
     const integrationOutput = protectedRun("npm", ["run", "test:integration"], environment, credential, credentialFile);
     assertNodeTestSummaries(integrationOutput, [expectedCounts.integration.testCount]);

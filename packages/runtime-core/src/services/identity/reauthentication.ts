@@ -15,6 +15,11 @@ export interface ReauthenticationDependencies {
   readonly databaseNow?: (trx: Transaction<RuntimeDatabase>) => Promise<Date>;
 }
 
+export interface ReauthenticationTransactionContext {
+  readonly trx: Transaction<RuntimeDatabase>;
+  readonly databaseNow?: (trx: Transaction<RuntimeDatabase>) => Promise<Date>;
+}
+
 export interface CurrentCoreSessionAuthorityInput {
   readonly actorId: string;
   readonly authSubjectId: string;
@@ -32,8 +37,7 @@ export interface EstablishedReauthentication {
   readonly session_resource_version: number;
 }
 
-export interface RecentReauthenticationContext {
-  readonly trx: Transaction<RuntimeDatabase>;
+export interface RecentReauthenticationAuthority {
   readonly session: CoreSession;
   readonly actor: {
     readonly actorId: string;
@@ -51,16 +55,14 @@ export interface RecentReauthenticationContext {
   readonly validUntil: string;
 }
 
-export type ProtectedReauthenticatedMutation<T> = (
-  context: RecentReauthenticationContext,
-) => Promise<T>;
-
 interface LockedCurrentAuthority {
   readonly session: CoreSession;
-  readonly actor: RecentReauthenticationContext["actor"];
-  readonly authSubject: RecentReauthenticationContext["authSubject"];
+  readonly actor: RecentReauthenticationAuthority["actor"];
+  readonly authSubject: RecentReauthenticationAuthority["authSubject"];
   readonly now: Date;
 }
+
+type ReauthenticationClock = Pick<ReauthenticationDependencies, "databaseNow">;
 
 const recentReauthenticationMs = 10 * 60 * 1_000;
 
@@ -80,7 +82,7 @@ function validDate(value: Date | undefined, message: string): Date {
 }
 
 async function readDatabaseNow(
-  dependencies: ReauthenticationDependencies,
+  dependencies: ReauthenticationClock,
   trx: Transaction<RuntimeDatabase>,
 ): Promise<Date> {
   const now = dependencies.databaseNow === undefined
@@ -111,14 +113,14 @@ function validityBoundary(session: CoreSession, reauthenticatedAt: number): numb
 
 /** Locks current authority in the canonical Actor -> AuthSubject -> Session order. */
 async function lockCurrentCoreSessionAuthority(
-  dependencies: ReauthenticationDependencies,
+  dependencies: ReauthenticationClock,
   trx: Transaction<RuntimeDatabase>,
   input: CurrentCoreSessionAuthorityInput,
 ): Promise<LockedCurrentAuthority> {
   assertAuthorityInput(input);
   const actorRow = await trx.selectFrom("actors").select(["actor_id", "status"])
     .where("actor_id", "=", input.actorId)
-    .forShare()
+    .forUpdate()
     .executeTakeFirst();
   if (actorRow?.status !== "active") requireReauthentication();
 
@@ -126,7 +128,7 @@ async function lockCurrentCoreSessionAuthority(
     "auth_subject_id", "actor_id", "provider", "provider_subject", "provider_identity_kind", "status",
   ]).where("auth_subject_id", "=", input.authSubjectId)
     .where("actor_id", "=", input.actorId)
-    .forShare()
+    .forUpdate()
     .executeTakeFirst();
   if (subjectRow?.status !== "active") requireReauthentication();
 
@@ -197,32 +199,33 @@ export async function establishRecentReauthentication(
   });
 }
 
-/** Executes the protected mutation while retaining all current-authority locks. */
-export async function requireRecentReauthentication<T>(
-  dependencies: ReauthenticationDependencies,
+/**
+ * Locks and verifies recent current authority inside a caller-owned transaction.
+ *
+ * Provider/OAuth start may happen before this transaction only when it has no
+ * durable authority effect. A callback or other final durable identity mutation
+ * must call this guard again and mutate through the same transaction.
+ */
+export async function requireRecentReauthentication(
+  context: ReauthenticationTransactionContext,
   input: CurrentCoreSessionAuthorityInput,
-  mutation: ProtectedReauthenticatedMutation<T>,
-): Promise<T> {
-  if (typeof mutation !== "function") requireReauthentication();
-  return withDatabaseTransactionRetry(dependencies.db, async (trx) => {
-    const locked = await lockCurrentCoreSessionAuthority(dependencies, trx, input);
-    if (locked.session.reauthenticated_at === undefined) requireReauthentication();
-    const reauthenticatedAt = Date.parse(locked.session.reauthenticated_at);
-    if (!Number.isFinite(reauthenticatedAt)) {
-      throw new DomainError("INTERNAL_ERROR", "Stored Core Session reauthentication is invalid");
-    }
-    const validUntil = validityBoundary(locked.session, reauthenticatedAt);
-    const age = locked.now.getTime() - reauthenticatedAt;
-    if (age < 0 || age >= recentReauthenticationMs || locked.now.getTime() >= validUntil) {
-      requireReauthentication();
-    }
-    return mutation(Object.freeze({
-      trx,
-      session: locked.session,
-      actor: locked.actor,
-      authSubject: locked.authSubject,
-      reauthenticatedAt: locked.session.reauthenticated_at,
-      validUntil: new Date(validUntil).toISOString(),
-    }));
+): Promise<RecentReauthenticationAuthority> {
+  const locked = await lockCurrentCoreSessionAuthority(context, context.trx, input);
+  if (locked.session.reauthenticated_at === undefined) requireReauthentication();
+  const reauthenticatedAt = Date.parse(locked.session.reauthenticated_at);
+  if (!Number.isFinite(reauthenticatedAt)) {
+    throw new DomainError("INTERNAL_ERROR", "Stored Core Session reauthentication is invalid");
+  }
+  const validUntil = validityBoundary(locked.session, reauthenticatedAt);
+  const age = locked.now.getTime() - reauthenticatedAt;
+  if (age < 0 || age >= recentReauthenticationMs || locked.now.getTime() >= validUntil) {
+    requireReauthentication();
+  }
+  return Object.freeze({
+    session: locked.session,
+    actor: locked.actor,
+    authSubject: locked.authSubject,
+    reauthenticatedAt: locked.session.reauthenticated_at,
+    validUntil: new Date(validUntil).toISOString(),
   });
 }
