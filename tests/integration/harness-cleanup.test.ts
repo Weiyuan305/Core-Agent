@@ -12,9 +12,15 @@ const databaseName = "core_agent_test_0123456789abcdef";
 const repositoryRoot = join(import.meta.dirname, "..", "..");
 
 async function runCleanupChild(
-  scenario: "delayed-backends" | "termination-failure" | "transient-drop",
+  scenario: "delayed-backends" | "delayed-backends-release" | "termination-failure" | "transient-drop",
   operation: "terminate" | "drop",
-): Promise<number | null> {
+): Promise<{
+  readonly code: number | null;
+  readonly diagnostics: readonly unknown[];
+  readonly elapsedMs: number;
+}> {
+  const startedAt = Date.now();
+  const diagnostics: unknown[] = [];
   const child = spawn(process.execPath, [
     "--import", join(repositoryRoot, "tests", "integration", "fixtures", "cleanup-test-database-child-pg-hook.mjs"),
     join(repositoryRoot, "scripts", "cleanup-test-database-child.mjs"),
@@ -25,10 +31,11 @@ async function runCleanupChild(
   ], {
     cwd: repositoryRoot,
     env: { ...process.env, CLEANUP_TEST_DATABASE_CHILD_SCENARIO: scenario },
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", "ignore", "ipc"],
   });
+  child.on("message", (message) => { diagnostics.push(message); });
   const [code] = await once(child, "close") as [number | null];
-  return code;
+  return { code, diagnostics, elapsedMs: Date.now() - startedAt };
 }
 
 function terminalOperation(work: () => void | Promise<void>) {
@@ -37,15 +44,35 @@ function terminalOperation(work: () => void | Promise<void>) {
 }
 
 test("cleanup terminate child fails if exact target backends remain through its deadline", async () => {
-  assert.notEqual(await runCleanupChild("delayed-backends", "terminate"), 0);
+  assert.notEqual((await runCleanupChild("delayed-backends", "terminate")).code, 0);
+});
+
+test("cleanup terminate child waits for an exact delayed backend to disappear before success", async () => {
+  const result = await runCleanupChild("delayed-backends-release", "terminate");
+  assert.equal(result.code, 0);
+  assert.deepEqual(result.diagnostics, [
+    {
+      type: "remaining",
+      remaining: "1",
+      sql: "select count(*) as remaining\n         from pg_stat_activity\n         where datname = $1 and pid <> pg_backend_pid()",
+      values: [databaseName],
+    },
+    {
+      type: "remaining",
+      remaining: "0",
+      sql: "select count(*) as remaining\n         from pg_stat_activity\n         where datname = $1 and pid <> pg_backend_pid()",
+      values: [databaseName],
+    },
+  ]);
+  assert(result.elapsedMs < 500, `cleanup child exceeded its bounded deadline: ${result.elapsedMs}ms`);
 });
 
 test("cleanup terminate child does not treat a failed exact termination as success", async () => {
-  assert.notEqual(await runCleanupChild("termination-failure", "terminate"), 0);
+  assert.notEqual((await runCleanupChild("termination-failure", "terminate")).code, 0);
 });
 
 test("cleanup drop child retries an exact transient DROP failure before absence succeeds", async () => {
-  assert.equal(await runCleanupChild("transient-drop", "drop"), 0);
+  assert.equal((await runCleanupChild("transient-drop", "drop")).code, 0);
 });
 
 test("isolated database teardown closes owned pools before exact active-backend termination and verifies absence", async () => {
