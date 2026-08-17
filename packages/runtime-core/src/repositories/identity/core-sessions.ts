@@ -76,6 +76,7 @@ function credentialCandidate(secret: unknown): CredentialCandidate {
   const wellFormed = typeof secret === "string" && opaqueSecretPattern.test(secret);
   const bytes = wellFormed ? Buffer.from(secret, "base64url") : Buffer.alloc(32);
   const validLength = bytes.length === 32;
+  const canonical = wellFormed && validLength && bytes.toString("base64url") === secret;
   const fixedBytes = validLength ? bytes : Buffer.alloc(32);
   let digest: Buffer | undefined;
   try {
@@ -83,7 +84,7 @@ function credentialCandidate(secret: unknown): CredentialCandidate {
     const ownedDigest = digest;
     return {
       digest: ownedDigest,
-      wellFormed: wellFormed && validLength,
+      wellFormed: canonical,
       clear() {
         bytes.fill(0);
         ownedDigest.fill(0);
@@ -124,7 +125,8 @@ export const coreSessionSecretTestInternals = Object.freeze({
   constantTimeOwnedDigestMatch,
 });
 
-function ownedDriverDigest(digest: Uint8Array | null | undefined): Buffer {
+function queryResultDigest(digest: Uint8Array | null | undefined): Buffer {
+  if (Buffer.isBuffer(digest)) return digest;
   return digest === null || digest === undefined ? Buffer.alloc(32) : Buffer.from(digest);
 }
 
@@ -175,6 +177,7 @@ const sessionColumns = [
 ] as const;
 
 const sessionCredentialColumns = [...sessionColumns, "secret_digest", "csrf_digest"] as const;
+const sessionSecretColumns = [...sessionColumns, "secret_digest"] as const;
 
 export async function insertCoreSession(
   trx: Transaction<RuntimeDatabase>,
@@ -222,7 +225,7 @@ export async function discoverCoreSessionBySecret(
       .select(["session_id", "actor_id", "secret_digest"])
       .where("secret_digest", "=", candidate.digest)
       .executeTakeFirst();
-    const matches = constantTimeOwnedDigestMatch(candidate.digest, ownedDriverDigest(row?.secret_digest));
+    const matches = constantTimeOwnedDigestMatch(candidate.digest, queryResultDigest(row?.secret_digest));
     if (!candidate.wellFormed || !matches || row === undefined) invalidSession();
     return Object.freeze({ sessionId: row.session_id, actorId: row.actor_id });
   } finally {
@@ -243,22 +246,26 @@ export async function lockCoreSessionCredential(
   const sessionCandidate = credentialCandidate(input.sessionSecret);
   let csrfCandidate: CredentialCandidate | undefined;
   try {
-    csrfCandidate = credentialCandidate(input.csrfSecret);
-    const row = await trx.selectFrom("core_sessions").select(sessionCredentialColumns)
+    csrfCandidate = input.requireCsrf === true ? credentialCandidate(input.csrfSecret) : undefined;
+    const columns = input.requireCsrf === true ? sessionCredentialColumns : sessionSecretColumns;
+    const row = await trx.selectFrom("core_sessions").select(columns)
       .where("session_id", "=", input.sessionId)
       .where("actor_id", "=", input.actorId)
       .forUpdate()
       .executeTakeFirst();
     const sessionMatches = constantTimeOwnedDigestMatch(
       sessionCandidate.digest,
-      ownedDriverDigest(row?.secret_digest),
+      queryResultDigest(row?.secret_digest),
     );
     const csrfMatches = input.requireCsrf !== true
-      || constantTimeOwnedDigestMatch(csrfCandidate.digest, ownedDriverDigest(row?.csrf_digest));
+      || constantTimeOwnedDigestMatch(
+        csrfCandidate!.digest,
+        queryResultDigest("csrf_digest" in (row ?? {}) ? row?.csrf_digest : undefined),
+      );
     if (
       !sessionCandidate.wellFormed
       || !sessionMatches
-      || (input.requireCsrf === true && (!csrfCandidate.wellFormed || !csrfMatches))
+      || (input.requireCsrf === true && (!csrfCandidate!.wellFormed || !csrfMatches))
       || row === undefined
     ) invalidSession();
     return rowToCoreSessionAuthority(row);
@@ -280,6 +287,27 @@ export async function updateCoreSessionActivity(
   const row = await trx.updateTable("core_sessions").set({
     last_seen_at: input.now,
     idle_expires_at: input.idleExpiresAt,
+    resource_version: input.expectedResourceVersion + 1,
+    updated_at: input.now,
+  }).where("session_id", "=", input.sessionId)
+    .where("status", "=", "active")
+    .where("resource_version", "=", input.expectedResourceVersion.toString())
+    .returning(sessionColumns)
+    .executeTakeFirst();
+  if (row === undefined) invalidSession();
+  return rowToCoreSessionAuthority(row);
+}
+
+export async function updateCoreSessionReauthentication(
+  trx: Transaction<RuntimeDatabase>,
+  input: {
+    readonly sessionId: string;
+    readonly now: Date;
+    readonly expectedResourceVersion: number;
+  },
+): Promise<StoredCoreSessionAuthority> {
+  const row = await trx.updateTable("core_sessions").set({
+    reauthenticated_at: input.now,
     resource_version: input.expectedResourceVersion + 1,
     updated_at: input.now,
   }).where("session_id", "=", input.sessionId)

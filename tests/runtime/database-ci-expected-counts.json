@@ -1,6 +1,6 @@
 {
   "runtimeCorePostgres": {
-    "testCount": 320,
+    "testCount": 326,
     "suitePaths": [
       "tests/migrations.test.ts",
       "tests/tenant-isolation.test.ts",

@@ -214,10 +214,8 @@ export {
   type ActorIdentityAuthority,
 } from "./repositories/identity/identity-authority.js";
 export {
-  issueOpaqueCoreSessionCredential,
   type CoreSessionRandomBytes,
   type CoreSessionRevocationReason,
-  type IssuedOpaqueCredential,
 } from "./repositories/identity/core-sessions.js";
 export {
   consumePublicRateLimit,
@@ -240,9 +238,14 @@ export {
   type RevokeCoreSessionsInput,
 } from "./services/identity/core-session.js";
 export {
+  establishRecentReauthentication,
   requireRecentReauthentication,
-  type ReauthenticationContext,
-  type RequireRecentReauthenticationInput,
+  type CurrentCoreSessionAuthorityInput,
+  type EstablishedReauthentication,
+  type EstablishRecentReauthenticationInput,
+  type ProtectedReauthenticatedMutation,
+  type ReauthenticationDependencies,
+  type RecentReauthenticationContext,
 } from "./services/identity/reauthentication.js";
 export {
   constantTimeDigestMatches,

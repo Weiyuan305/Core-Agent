@@ -6,7 +6,15 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import type { CoreSession } from "@core-agent/contracts";
-import type { Kysely, Transaction } from "kysely";
+import type {
+  Kysely,
+  KyselyPlugin,
+  PluginTransformQueryArgs,
+  PluginTransformResultArgs,
+  QueryResult,
+  Transaction,
+  UnknownRow,
+} from "kysely";
 import { Pool } from "pg";
 
 import { createRuntimeDatabase, type RuntimeDatabase } from "../src/db/database.js";
@@ -75,13 +83,110 @@ type RevokeCoreSessions = (
     | { readonly actorId: string; readonly reason: "password_reset" | "actor_disabled" | "account_deletion_requested" | "administrator_revoked" }
     | { readonly actorId: string; readonly authSubjectId: string; readonly reason: "provider_unlinked" },
 ) => Promise<number>;
-type RequireRecentReauthentication = (
-  context: {
-    readonly trx: Transaction<RuntimeDatabase>;
-    readonly databaseNow?: (trx: Transaction<RuntimeDatabase>) => Promise<Date>;
+interface ReauthenticationDependencies {
+  readonly db: Kysely<RuntimeDatabase>;
+  readonly databaseNow?: (trx: Transaction<RuntimeDatabase>) => Promise<Date>;
+}
+
+interface CurrentSessionAuthorityInput {
+  readonly actorId: string;
+  readonly authSubjectId: string;
+  readonly sessionId: string;
+}
+
+interface VerifiedPasswordSubject {
+  readonly provider: "supabase";
+  readonly providerSubject: string;
+  readonly identityKind: "email_password";
+  readonly normalizedEmail: string;
+  readonly verifiedAt: string;
+}
+
+interface EstablishedReauthentication {
+  readonly schema_version: 1;
+  readonly reauthenticated_at: string;
+  readonly valid_until: string;
+  readonly session_resource_version: number;
+}
+
+type EstablishRecentReauthentication = (
+  dependencies: ReauthenticationDependencies,
+  input: CurrentSessionAuthorityInput & {
+    readonly verifiedPasswordSubject: VerifiedPasswordSubject;
   },
-  input: { readonly actorId: string; readonly sessionId: string },
-) => Promise<void>;
+) => Promise<EstablishedReauthentication>;
+
+type RequireRecentReauthentication = <T>(
+  dependencies: ReauthenticationDependencies,
+  input: CurrentSessionAuthorityInput,
+  mutation: (context: {
+    readonly trx: Transaction<RuntimeDatabase>;
+    readonly session: CoreSession;
+    readonly reauthenticatedAt: string;
+    readonly validUntil: string;
+  }) => Promise<T>,
+) => Promise<T>;
+
+interface Deferred<T> {
+  readonly promise: Promise<T>;
+  resolve(value: T): void;
+  reject(error: unknown): void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+async function assertPending<T>(promise: Promise<T>): Promise<void> {
+  const pending = Symbol("pending");
+  const outcome = await Promise.race([
+    promise.then(() => "fulfilled" as const, () => "rejected" as const),
+    new Promise<typeof pending>((resolve) => setTimeout(resolve, 50, pending)),
+  ]);
+  assert.equal(outcome, pending);
+}
+
+function verifiedPasswordSubject(): VerifiedPasswordSubject {
+  return {
+    provider: "supabase",
+    providerSubject: "provider-subject_password",
+    identityKind: "email_password",
+    normalizedEmail: "person@example.test",
+    verifiedAt: createdAt.toISOString(),
+  };
+}
+
+function captureQueryDigestBuffers(captured: Buffer[][]): KyselyPlugin {
+  return {
+    transformQuery(args: PluginTransformQueryArgs) {
+      return args.node;
+    },
+    async transformResult(args: PluginTransformResultArgs): Promise<QueryResult<UnknownRow>> {
+      for (const row of args.result.rows) {
+        const buffers = Object.values(row).filter(Buffer.isBuffer);
+        if (buffers.length > 0) captured.push(buffers);
+      }
+      return args.result;
+    },
+  };
+}
+
+function nonCanonicalBase64UrlAlias(secret: string): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const lastIndex = alphabet.indexOf(secret.at(-1)!);
+  assert.notEqual(lastIndex, -1);
+  const aliasIndex = (lastIndex & ~3) + ((lastIndex + 1) & 3);
+  const alias = `${secret.slice(0, -1)}${alphabet[aliasIndex]}`;
+  assert.notEqual(alias, secret);
+  assert.deepEqual(Buffer.from(alias, "base64url"), Buffer.from(secret, "base64url"));
+  return alias;
+}
 
 interface OwnedOpaqueCredential {
   readonly secret: string;
@@ -103,23 +208,14 @@ function recentReauthenticationFailure(error: unknown): error is DomainError {
 
 async function requireRecentAt(session: CoreSession, now: Date): Promise<void> {
   const requireRecentReauthentication = requiredFunction<RequireRecentReauthentication>("requireRecentReauthentication");
-  await identityDb.transaction().execute((trx) => {
-    const context = {
-      trx,
-      // Legacy-shaped extras prove the implementation cannot trust a caller snapshot.
-      db: identityDb,
-      databaseNow: async (clockTrx: Transaction<RuntimeDatabase>) => {
-        assert.strictEqual(clockTrx, trx);
-        return new Date(now);
-      },
-    };
-    const input = {
-      ...session,
-      actorId: session.actor_id,
-      sessionId: session.session_id,
-    };
-    return requireRecentReauthentication(context, input);
-  });
+  await requireRecentReauthentication({
+    db: identityDb,
+    databaseNow: async () => new Date(now),
+  }, {
+    actorId: session.actor_id,
+    authSubjectId: session.auth_subject_id,
+    sessionId: session.session_id,
+  }, async () => undefined);
 }
 
 async function ensureIdentityRoles(): Promise<void> {
@@ -278,11 +374,12 @@ test("web Session issuance consumes exactly two 32-byte secrets and persists onl
 });
 
 test("owned Session credential buffers are cleared after use and when web CSRF credential generation fails", async () => {
-  const issueOpaqueCoreSessionCredential = requiredFunction<
-    (randomSource: (size: number) => Buffer) => OwnedOpaqueCredential
-  >("issueOpaqueCoreSessionCredential");
+  const issueOpaqueCoreSessionCredential = coreSessionRepository.issueOpaqueCoreSessionCredential as
+    ((randomSource: (size: number) => Buffer) => OwnedOpaqueCredential) | undefined;
+  assert.equal(typeof issueOpaqueCoreSessionCredential, "function");
+  assert.equal(runtime.issueOpaqueCoreSessionCredential, undefined);
   const retainedCredentialBuffer = Buffer.alloc(32, 0x45);
-  const credential = issueOpaqueCoreSessionCredential(() => retainedCredentialBuffer);
+  const credential = issueOpaqueCoreSessionCredential!(() => retainedCredentialBuffer);
   assert.strictEqual(credential.digest, retainedCredentialBuffer);
   assert.equal(credential.digest.some((byte) => byte !== 0), true);
   credential.clear();
@@ -353,6 +450,73 @@ test("constant-time Session digest comparison clears every caller-owned input an
   const sessionColumnsSource = /const sessionColumns = \[([\s\S]*?)\] as const;/u.exec(source)?.[1];
   assert.notEqual(sessionColumnsSource, undefined);
   assert.doesNotMatch(sessionColumnsSource!, /secret_digest|csrf_digest/u);
+});
+
+test("authentication clears original query-result digest Buffers on success mismatch and mapping error", async () => {
+  const authenticateCoreSession = requiredFunction<AuthenticateCoreSession>("authenticateCoreSession");
+
+  const success = await issue("session_query_buffers_success");
+  const successfulBuffers: Buffer[][] = [];
+  await authenticateCoreSession({
+    ...dependencies(),
+    db: identityDb.withPlugin(captureQueryDigestBuffers(successfulBuffers)),
+  }, {
+    sessionSecret: success.sessionSecret,
+    csrfSecret: success.csrfSecret,
+    requireCsrf: true,
+  });
+  assert(successfulBuffers.flat().length >= 3);
+  assert.equal(successfulBuffers.flat().every((buffer) => buffer.every((byte) => byte === 0)), true);
+
+  const mismatch = await issue("session_query_buffers_mismatch");
+  const mismatchedBuffers: Buffer[][] = [];
+  await assert.rejects(authenticateCoreSession({
+    ...dependencies(),
+    db: identityDb.withPlugin(captureQueryDigestBuffers(mismatchedBuffers)),
+  }, {
+    sessionSecret: mismatch.sessionSecret,
+    csrfSecret: Buffer.alloc(32, 0x7f).toString("base64url"),
+    requireCsrf: true,
+  }), publicSessionFailure);
+  assert(mismatchedBuffers.flat().length >= 3);
+  assert.equal(mismatchedBuffers.flat().every((buffer) => buffer.every((byte) => byte === 0)), true);
+
+  const mappingError = await issue("session_query_buffers_mapping_error");
+  await administratorPool.query(
+    "update core_sessions set resource_version = 9007199254740992 where session_id = $1",
+    [mappingError.session.session_id],
+  );
+  const errorBuffers: Buffer[][] = [];
+  await assert.rejects(authenticateCoreSession({
+    ...dependencies(),
+    db: identityDb.withPlugin(captureQueryDigestBuffers(errorBuffers)),
+  }, {
+    sessionSecret: mappingError.sessionSecret,
+    csrfSecret: mappingError.csrfSecret,
+    requireCsrf: true,
+  }), (error: unknown) => error instanceof DomainError && error.code === "INTERNAL_ERROR");
+  assert(errorBuffers.flat().length >= 3);
+  assert.equal(errorBuffers.flat().every((buffer) => buffer.every((byte) => byte === 0)), true);
+});
+
+test("authentication does not select CSRF digests when CSRF validation is not required", async () => {
+  const authenticateCoreSession = requiredFunction<AuthenticateCoreSession>("authenticateCoreSession");
+  const issued = await issue("session_query_without_csrf");
+  const resultKeys: string[][] = [];
+  const plugin: KyselyPlugin = {
+    transformQuery(args) {
+      return args.node;
+    },
+    async transformResult(args) {
+      for (const row of args.result.rows) resultKeys.push(Object.keys(row));
+      return args.result;
+    },
+  };
+  await authenticateCoreSession({
+    ...dependencies(),
+    db: identityDb.withPlugin(plugin),
+  }, { sessionSecret: issued.sessionSecret });
+  assert.equal(resultKeys.some((keys) => keys.includes("csrf_digest")), false);
 });
 
 test("native Session issuance consumes one 32-byte secret and never creates CSRF authority", async () => {
@@ -491,6 +655,25 @@ test("expired revoked malformed and unknown Session secrets have one public fail
   assert.deepEqual(row.rows[0], { status: "expired", revocation_reason: null });
 });
 
+test("Session authentication rejects non-canonical base64url credential aliases", async () => {
+  const authenticateCoreSession = requiredFunction<AuthenticateCoreSession>("authenticateCoreSession");
+  const issued = await issue("session_noncanonical_alias");
+  const sessionAlias = nonCanonicalBase64UrlAlias(issued.sessionSecret);
+  const csrfAlias = nonCanonicalBase64UrlAlias(issued.csrfSecret!);
+  await assert.rejects(
+    authenticateCoreSession(dependencies(), { sessionSecret: sessionAlias }),
+    publicSessionFailure,
+  );
+  await assert.rejects(
+    authenticateCoreSession(dependencies(), {
+      sessionSecret: issued.sessionSecret,
+      csrfSecret: csrfAlias,
+      requireCsrf: true,
+    }),
+    publicSessionFailure,
+  );
+});
+
 test("current Actor or AuthSubject authority changes fail closed without provider availability", async () => {
   const authenticateCoreSession = requiredFunction<AuthenticateCoreSession>("authenticateCoreSession");
   const disabled = await issue("session_disabled_actor");
@@ -627,73 +810,273 @@ test("revocation rejects runtime reason and scope combinations that could broade
   assert.deepEqual(row.rows[0], { status: "active", revocation_reason: null });
 });
 
-test("recent reauthentication is accepted at 9:59 and rejected at 10:00 or later", async () => {
-  const authenticateCoreSession = requiredFunction<AuthenticateCoreSession>("authenticateCoreSession");
-  const issued = await issue("session_reauthentication");
-  await identityDb.updateTable("core_sessions").set({ reauthenticated_at: createdAt })
-    .where("session_id", "=", issued.session.session_id).execute();
-  const authenticated = await authenticateCoreSession(
-    dependencies(new Date(createdAt.getTime() + 9 * 60_000 + 59_000)),
-    { sessionSecret: issued.sessionSecret },
+test("verified password reauthentication durably establishes the exact 10-minute authority boundary", async () => {
+  const establishRecentReauthentication = requiredFunction<EstablishRecentReauthentication>(
+    "establishRecentReauthentication",
   );
+  const issued = await issue("session_establish_reauthentication");
+  const established = await establishRecentReauthentication({
+    db: identityDb,
+    databaseNow: async () => new Date(createdAt),
+  }, {
+    actorId: issued.session.actor_id,
+    authSubjectId: issued.session.auth_subject_id,
+    sessionId: issued.session.session_id,
+    verifiedPasswordSubject: verifiedPasswordSubject(),
+  });
+  assert.deepEqual(established, {
+    schema_version: 1,
+    reauthenticated_at: createdAt.toISOString(),
+    valid_until: new Date(createdAt.getTime() + 10 * 60_000).toISOString(),
+    session_resource_version: 2,
+  });
+  const row = await administratorPool.query<{
+    reauthenticated_at: Date;
+    resource_version: number;
+  }>("select reauthenticated_at, resource_version::int from core_sessions where session_id = $1", [
+    issued.session.session_id,
+  ]);
+  assert.equal(row.rows[0]?.reauthenticated_at.toISOString(), established.reauthenticated_at);
+  assert.equal(row.rows[0]?.resource_version, established.session_resource_version);
+
+  let mutations = 0;
   await assert.doesNotReject(requireRecentAt(
-    authenticated.session,
+    { ...issued.session, reauthenticated_at: established.reauthenticated_at },
     new Date(createdAt.getTime() + 9 * 60_000 + 59_000),
   ));
   await assert.rejects(
-    requireRecentAt(
-      authenticated.session,
-      new Date(createdAt.getTime() + 10 * 60_000),
-    ),
+    requiredFunction<RequireRecentReauthentication>("requireRecentReauthentication")({
+      db: identityDb,
+      databaseNow: async () => new Date(createdAt.getTime() + 10 * 60_000),
+    }, {
+      actorId: issued.session.actor_id,
+      authSubjectId: issued.session.auth_subject_id,
+      sessionId: issued.session.session_id,
+    }, async () => {
+      mutations += 1;
+    }),
     recentReauthenticationFailure,
   );
+  assert.equal(mutations, 0);
 });
 
-test("recent reauthentication rejects stale snapshots after durable revoke expiry or timestamp change", async () => {
-  const authenticateCoreSession = requiredFunction<AuthenticateCoreSession>("authenticateCoreSession");
-  const revokeCoreSession = requiredFunction<RevokeCoreSession>("revokeCoreSession");
-  const checkAt = new Date(createdAt.getTime() + 9 * 60_000 + 59_000);
-
-  const revoked = await issue("session_stale_reauthentication_revoked");
-  await identityDb.updateTable("core_sessions").set({ reauthenticated_at: createdAt })
-    .where("session_id", "=", revoked.session.session_id).execute();
-  const revokedSnapshot = await authenticateCoreSession(dependencies(checkAt), {
-    sessionSecret: revoked.sessionSecret,
+test("a normally issued Apple Session becomes eligible after verified password reauthentication", async () => {
+  const establishRecentReauthentication = requiredFunction<EstablishRecentReauthentication>(
+    "establishRecentReauthentication",
+  );
+  const issued = await issue("session_apple_password_reauthentication", {
+    authSubjectId: "subject_apple",
   });
-  await revokeCoreSession(dependencies(checkAt), {
-    actorId: revokedSnapshot.session.actor_id,
-    sessionId: revokedSnapshot.session.session_id,
+  const established = await establishRecentReauthentication({
+    db: identityDb,
+    databaseNow: async () => new Date(createdAt),
+  }, {
+    actorId: issued.session.actor_id,
+    authSubjectId: issued.session.auth_subject_id,
+    sessionId: issued.session.session_id,
+    verifiedPasswordSubject: {
+      ...verifiedPasswordSubject(),
+      providerSubject: "provider-subject_apple",
+    },
+  });
+  assert.equal(established.reauthenticated_at, createdAt.toISOString());
+  await assert.doesNotReject(requireRecentAt(
+    { ...issued.session, reauthenticated_at: established.reauthenticated_at },
+    new Date(createdAt.getTime() + 9 * 60_000 + 59_000),
+  ));
+});
+
+test("reauthentication establishment rejects revoked expired disabled unlinked and mismatched authority", async () => {
+  const establishRecentReauthentication = requiredFunction<EstablishRecentReauthentication>(
+    "establishRecentReauthentication",
+  );
+  const revokeCoreSession = requiredFunction<RevokeCoreSession>("revokeCoreSession");
+  const establish = (session: CoreSession, now = createdAt, subject = verifiedPasswordSubject()) => (
+    establishRecentReauthentication({ db: identityDb, databaseNow: async () => new Date(now) }, {
+      actorId: session.actor_id,
+      authSubjectId: session.auth_subject_id,
+      sessionId: session.session_id,
+      verifiedPasswordSubject: subject,
+    })
+  );
+
+  const revoked = await issue("session_establish_revoked");
+  await revokeCoreSession(dependencies(), {
+    actorId: revoked.session.actor_id,
+    sessionId: revoked.session.session_id,
     reason: "user_sign_out",
   });
+  await assert.rejects(establish(revoked.session), (error: unknown) => (
+    error instanceof DomainError && error.code === "UNAUTHENTICATED"
+  ));
+
+  const expired = await issue("session_establish_expired");
   await assert.rejects(
-    requireRecentAt(revokedSnapshot.session, checkAt),
-    recentReauthenticationFailure,
+    establish(expired.session, new Date(createdAt.getTime() + 7 * dayMs)),
+    (error: unknown) => error instanceof DomainError && error.code === "UNAUTHENTICATED",
   );
 
-  const expired = await issue("session_stale_reauthentication_expired");
-  await identityDb.updateTable("core_sessions").set({ reauthenticated_at: createdAt })
-    .where("session_id", "=", expired.session.session_id).execute();
-  const expiredSnapshot = await authenticateCoreSession(dependencies(checkAt), {
-    sessionSecret: expired.sessionSecret,
-  });
-  await identityDb.updateTable("core_sessions").set({ idle_expires_at: checkAt })
-    .where("session_id", "=", expiredSnapshot.session.session_id).execute();
-  await assert.rejects(
-    requireRecentAt(expiredSnapshot.session, checkAt),
-    recentReauthenticationFailure,
-  );
+  const disabled = await issue("session_establish_disabled");
+  await identityDb.updateTable("actors").set({ status: "disabled" })
+    .where("actor_id", "=", disabled.session.actor_id).execute();
+  await assert.rejects(establish(disabled.session), (error: unknown) => (
+    error instanceof DomainError && error.code === "UNAUTHENTICATED"
+  ));
+  await identityDb.updateTable("actors").set({ status: "active" })
+    .where("actor_id", "=", disabled.session.actor_id).execute();
 
-  const changed = await issue("session_stale_reauthentication_changed");
-  await identityDb.updateTable("core_sessions").set({ reauthenticated_at: createdAt })
-    .where("session_id", "=", changed.session.session_id).execute();
-  const changedSnapshot = await authenticateCoreSession(dependencies(checkAt), {
-    sessionSecret: changed.sessionSecret,
-  });
-  await identityDb.updateTable("core_sessions").set({
-    reauthenticated_at: new Date(createdAt.getTime() - 1_000),
-  }).where("session_id", "=", changedSnapshot.session.session_id).execute();
-  await assert.rejects(
-    requireRecentAt(changedSnapshot.session, checkAt),
-    recentReauthenticationFailure,
+  const unlinked = await issue("session_establish_unlinked");
+  await identityDb.updateTable("auth_subjects").set({ status: "unlinked" })
+    .where("auth_subject_id", "=", unlinked.session.auth_subject_id).execute();
+  await assert.rejects(establish(unlinked.session), (error: unknown) => (
+    error instanceof DomainError && error.code === "UNAUTHENTICATED"
+  ));
+  await identityDb.updateTable("auth_subjects").set({ status: "active" })
+    .where("auth_subject_id", "=", unlinked.session.auth_subject_id).execute();
+
+  const mismatched = await issue("session_establish_mismatched");
+  await assert.rejects(establish(mismatched.session, createdAt, {
+    ...verifiedPasswordSubject(),
+    providerSubject: "provider-subject_other",
+  }), (error: unknown) => error instanceof DomainError && error.code === "UNAUTHENTICATED");
+});
+
+test("protected reauthenticated mutations serialize behind disable unlink and revoke before checking current authority", async () => {
+  const establishRecentReauthentication = requiredFunction<EstablishRecentReauthentication>(
+    "establishRecentReauthentication",
   );
+  const requireRecentReauthentication = requiredFunction<RequireRecentReauthentication>(
+    "requireRecentReauthentication",
+  );
+  const scenarios = ["disable", "unlink", "revoke"] as const;
+  for (const scenario of scenarios) {
+    const issued = await issue(`session_guard_behind_${scenario}`);
+    await establishRecentReauthentication({ db: identityDb, databaseNow: async () => new Date(createdAt) }, {
+      actorId: issued.session.actor_id,
+      authSubjectId: issued.session.auth_subject_id,
+      sessionId: issued.session.session_id,
+      verifiedPasswordSubject: verifiedPasswordSubject(),
+    });
+
+    const managementReady = deferred<void>();
+    const releaseManagement = deferred<void>();
+    const management = identityDb.transaction().execute(async (trx) => {
+      await trx.selectFrom("actors").select("actor_id")
+        .where("actor_id", "=", issued.session.actor_id).forUpdate().executeTakeFirstOrThrow();
+      if (scenario === "disable") {
+        await trx.updateTable("actors").set({ status: "disabled" })
+          .where("actor_id", "=", issued.session.actor_id).execute();
+      } else if (scenario === "unlink") {
+        await trx.selectFrom("auth_subjects").select("auth_subject_id")
+          .where("auth_subject_id", "=", issued.session.auth_subject_id).forUpdate().executeTakeFirstOrThrow();
+        await trx.updateTable("auth_subjects").set({ status: "unlinked" })
+          .where("auth_subject_id", "=", issued.session.auth_subject_id).execute();
+      } else {
+        await trx.selectFrom("core_sessions").select("session_id")
+          .where("session_id", "=", issued.session.session_id).forUpdate().executeTakeFirstOrThrow();
+        await trx.updateTable("core_sessions").set({
+          status: "revoked",
+          revocation_reason: "administrator_revoked",
+          resource_version: 3,
+          updated_at: createdAt,
+        }).where("session_id", "=", issued.session.session_id).execute();
+      }
+      managementReady.resolve();
+      await releaseManagement.promise;
+    });
+    await managementReady.promise;
+    let mutationCalls = 0;
+    const protectedMutation = requireRecentReauthentication({
+      db: identityDb,
+      databaseNow: async () => new Date(createdAt),
+    }, {
+      actorId: issued.session.actor_id,
+      authSubjectId: issued.session.auth_subject_id,
+      sessionId: issued.session.session_id,
+    }, async ({ trx }) => {
+      mutationCalls += 1;
+      await trx.updateTable("core_sessions").set({ device_label: "protected mutation" })
+        .where("session_id", "=", issued.session.session_id).execute();
+    });
+    try {
+      await assertPending(protectedMutation);
+    } finally {
+      releaseManagement.resolve();
+    }
+    await management;
+    await assert.rejects(protectedMutation, recentReauthenticationFailure);
+    assert.equal(mutationCalls, 0, `${scenario} must commit before protected authority is evaluated`);
+
+    if (scenario === "disable") {
+      await identityDb.updateTable("actors").set({ status: "active" })
+        .where("actor_id", "=", issued.session.actor_id).execute();
+    } else if (scenario === "unlink") {
+      await identityDb.updateTable("auth_subjects").set({ status: "active" })
+        .where("auth_subject_id", "=", issued.session.auth_subject_id).execute();
+    }
+  }
+});
+
+test("protected mutation retains canonical Actor AuthSubject Session locks through its callback", async () => {
+  const establishRecentReauthentication = requiredFunction<EstablishRecentReauthentication>(
+    "establishRecentReauthentication",
+  );
+  const requireRecentReauthentication = requiredFunction<RequireRecentReauthentication>(
+    "requireRecentReauthentication",
+  );
+  const issued = await issue("session_guard_holds_canonical_locks");
+  await establishRecentReauthentication({ db: identityDb, databaseNow: async () => new Date(createdAt) }, {
+    actorId: issued.session.actor_id,
+    authSubjectId: issued.session.auth_subject_id,
+    sessionId: issued.session.session_id,
+    verifiedPasswordSubject: verifiedPasswordSubject(),
+  });
+  const mutationEntered = deferred<void>();
+  const releaseMutation = deferred<void>();
+  const protectedMutation = requireRecentReauthentication({
+    db: identityDb,
+    databaseNow: async () => new Date(createdAt),
+  }, {
+    actorId: issued.session.actor_id,
+    authSubjectId: issued.session.auth_subject_id,
+    sessionId: issued.session.session_id,
+  }, async ({ trx }) => {
+    await trx.updateTable("core_sessions").set({ device_label: "protected committed first" })
+      .where("session_id", "=", issued.session.session_id).execute();
+    mutationEntered.resolve();
+    await releaseMutation.promise;
+    return "protected-result" as const;
+  });
+  const entered = await Promise.race([
+    mutationEntered.promise.then(() => true),
+    protectedMutation.then(() => false, () => false),
+  ]);
+  assert.equal(entered, true);
+
+  const management = identityDb.transaction().execute(async (trx) => {
+    await trx.selectFrom("actors").select("actor_id")
+      .where("actor_id", "=", issued.session.actor_id).forUpdate().executeTakeFirstOrThrow();
+    await trx.selectFrom("auth_subjects").select("auth_subject_id")
+      .where("auth_subject_id", "=", issued.session.auth_subject_id).forUpdate().executeTakeFirstOrThrow();
+    await trx.selectFrom("core_sessions").select("session_id")
+      .where("session_id", "=", issued.session.session_id).forUpdate().executeTakeFirstOrThrow();
+    await trx.updateTable("core_sessions").set({
+      status: "revoked",
+      revocation_reason: "administrator_revoked",
+      resource_version: 3,
+      updated_at: createdAt,
+    }).where("session_id", "=", issued.session.session_id).execute();
+  });
+  try {
+    await assertPending(management);
+  } finally {
+    releaseMutation.resolve();
+  }
+  assert.equal(await protectedMutation, "protected-result");
+  await management;
+  const row = await administratorPool.query<{ status: string; device_label: string }>(
+    "select status, device_label from core_sessions where session_id = $1",
+    [issued.session.session_id],
+  );
+  assert.deepEqual(row.rows[0], { status: "revoked", device_label: "protected committed first" });
 });
