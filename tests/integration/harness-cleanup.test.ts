@@ -1,17 +1,52 @@
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
+import { spawn } from "node:child_process";
+import { EventEmitter, once } from "node:events";
 import { createConnection, createServer, type Socket } from "node:net";
+import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 
 import { LEAK_SENTINEL, testHarnessInternals } from "./harness.js";
 
 const databaseName = "core_agent_test_0123456789abcdef";
+const repositoryRoot = join(import.meta.dirname, "..", "..");
+
+async function runCleanupChild(
+  scenario: "delayed-backends" | "termination-failure" | "transient-drop",
+  operation: "terminate" | "drop",
+): Promise<number | null> {
+  const child = spawn(process.execPath, [
+    "--import", join(repositoryRoot, "tests", "integration", "fixtures", "cleanup-test-database-child-pg-hook.mjs"),
+    join(repositoryRoot, "scripts", "cleanup-test-database-child.mjs"),
+    operation,
+    "postgresql://127.0.0.1/core_agent_control",
+    databaseName,
+    "25",
+  ], {
+    cwd: repositoryRoot,
+    env: { ...process.env, CLEANUP_TEST_DATABASE_CHILD_SCENARIO: scenario },
+    stdio: "ignore",
+  });
+  const [code] = await once(child, "close") as [number | null];
+  return code;
+}
 
 function terminalOperation(work: () => void | Promise<void>) {
   const completion = Promise.resolve().then(work);
   return { completion, terminateAndReap: async () => { await completion; } };
 }
+
+test("cleanup terminate child fails if exact target backends remain through its deadline", async () => {
+  assert.notEqual(await runCleanupChild("delayed-backends", "terminate"), 0);
+});
+
+test("cleanup terminate child does not treat a failed exact termination as success", async () => {
+  assert.notEqual(await runCleanupChild("termination-failure", "terminate"), 0);
+});
+
+test("cleanup drop child retries an exact transient DROP failure before absence succeeds", async () => {
+  assert.equal(await runCleanupChild("transient-drop", "drop"), 0);
+});
 
 test("isolated database teardown closes owned pools before exact active-backend termination and verifies absence", async () => {
   const calls: Array<{ readonly sql: string; readonly values?: readonly unknown[] } | string> = [];
