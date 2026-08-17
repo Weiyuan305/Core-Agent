@@ -1,3 +1,5 @@
+import { types as utilTypes } from "node:util";
+
 export type ProviderFailureCode =
   | "AUTH_INVALID"
   | "AUTH_EMAIL_UNVERIFIED"
@@ -31,7 +33,7 @@ export class ProviderFailure extends Error {
 
 function ownData(value: unknown, key: string): unknown {
   try {
-    if (typeof value !== "object" || value === null) return undefined;
+    if (typeof value !== "object" || value === null || utilTypes.isProxy(value)) return undefined;
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     return descriptor !== undefined && "value" in descriptor ? descriptor.value : undefined;
   } catch {

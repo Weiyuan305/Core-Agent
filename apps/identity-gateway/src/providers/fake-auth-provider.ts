@@ -1,4 +1,5 @@
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
+import { types as utilTypes } from "node:util";
 
 import type {
   AppleAuthorizationCallback,
@@ -43,6 +44,7 @@ interface FakeAppleTransaction {
   readonly stateDigest: string;
   readonly nonceDigest: string;
   readonly pkceChallenge: string | null;
+  readonly providerSubjectDigest: string | null;
   readonly expiresAt: number;
 }
 
@@ -52,13 +54,19 @@ function digest(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
+function constantTimeEqual(left: string, right: string): boolean {
+  const leftBytes = Buffer.from(left, "utf8");
+  const rightBytes = Buffer.from(right, "utf8");
+  return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
+}
+
 function pkceChallenge(verifier: string): string {
   return createHash("sha256").update(verifier, "utf8").digest("base64url");
 }
 
 function ownData(value: unknown, key: string): unknown {
   try {
-    if (typeof value !== "object" || value === null) return undefined;
+    if (typeof value !== "object" || value === null || utilTypes.isProxy(value)) return undefined;
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     return descriptor !== undefined && "value" in descriptor ? descriptor.value : undefined;
   } catch {
@@ -102,13 +110,39 @@ function readClientKind(value: unknown): ProviderClientKind | undefined {
 }
 
 function copySubject(subject: VerifiedProviderSubject): VerifiedProviderSubject {
+  const provider = ownString(subject, "provider");
+  const providerSubject = ownString(subject, "providerSubject");
+  const identityKind = ownString(subject, "identityKind");
+  const normalizedEmail = ownString(subject, "normalizedEmail");
+  const verifiedAt = ownString(subject, "verifiedAt");
+  if (provider !== "supabase" || providerSubject === undefined || providerSubject.length === 0
+    || (identityKind !== "email_password" && identityKind !== "apple")
+    || normalizedEmail === undefined || !validEmail(normalizedEmail)
+    || verifiedAt === undefined || !Number.isFinite(new Date(verifiedAt).getTime())) {
+    throw new ProviderFailure("AUTH_INVALID");
+  }
   return Object.freeze({
     provider: "supabase",
-    providerSubject: subject.providerSubject,
-    identityKind: subject.identityKind,
-    normalizedEmail: subject.normalizedEmail,
-    verifiedAt: subject.verifiedAt,
+    providerSubject,
+    identityKind,
+    normalizedEmail,
+    verifiedAt: new Date(verifiedAt).toISOString(),
   });
+}
+
+function readOwnArray(value: unknown, maximum: number): readonly unknown[] | undefined {
+  if (!Array.isArray(value) || utilTypes.isProxy(value)) return undefined;
+  const length = ownData(value, "length");
+  if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0 || length > maximum) {
+    return undefined;
+  }
+  const copy: unknown[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const item = ownData(value, String(index));
+    if (item === undefined) return undefined;
+    copy.push(item);
+  }
+  return copy;
 }
 
 export class FakeAuthProvider implements AuthProviderAdapter {
@@ -120,13 +154,24 @@ export class FakeAuthProvider implements AuthProviderAdapter {
   #transactionCounter = 0;
 
   constructor(options: FakeAuthProviderOptions) {
-    this.#now = options.now ?? (() => new Date());
-    this.#appleSubject = copySubject(options.appleSubject);
-    for (const fixture of options.subjects) {
-      const normalizedEmail = normalizeEmail(fixture.email);
-      const subject = copySubject(fixture.subject);
-      this.#subjects.set(normalizedEmail, { passwordDigest: digest(fixture.password), subject });
-      this.#proofs.set(digest(readProof(fixture.proof)), subject);
+    if (utilTypes.isProxy(options)) throw new ProviderFailure("AUTH_INVALID");
+    const now = ownData(options, "now");
+    const subjects = readOwnArray(ownData(options, "subjects"), 10_000);
+    if ((now !== undefined && (typeof now !== "function" || utilTypes.isProxy(now)))
+      || subjects === undefined) throw new ProviderFailure("AUTH_INVALID");
+    this.#now = (now as (() => Date) | undefined) ?? (() => new Date());
+    this.#appleSubject = copySubject(ownData(options, "appleSubject") as VerifiedProviderSubject);
+    for (const fixture of subjects) {
+      const email = ownString(fixture, "email");
+      const password = ownString(fixture, "password");
+      const proof = ownData(fixture, "proof");
+      if (email === undefined || password === undefined || !validEmail(normalizeEmail(email))) {
+        throw new ProviderFailure("AUTH_INVALID");
+      }
+      const normalizedEmail = normalizeEmail(email);
+      const subject = copySubject(ownData(fixture, "subject") as VerifiedProviderSubject);
+      this.#subjects.set(normalizedEmail, { passwordDigest: digest(password), subject });
+      this.#proofs.set(digest(readProof(proof)), subject);
     }
   }
 
@@ -171,6 +216,7 @@ export class FakeAuthProvider implements AuthProviderAdapter {
       stateDigest: digest(state),
       nonceDigest: digest(`reset-nonce:${transactionId}`),
       pkceChallenge: null,
+      providerSubjectDigest: null,
       expiresAt,
     });
     return Object.freeze({
@@ -181,14 +227,14 @@ export class FakeAuthProvider implements AuthProviderAdapter {
   }
 
   async beginApple(input: AppleAuthorizationInput): Promise<AppleAuthorizationStart> {
-    return this.#beginApple(input, "sign_in", null);
+    return this.#beginApple(input, "sign_in", null, null);
   }
 
-  async beginAppleLink(input: AppleLinkAuthorizationInput): Promise<AppleAuthorizationStart> {
+  async reauthenticateAndBeginAppleLink(input: AppleLinkAuthorizationInput): Promise<AppleAuthorizationStart> {
     const actorId = ownString(input, "authenticatedActorId") ?? null;
     if (actorId === null) throw new ProviderFailure("AUTH_INVALID");
-    await this.verifyCurrentSubject(ownData(input, "providerProof") as ProviderProof);
-    return this.#beginApple(input, "link", actorId);
+    const subject = await this.signInEmail(readCredential(input));
+    return this.#beginApple(input, "link", actorId, digest(subject.providerSubject));
   }
 
   async completePasswordReset(input: PasswordResetCompletionInput): Promise<VerifiedProviderSubject> {
@@ -227,6 +273,7 @@ export class FakeAuthProvider implements AuthProviderAdapter {
     input: AppleAuthorizationInput,
     flowKind: "sign_in" | "link",
     actorId: string | null,
+    providerSubjectDigest: string | null,
   ): AppleAuthorizationStart {
     const clientKind = readClientKind(ownData(input, "client_kind"));
     const redirectUri = ownString(input, "redirect_uri");
@@ -260,6 +307,7 @@ export class FakeAuthProvider implements AuthProviderAdapter {
       stateDigest: digest(state),
       nonceDigest: digest(nonce),
       pkceChallenge: callerChallenge ?? null,
+      providerSubjectDigest,
       expiresAt,
     });
     const authorizationUrl = new URL("https://fake-auth.invalid/apple");
@@ -284,7 +332,6 @@ export class FakeAuthProvider implements AuthProviderAdapter {
 
   async linkApple(input: AppleLinkInput): Promise<VerifiedProviderSubject> {
     const actorId = ownString(input, "authenticatedActorId") ?? null;
-    await this.verifyCurrentSubject(ownData(input, "providerProof") as ProviderProof);
     this.#consumeAppleCallback(input, "link", actorId);
     return copySubject(this.#appleSubject);
   }
@@ -330,8 +377,13 @@ export class FakeAuthProvider implements AuthProviderAdapter {
       || transaction.actorId !== expectedActorId || transaction.clientKind !== clientKind
       || transaction.expiresAt <= this.#now().getTime() || transaction.stateDigest !== digest(state)
       || (clientKind !== "web" && (transaction.nonceDigest !== digest(nonce!)
-        || transaction.pkceChallenge !== pkceChallenge(verifier!)))) {
+        || transaction.pkceChallenge !== pkceChallenge(verifier!)))
+      || (expectedFlow === "sign_in" && transaction.providerSubjectDigest !== null)) {
       throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+    }
+    if (expectedFlow === "link" && (transaction.providerSubjectDigest === null
+      || !constantTimeEqual(transaction.providerSubjectDigest, digest(this.#appleSubject.providerSubject)))) {
+      throw new ProviderFailure("AUTH_CONFLICT");
     }
   }
 }

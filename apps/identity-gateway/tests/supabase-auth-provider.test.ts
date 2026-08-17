@@ -5,6 +5,8 @@ import test from "node:test";
 
 import type {
   AppleAuthorizationCallback,
+  AppleLinkAuthorizationInput,
+  AppleLinkInput,
   ProviderClientKind,
 } from "../src/providers/auth-provider.js";
 import { mapProviderFailure, ProviderFailure } from "../src/providers/provider-errors.js";
@@ -35,6 +37,11 @@ const providerAccessToken = ["provider", "access", "sentinel"].join("-");
 const providerRefreshToken = ["provider", "refresh", "sentinel"].join("-");
 const serviceRoleKey = ["service", "role", "sentinel"].join("-");
 const payloadHash = `sha256:${"a".repeat(64)}`;
+
+type HasProviderProof<T> = "providerProof" extends keyof T ? true : false;
+
+const appleLinkStartHasNoProviderProof: HasProviderProof<AppleLinkAuthorizationInput> = false;
+const appleLinkCallbackHasNoProviderProof: HasProviderProof<AppleLinkInput> = false;
 
 function sha256ForTest(value: string): Uint8Array {
   return Uint8Array.from(createHash("sha256").update(value, "utf8").digest());
@@ -88,11 +95,7 @@ function user(provider: "email" | "apple" = "email", id = "provider-subject-1"):
       },
     },
   });
-  return new Proxy(value, {
-    get() {
-      throw new Error(`property access is forbidden (${unknownGetterCalls})`);
-    },
-  });
+  return value;
 }
 
 interface Harness {
@@ -106,6 +109,8 @@ interface Harness {
 function createHarness(input: {
   readonly now?: () => Date;
   readonly transactionProtector?: TransactionProtector;
+  readonly adminUpdateError?: unknown;
+  readonly exchangedProviderSubject?: string;
 } = {}): Harness {
   const store = new MemoryTransactionStore();
   const clientCalls: Harness["clientCalls"] = [];
@@ -202,7 +207,7 @@ function createHarness(input: {
         }));
         return {
           data: {
-            user: user("apple"),
+            user: user("apple", input.exchangedProviderSubject ?? "provider-subject-1"),
             session: { access_token: providerAccessToken, refresh_token: providerRefreshToken },
           },
           error: null,
@@ -213,6 +218,12 @@ function createHarness(input: {
         return { data: { user: user("email") }, error: null };
       },
       admin: {
+        updateUserById: async (...arguments_: unknown[]) => {
+          methodCalls.push({ name: "updateUserById", arguments: arguments_ });
+          return input.adminUpdateError === undefined
+            ? { data: { user: user("email") }, error: null }
+            : { data: null, error: input.adminUpdateError };
+        },
         deleteUser: async (...arguments_: unknown[]) => {
           methodCalls.push({ name: "deleteUser", arguments: arguments_ });
           return { data: {}, error: null };
@@ -470,9 +481,19 @@ test("provider failures map to the six-code vocabulary without message matching"
 });
 
 test("Supabase error mapping does not execute proxy property or prototype traps", async () => {
+  let descriptorTrapCalls = 0;
+  let ownKeysTrapCalls = 0;
   let prototypeTrapCalls = 0;
   let getTrapCalls = 0;
   const providerError = new Proxy({ status: 429, code: "over_request_rate_limit" }, {
+    getOwnPropertyDescriptor() {
+      descriptorTrapCalls += 1;
+      throw new Error("descriptor access is forbidden");
+    },
+    ownKeys() {
+      ownKeysTrapCalls += 1;
+      throw new Error("ownKeys access is forbidden");
+    },
     get() {
       getTrapCalls += 1;
       throw new Error("property access is forbidden");
@@ -498,9 +519,59 @@ test("Supabase error mapping does not execute proxy property or prototype traps"
     createClient: factory,
   });
 
-  await expectFailure(() => provider.signInEmail(credential), "AUTH_RATE_LIMITED");
+  await expectFailure(() => provider.signInEmail(credential), "AUTH_PROVIDER_UNAVAILABLE");
+  assert.equal(descriptorTrapCalls, 0);
+  assert.equal(ownKeysTrapCalls, 0);
   assert.equal(prototypeTrapCalls, 0);
   assert.equal(getTrapCalls, 0);
+});
+
+test("Supabase rejects Proxy config, store, and result inputs without invoking structural traps", async () => {
+  const calls = { descriptor: 0, keys: 0, get: 0, prototype: 0 };
+  const getKeys: PropertyKey[] = [];
+  const traps = {
+    getOwnPropertyDescriptor() { calls.descriptor += 1; throw new Error("no descriptor"); },
+    ownKeys() { calls.keys += 1; throw new Error("no keys"); },
+    get(_target: object, key: PropertyKey) { calls.get += 1; getKeys.push(key); throw new Error("no get"); },
+    getPrototypeOf() { calls.prototype += 1; throw new Error("no prototype"); },
+  };
+  const assertStableConstructorFailure = (options: unknown) => {
+    assert.throws(
+      () => new SupabaseAuthProvider(options as never),
+      (error: unknown) => error instanceof ProviderFailure && error.code === "AUTH_PROVIDER_UNAVAILABLE",
+    );
+    assert.deepEqual(calls, { descriptor: 0, keys: 0, get: 0, prototype: 0 });
+  };
+
+  assertStableConstructorFailure(new Proxy({}, traps));
+  assertStableConstructorFailure({
+    supabaseUrl: "https://example.supabase.co",
+    publishableKey: "publishable-key-not-secret",
+    serviceRoleKey,
+    appleRedirectUris: [callbackUri],
+    passwordResetRedirectUri: callbackUri,
+    transactionStore: new Proxy({}, traps),
+    transactionProtector: protector,
+  });
+
+  const resultProxy = new Proxy({}, traps);
+  const provider = new SupabaseAuthProvider({
+    supabaseUrl: "https://example.supabase.co",
+    publishableKey: "publishable-key-not-secret",
+    serviceRoleKey,
+    appleRedirectUris: [callbackUri],
+    passwordResetRedirectUri: callbackUri,
+    transactionStore: new MemoryTransactionStore(),
+    transactionProtector: protector,
+    createClient: () => ({
+      auth: { signInWithPassword: async () => ({ data: resultProxy, error: null }) },
+    } as never),
+  });
+  await expectFailure(() => provider.signInEmail(credential), "AUTH_PROVIDER_UNAVAILABLE");
+  assert.deepEqual({ calls, getKeys }, {
+    calls: { descriptor: 0, keys: 0, get: 0, prototype: 0 },
+    getKeys: [],
+  });
 });
 
 test("Supabase bounds client-construction failures without inspecting error prototypes", async () => {
@@ -826,17 +897,26 @@ test("Supabase Apple callback rejects expired, tampered, accessor, and Proxy tra
   assert.equal(descriptorTrapCalls, 0);
 });
 
-test("Supabase Apple link start/callback mirror released Web/native shapes plus actor proof", async () => {
+test("Supabase Apple link reauthenticates and starts on one transient client without provider proof", async () => {
   const harness = createHarness();
-  const start = await harness.provider.beginAppleLink({
-    ...webAppleStart(), authenticatedActorId: "actor-1", providerProof,
+  const start = await harness.provider.reauthenticateAndBeginAppleLink({
+    ...webAppleStart(), authenticatedActorId: "actor-1", ...credential,
   });
+  assert.equal(harness.clientCalls.length, 1);
   assert.equal(harness.store.records.get(start.transaction_id)?.flow_kind, "apple_link");
   const result = await harness.provider.linkApple({
-    ...callbackFromStart(start), authenticatedActorId: "actor-1", providerProof,
+    ...callbackFromStart(start), authenticatedActorId: "actor-1",
   });
   assert.equal(result.identityKind, "apple");
   assert.equal(JSON.stringify(result).includes(currentJwt), false);
+  assert.equal(JSON.stringify(result).includes(credential.password), false);
+  assert.equal(appleLinkStartHasNoProviderProof, false);
+  assert.equal(appleLinkCallbackHasNoProviderProof, false);
+  assert.deepEqual(
+    harness.methodCalls.slice(0, 3).map((call) => call.name),
+    ["signInWithPassword", "linkIdentity", "signOut"],
+  );
+  assert.equal(harness.methodCalls.some((call) => call.name === "setSession"), false);
   assert.equal(harness.methodCalls.filter((call) => call.name === "linkIdentity").length, 1);
   const linkRequest = harness.methodCalls.find((call) => call.name === "linkIdentity")?.arguments[0] as {
     readonly options: { readonly queryParams: Record<string, unknown> };
@@ -844,8 +924,8 @@ test("Supabase Apple link start/callback mirror released Web/native shapes plus 
   assert.equal(Object.hasOwn(linkRequest.options.queryParams, "state"), false);
 
   const native = createHarness();
-  const nativeStart = await native.provider.beginAppleLink({
-    ...nativeAppleStart(), authenticatedActorId: "actor-1", providerProof,
+  const nativeStart = await native.provider.reauthenticateAndBeginAppleLink({
+    ...nativeAppleStart(), authenticatedActorId: "actor-1", ...credential,
   });
   const nativeAuthorizationUrl = new URL(nativeStart.authorization_url);
   assert.equal(nativeAuthorizationUrl.searchParams.get("state"), "4fd0445c-badc-4bdb-bc0f-7af9b821c7ec");
@@ -854,23 +934,30 @@ test("Supabase Apple link start/callback mirror released Web/native shapes plus 
   const nativeRequest = native.methodCalls.find((call) => call.name === "nativeAuthorize")?.arguments[0] as object;
   assert.equal(Object.hasOwn(nativeRequest, "state"), false);
   assert.equal((await native.provider.linkApple({
-    ...callbackFromStart(nativeStart, "iphone"), authenticatedActorId: "actor-1", providerProof,
+    ...callbackFromStart(nativeStart, "iphone"), authenticatedActorId: "actor-1",
   })).identityKind, "apple");
 
   const changed = createHarness();
-  const changedStart = await changed.provider.beginAppleLink({
-    ...nativeAppleStart(), authenticatedActorId: "actor-1", providerProof,
+  const changedStart = await changed.provider.reauthenticateAndBeginAppleLink({
+    ...nativeAppleStart(), authenticatedActorId: "actor-1", ...credential,
   });
   await expectFailure(() => changed.provider.linkApple({
     ...callbackFromStart(changedStart, "iphone"),
     state: `${changedStart.transaction_id}-changed`,
     authenticatedActorId: "actor-1",
-    providerProof,
   }), "AUTH_CALLBACK_INVALID");
   assert.equal(changed.methodCalls.some((call) => call.name === "exchangeCodeForSession"), false);
+
+  const conflicting = createHarness({ exchangedProviderSubject: "different-provider-subject" });
+  const conflictingStart = await conflicting.provider.reauthenticateAndBeginAppleLink({
+    ...webAppleStart(), authenticatedActorId: "actor-1", ...credential,
+  });
+  await expectFailure(() => conflicting.provider.linkApple({
+    ...callbackFromStart(conflictingStart), authenticatedActorId: "actor-1",
+  }), "AUTH_CONFLICT");
 });
 
-test("installed Supabase 2.112.2 native Apple link follows authoritative GoTrue Apple state and PKCE semantics", async () => {
+test("installed Supabase 2.112.2 Apple link uses only its operation-local password session", async () => {
   const runtimePackage = createRequire(import.meta.url)("@supabase/supabase-js/package.json") as {
     readonly version?: unknown;
   };
@@ -887,6 +974,20 @@ test("installed Supabase 2.112.2 native Apple link follows authoritative GoTrue 
     const request = new Request(input, init);
     serverRequests.push(request);
     const requestUrl = new URL(request.url);
+    if (requestUrl.pathname === "/auth/v1/token" && requestUrl.searchParams.get("grant_type") === "password") {
+      return Response.json({
+        access_token: accessToken,
+        refresh_token: "installed-sdk-refresh-sentinel",
+        expires_in: 3600,
+        token_type: "bearer",
+        user: {
+          id: "provider-subject-1",
+          email: "User@Example.Test",
+          email_confirmed_at: "2026-08-01T00:00:00.000Z",
+          app_metadata: { provider: "email" },
+        },
+      });
+    }
     if (requestUrl.pathname === "/auth/v1/user") {
       return Response.json({ user: {
         id: "provider-subject-1",
@@ -903,25 +1004,29 @@ test("installed Supabase 2.112.2 native Apple link follows authoritative GoTrue 
       authorizationUrl.searchParams.set("state", "4fd0445c-badc-4bdb-bc0f-7af9b821c7ec");
       return Response.json({ url: authorizationUrl.toString() });
     }
+    if (requestUrl.pathname === "/auth/v1/logout") {
+      return new Response(null, { status: 204 });
+    }
     return Response.json({ code: "unexpected_test_request" }, { status: 500 });
   };
 
   try {
+    const store = new MemoryTransactionStore();
     const provider = new SupabaseAuthProvider({
       supabaseUrl: "https://example.supabase.co",
       publishableKey: "publishable-key-not-secret",
       serviceRoleKey,
       appleRedirectUris: [nativeCallbackUri],
       passwordResetRedirectUri: callbackUri,
-      transactionStore: new MemoryTransactionStore(),
+      transactionStore: store,
       transactionProtector: protector,
       now: () => new Date(fixedNow),
     });
 
-    const start = await provider.beginAppleLink({
+    const start = await provider.reauthenticateAndBeginAppleLink({
       ...nativeAppleStart(),
       authenticatedActorId: "actor-1",
-      providerProof: { accessToken },
+      ...credential,
     });
 
     const authorizationRequest = serverRequests.find(
@@ -939,12 +1044,57 @@ test("installed Supabase 2.112.2 native Apple link follows authoritative GoTrue 
     assert.notEqual(appleAuthorizationUrl.searchParams.get("state"), start.transaction_id);
     assert.equal(appleAuthorizationUrl.searchParams.has("code_challenge"), false);
     assert.equal(appleAuthorizationUrl.searchParams.has("code_challenge_method"), false);
+    const transaction = store.records.get(start.transaction_id);
+    assert(transaction !== undefined);
+    const envelopeText = new TextDecoder().decode(
+      await protector.decrypt(transaction.pkce_verifier_ciphertext),
+    );
+    assert.equal(envelopeText.includes(accessToken), false);
+    assert.equal(envelopeText.includes(credential.password), false);
+    assert.equal(JSON.stringify(start).includes(accessToken), false);
+    assert.equal(JSON.stringify(start).includes(credential.password), false);
+
+    const webStore = new MemoryTransactionStore();
+    const webRequestOffset = serverRequests.length;
+    const webProvider = new SupabaseAuthProvider({
+      supabaseUrl: "https://example.supabase.co",
+      publishableKey: "publishable-key-not-secret",
+      serviceRoleKey,
+      appleRedirectUris: [callbackUri],
+      passwordResetRedirectUri: callbackUri,
+      transactionStore: webStore,
+      transactionProtector: protector,
+      now: () => new Date(fixedNow),
+    });
+    const webStart = await webProvider.reauthenticateAndBeginAppleLink({
+      ...webAppleStart(),
+      authenticatedActorId: "actor-1",
+      ...credential,
+    });
+    const webAuthorizationRequest = serverRequests.slice(webRequestOffset).find(
+      (request) => new URL(request.url).pathname === "/auth/v1/user/identities/authorize",
+    );
+    assert(webAuthorizationRequest !== undefined);
+    assert.equal(webAuthorizationRequest.headers.get("authorization"), `Bearer ${accessToken}`);
+    const webTransaction = webStore.records.get(webStart.transaction_id);
+    assert(webTransaction !== undefined);
+    const webEnvelope = JSON.parse(new TextDecoder().decode(
+      await protector.decrypt(webTransaction.pkce_verifier_ciphertext),
+    )) as Record<string, unknown>;
+    assert.equal(
+      webEnvelope.providerSubjectDigest,
+      Buffer.from(sha256ForTest("provider-subject-1")).toString("hex"),
+    );
+    assert.equal(JSON.stringify(webEnvelope).includes(accessToken), false);
+    assert.equal(JSON.stringify(webEnvelope).includes(credential.password), false);
+    assert.equal(JSON.stringify(webStart).includes(accessToken), false);
+    assert.equal(JSON.stringify(webStart).includes(credential.password), false);
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test("Supabase password recovery persists a one-time transaction, updates password, and globally revokes without token output", async () => {
+test("Supabase password recovery uses the fresh admin atomic password-and-session update path", async () => {
   const harness = createHarness();
   const binding = await harness.provider.beginPasswordReset("USER@EXAMPLE.TEST");
   const resetCall = harness.methodCalls.find((call) => call.name === "resetPasswordForEmail");
@@ -969,10 +1119,16 @@ test("Supabase password recovery persists a one-time transaction, updates passwo
   });
   assert.equal(result.providerSubject, "provider-subject-1");
   assert.deepEqual(harness.exchangedVerifiers, [recoveryVerifier]);
-  assert.deepEqual(harness.methodCalls.find((call) => call.name === "updateUser")?.arguments,
-    [{ password: "new correct horse battery staple" }]);
-  assert.deepEqual(harness.methodCalls.filter((call) => call.name === "signOut").at(-1)?.arguments,
-    [{ scope: "global" }]);
+  assert.deepEqual(harness.methodCalls.find((call) => call.name === "updateUserById")?.arguments,
+    ["provider-subject-1", { password: "new correct horse battery staple" }]);
+  assert.deepEqual(
+    harness.methodCalls.filter((call) => ["exchangeCodeForSession", "updateUserById"].includes(call.name))
+      .map((call) => call.name),
+    ["exchangeCodeForSession", "updateUserById"],
+  );
+  assert.equal(harness.methodCalls.some((call) => call.name === "updateUser"), false);
+  assert.equal(harness.methodCalls.some((call) => call.name === "signOut"), false);
+  assert.equal(harness.clientCalls.at(-1)?.key, serviceRoleKey);
   assert.equal(JSON.stringify(result).includes(providerAccessToken), false);
   assert.equal(harness.store.records.has(binding.transaction_id), false);
   await expectFailure(() => harness.provider.completePasswordReset({
@@ -993,4 +1149,34 @@ test("Supabase password recovery persists a one-time transaction, updates passwo
     }), "AUTH_CALLBACK_INVALID");
     assert.equal(isolated.methodCalls.some((call) => call.name === "exchangeCodeForSession"), false);
   }
+});
+
+test("Supabase password recovery returns no subject when the atomic admin update fails", async () => {
+  let providerBodyGetterCalls = 0;
+  const adminError = Object.defineProperties({}, {
+    status: { value: 503, enumerable: true },
+    message: {
+      enumerable: true,
+      get() {
+        providerBodyGetterCalls += 1;
+        throw new Error("provider body must not be read");
+      },
+    },
+  });
+  const harness = createHarness({ adminUpdateError: adminError });
+  const binding = await harness.provider.beginPasswordReset("USER@EXAMPLE.TEST");
+
+  await expectFailure(() => harness.provider.completePasswordReset({
+    binding,
+    authorization_code: "one-time-recovery-code",
+    new_password: "new correct horse battery staple",
+  }), "AUTH_PROVIDER_UNAVAILABLE");
+
+  assert.deepEqual(
+    harness.methodCalls.filter((call) => ["exchangeCodeForSession", "updateUserById"].includes(call.name))
+      .map((call) => call.name),
+    ["exchangeCodeForSession", "updateUserById"],
+  );
+  assert.equal(harness.methodCalls.some((call) => call.name === "signOut"), false);
+  assert.equal(providerBodyGetterCalls, 0);
 });

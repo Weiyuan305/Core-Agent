@@ -539,6 +539,7 @@ export interface AuthProviderAdapter {
   signUpEmail(input: EmailCredentialInput): Promise<{ readonly kind: "verification_pending" }>;
   signInEmail(input: EmailCredentialInput): Promise<VerifiedProviderSubject>;
   beginApple(input: AppleAuthorizationInput): Promise<AppleAuthorizationStart>;
+  reauthenticateAndBeginAppleLink(input: AppleLinkAuthorizationInput): Promise<AppleAuthorizationStart>;
   completeApple(input: AppleAuthorizationCallback): Promise<VerifiedProviderSubject>;
   verifyCurrentSubject(input: ProviderProof): Promise<VerifiedProviderSubject>;
   reauthenticatePassword(input: EmailCredentialInput): Promise<VerifiedProviderSubject>;
@@ -580,7 +581,7 @@ Do not branch on public error-message text. Use provider status/code internally,
 
 Create a fresh server-side Supabase client per operation with persistence, auto-refresh, and URL session detection disabled. Keep access/refresh tokens inside the adapter call, validate `email_confirmed_at`, copy only the allowlisted subject facts, sign out the transient provider client, and release references.
 
-Apple flow must persist a one-time OAuth transaction digest containing state, nonce, PKCE verifier digest, exact redirect URI, client kind, expiry, and optional authenticated Actor for linking. Callback validates all fields before exchanging the code. A callback failure creates no Core Actor, AuthSubject, or Core Session.
+Apple flow must persist a one-time OAuth transaction digest containing state, nonce, PKCE verifier digest, exact redirect URI, client kind, expiry, and optional authenticated Actor for linking. Link start accepts the current email/password only inside `reauthenticateAndBeginAppleLink`, authenticates and starts linking on the same operation-local provider client, persists only a digest of the verified provider subject inside the authenticated-encrypted transaction envelope, and terminally clears that transient provider Session. Link callback accepts no password or provider proof; after code exchange it constant-time verifies the returned provider-subject digest. Callback validates all fields before exchanging the code. A callback failure creates no Core Actor, AuthSubject, or Core Session.
 
 Password recovery sends the configured Supabase redirect URI unchanged. Its
 one-time transaction/state/expiry binding is adapter-internal transport state,
@@ -666,6 +667,13 @@ git commit -m "feat(identity): add durable core sessions"
 
 **Files:**
 
+- Modify: `packages/contracts/src/identity/public-auth.ts`
+- Modify: `packages/contracts/src/registry.ts`
+- Modify: `packages/contracts/src/index.ts`
+- Modify: `packages/contracts/tests/identity-contracts.test.ts`
+- Create: `packages/contracts/compat/v1/releases/0.6.0/`
+- Modify: `packages/contracts/package.json`
+- Modify: `package-lock.json`
 - Create: `apps/identity-gateway/src/config.ts`
 - Create: `apps/identity-gateway/src/security.ts`
 - Create: `apps/identity-gateway/src/errors.ts`
@@ -703,6 +711,20 @@ Inject requests and prove:
   `Secure; HttpOnly; SameSite=Lax` recovery Cookie; the binding never enters
   public JSON, and the provider redirect remains the exact configured URL with
   no per-transaction query parameters.
+- Apple Web sign-in/link start creates a separate short-lived
+  `Secure; HttpOnly; SameSite=Lax` Apple-flow Cookie containing the Core
+  transaction binding. Web callback authority comes from that Cookie, requires
+  an exact transaction match, and clears it on every terminal callback path.
+  Native iPhone/macOS clients instead bind `transaction_id` to their local
+  nonce/PKCE flow context. The Apple-flow and password-recovery Cookies have
+  different names, purposes, and parsers and are never interchangeable.
+- publish an additive `AppleIdentityLinkStartRequest` in Contracts 0.6.0. It
+  contains the current password plus the released Web/native Apple start
+  fields, but no email, provider token, or provider proof. Its route requires
+  an active Core Session and recent Core reauthentication, loads the current
+  normalized email server-side, then calls
+  `reauthenticateAndBeginAppleLink`. `AppleIdentityLinkRequest` remains the
+  password/token-free callback contract.
 
 - [ ] **Step 2: Implement strict configuration**
 
@@ -736,14 +758,34 @@ from the dedicated HttpOnly Cookie, combines it with the provider callback code
 and submitted new password, consumes it once, and clears the Cookie on every
 terminal outcome.
 
+Apple Web start stores `transaction_id`, expiry, and the Core callback state in
+the dedicated Apple-flow HttpOnly Cookie and returns only the provider
+authorization URL. Apple Web callback reconstructs the adapter's Core
+transaction/state binding from that Cookie (request fields are never authority),
+requires exact agreement before provider exchange, and clears the Cookie on
+success and every bounded failure. Native start/callback has no Apple-flow
+Cookie; the native app must bind `transaction_id` to the same local nonce/PKCE
+context and present that exact binding on callback. The password-reset recovery
+Cookie remains a separate transport and cannot satisfy an Apple callback.
+
+The authenticated Apple link-start route accepts the current password and
+Apple start fields only after active Core Session authentication plus
+`requireRecentReauthentication`. It derives the current normalized email from
+the private identity projection, invokes
+`reauthenticateAndBeginAppleLink` once, and never receives or forwards a
+Supabase access token. The link callback accepts neither password nor provider
+proof.
+
 - [ ] **Step 5: Verify and commit**
+
+Run: `npm run check -w @core-agent/contracts`
 
 Run: `npm run check -w @core-agent/identity-gateway`
 
 Run: `npm test -w @core-agent/identity-gateway -- --test-name-pattern='security|enumeration|cookie|origin|csrf'`
 
 ```bash
-git add apps/identity-gateway package.json
+git add apps/identity-gateway packages/contracts package.json package-lock.json
 git commit -m "feat(identity): add public identity gateway"
 ```
 

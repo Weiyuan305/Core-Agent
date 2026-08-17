@@ -54,9 +54,12 @@ interface SupabaseAuthPort {
   setSession(input: { readonly access_token: string; readonly refresh_token: string }): Promise<unknown>;
   signOut(input: { readonly scope: "local" | "global" }): Promise<unknown>;
   resetPasswordForEmail(email: string, options: { readonly redirectTo: string }): Promise<unknown>;
-  updateUser(input: { readonly password: string }): Promise<unknown>;
   linkIdentity(input: unknown): Promise<unknown>;
   readonly admin: {
+    updateUserById(
+      providerSubject: string,
+      attributes: { readonly password: string },
+    ): Promise<unknown>;
     deleteUser(providerSubject: string, shouldSoftDelete: boolean): Promise<unknown>;
   };
 }
@@ -144,12 +147,14 @@ interface WebPkceEnvelope {
   readonly flowId: string;
   readonly verifier: string;
   readonly verifierDigest: string;
+  readonly providerSubjectDigest?: string;
 }
 
 interface NativePkceEnvelope {
   readonly kind: "native";
   readonly flowId: string;
   readonly challenge: string;
+  readonly providerSubjectDigest?: string;
 }
 
 type DecryptedPkceEnvelope = WebPkceEnvelope | NativePkceEnvelope;
@@ -187,7 +192,9 @@ const supabaseRuntime = nodeRequire("@supabase/supabase-js") as {
 const defaultClientFactory: SupabaseClientFactory = (url, key, options) => {
   const client = supabaseRuntime.createClient(url, key, options);
   const auth = ownData(client, "auth");
-  if (typeof auth !== "object" || auth === null) throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+  if (typeof auth !== "object" || auth === null || utilTypes.isProxy(auth)) {
+    throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+  }
   const storage = Object.getOwnPropertyDescriptor(auth, "storage");
   // supabase-js 2.112.2 deliberately substitutes its own memory storage when
   // persistSession is false. Rebind that private, operation-local slot so the
@@ -238,7 +245,7 @@ const defaultNativeLinkAuthorization: NativeLinkAuthorizationPort = {
 
 function ownData(value: unknown, key: string): unknown {
   try {
-    if (typeof value !== "object" || value === null) return undefined;
+    if (typeof value !== "object" || value === null || utilTypes.isProxy(value)) return undefined;
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     return descriptor !== undefined && "value" in descriptor ? descriptor.value : undefined;
   } catch {
@@ -248,7 +255,7 @@ function ownData(value: unknown, key: string): unknown {
 
 function hasOwnData(value: unknown, key: string): boolean {
   try {
-    if (typeof value !== "object" || value === null) return false;
+    if (typeof value !== "object" || value === null || utilTypes.isProxy(value)) return false;
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     return descriptor !== undefined && "value" in descriptor;
   } catch {
@@ -261,6 +268,21 @@ function ownString(value: unknown, key: string): string | undefined {
   return typeof property === "string" ? property : undefined;
 }
 
+function readOwnStringArray(value: unknown, maximum: number): readonly string[] | undefined {
+  if (!Array.isArray(value) || utilTypes.isProxy(value)) return undefined;
+  const length = ownData(value, "length");
+  if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0 || length > maximum) {
+    return undefined;
+  }
+  const copy: string[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const item = ownString(value, String(index));
+    if (item === undefined) return undefined;
+    copy.push(item);
+  }
+  return copy;
+}
+
 function requireResultData(result: unknown, fallback?: ProviderFailureCode): unknown {
   if (!hasOwnData(result, "error") || !hasOwnData(result, "data")) {
     throw new ProviderFailure(fallback ?? "AUTH_PROVIDER_UNAVAILABLE");
@@ -268,7 +290,7 @@ function requireResultData(result: unknown, fallback?: ProviderFailureCode): unk
   const error = ownData(result, "error");
   if (error !== null && error !== undefined) throw mapProviderFailure(error, fallback);
   const data = ownData(result, "data");
-  if (typeof data !== "object" || data === null) {
+  if (typeof data !== "object" || data === null || utilTypes.isProxy(data)) {
     throw new ProviderFailure(fallback ?? "AUTH_PROVIDER_UNAVAILABLE");
   }
   return data;
@@ -397,7 +419,7 @@ function parseStoredFlowId(value: string | null): string | undefined {
   if (value === null) return undefined;
   try {
     const parsed: unknown = JSON.parse(value);
-    if (!Array.isArray(parsed) || parsed.length !== 1) return undefined;
+    if (!Array.isArray(parsed) || utilTypes.isProxy(parsed) || parsed.length !== 1) return undefined;
     const descriptor = Object.getOwnPropertyDescriptor(parsed, "0");
     const flowId = descriptor !== undefined && "value" in descriptor ? descriptor.value : undefined;
     return typeof flowId === "string" && /^[A-Za-z0-9_-]{8,64}$/u.test(flowId) ? flowId : undefined;
@@ -467,17 +489,44 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
   readonly #randomBytes: (length: number) => Uint8Array;
 
   constructor(options: SupabaseAuthProviderOptions) {
-    this.#url = options.supabaseUrl;
-    this.#publishableKey = options.publishableKey;
-    this.#serviceRoleKey = options.serviceRoleKey;
-    this.#appleRedirectUris = new Set(options.appleRedirectUris);
-    this.#passwordResetRedirectUri = options.passwordResetRedirectUri;
-    this.#transactionStore = options.transactionStore;
-    this.#transactionProtector = options.transactionProtector;
-    this.#createClient = options.createClient ?? defaultClientFactory;
-    this.#nativeLinkAuthorization = options.nativeLinkAuthorization ?? defaultNativeLinkAuthorization;
-    this.#now = options.now ?? (() => new Date());
-    this.#randomBytes = options.randomBytes ?? ((length) => Uint8Array.from(nodeRandomBytes(length)));
+    if (utilTypes.isProxy(options)) throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+    const supabaseUrl = ownString(options, "supabaseUrl");
+    const publishableKey = ownString(options, "publishableKey");
+    const serviceRoleKey = ownString(options, "serviceRoleKey");
+    const appleRedirectUris = readOwnStringArray(ownData(options, "appleRedirectUris"), 128);
+    const passwordResetRedirectUri = ownString(options, "passwordResetRedirectUri");
+    const transactionStore = ownData(options, "transactionStore");
+    const transactionProtector = ownData(options, "transactionProtector");
+    const createClient = ownData(options, "createClient");
+    const nativeLinkAuthorization = ownData(options, "nativeLinkAuthorization");
+    const now = ownData(options, "now");
+    const randomBytes = ownData(options, "randomBytes");
+    if (supabaseUrl === undefined || publishableKey === undefined || serviceRoleKey === undefined
+      || appleRedirectUris === undefined || passwordResetRedirectUri === undefined
+      || typeof transactionStore !== "object" || transactionStore === null || utilTypes.isProxy(transactionStore)
+      || typeof transactionProtector !== "object" || transactionProtector === null
+      || utilTypes.isProxy(transactionProtector)
+      || (createClient !== undefined && (typeof createClient !== "function" || utilTypes.isProxy(createClient)))
+      || (nativeLinkAuthorization !== undefined
+        && (typeof nativeLinkAuthorization !== "object" || nativeLinkAuthorization === null
+          || utilTypes.isProxy(nativeLinkAuthorization)))
+      || (now !== undefined && (typeof now !== "function" || utilTypes.isProxy(now)))
+      || (randomBytes !== undefined && (typeof randomBytes !== "function" || utilTypes.isProxy(randomBytes)))) {
+      throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+    }
+    this.#url = supabaseUrl;
+    this.#publishableKey = publishableKey;
+    this.#serviceRoleKey = serviceRoleKey;
+    this.#appleRedirectUris = new Set(appleRedirectUris);
+    this.#passwordResetRedirectUri = passwordResetRedirectUri;
+    this.#transactionStore = transactionStore as OAuthTransactionStore;
+    this.#transactionProtector = transactionProtector as TransactionProtector;
+    this.#createClient = (createClient as SupabaseClientFactory | undefined) ?? defaultClientFactory;
+    this.#nativeLinkAuthorization = (nativeLinkAuthorization as NativeLinkAuthorizationPort | undefined)
+      ?? defaultNativeLinkAuthorization;
+    this.#now = (now as (() => Date) | undefined) ?? (() => new Date());
+    this.#randomBytes = (randomBytes as ((length: number) => Uint8Array) | undefined)
+      ?? ((length) => Uint8Array.from(nodeRandomBytes(length)));
   }
 
   async signUpEmail(input: EmailCredentialInput): Promise<{ readonly kind: "verification_pending" }> {
@@ -579,7 +628,7 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
     return this.#beginAppleTransaction(input, "apple_sign_in", null, null);
   }
 
-  async beginAppleLink(input: AppleLinkAuthorizationInput): Promise<AppleAuthorizationStart> {
+  async reauthenticateAndBeginAppleLink(input: AppleLinkAuthorizationInput): Promise<AppleAuthorizationStart> {
     const actorId = ownString(input, "authenticatedActorId");
     if (actorId === undefined || actorId.length === 0 || actorId.length > 256) {
       throw new ProviderFailure("AUTH_CALLBACK_INVALID");
@@ -588,7 +637,7 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       input,
       "apple_link",
       actorId,
-      readProof(ownData(input, "providerProof")),
+      readCredential(input),
     );
   }
 
@@ -596,7 +645,7 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
     input: AppleAuthorizationInput,
     flowKind: "apple_sign_in" | "apple_link",
     actorId: string | null,
-    accessToken: string | null,
+    linkCredential: EmailCredentialInput | null,
   ): Promise<AppleAuthorizationStart> {
     const parsed = this.#parseAppleStart(input);
     const transactionId = `oauth_${encodeOpaque(this.#randomBytes(18))}`;
@@ -605,8 +654,12 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
     const expiresAt = new Date(this.#now().getTime() + oauthTransactionTtlMs).toISOString();
     const { client, storage, storageKey } = this.#newClient(undefined, transactionId);
     let verifierBytes: Uint8Array | undefined;
+    let transientLinkSession = false;
     try {
-      if (accessToken !== null) await this.#hydrateProof(client, accessToken);
+      const linkAuthentication = linkCredential === null
+        ? null
+        : await this.#authenticatePasswordOnClient(client, linkCredential);
+      transientLinkSession = linkAuthentication !== null;
       const oauthRequest = {
         provider: "apple",
         options: {
@@ -622,7 +675,7 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
         rawAuthorizationUrl = await safeProviderCall(() => this.#nativeLinkAuthorization.authorize({
           supabaseUrl: this.#url,
           publishableKey: this.#publishableKey,
-          accessToken: accessToken!,
+          accessToken: linkAuthentication!.accessToken,
           redirectUri: parsed.redirectUri,
           nonce,
           codeChallenge: parsed.pkceChallenge!,
@@ -659,9 +712,23 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
         envelope = {
           kind: "web", flowId, verifier,
           verifierDigest: Buffer.from(sha256(verifier)).toString("hex"),
+          ...(linkAuthentication === null ? {} : {
+            providerSubjectDigest: Buffer.from(
+              sha256(linkAuthentication.subject.providerSubject),
+            ).toString("hex"),
+          }),
         };
       } else {
-        envelope = { kind: "native", flowId, challenge: parsed.pkceChallenge! };
+        envelope = {
+          kind: "native",
+          flowId,
+          challenge: parsed.pkceChallenge!,
+          ...(linkAuthentication === null ? {} : {
+            providerSubjectDigest: Buffer.from(
+              sha256(linkAuthentication.subject.providerSubject),
+            ).toString("hex"),
+          }),
+        };
         if (flowKind === "apple_sign_in") {
           authorizationUrl.searchParams.set("code_challenge", parsed.pkceChallenge!);
           authorizationUrl.searchParams.set("code_challenge_method", "S256");
@@ -693,22 +760,24 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       });
     } finally {
       verifierBytes?.fill(0);
-      storage.clear();
+      try {
+        if (transientLinkSession) await this.#signOut(client, "local");
+      } finally {
+        storage.clear();
+      }
     }
   }
 
   async completeApple(input: AppleAuthorizationCallback): Promise<VerifiedProviderSubject> {
     const parsed = this.#parseAppleCallback(input);
-    return this.#completeAppleTransaction(parsed, "apple_sign_in", null, null);
+    return this.#completeAppleTransaction(parsed, "apple_sign_in", null);
   }
 
   async linkApple(input: AppleLinkInput): Promise<VerifiedProviderSubject> {
     const parsed = this.#parseAppleCallback(input);
     const actorId = ownString(input, "authenticatedActorId");
-    const proof = ownData(input, "providerProof");
     if (actorId === undefined || actorId.length === 0) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
-    const accessToken = readProof(proof);
-    return this.#completeAppleTransaction(parsed, "apple_link", actorId, accessToken);
+    return this.#completeAppleTransaction(parsed, "apple_link", actorId);
   }
 
   async completePasswordReset(input: PasswordResetCompletionInput): Promise<VerifiedProviderSubject> {
@@ -750,8 +819,14 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
         throw new ProviderFailure("AUTH_CALLBACK_INVALID");
       }
       const subject = copySubject(ownData(data, "user"), "email_password");
-      requireResultData(await safeProviderCall(() => client.auth.updateUser({ password: newPassword })));
-      await this.#signOut(client, "global");
+      const { client: adminClient, storage: adminStorage } = this.#newClient(this.#serviceRoleKey);
+      try {
+        requireNoResultError(await safeProviderCall(
+          () => adminClient.auth.admin.updateUserById(subject.providerSubject, { password: newPassword }),
+        ));
+      } finally {
+        adminStorage.clear();
+      }
       return subject;
     } finally {
       storage.clear();
@@ -792,20 +867,33 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
 
   async #passwordSubject(credential: EmailCredentialInput): Promise<VerifiedProviderSubject> {
     const { client, storage } = this.#newClient();
-    let authenticated = false;
     try {
-      const data = requireResultData(await safeProviderCall(() => client.auth.signInWithPassword({
-        email: credential.email,
-        password: credential.password,
-      })));
-      authenticated = ownData(data, "session") !== null && ownData(data, "session") !== undefined;
-      const subject = copySubject(ownData(data, "user"), "email_password");
-      if (!authenticated) throw new ProviderFailure("AUTH_INVALID");
+      const authentication = await this.#authenticatePasswordOnClient(client, credential);
       await this.#signOut(client, "local");
-      return subject;
+      return authentication.subject;
     } finally {
       storage.clear();
     }
+  }
+
+  async #authenticatePasswordOnClient(
+    client: SupabaseClientPort,
+    credential: EmailCredentialInput,
+  ): Promise<{ readonly subject: VerifiedProviderSubject; readonly accessToken: string }> {
+    const data = requireResultData(await safeProviderCall(() => client.auth.signInWithPassword({
+      email: credential.email,
+      password: credential.password,
+    })));
+    const session = ownData(data, "session");
+    const subject = copySubject(ownData(data, "user"), "email_password");
+    const accessToken = ownString(session, "access_token");
+    if (accessToken === undefined || accessToken.length === 0 || accessToken.length > 16_384) {
+      throw new ProviderFailure("AUTH_INVALID");
+    }
+    return Object.freeze({
+      subject,
+      accessToken,
+    });
   }
 
   async #hydrateProof(client: SupabaseClientPort, accessToken: string): Promise<VerifiedProviderSubject> {
@@ -898,7 +986,6 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
     callback: ParsedAppleCallback,
     expectedFlowKind: OAuthTransactionRecord["flow_kind"],
     expectedActorId: string | null,
-    accessToken: string | null,
   ): Promise<VerifiedProviderSubject> {
     const transaction = await this.#consumeTransaction(callback.transactionId);
     if (transaction.flowKind !== expectedFlowKind || transaction.actorId !== expectedActorId
@@ -924,14 +1011,19 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
         `${storageKey}-flow-${envelope.flowId}-code-verifier`,
         JSON.stringify(verifier),
       );
-      let currentSubject: VerifiedProviderSubject | undefined;
-      if (accessToken !== null) currentSubject = await this.#hydrateProof(client, accessToken);
       const data = requireResultData(await safeProviderCall(
         () => client.auth.exchangeCodeForSession(callback.authorizationCode, { flowId: envelope.flowId }),
         "AUTH_CALLBACK_INVALID",
       ), "AUTH_CALLBACK_INVALID");
       const subject = copySubject(ownData(data, "user"), "apple");
-      if (currentSubject !== undefined && currentSubject.providerSubject !== subject.providerSubject) {
+      const expectedSubjectDigest = envelope.providerSubjectDigest;
+      if ((expectedFlowKind === "apple_sign_in" && expectedSubjectDigest !== undefined)
+        || (expectedFlowKind === "apple_link"
+          && (expectedSubjectDigest === undefined
+            || !equalDigest(
+              sha256(subject.providerSubject),
+              Uint8Array.from(Buffer.from(expectedSubjectDigest, "hex")),
+            )))) {
         throw new ProviderFailure("AUTH_CONFLICT");
       }
       if (ownData(data, "session") === null || ownData(data, "session") === undefined) {
@@ -969,20 +1061,32 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       }
       if (kind === "native") {
         const challenge = ownString(parsed, "challenge");
+        const providerSubjectDigest = ownString(parsed, "providerSubjectDigest");
         if (challenge === undefined || !/^[A-Za-z0-9_-]{43}$/u.test(challenge)) {
           throw new ProviderFailure("AUTH_CALLBACK_INVALID");
         }
-        return { kind, flowId, challenge };
+        if (providerSubjectDigest !== undefined && !/^[a-f0-9]{64}$/u.test(providerSubjectDigest)) {
+          throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+        }
+        return {
+          kind, flowId, challenge,
+          ...(providerSubjectDigest === undefined ? {} : { providerSubjectDigest }),
+        };
       }
       const verifier = ownString(parsed, "verifier");
       const verifierDigest = ownString(parsed, "verifierDigest");
+      const providerSubjectDigest = ownString(parsed, "providerSubjectDigest");
       if ((kind !== "web" && kind !== "password_reset") || verifier === undefined
         || verifier.length < 43 || verifier.length > 512
         || verifierDigest === undefined || !/^[a-f0-9]{64}$/u.test(verifierDigest)
-        || !equalDigest(sha256(verifier), Uint8Array.from(Buffer.from(verifierDigest, "hex")))) {
+        || !equalDigest(sha256(verifier), Uint8Array.from(Buffer.from(verifierDigest, "hex")))
+        || (providerSubjectDigest !== undefined && !/^[a-f0-9]{64}$/u.test(providerSubjectDigest))) {
         throw new ProviderFailure("AUTH_CALLBACK_INVALID");
       }
-      return { kind, flowId, verifier, verifierDigest };
+      return {
+        kind, flowId, verifier, verifierDigest,
+        ...(providerSubjectDigest === undefined ? {} : { providerSubjectDigest }),
+      };
     } catch (error) {
       throw mapProviderFailure(error, "AUTH_CALLBACK_INVALID");
     } finally {

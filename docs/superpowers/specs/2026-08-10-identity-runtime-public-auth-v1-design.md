@@ -264,7 +264,9 @@ It supports:
   allowlists;
 - current provider-subject verification;
 - password reauthentication;
-- identity linking while authenticated;
+- password-reauthenticated identity-link start on one operation-local provider
+  client, followed by a password/token-free callback bound to the encrypted
+  provider-subject digest;
 - provider Session revocation and password reset initiation.
 
 The adapter never returns a provider error body, password, refresh token, Apple token,
@@ -305,6 +307,14 @@ exact host and path. OAuth callback compatibility is the reason for `Lax` rather
 token bound to the Session, JSON content type, and the existing bounded body policy.
 The browser never reads either the Core Session secret or a Supabase token.
 
+Apple Web authorization start also creates a separate short-lived `Secure`,
+`HttpOnly`, `SameSite=Lax` Apple-flow Cookie. It binds the Core
+`transaction_id`/callback state created at start; callback reconstructs that
+Core binding from the Cookie, requires an exact match before exchange, and
+clears the Cookie on every terminal success or failure. This Cookie is distinct
+from both the Core Session Cookie and the password-reset recovery Cookie and
+cannot be used in either role.
+
 ### 7.3 Apple clients
 
 Future iPhone and macOS clients use native Sign in with Apple and PKCE. The Identity
@@ -312,6 +322,15 @@ Gateway receives the provider proof, creates the same Core Session resource, and
 returns its opaque secret over TLS. The native client stores that secret in Keychain.
 No Apple client depends on a Web Cookie, and no native-specific identity fields enter
 the authority model.
+
+Native Apple start binds the returned Core `transaction_id` to the app's local
+nonce/PKCE flow context. Callback must present that exact locally held binding;
+it cannot use the Web Apple-flow Cookie. Manual Apple link start additionally
+requires an active Core Session, recent Core reauthentication, and the current
+password. The Gateway derives the current email server-side and the adapter
+uses the resulting provider access token only transiently inside the same
+operation-local start client. Link callback contains neither password nor
+provider proof.
 
 ### 7.4 Reauthentication and rate limits
 

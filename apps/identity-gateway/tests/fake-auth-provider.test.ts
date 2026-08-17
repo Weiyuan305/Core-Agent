@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { AuthProviderAdapter } from "../src/providers/auth-provider.js";
+import type {
+  AppleLinkAuthorizationInput,
+  AppleLinkInput,
+  AuthProviderAdapter,
+} from "../src/providers/auth-provider.js";
 import { FakeAuthProvider } from "../src/providers/fake-auth-provider.js";
 import { ProviderFailure } from "../src/providers/provider-errors.js";
 
@@ -13,7 +17,12 @@ const credential = Object.freeze({
 const providerProof = Object.freeze({ accessToken: ["fake", "current", "jwt"].join("-") });
 const payloadHash = `sha256:${"a".repeat(64)}`;
 
-function createProvider(): FakeAuthProvider {
+type HasProviderProof<T> = "providerProof" extends keyof T ? true : false;
+
+const appleLinkStartHasNoProviderProof: HasProviderProof<AppleLinkAuthorizationInput> = false;
+const appleLinkCallbackHasNoProviderProof: HasProviderProof<AppleLinkInput> = false;
+
+function createProvider(appleProviderSubject = "provider-subject-1"): FakeAuthProvider {
   return new FakeAuthProvider({
     now: () => new Date(fixedNow),
     subjects: [{
@@ -30,7 +39,7 @@ function createProvider(): FakeAuthProvider {
     }],
     appleSubject: {
       provider: "supabase",
-      providerSubject: "provider-subject-1",
+      providerSubject: appleProviderSubject,
       identityKind: "apple",
       normalizedEmail: "user@example.test",
       verifiedAt: "2026-08-01T00:00:00.000Z",
@@ -103,13 +112,7 @@ test("deterministic fake accepts inert own data properties without invoking gett
       },
     },
   });
-  const trapped = new Proxy(target, {
-    get() {
-      throw new Error("property access is forbidden");
-    },
-  });
-
-  const result = await createProvider().signInEmail(trapped as never);
+  const result = await createProvider().signInEmail(target as never);
 
   assert.equal(getterCalls, 0);
   assert.deepEqual(Object.keys(result).sort(), [
@@ -120,6 +123,42 @@ test("deterministic fake accepts inert own data properties without invoking gett
     "verifiedAt",
   ]);
   assert.equal(JSON.stringify(result).includes(credential.password), false);
+});
+
+test("deterministic fake rejects Node Proxy inputs without invoking any structural trap", async () => {
+  const calls = { descriptor: 0, keys: 0, get: 0, prototype: 0 };
+  const trapped = new Proxy({ ...credential }, {
+    getOwnPropertyDescriptor() {
+      calls.descriptor += 1;
+      throw new Error("descriptor trap must not execute");
+    },
+    ownKeys() {
+      calls.keys += 1;
+      throw new Error("ownKeys trap must not execute");
+    },
+    get() {
+      calls.get += 1;
+      throw new Error("get trap must not execute");
+    },
+    getPrototypeOf() {
+      calls.prototype += 1;
+      throw new Error("prototype trap must not execute");
+    },
+  });
+
+  await expectFailure(() => createProvider().signInEmail(trapped as never), "AUTH_INVALID");
+  assert.deepEqual(calls, { descriptor: 0, keys: 0, get: 0, prototype: 0 });
+
+  assert.throws(
+    () => new FakeAuthProvider(new Proxy({} as never, {
+      getOwnPropertyDescriptor() { calls.descriptor += 1; throw new Error("no descriptor"); },
+      ownKeys() { calls.keys += 1; throw new Error("no keys"); },
+      get() { calls.get += 1; throw new Error("no get"); },
+      getPrototypeOf() { calls.prototype += 1; throw new Error("no prototype"); },
+    })),
+    (error: unknown) => error instanceof ProviderFailure && error.code === "AUTH_INVALID",
+  );
+  assert.deepEqual(calls, { descriptor: 0, keys: 0, get: 0, prototype: 0 });
 });
 
 test("deterministic fake rejects inherited or accessor credentials with a stable bounded failure", async () => {
@@ -166,14 +205,15 @@ test("deterministic fake validates one-time Apple sign-in and link transactions"
   assert.equal((await provider.completeApple(callback)).identityKind, "apple");
   await expectFailure(() => provider.completeApple(callback), "AUTH_CALLBACK_INVALID");
 
-  const linkStart = await provider.beginAppleLink({
+  const linkStart = await provider.reauthenticateAndBeginAppleLink({
     schema_version: 1,
     idempotency_key: "idem_fake_link_start",
     payload_hash: payloadHash,
     client_kind: "web",
     redirect_uri: "https://identity.example.test/auth/v1/apple/callback",
     authenticatedActorId: "actor-1",
-    providerProof,
+    email: credential.email,
+    password: credential.password,
   });
   assert.equal(new URL(linkStart.authorization_url).searchParams.has("state"), false);
   assert.equal((await provider.linkApple({
@@ -185,8 +225,34 @@ test("deterministic fake validates one-time Apple sign-in and link transactions"
     state: linkStart.transaction_id,
     client_kind: "web",
     authenticatedActorId: "actor-1",
-    providerProof,
   })).identityKind, "apple");
+  assert.equal(appleLinkStartHasNoProviderProof, false);
+  assert.equal(appleLinkCallbackHasNoProviderProof, false);
+});
+
+test("deterministic fake rejects an Apple link callback for a different provider subject", async () => {
+  const provider = createProvider("different-provider-subject");
+  const start = await provider.reauthenticateAndBeginAppleLink({
+    schema_version: 1,
+    idempotency_key: "idem_fake_link_conflict_start",
+    payload_hash: payloadHash,
+    client_kind: "web",
+    redirect_uri: "https://identity.example.test/auth/v1/apple/callback",
+    authenticatedActorId: "actor-1",
+    email: credential.email,
+    password: credential.password,
+  });
+
+  await expectFailure(() => provider.linkApple({
+    schema_version: 1,
+    idempotency_key: "idem_fake_link_conflict_callback",
+    payload_hash: payloadHash,
+    transaction_id: start.transaction_id,
+    authorization_code: "fake-link-code",
+    state: start.transaction_id,
+    client_kind: "web",
+    authenticatedActorId: "actor-1",
+  }), "AUTH_CONFLICT");
 });
 
 test("deterministic fake rejects changed Apple callback authority before returning a subject", async () => {

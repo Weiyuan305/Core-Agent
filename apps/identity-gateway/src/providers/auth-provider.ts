@@ -27,12 +27,12 @@ export type AppleAuthorizationCallback = AppleAuthorizationCallbackRequest;
 
 export type AppleLinkAuthorizationInput = AppleAuthorizationInput & {
   readonly authenticatedActorId: string;
-  readonly providerProof: ProviderProof;
+  readonly email: string;
+  readonly password: string;
 };
 
 export type AppleLinkInput = AppleIdentityLinkRequest & {
   readonly authenticatedActorId: string;
-  readonly providerProof: ProviderProof;
 };
 
 /**
@@ -55,7 +55,7 @@ export interface AuthProviderAdapter {
   signUpEmail(input: EmailCredentialInput): Promise<{ readonly kind: "verification_pending" }>;
   signInEmail(input: EmailCredentialInput): Promise<VerifiedProviderSubject>;
   beginApple(input: AppleAuthorizationInput): Promise<AppleAuthorizationStart>;
-  beginAppleLink(input: AppleLinkAuthorizationInput): Promise<AppleAuthorizationStart>;
+  reauthenticateAndBeginAppleLink(input: AppleLinkAuthorizationInput): Promise<AppleAuthorizationStart>;
   completeApple(input: AppleAuthorizationCallback): Promise<VerifiedProviderSubject>;
   verifyCurrentSubject(input: ProviderProof): Promise<VerifiedProviderSubject>;
   reauthenticatePassword(input: EmailCredentialInput): Promise<VerifiedProviderSubject>;
