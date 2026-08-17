@@ -184,10 +184,16 @@ async function runCiEquivalentScenario({ injectedFailure = false, injectedOutput
     assert.equal(changed.status, 0);
     assert.equal(untracked.status, 0);
     const artifactPaths = Buffer.concat([changed.stdout, untracked.stdout]).toString("utf8").split("\0").filter(Boolean);
+    const localTask2Report = ".superpowers/sdd/task-2-report.md";
+    try {
+      await lstat(join(repositoryRoot, localTask2Report));
+      artifactPaths.push(localTask2Report);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
     protectedRun(process.execPath, [
       "scripts/verify-no-secret.mjs", "--secret-file", credentialFile,
       ...artifactPaths,
-      ".superpowers/sdd/task-2-report.md",
     ], environment, credential, credentialFile);
   } finally {
     docker(["rm", "--force", "--volumes", container], baseEnvironment, credential);
