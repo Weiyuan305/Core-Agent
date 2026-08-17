@@ -172,12 +172,12 @@ git commit -m "feat(contracts): add entitlement capability authority"
 
 **Interfaces:**
 
-- Consumes: Identity schema 10 and existing migration/Worker tables.
+- Consumes: Identity schema 11 and existing migration/Worker tables.
 - Produces: schema 12, `EntitlementAuthorityTables`, immutable database constraints, and new Worker job kinds.
 
 - [ ] **Step 1: Write failing migration and immutability tests**
 
-Prove schema 10 -> 11 and empty -> 11 migration, exact table/index/constraint inventory, tenant-scoped foreign keys, database-time validity, immutable reviewed/published rows, immutable snapshots, unique order identity, one active Assignment pair, and no seat oversubscription bypass through direct SQL.
+Prove schema 11 -> 12 and empty -> 12 migration, exact table/index/constraint inventory, tenant-scoped foreign keys, database-time validity, immutable reviewed/published rows, immutable snapshots, unique order identity, one active Assignment pair, and no seat oversubscription bypass through direct SQL.
 
 Attempt `UPDATE` and `DELETE` on reviewed Capability Version, published Pack Version/member, Tenant release history, and Snapshot rows; expect named fail-closed triggers. Current pointer updates remain allowed only through an expected-version function/service transaction.
 

@@ -128,13 +128,13 @@ function createHarness(input: {
         `${authOptions.storageKey}-flow-${flowId}-code-verifier`,
         JSON.stringify(pkceVerifier),
       );
-      const requestOptions = (request as { readonly options: { readonly queryParams: {
-        readonly state: string;
-        readonly nonce: string;
-      } } }).options;
       const authorizationUrl = new URL("https://example.supabase.co/auth/v1/authorize");
-      authorizationUrl.searchParams.set("state", requestOptions.queryParams.state);
-      authorizationUrl.searchParams.set("nonce", requestOptions.queryParams.nonce);
+      const requestOptions = (request as { readonly options: { readonly queryParams: {
+        readonly nonce?: unknown;
+      } } }).options;
+      if (typeof requestOptions.queryParams.nonce === "string") {
+        authorizationUrl.searchParams.set("nonce", requestOptions.queryParams.nonce);
+      }
       return { data: { provider: "apple", url: authorizationUrl.toString(), flowId }, error: null };
     };
     const auth = {
@@ -236,6 +236,12 @@ function createHarness(input: {
       transactionStore: store,
       transactionProtector: input.transactionProtector ?? protector,
       createClient: factory,
+      nativeLinkAuthorization: {
+        async authorize(request) {
+          methodCalls.push({ name: "nativeAuthorize", arguments: [request] });
+          return "https://appleid.apple.com/auth/authorize?state=4fd0445c-badc-4bdb-bc0f-7af9b821c7ec";
+        },
+      },
       now: input.now ?? (() => new Date(fixedNow)),
       randomBytes: (length) => {
         randomCall += 1;
@@ -269,14 +275,13 @@ function callbackFromStart(
   start: { readonly transaction_id: string; readonly authorization_url: string },
   clientKind: ProviderClientKind = "web",
 ): AppleAuthorizationCallback {
-  const url = new URL(start.authorization_url);
   const base = {
     schema_version: 1 as const,
     idempotency_key: "idem_apple_callback",
     payload_hash: payloadHash,
     transaction_id: start.transaction_id,
     authorization_code: "one-time-authorization-code",
-    state: url.searchParams.get("state") ?? "",
+    state: start.transaction_id,
     client_kind: clientKind,
   };
   return (clientKind === "web" ? base : {
@@ -630,6 +635,7 @@ test("installed Supabase 2.112.2 default factory captures SDK PKCE state offline
   const authorizationUrl = new URL(start.authorization_url);
   assert.equal(authorizationUrl.origin, "https://example.supabase.co");
   assert.equal(authorizationUrl.pathname, "/auth/v1/authorize");
+  assert.equal(authorizationUrl.searchParams.has("state"), false);
   assert.match(authorizationUrl.searchParams.get("code_challenge") ?? "", /^[A-Za-z0-9_-]{43}$/u);
   const transaction = store.records.get(start.transaction_id);
   assert(transaction !== undefined);
@@ -654,10 +660,16 @@ test("Supabase Apple Web uses the released request/callback shape and trusted pr
   ]);
   assert.equal(transaction.flow_kind, "apple_sign_in");
   assert.equal(transaction.redirect_uri, callbackUri);
+  assert.deepEqual(transaction.state_digest, sha256ForTest(start.transaction_id));
   assert.equal(transaction.state_digest.byteLength, 32);
   assert.equal(transaction.nonce_digest.byteLength, 32);
   assert.equal(JSON.stringify(transaction).includes(pkceVerifier), false);
   assert.deepEqual(Object.keys(start).sort(), ["authorization_url", "expires_at", "transaction_id"]);
+  const request = harness.methodCalls.find((call) => call.name === "signInWithOAuth")?.arguments[0] as {
+    readonly options: { readonly queryParams: Record<string, unknown> };
+  };
+  assert.equal(Object.hasOwn(request.options.queryParams, "state"), false);
+  assert.notEqual(new URL(start.authorization_url).searchParams.get("state"), start.transaction_id);
   const callback = callbackFromStart(start);
   assert.equal("nonce" in callback, false);
   assert.equal((await harness.provider.completeApple(callback)).identityKind, "apple");
@@ -673,6 +685,11 @@ test("Supabase Apple native binds caller nonce and exact S256 challenge before e
   assert.equal(url.searchParams.get("nonce"), nativeNonce);
   assert.equal(url.searchParams.get("code_challenge"), nativePkceChallenge);
   assert.equal(url.searchParams.get("code_challenge_method")?.toUpperCase(), "S256");
+  const request = harness.methodCalls.find((call) => call.name === "signInWithOAuth")?.arguments[0] as {
+    readonly options: { readonly queryParams: Record<string, unknown> };
+  };
+  assert.equal(Object.hasOwn(request.options.queryParams, "state"), false);
+  assert.notEqual(url.searchParams.get("state"), start.transaction_id);
 
   const subject = await harness.provider.completeApple(callbackFromStart(start, "iphone"));
   assert.equal(subject.identityKind, "apple");
@@ -821,9 +838,39 @@ test("Supabase Apple link start/callback mirror released Web/native shapes plus 
   assert.equal(result.identityKind, "apple");
   assert.equal(JSON.stringify(result).includes(currentJwt), false);
   assert.equal(harness.methodCalls.filter((call) => call.name === "linkIdentity").length, 1);
+  const linkRequest = harness.methodCalls.find((call) => call.name === "linkIdentity")?.arguments[0] as {
+    readonly options: { readonly queryParams: Record<string, unknown> };
+  };
+  assert.equal(Object.hasOwn(linkRequest.options.queryParams, "state"), false);
+
+  const native = createHarness();
+  const nativeStart = await native.provider.beginAppleLink({
+    ...nativeAppleStart(), authenticatedActorId: "actor-1", providerProof,
+  });
+  const nativeAuthorizationUrl = new URL(nativeStart.authorization_url);
+  assert.equal(nativeAuthorizationUrl.searchParams.get("state"), "4fd0445c-badc-4bdb-bc0f-7af9b821c7ec");
+  assert.notEqual(nativeAuthorizationUrl.searchParams.get("state"), nativeStart.transaction_id);
+  assert.equal(nativeAuthorizationUrl.searchParams.has("code_challenge"), false);
+  const nativeRequest = native.methodCalls.find((call) => call.name === "nativeAuthorize")?.arguments[0] as object;
+  assert.equal(Object.hasOwn(nativeRequest, "state"), false);
+  assert.equal((await native.provider.linkApple({
+    ...callbackFromStart(nativeStart, "iphone"), authenticatedActorId: "actor-1", providerProof,
+  })).identityKind, "apple");
+
+  const changed = createHarness();
+  const changedStart = await changed.provider.beginAppleLink({
+    ...nativeAppleStart(), authenticatedActorId: "actor-1", providerProof,
+  });
+  await expectFailure(() => changed.provider.linkApple({
+    ...callbackFromStart(changedStart, "iphone"),
+    state: `${changedStart.transaction_id}-changed`,
+    authenticatedActorId: "actor-1",
+    providerProof,
+  }), "AUTH_CALLBACK_INVALID");
+  assert.equal(changed.methodCalls.some((call) => call.name === "exchangeCodeForSession"), false);
 });
 
-test("installed Supabase 2.112.2 native Apple link sends the caller S256 challenge to the authenticated endpoint", async () => {
+test("installed Supabase 2.112.2 native Apple link follows authoritative GoTrue Apple state and PKCE semantics", async () => {
   const runtimePackage = createRequire(import.meta.url)("@supabase/supabase-js/package.json") as {
     readonly version?: unknown;
   };
@@ -849,11 +896,11 @@ test("installed Supabase 2.112.2 native Apple link sends the caller S256 challen
       } });
     }
     if (requestUrl.pathname === "/auth/v1/user/identities/authorize") {
+      // supabase/auth@0fb56ca93fcbe033bc2b0309bafbd86ef97aa468:
+      // external.go creates a UUID flow state; provider/apple.go ignores AuthCodeURL
+      // options and reports RequiresPKCE=false, so caller PKCE remains at GoTrue.
       const authorizationUrl = new URL("https://appleid.apple.com/auth/authorize");
-      for (const key of ["state", "nonce", "code_challenge", "code_challenge_method"] as const) {
-        const value = requestUrl.searchParams.get(key);
-        if (value !== null) authorizationUrl.searchParams.set(key, value);
-      }
+      authorizationUrl.searchParams.set("state", "4fd0445c-badc-4bdb-bc0f-7af9b821c7ec");
       return Response.json({ url: authorizationUrl.toString() });
     }
     return Response.json({ code: "unexpected_test_request" }, { status: 500 });
@@ -871,7 +918,7 @@ test("installed Supabase 2.112.2 native Apple link sends the caller S256 challen
       now: () => new Date(fixedNow),
     });
 
-    await provider.beginAppleLink({
+    const start = await provider.beginAppleLink({
       ...nativeAppleStart(),
       authenticatedActorId: "actor-1",
       providerProof: { accessToken },
@@ -884,8 +931,14 @@ test("installed Supabase 2.112.2 native Apple link sends the caller S256 challen
     const authorizationRequestUrl = new URL(authorizationRequest.url);
     assert.equal(authorizationRequestUrl.searchParams.get("code_challenge"), nativePkceChallenge);
     assert.equal(authorizationRequestUrl.searchParams.get("code_challenge_method"), "S256");
+    assert.equal(authorizationRequestUrl.searchParams.has("state"), false);
     assert.equal(authorizationRequest.headers.get("authorization"), `Bearer ${accessToken}`);
     assert.equal(authorizationRequest.headers.get("apikey"), "publishable-key-not-secret");
+    const appleAuthorizationUrl = new URL(start.authorization_url);
+    assert.equal(appleAuthorizationUrl.searchParams.get("state"), "4fd0445c-badc-4bdb-bc0f-7af9b821c7ec");
+    assert.notEqual(appleAuthorizationUrl.searchParams.get("state"), start.transaction_id);
+    assert.equal(appleAuthorizationUrl.searchParams.has("code_challenge"), false);
+    assert.equal(appleAuthorizationUrl.searchParams.has("code_challenge_method"), false);
   } finally {
     globalThis.fetch = originalFetch;
   }

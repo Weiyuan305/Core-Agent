@@ -248,7 +248,7 @@ export class FakeAuthProvider implements AuthProviderAdapter {
 
     this.#transactionCounter += 1;
     const transactionId = `oauth_fake_${this.#transactionCounter.toString().padStart(4, "0")}`;
-    const state = digest(`state:${transactionId}`);
+    const state = transactionId;
     const nonce = callerNonce ?? digest(`nonce:${transactionId}`);
     const expiresAt = this.#now().getTime() + oauthTtlMs;
     this.#transactions.set(transactionId, {
@@ -263,7 +263,6 @@ export class FakeAuthProvider implements AuthProviderAdapter {
       expiresAt,
     });
     const authorizationUrl = new URL("https://fake-auth.invalid/apple");
-    authorizationUrl.searchParams.set("state", state);
     authorizationUrl.searchParams.set("nonce", nonce);
 
     if (callerChallenge !== undefined) {

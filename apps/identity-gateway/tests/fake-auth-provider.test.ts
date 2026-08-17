@@ -151,14 +151,14 @@ test("deterministic fake validates one-time Apple sign-in and link transactions"
     client_kind: "web",
     redirect_uri: "https://identity.example.test/auth/v1/apple/callback",
   });
-  const signInUrl = new URL(signInStart.authorization_url);
+  assert.equal(new URL(signInStart.authorization_url).searchParams.has("state"), false);
   const callback = {
     schema_version: 1 as const,
     idempotency_key: "idem_fake_callback",
     payload_hash: payloadHash,
     transaction_id: signInStart.transaction_id,
     authorization_code: "fake-authorization-code",
-    state: signInUrl.searchParams.get("state") ?? "",
+    state: signInStart.transaction_id,
     client_kind: "web" as const,
   };
 
@@ -175,14 +175,14 @@ test("deterministic fake validates one-time Apple sign-in and link transactions"
     authenticatedActorId: "actor-1",
     providerProof,
   });
-  const linkUrl = new URL(linkStart.authorization_url);
+  assert.equal(new URL(linkStart.authorization_url).searchParams.has("state"), false);
   assert.equal((await provider.linkApple({
     schema_version: 1,
     idempotency_key: "idem_fake_link_callback",
     payload_hash: payloadHash,
     transaction_id: linkStart.transaction_id,
     authorization_code: "fake-link-code",
-    state: linkUrl.searchParams.get("state") ?? "",
+    state: linkStart.transaction_id,
     client_kind: "web",
     authenticatedActorId: "actor-1",
     providerProof,
@@ -201,15 +201,13 @@ test("deterministic fake rejects changed Apple callback authority before returni
     pkce_code_challenge: "a".repeat(43),
     pkce_code_challenge_method: "S256",
   });
-  const url = new URL(start.authorization_url);
-
   await expectFailure(() => provider.completeApple({
     schema_version: 1,
     idempotency_key: "idem_fake_native_callback",
     payload_hash: payloadHash,
     transaction_id: start.transaction_id,
     authorization_code: "fake-code",
-    state: `${url.searchParams.get("state") ?? ""}-changed`,
+    state: `${start.transaction_id}-changed`,
     nonce: "opaque-native-nonce",
     pkce_code_verifier: "b".repeat(43),
     client_kind: "iphone",

@@ -70,7 +70,6 @@ interface NativeLinkAuthorizationInput {
   readonly publishableKey: string;
   readonly accessToken: string;
   readonly redirectUri: string;
-  readonly state: string;
   readonly nonce: string;
   readonly codeChallenge: string;
 }
@@ -207,7 +206,6 @@ const defaultNativeLinkAuthorization: NativeLinkAuthorizationPort = {
     endpoint.searchParams.set("redirect_to", input.redirectUri);
     endpoint.searchParams.set("code_challenge", input.codeChallenge);
     endpoint.searchParams.set("code_challenge_method", "S256");
-    endpoint.searchParams.set("state", input.state);
     endpoint.searchParams.set("nonce", input.nonce);
     endpoint.searchParams.set("skip_http_redirect", "true");
 
@@ -602,7 +600,7 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
   ): Promise<AppleAuthorizationStart> {
     const parsed = this.#parseAppleStart(input);
     const transactionId = `oauth_${encodeOpaque(this.#randomBytes(18))}`;
-    const state = encodeOpaque(this.#randomBytes(32));
+    const state = transactionId;
     const nonce = parsed.nonce ?? encodeOpaque(this.#randomBytes(32));
     const expiresAt = new Date(this.#now().getTime() + oauthTransactionTtlMs).toISOString();
     const { client, storage, storageKey } = this.#newClient(undefined, transactionId);
@@ -614,7 +612,7 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
         options: {
           redirectTo: parsed.redirectUri,
           skipBrowserRedirect: true,
-          queryParams: { state, nonce },
+          queryParams: { nonce },
         },
       } as const;
       let rawAuthorizationUrl: string | undefined;
@@ -626,7 +624,6 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
           publishableKey: this.#publishableKey,
           accessToken: accessToken!,
           redirectUri: parsed.redirectUri,
-          state,
           nonce,
           codeChallenge: parsed.pkceChallenge!,
         }), "AUTH_CONFLICT");
@@ -665,8 +662,10 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
         };
       } else {
         envelope = { kind: "native", flowId, challenge: parsed.pkceChallenge! };
-        authorizationUrl.searchParams.set("code_challenge", parsed.pkceChallenge!);
-        authorizationUrl.searchParams.set("code_challenge_method", "S256");
+        if (flowKind === "apple_sign_in") {
+          authorizationUrl.searchParams.set("code_challenge", parsed.pkceChallenge!);
+          authorizationUrl.searchParams.set("code_challenge_method", "S256");
+        }
       }
       verifierBytes = utf8.encode(JSON.stringify(envelope));
       const ciphertext = copyBytes(await safeProviderCall(
