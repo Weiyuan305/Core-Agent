@@ -777,6 +777,24 @@ async function settleTerminalOperation(operation: TerminalOperation, budgetMs: n
   await operation.completion;
 }
 
+function databaseCleanupBudgets(timeoutMs: number, productionBudget: boolean, hasOwnedResources: boolean) {
+  const phaseBudget = (fraction: number): number => Math.max(5, Math.floor(timeoutMs * fraction));
+  return Object.freeze({
+    gracefulBudgetMs: phaseBudget(productionBudget ? 0.05 : 0.1),
+    forceBudgetMs: phaseBudget(productionBudget ? 0.05 : 0.1),
+    terminateBudgetMs: phaseBudget(hasOwnedResources
+      ? (productionBudget ? 0.3 : 0.2)
+      : 0.3),
+    ownedTerminalBudgetMs: phaseBudget(productionBudget ? 0.15 : 0.2),
+    dropBudgetMs: phaseBudget(hasOwnedResources
+      ? (productionBudget ? 0.4 : 0.3)
+      : 0.65),
+    adminCloseBudgetMs: phaseBudget(productionBudget && hasOwnedResources
+      ? 0.05
+      : hasOwnedResources ? 0.1 : 0.05),
+  });
+}
+
 async function dropIsolatedDatabase(options: {
   readonly databaseName: string;
   readonly controlDatabaseUrl?: string;
@@ -794,21 +812,22 @@ async function dropIsolatedDatabase(options: {
   assert(Number.isSafeInteger(retryDelayMs) && retryDelayMs > 0 && retryDelayMs <= 250);
   // Each terminal phase owns a fresh bounded slice. A slow terminate or owned-resource
   // handoff therefore cannot consume the DROP/absence or admin-close budget.
-  const phaseBudget = (fraction: number): number => Math.max(5, Math.floor(timeoutMs * fraction));
   const productionBudget = timeoutMs >= externalStageTimeoutMs;
   // The production path spends most of its fixed budget on the two killable
   // PostgreSQL child operations. Docker-forwarded connect/query/close can
   // legitimately exceed the smaller in-process slices under scheduler load;
   // graceful and force handoff remain independently bounded and terminal.
-  const gracefulBudgetMs = phaseBudget(productionBudget ? 0.05 : 0.1);
-  const forceBudgetMs = phaseBudget(productionBudget ? 0.05 : 0.1);
   const hasOwnedResources = options.closeOwned.length > 0;
-  const terminateBudgetMs = phaseBudget(productionBudget && hasOwnedResources ? 0.3 : hasOwnedResources ? 0.2 : 0.1);
-  const ownedTerminalBudgetMs = phaseBudget(productionBudget ? 0.15 : 0.2);
-  // When there are no owned resources, transfer their unused slices to DROP;
-  // this preserves the operation bound while tolerating scheduler pressure.
-  const dropBudgetMs = phaseBudget(productionBudget && hasOwnedResources ? 0.4 : hasOwnedResources ? 0.3 : 0.85);
-  const adminCloseBudgetMs = phaseBudget(productionBudget && hasOwnedResources ? 0.05 : hasOwnedResources ? 0.1 : 0.05);
+  const {
+    gracefulBudgetMs,
+    forceBudgetMs,
+    terminateBudgetMs,
+    ownedTerminalBudgetMs,
+    dropBudgetMs,
+    adminCloseBudgetMs,
+  } = databaseCleanupBudgets(timeoutMs, productionBudget, hasOwnedResources);
+  // When there are no owned resources, transfer their unused slices to the
+  // killable children while preserving a viable startup slice and total bound.
   const ownedFailures: string[] = [];
   const ownedSettlements: Array<{
     readonly index: number;
@@ -2313,6 +2332,7 @@ export const testHarnessInternals = Object.freeze({
   combineSetupAndCleanupFailure,
   createIsolatedDatabase,
   createOwnedPostgresPool,
+  databaseCleanupBudgets,
   dropIsolatedDatabase,
   runCleanupStages,
   trackPostgresPool,

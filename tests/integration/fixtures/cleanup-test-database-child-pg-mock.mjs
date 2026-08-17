@@ -1,4 +1,5 @@
 const scenario = process.env.CLEANUP_TEST_DATABASE_CHILD_SCENARIO;
+const startupDelayMs = Number(process.env.CLEANUP_TEST_DATABASE_CHILD_STARTUP_DELAY_MS ?? "125");
 let dropAttempts = 0;
 let remainingChecks = 0;
 
@@ -13,7 +14,11 @@ async function sendDiagnostic(message) {
 }
 
 export class Client {
-  async connect() {}
+  async connect() {
+    if (scenario === "startup-delay") {
+      await new Promise((resolve) => setTimeout(resolve, startupDelayMs));
+    }
+  }
 
   async end() {}
 

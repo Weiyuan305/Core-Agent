@@ -131,7 +131,7 @@ function copySubject(subject: VerifiedProviderSubject): VerifiedProviderSubject 
 }
 
 function readOwnArray(value: unknown, maximum: number): readonly unknown[] | undefined {
-  if (!Array.isArray(value) || utilTypes.isProxy(value)) return undefined;
+  if (utilTypes.isProxy(value) || !Array.isArray(value)) return undefined;
   const length = ownData(value, "length");
   if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0 || length > maximum) {
     return undefined;

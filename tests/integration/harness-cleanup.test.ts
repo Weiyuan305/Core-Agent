@@ -75,6 +75,71 @@ test("cleanup drop child retries an exact transient DROP failure before absence 
   assert.equal((await runCleanupChild("transient-drop", "drop")).code, 0);
 });
 
+test("unowned cleanup assigns exact terminate and drop slices within the total bound", () => {
+  const cleanupBudgets = (testHarnessInternals as unknown as {
+    databaseCleanupBudgets(timeoutMs: number, productionBudget: boolean, hasOwnedResources: boolean): {
+      readonly terminateBudgetMs: number;
+      readonly dropBudgetMs: number;
+      readonly adminCloseBudgetMs: number;
+    };
+  }).databaseCleanupBudgets;
+  for (const [timeoutMs, productionBudget] of [[1_000, false], [6_000, true]] as const) {
+    const budgets = cleanupBudgets(timeoutMs, productionBudget, false);
+    assert.deepEqual({
+      terminateBudgetMs: budgets.terminateBudgetMs,
+      dropBudgetMs: budgets.dropBudgetMs,
+      adminCloseBudgetMs: budgets.adminCloseBudgetMs,
+    }, {
+      terminateBudgetMs: Math.floor(timeoutMs * 0.3),
+      dropBudgetMs: Math.floor(timeoutMs * 0.65),
+      adminCloseBudgetMs: Math.floor(timeoutMs * 0.05),
+    });
+    assert.equal(
+      budgets.terminateBudgetMs + budgets.dropBudgetMs + budgets.adminCloseBudgetMs,
+      timeoutMs,
+    );
+  }
+});
+
+test("unowned child cleanup survives startup delay within its total bound", async () => {
+  const originalNodeOptions = process.env.NODE_OPTIONS;
+  const originalScenario = process.env.CLEANUP_TEST_DATABASE_CHILD_SCENARIO;
+  const originalStartupDelay = process.env.CLEANUP_TEST_DATABASE_CHILD_STARTUP_DELAY_MS;
+  const hook = join(repositoryRoot, "tests", "integration", "fixtures", "cleanup-test-database-child-pg-hook.mjs");
+  process.env.NODE_OPTIONS = [originalNodeOptions, `--import=${hook}`].filter(Boolean).join(" ");
+  process.env.CLEANUP_TEST_DATABASE_CHILD_SCENARIO = "startup-delay";
+  const outcomes: string[] = [];
+  try {
+    for (const { timeoutMs, startupDelayMs } of [
+      { timeoutMs: 1_000, startupDelayMs: 125 },
+      { timeoutMs: 6_000, startupDelayMs: 650 },
+    ]) {
+      process.env.CLEANUP_TEST_DATABASE_CHILD_STARTUP_DELAY_MS = String(startupDelayMs);
+      const startedAt = Date.now();
+      try {
+        await testHarnessInternals.dropIsolatedDatabase({
+          databaseName,
+          controlDatabaseUrl: "postgresql://127.0.0.1/core_agent_control",
+          closeOwned: [],
+          timeoutMs,
+          retryDelayMs: 1,
+        });
+        outcomes.push(Date.now() - startedAt < timeoutMs ? "bounded" : "over-bound");
+      } catch {
+        outcomes.push("failed");
+      }
+    }
+  } finally {
+    if (originalNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = originalNodeOptions;
+    if (originalScenario === undefined) delete process.env.CLEANUP_TEST_DATABASE_CHILD_SCENARIO;
+    else process.env.CLEANUP_TEST_DATABASE_CHILD_SCENARIO = originalScenario;
+    if (originalStartupDelay === undefined) delete process.env.CLEANUP_TEST_DATABASE_CHILD_STARTUP_DELAY_MS;
+    else process.env.CLEANUP_TEST_DATABASE_CHILD_STARTUP_DELAY_MS = originalStartupDelay;
+  }
+  assert.deepEqual(outcomes, ["bounded", "bounded"]);
+});
+
 test("isolated database teardown closes owned pools before exact active-backend termination and verifies absence", async () => {
   const calls: Array<{ readonly sql: string; readonly values?: readonly unknown[] } | string> = [];
   await testHarnessInternals.dropIsolatedDatabase({

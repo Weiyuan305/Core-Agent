@@ -159,6 +159,16 @@ test("deterministic fake rejects Node Proxy inputs without invoking any structur
     (error: unknown) => error instanceof ProviderFailure && error.code === "AUTH_INVALID",
   );
   assert.deepEqual(calls, { descriptor: 0, keys: 0, get: 0, prototype: 0 });
+
+  const revokedSubjects = Proxy.revocable([], {});
+  revokedSubjects.revoke();
+  assert.throws(
+    () => new FakeAuthProvider({
+      subjects: revokedSubjects.proxy,
+      appleSubject: {} as never,
+    }),
+    (error: unknown) => error instanceof ProviderFailure && error.code === "AUTH_INVALID",
+  );
 });
 
 test("deterministic fake rejects inherited or accessor credentials with a stable bounded failure", async () => {

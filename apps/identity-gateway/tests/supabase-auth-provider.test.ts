@@ -110,6 +110,7 @@ function createHarness(input: {
   readonly now?: () => Date;
   readonly transactionProtector?: TransactionProtector;
   readonly adminUpdateError?: unknown;
+  readonly adminUpdateData?: unknown;
   readonly exchangedProviderSubject?: string;
 } = {}): Harness {
   const store = new MemoryTransactionStore();
@@ -221,7 +222,7 @@ function createHarness(input: {
         updateUserById: async (...arguments_: unknown[]) => {
           methodCalls.push({ name: "updateUserById", arguments: arguments_ });
           return input.adminUpdateError === undefined
-            ? { data: { user: user("email") }, error: null }
+            ? { data: input.adminUpdateData ?? { user: user("email") }, error: null }
             : { data: null, error: input.adminUpdateError };
         },
         deleteUser: async (...arguments_: unknown[]) => {
@@ -551,6 +552,18 @@ test("Supabase rejects Proxy config, store, and result inputs without invoking s
     appleRedirectUris: [callbackUri],
     passwordResetRedirectUri: callbackUri,
     transactionStore: new Proxy({}, traps),
+    transactionProtector: protector,
+  });
+
+  const revokedRedirects = Proxy.revocable([callbackUri], {});
+  revokedRedirects.revoke();
+  assertStableConstructorFailure({
+    supabaseUrl: "https://example.supabase.co",
+    publishableKey: "publishable-key-not-secret",
+    serviceRoleKey,
+    appleRedirectUris: revokedRedirects.proxy,
+    passwordResetRedirectUri: callbackUri,
+    transactionStore: new MemoryTransactionStore(),
     transactionProtector: protector,
   });
 
@@ -1179,4 +1192,27 @@ test("Supabase password recovery returns no subject when the atomic admin update
   );
   assert.equal(harness.methodCalls.some((call) => call.name === "signOut"), false);
   assert.equal(providerBodyGetterCalls, 0);
+});
+
+test("Supabase password recovery requires the admin update to return the exact recovered subject", async () => {
+  for (const adminUpdateData of [
+    {},
+    { user: null },
+    { user: user("email", "different-provider-subject") },
+  ]) {
+    const harness = createHarness({ adminUpdateData });
+    const binding = await harness.provider.beginPasswordReset("USER@EXAMPLE.TEST");
+
+    await expectFailure(() => harness.provider.completePasswordReset({
+      binding,
+      authorization_code: "one-time-recovery-code",
+      new_password: "new correct horse battery staple",
+    }), "AUTH_PROVIDER_UNAVAILABLE");
+
+    assert.deepEqual(
+      harness.methodCalls.filter((call) => ["exchangeCodeForSession", "updateUserById"].includes(call.name))
+        .map((call) => call.name),
+      ["exchangeCodeForSession", "updateUserById"],
+    );
+  }
 });

@@ -269,7 +269,7 @@ function ownString(value: unknown, key: string): string | undefined {
 }
 
 function readOwnStringArray(value: unknown, maximum: number): readonly string[] | undefined {
-  if (!Array.isArray(value) || utilTypes.isProxy(value)) return undefined;
+  if (utilTypes.isProxy(value) || !Array.isArray(value)) return undefined;
   const length = ownData(value, "length");
   if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0 || length > maximum) {
     return undefined;
@@ -419,7 +419,7 @@ function parseStoredFlowId(value: string | null): string | undefined {
   if (value === null) return undefined;
   try {
     const parsed: unknown = JSON.parse(value);
-    if (!Array.isArray(parsed) || utilTypes.isProxy(parsed) || parsed.length !== 1) return undefined;
+    if (utilTypes.isProxy(parsed) || !Array.isArray(parsed) || parsed.length !== 1) return undefined;
     const descriptor = Object.getOwnPropertyDescriptor(parsed, "0");
     const flowId = descriptor !== undefined && "value" in descriptor ? descriptor.value : undefined;
     return typeof flowId === "string" && /^[A-Za-z0-9_-]{8,64}$/u.test(flowId) ? flowId : undefined;
@@ -821,9 +821,12 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       const subject = copySubject(ownData(data, "user"), "email_password");
       const { client: adminClient, storage: adminStorage } = this.#newClient(this.#serviceRoleKey);
       try {
-        requireNoResultError(await safeProviderCall(
+        const adminData = requireResultData(await safeProviderCall(
           () => adminClient.auth.admin.updateUserById(subject.providerSubject, { password: newPassword }),
         ));
+        if (ownString(ownData(adminData, "user"), "id") !== subject.providerSubject) {
+          throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+        }
       } finally {
         adminStorage.clear();
       }
