@@ -1,0 +1,38 @@
+{
+  "$id": "core-agent://v1/case-ref",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "capability_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "case_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "source_system": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "source_version": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "student_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "case_id",
+    "student_id",
+    "capability_id"
+  ],
+  "type": "object"
+}

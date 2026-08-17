@@ -1,0 +1,171 @@
+{
+  "$id": "core-agent://v1/agent-run",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "client_request_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "conversation_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "failure_code": {
+      "anyOf": [
+        {
+          "const": "MODEL_BUSY",
+          "type": "string"
+        },
+        {
+          "const": "MODEL_SERVICE_UNAVAILABLE",
+          "type": "string"
+        },
+        {
+          "const": "MODEL_RESPONSE_TIMEOUT",
+          "type": "string"
+        },
+        {
+          "const": "MODEL_ACCESS_DENIED",
+          "type": "string"
+        },
+        {
+          "const": "MODEL_NOT_AVAILABLE",
+          "type": "string"
+        },
+        {
+          "const": "MODEL_RESPONSE_INVALID",
+          "type": "string"
+        },
+        {
+          "const": "MODEL_STREAM_INTERRUPTED",
+          "type": "string"
+        },
+        {
+          "const": "MODEL_EMPTY_RESPONSE",
+          "type": "string"
+        },
+        {
+          "const": "AGENT_RUNTIME_NOT_READY",
+          "type": "string"
+        },
+        {
+          "const": "RUN_INTERNAL_ERROR",
+          "type": "string"
+        },
+        {
+          "const": "RUN_FAILURE_UNKNOWN",
+          "type": "string"
+        }
+      ]
+    },
+    "failure_summary": {
+      "maxLength": 1000,
+      "type": "string"
+    },
+    "finished_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "idempotency_key": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "parent_run_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "request_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "run_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "started_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "status": {
+      "anyOf": [
+        {
+          "const": "queued",
+          "type": "string"
+        },
+        {
+          "const": "running",
+          "type": "string"
+        },
+        {
+          "const": "waiting_approval",
+          "type": "string"
+        },
+        {
+          "const": "succeeded",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "type": "string"
+        },
+        {
+          "const": "cancelled",
+          "type": "string"
+        }
+      ]
+    },
+    "tenant_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "trace_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "resource_version",
+    "created_at",
+    "updated_at",
+    "run_id",
+    "tenant_id",
+    "conversation_id",
+    "request_id",
+    "trace_id",
+    "client_request_id",
+    "idempotency_key",
+    "status"
+  ],
+  "type": "object"
+}

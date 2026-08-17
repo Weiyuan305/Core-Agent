@@ -1,0 +1,1 @@
+{"schema_key":"apple-identity-link-start-request","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"idempotency_key":"idem_apple_link_start","payload_hash":"sha256:abababababababababababababababababababababababababababababababab","password":"correct-horse","client_kind":"web","redirect_uri":"https://auth.invalid/callback"}}

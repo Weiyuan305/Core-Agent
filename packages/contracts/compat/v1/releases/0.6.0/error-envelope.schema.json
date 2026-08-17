@@ -1,0 +1,233 @@
+{
+  "$id": "core-agent://v1/error-envelope",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "category": {
+      "anyOf": [
+        {
+          "const": "validation",
+          "type": "string"
+        },
+        {
+          "const": "authentication",
+          "type": "string"
+        },
+        {
+          "const": "authorization",
+          "type": "string"
+        },
+        {
+          "const": "conflict",
+          "type": "string"
+        },
+        {
+          "const": "rate_limit",
+          "type": "string"
+        },
+        {
+          "const": "dependency",
+          "type": "string"
+        },
+        {
+          "const": "unavailable",
+          "type": "string"
+        },
+        {
+          "const": "timeout",
+          "type": "string"
+        },
+        {
+          "const": "internal",
+          "type": "string"
+        }
+      ]
+    },
+    "code": {
+      "anyOf": [
+        {
+          "const": "INVALID_REQUEST",
+          "type": "string"
+        },
+        {
+          "const": "UNAUTHENTICATED",
+          "type": "string"
+        },
+        {
+          "const": "RESOURCE_NOT_FOUND",
+          "type": "string"
+        },
+        {
+          "const": "RESOURCE_VERSION_CONFLICT",
+          "type": "string"
+        },
+        {
+          "const": "INVALID_STATE_TRANSITION",
+          "type": "string"
+        },
+        {
+          "const": "RUNTIME_NOT_READY",
+          "type": "string"
+        },
+        {
+          "const": "SUPERVISOR_REJECTED",
+          "type": "string"
+        },
+        {
+          "const": "TENANT_SCOPE_MISMATCH",
+          "type": "string"
+        },
+        {
+          "const": "PROFILE_NOT_ACTIVE",
+          "type": "string"
+        },
+        {
+          "const": "CONTEXT_EXPIRED",
+          "type": "string"
+        },
+        {
+          "const": "ENTITLEMENT_DENIED",
+          "type": "string"
+        },
+        {
+          "const": "APPROVAL_REQUIRED",
+          "type": "string"
+        },
+        {
+          "const": "IDEMPOTENCY_CONFLICT",
+          "type": "string"
+        },
+        {
+          "const": "DEPENDENCY_UNAVAILABLE",
+          "type": "string"
+        },
+        {
+          "const": "DEPENDENCY_TIMEOUT",
+          "type": "string"
+        },
+        {
+          "const": "INTERNAL_ERROR",
+          "type": "string"
+        },
+        {
+          "const": "AUTH_INVALID",
+          "type": "string"
+        },
+        {
+          "const": "AUTH_EMAIL_UNVERIFIED",
+          "type": "string"
+        },
+        {
+          "const": "AUTH_RATE_LIMITED",
+          "type": "string"
+        },
+        {
+          "const": "AUTH_PROVIDER_UNAVAILABLE",
+          "type": "string"
+        },
+        {
+          "const": "AUTH_CALLBACK_INVALID",
+          "type": "string"
+        },
+        {
+          "const": "AUTH_CONFLICT",
+          "type": "string"
+        },
+        {
+          "const": "REAUTHENTICATION_REQUIRED",
+          "type": "string"
+        }
+      ],
+      "x-extensible-union": true
+    },
+    "current_state": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "error_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "field_errors": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "message": {
+            "maxLength": 2000,
+            "type": "string"
+          },
+          "path": {
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "message": {
+      "maxLength": 2000,
+      "type": "string"
+    },
+    "request_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "resource_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "resource_type": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "retry_after_ms": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "retryable": {
+      "type": "boolean"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "trace_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "error_id",
+    "code",
+    "category",
+    "message",
+    "retryable",
+    "request_id",
+    "trace_id"
+  ],
+  "type": "object"
+}

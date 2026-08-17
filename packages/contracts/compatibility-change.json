@@ -1,6 +1,6 @@
 {
-  "package_version": "0.5.0",
+  "package_version": "0.6.0",
   "wire_schema_version": 1,
   "change_level": "minor",
-  "reason": "Add executable identity onboarding, canonical Membership roles, bidirectional Profile lifecycle contracts, discriminated role create/reactivate commands, version-complete writes, and safe identity events"
+  "reason": "Add the password-reauthenticated Apple identity link-start request without changing accepted public-auth schemas"
 }

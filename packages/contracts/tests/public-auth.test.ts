@@ -11,6 +11,7 @@ const {
   AppleAuthorizationStartRequestSchema,
   AppleAuthorizationStartResponseSchema,
   AppleIdentityLinkRequestSchema,
+  AppleIdentityLinkStartRequestSchema,
   AppleIdentityLinkResponseSchema,
   AuthSessionViewSchema,
   AuthSubjectSchema,
@@ -143,6 +144,8 @@ const requestCases: Array<[string, unknown, unknown]> = [
   ["Apple Web callback", AppleAuthorizationCallbackRequestSchema, { ...idem, client_kind: "web", transaction_id: "oauth_01", authorization_code: "opaque_code", state: "opaque_state" }],
   ["Apple native callback", AppleAuthorizationCallbackRequestSchema, { ...idem, client_kind: "macos", transaction_id: "oauth_02", authorization_code: "opaque_code", state: "opaque_state", nonce: "opaque_native_nonce", pkce_code_verifier: "b".repeat(43) }],
   ["Apple link", AppleIdentityLinkRequestSchema, { ...idem, client_kind: "web", transaction_id: "oauth_03", authorization_code: "opaque_code", state: "opaque_state" }],
+  ["Apple Web link start", AppleIdentityLinkStartRequestSchema, { ...idem, password: "correct-horse", client_kind: "web", redirect_uri: "https://auth.example.test/callback" }],
+  ["Apple native link start", AppleIdentityLinkStartRequestSchema, { ...idem, password: "correct-horse", client_kind: "iphone", redirect_uri: "coreagent://auth/callback", nonce: "opaque_native_nonce", pkce_code_challenge: "a".repeat(43), pkce_code_challenge_method: "S256" }],
   ["session inspect", SessionInspectRequestSchema, { schema_version: 1, session_id: "session_01" }],
   ["session revoke", SessionRevokeRequestSchema, { ...idem, expected_resource_version: 1, session_id: "session_01", reason_code: "user_sign_out" }],
   ["reauthentication", ReauthenticationRequestSchema, { ...idem, expected_resource_version: 1, password: "correct-horse" }],
@@ -250,6 +253,26 @@ test("Apple and invitation proofs use closed Web and native PKCE variants", () =
   assert.equal(accept.Check({ ...common, authentication_proof: { kind: "email_password", client_kind: "web", email: "invitee@example.test", password: "correct-horse" } }), false);
   assert.equal(accept.Check({ ...common, authentication_proof: { kind: "apple", client_kind: "web", transaction_id: "oauth_01", authorization_code: "opaque_code", state: "opaque_state" } }), true);
   assert.equal(accept.Check({ ...common, authentication_proof: { kind: "apple", client_kind: "macos", transaction_id: "oauth_01", authorization_code: "opaque_code", state: "opaque_state", nonce: "opaque_native_nonce", pkce_code_verifier: "b".repeat(43) } }), true);
+});
+
+test("Apple link start contains current password and released start fields without provider authority", () => {
+  const linkStart = compileRequired("AppleIdentityLinkStartRequestSchema", AppleIdentityLinkStartRequestSchema);
+  const web = { ...idem, password: "correct-horse", client_kind: "web", redirect_uri: "https://auth.example.test/callback" };
+  assert.equal(linkStart.Check(web), true);
+  for (const forbidden of [
+    { email: "forged@example.test" },
+    { actor_id: "actor_forged" },
+    { access_token: "provider-token" },
+    { provider_proof: "provider-proof" },
+  ]) assert.equal(linkStart.Check({ ...web, ...forbidden }), false);
+  assert.equal(compileRequired("AppleIdentityLinkRequestSchema", AppleIdentityLinkRequestSchema).Check({
+    ...idem,
+    client_kind: "web",
+    transaction_id: "oauth_03",
+    authorization_code: "opaque_code",
+    state: "opaque_state",
+    password: "forbidden",
+  }), false);
 });
 
 test("every durable public mutation is idempotent and existing-resource writes are versioned", () => {

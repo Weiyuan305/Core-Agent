@@ -1,4 +1,4 @@
-export const CONTRACT_PACKAGE_VERSION = "0.5.0" as const;
+export const CONTRACT_PACKAGE_VERSION = "0.6.0" as const;
 export const WIRE_SCHEMA_VERSION = 1 as const;
 
 export * from "./common/primitives.js";

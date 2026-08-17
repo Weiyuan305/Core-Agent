@@ -4,6 +4,7 @@ import type {
   AppleAuthorizationStartRequest,
   AppleAuthorizationStartResponse,
   AppleIdentityLinkRequest,
+  AppleIdentityLinkStartRequest,
 } from "@core-agent/contracts";
 
 export type VerifiedProviderSubject = VerifiedAuthSubjectInput;
@@ -25,7 +26,7 @@ export type AppleAuthorizationStart = Pick<
 >;
 export type AppleAuthorizationCallback = AppleAuthorizationCallbackRequest;
 
-export type AppleLinkAuthorizationInput = AppleAuthorizationInput & {
+export type AppleLinkAuthorizationInput = AppleIdentityLinkStartRequest & {
   readonly authenticatedActorId: string;
   readonly email: string;
   readonly password: string;

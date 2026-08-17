@@ -179,6 +179,25 @@ export const AppleAuthorizationCallbackResponseSchema = sessionDelivery(
   "apple-authorization-callback-response",
   {},
 );
+export const AppleIdentityLinkStartRequestSchema = Type.Union([
+  Type.Object({
+    ...IdempotencyRequestProperties,
+    password: PasswordSchema,
+    client_kind: Type.Literal("web"),
+    redirect_uri: RedirectUriSchema,
+    device_label: Type.Optional(DeviceLabelSchema),
+  }, { additionalProperties: false }),
+  Type.Object({
+    ...IdempotencyRequestProperties,
+    password: PasswordSchema,
+    client_kind: NativeClientKindSchema,
+    redirect_uri: RedirectUriSchema,
+    nonce: OAuthProofSchema,
+    pkce_code_challenge: PkceChallengeSchema,
+    pkce_code_challenge_method: Type.Literal("S256"),
+    device_label: Type.Optional(DeviceLabelSchema),
+  }, { additionalProperties: false }),
+], { $id: "core-agent://v1/apple-identity-link-start-request" });
 export const AppleIdentityLinkRequestSchema = Type.Union([
   Type.Object({ ...IdempotencyRequestProperties, ...WebAppleCallbackFields }, { additionalProperties: false }),
   Type.Object({ ...IdempotencyRequestProperties, ...NativeAppleCallbackFields }, { additionalProperties: false }),
@@ -581,6 +600,7 @@ export type AppleAuthorizationStartRequest = Static<typeof AppleAuthorizationSta
 export type AppleAuthorizationStartResponse = Static<typeof AppleAuthorizationStartResponseSchema>;
 export type AppleAuthorizationCallbackRequest = Static<typeof AppleAuthorizationCallbackRequestSchema>;
 export type AppleAuthorizationCallbackResponse = Static<typeof AppleAuthorizationCallbackResponseSchema>;
+export type AppleIdentityLinkStartRequest = Static<typeof AppleIdentityLinkStartRequestSchema>;
 export type AppleIdentityLinkRequest = Static<typeof AppleIdentityLinkRequestSchema>;
 export type AppleIdentityLinkResponse = Static<typeof AppleIdentityLinkResponseSchema>;
 export type SessionInspectRequest = Static<typeof SessionInspectRequestSchema>;
