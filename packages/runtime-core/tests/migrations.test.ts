@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { chmod, cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -196,16 +196,18 @@ async function applyThroughSchema9(): Promise<string> {
   const v9Directory = await mkdtemp(join(tmpdir(), "core-agent-v9-migrations-"));
   await cp(migrationsDirectory, v9Directory, { recursive: true });
   await rm(join(v9Directory, "010_identity_authority.sql"), { force: true });
-  await migrationTestInternals.applyMigrationsWithManifests(
-    pool,
-    v9Directory,
-    new Map([...migrationTestInternals.schemaManifests].filter(([version]) => version <= 9)),
-  );
+  await applyMigrationPrefix(v9Directory, 9);
   assert.equal(await readSchemaVersion(db), 9);
   return v9Directory;
 }
 
 async function applyMigrationPrefix(directory: string, maximumVersion: number): Promise<void> {
+  for (const filename of await readdir(directory)) {
+    const version = /^([0-9]{3,})_/u.exec(filename)?.[1];
+    if (version !== undefined && Number(version) > maximumVersion) {
+      await rm(join(directory, filename));
+    }
+  }
   await migrationTestInternals.applyMigrationsWithManifests(
     pool,
     directory,
@@ -340,14 +342,14 @@ test.after(async () => {
   await db.destroy();
 });
 
-test("empty database migrates exactly to schema version 10 with identity authority", async () => {
+test("empty database migrates exactly to schema version 11 with password recovery transactions", async () => {
   await applyMigrations(pool, migrationsDirectory);
 
-  assert.equal(EXPECTED_SCHEMA_VERSION, 10);
+  assert.equal(EXPECTED_SCHEMA_VERSION, 11);
   assert.equal(await readSchemaVersion(db), EXPECTED_SCHEMA_VERSION);
   await assert.doesNotReject(assertSchemaVersion(db, EXPECTED_SCHEMA_VERSION));
   await assert.rejects(assertSchemaVersion(db, 3), /ahead/);
-  await assert.rejects(assertSchemaVersion(db, 11), /behind/);
+  await assert.rejects(assertSchemaVersion(db, 12), /behind/);
   const runtimeCommandColumn = await sql<{ column_name: string }>`
     select column_name from information_schema.columns
     where table_schema = 'public' and table_name = 'worker_jobs' and column_name = 'runtime_command'
@@ -385,6 +387,107 @@ test("empty database migrates exactly to schema version 10 with identity authori
     "worker_jobs_platform_recovery_idx",
     "worker_jobs_tenant_run_idx",
   ]);
+});
+
+test("schema 11 upgrades schema 10 password reset transactions without changing table ACLs", async () => {
+  const v10Directory = await mkdtemp(join(tmpdir(), "core-agent-v10-migrations-"));
+  try {
+    await cp(migrationsDirectory, v10Directory, { recursive: true });
+    await applyMigrationPrefix(v10Directory, 10);
+    assert.equal(await readSchemaVersion(db), 10);
+    await pool.query(`insert into oauth_transactions (
+      oauth_transaction_id, provider, flow_kind, actor_id, client_kind,
+      state_digest, nonce_digest, pkce_verifier_ciphertext, redirect_uri,
+      status, expires_at, consumed_at, created_at, updated_at
+    ) values (
+      'oauth_v10_existing', 'supabase', 'apple_sign_in', null, 'web',
+      decode(repeat('01', 32), 'hex'), decode(repeat('02', 32), 'hex'), decode('03', 'hex'),
+      'https://app.example.test/auth/callback', 'pending', now() + interval '10 minutes', null, now(), now()
+    )`);
+    const readAcl = async () => (await pool.query<{ readonly acl: string | null }>(
+      `select relation.relacl::text as acl
+       from pg_class relation
+       join pg_namespace namespace on namespace.oid = relation.relnamespace
+       where namespace.nspname = 'public' and relation.relname = 'oauth_transactions'`,
+    )).rows;
+    const aclBefore = await readAcl();
+
+    await applyMigrations(pool, migrationsDirectory);
+    assert.equal(await readSchemaVersion(db), 11);
+    assert.deepEqual(await readAcl(), aclBefore);
+    assert.equal((await pool.query(
+      "select count(*)::int as count from oauth_transactions where oauth_transaction_id = 'oauth_v10_existing'",
+    )).rows[0]?.count, 1);
+    await pool.query(`insert into oauth_transactions (
+      oauth_transaction_id, provider, flow_kind, actor_id, client_kind,
+      state_digest, nonce_digest, pkce_verifier_ciphertext, redirect_uri,
+      status, expires_at, consumed_at, created_at, updated_at
+    ) values (
+      'oauth_v11_password_reset', 'supabase', 'password_reset', null, 'web',
+      decode(repeat('04', 32), 'hex'), decode(repeat('05', 32), 'hex'), decode('06', 'hex'),
+      'https://app.example.test/auth/reset', 'pending', now() + interval '10 minutes', null, now(), now()
+    )`);
+    await assert.rejects(
+      pool.query(`insert into oauth_transactions (
+        oauth_transaction_id, provider, flow_kind, actor_id, client_kind,
+        state_digest, nonce_digest, pkce_verifier_ciphertext, redirect_uri,
+        status, expires_at, consumed_at, created_at, updated_at
+      ) values (
+        'oauth_v11_invalid', 'supabase', 'invalid_flow', null, 'web',
+        decode(repeat('07', 32), 'hex'), decode(repeat('08', 32), 'hex'), decode('09', 'hex'),
+        'https://app.example.test/auth/reset', 'pending', now() + interval '10 minutes', null, now(), now()
+      )`),
+      /oauth_transactions_flow_kind_check/u,
+    );
+    assert.equal((await pool.query(
+      `select pg_get_constraintdef(oid, true) as definition
+       from pg_constraint where conname = 'oauth_transactions_flow_kind_check'`,
+    )).rows[0]?.definition, "CHECK (flow_kind = ANY (ARRAY['apple_sign_in'::text, 'apple_link'::text, 'password_reset'::text]))");
+
+    await applyMigrations(pool, migrationsDirectory);
+    assert.equal((await pool.query(
+      "select count(*)::int as count from core_agent_schema_migrations where version = 11",
+    )).rows[0]?.count, 1);
+  } finally {
+    await rm(v10Directory, { recursive: true, force: true });
+  }
+});
+
+test("schema 11 catalog rejection rolls back its constraint change and migration record", async () => {
+  const v10Directory = await mkdtemp(join(tmpdir(), "core-agent-v10-rollback-base-"));
+  const invalidDirectory = await mkdtemp(join(tmpdir(), "core-agent-v11-rollback-"));
+  try {
+    await cp(migrationsDirectory, v10Directory, { recursive: true });
+    await applyMigrationPrefix(v10Directory, 10);
+    await cp(migrationsDirectory, invalidDirectory, { recursive: true });
+    const migrationPath = join(invalidDirectory, "011_password_reset_transactions.sql");
+    const invalidSql = `${await readFile(migrationPath, "utf8")}\ncreate table undeclared_password_reset_migration (id text);\n`;
+    await writeFile(migrationPath, invalidSql);
+    const manifests = new Map(migrationTestInternals.schemaManifests);
+    manifests.set(11, {
+      ...manifests.get(11)!,
+      checksum: (await import("node:crypto")).createHash("sha256").update(invalidSql).digest("hex"),
+    });
+
+    await assert.rejects(
+      migrationTestInternals.applyMigrationsWithManifests(pool, invalidDirectory, manifests),
+      /schema 11 manifest validation failed: relation catalog/u,
+    );
+    assert.equal(await readSchemaVersion(db), 10);
+    assert.equal((await pool.query(
+      "select count(*)::int as count from core_agent_schema_migrations where version = 11",
+    )).rows[0]?.count, 0);
+    assert.equal((await pool.query(
+      "select to_regclass('public.undeclared_password_reset_migration')::text as relation",
+    )).rows[0]?.relation, null);
+    assert.equal((await pool.query(
+      `select pg_get_constraintdef(oid, true) as definition
+       from pg_constraint where conname = 'oauth_transactions_flow_kind_check'`,
+    )).rows[0]?.definition, "CHECK (flow_kind = ANY (ARRAY['apple_sign_in'::text, 'apple_link'::text]))");
+  } finally {
+    await rm(v10Directory, { recursive: true, force: true });
+    await rm(invalidDirectory, { recursive: true, force: true });
+  }
 });
 
 test("database role bootstrap removes hostile role drift and rotates persisted SCRAM credentials", async () => {
@@ -740,6 +843,7 @@ test("schema 10 role prerequisite fails closed before an existing schema-9 upgra
     const modified = migration.replaceAll("core_agent_identity", "core_agent_identity_missing_for_test");
     await writeFile(join(v9Directory, "010_identity_authority.sql"), modified);
     const manifests = new Map(migrationTestInternals.schemaManifests);
+    manifests.delete(11);
     manifests.set(10, {
       ...manifests.get(10)!,
       checksum: (await import("node:crypto")).createHash("sha256").update(modified).digest("hex"),
@@ -762,7 +866,7 @@ test("schema 10 collapses consistent Actors and preserves every legacy Actor for
 
     await applyMigrations(pool, migrationsDirectory);
 
-    assert.equal(await readSchemaVersion(db), 10);
+    assert.equal(await readSchemaVersion(db), 11);
     const actors = await pool.query("select * from actors where actor_id = 'actor_global'");
     assert.equal(actors.rowCount, 1);
     assert.equal("tenant_id" in actors.rows[0], false);
@@ -965,7 +1069,7 @@ test("schema 10 identity authority tables retain their compatibility and securit
     auth_subjects: ["supabase", "email_password", "apple", "active", "unlinked", "revoked"],
     platform_role_assignments: ["platform_super_admin", "active", "revoked"],
     identity_invitations: ["admin", "consultant", "pending", "accepted", "revoked", "expired", "replaced", "octet_length(secret_digest) = 32", "octet_length(normalized_email_hmac) = 32"],
-    oauth_transactions: ["supabase", "apple_sign_in", "apple_link", "web", "iphone", "macos", "pending", "consumed", "expired", "octet_length(state_digest) = 32", "octet_length(nonce_digest) = 32"],
+    oauth_transactions: ["supabase", "apple_sign_in", "apple_link", "password_reset", "web", "iphone", "macos", "pending", "consumed", "expired", "octet_length(state_digest) = 32", "octet_length(nonce_digest) = 32"],
     core_sessions: ["web", "iphone", "macos", "active", "revoked", "expired", "octet_length(secret_digest) = 32", "octet_length(csrf_digest) = 32"],
     account_deletions: ["deletion_pending", "cancelled", "deleted"],
     private_identity_pii: ["octet_length(normalized_email_hmac) = 32", "octet_length(encrypted_email) > 0"],
@@ -1120,16 +1224,16 @@ test("column ACL convergence rolls back with a rejected forward migration", asyn
     await pool.query("grant select (provider_subject, tableoid, xmin) on auth_subjects to core_agent_column_acl_rollback with grant option");
     await cp(migrationsDirectory, directory, { recursive: true });
     const migrationSql = "create table undeclared_column_acl_rollback (id text);\n";
-    await writeFile(join(directory, "011_column_acl_rollback.sql"), migrationSql);
+    await writeFile(join(directory, "012_column_acl_rollback.sql"), migrationSql);
     const manifests = new Map(migrationTestInternals.schemaManifests);
-    manifests.set(11, {
-      version: 11,
+    manifests.set(12, {
+      version: 12,
       name: "column_acl_rollback",
       checksum: (await import("node:crypto")).createHash("sha256").update(migrationSql).digest("hex"),
     });
     await assert.rejects(
       migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests),
-      /schema 11 manifest validation failed: relation catalog/u,
+      /schema 12 manifest validation failed: relation catalog/u,
     );
     assert.equal((await pool.query(
       "select has_column_privilege('core_agent_column_acl_rollback', 'auth_subjects', 'provider_subject', 'SELECT WITH GRANT OPTION') as allowed",
@@ -1138,7 +1242,7 @@ test("column ACL convergence rolls back with a rejected forward migration", asyn
       "select has_column_privilege('core_agent_column_acl_rollback', 'auth_subjects', 'tableoid', 'SELECT WITH GRANT OPTION') as allowed",
     )).rows[0]?.allowed, true);
     assert.equal((await pool.query("select to_regclass('public.undeclared_column_acl_rollback')::text as relation")).rows[0]?.relation, null);
-    assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 11")).rows[0]?.count, 0);
+    assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 12")).rows[0]?.count, 0);
   } finally {
     await pool.query("drop owned by core_agent_column_acl_rollback; drop role if exists core_agent_column_acl_rollback");
     await rm(directory, { recursive: true, force: true });
@@ -1161,10 +1265,10 @@ test("registered views and materialized views reconverge column ACLs to exact em
       "registered_column_acl_view", "registered_column_acl_materialized",
     ]);
     await cp(migrationsDirectory, directory, { recursive: true });
-    await writeFile(join(directory, "011_forward_column_acl.sql"), migrationSql);
+    await writeFile(join(directory, "012_forward_column_acl.sql"), migrationSql);
     const manifests = new Map(migrationTestInternals.schemaManifests);
-    manifests.set(11, {
-      version: 11,
+    manifests.set(12, {
+      version: 12,
       name: "forward_column_acl",
       checksum: (await import("node:crypto")).createHash("sha256").update(migrationSql).digest("hex"),
       objects: [
@@ -1230,7 +1334,7 @@ test("registered views and materialized views reconverge column ACLs to exact em
 test("recorded schema 10 fails closed on an undeclared sequence", async () => {
   await applyMigrations(pool, migrationsDirectory);
   await pool.query("create sequence acl_drift_sequence");
-  await assert.rejects(applyMigrations(pool, migrationsDirectory), /schema 10 manifest validation failed: relation catalog/);
+  await assert.rejects(applyMigrations(pool, migrationsDirectory), /schema 11 manifest validation failed: relation catalog/);
 });
 
 test("recorded schema 10 convergence fails closed for a malformed partial identity catalog", async () => {
@@ -1239,11 +1343,11 @@ test("recorded schema 10 convergence fails closed for a malformed partial identi
   await assert.rejects(applyMigrations(pool, migrationsDirectory), /schema 10 ACL convergence failed/);
 });
 
-test("an unknown migration 011 is rejected before SQL execution or recording", async () => {
+test("an unknown migration 012 is rejected before SQL execution or recording", async () => {
   const directory = await mkdtemp(join(tmpdir(), "core-agent-unknown-migration-"));
   try {
     await cp(migrationsDirectory, directory, { recursive: true });
-    await writeFile(join(directory, "011_unknown.sql"), "create table unknown_manifest_side_effect (id text primary key);\n");
+    await writeFile(join(directory, "012_unknown.sql"), "create table unknown_manifest_side_effect (id text primary key);\n");
     await assert.rejects(applyMigrations(pool, directory), /migration manifest inventory/u);
     assert.equal((await pool.query("select to_regclass('public.unknown_manifest_side_effect')::text as relation")).rows[0]?.relation, null);
     assert.equal((await pool.query("select to_regclass('public.core_agent_schema_migrations')::text as relation")).rows[0]?.relation, null);
@@ -1255,7 +1359,7 @@ test("an unknown migration 011 is rejected before SQL execution or recording", a
 test("migration and manifest inventories are an exact ordered contiguous bijection before connect", async (t) => {
   const cases: Array<[string, (directory: string, manifests: Map<number, typeof migrationTestInternals.schemaManifests extends ReadonlyMap<number, infer M> ? M : never>) => Promise<void>]> = [
     ["orphan manifest", async (_directory, manifests) => {
-      manifests.set(11, { version: 11, name: "orphan", checksum: "0".repeat(64) });
+      manifests.set(12, { version: 12, name: "orphan", checksum: "0".repeat(64) });
     }],
     ["gap", async (directory, manifests) => {
       await rm(join(directory, "005_worker_runtime_facts.sql"));
@@ -1292,21 +1396,21 @@ test("migration and manifest inventories are an exact ordered contiguous bijecti
 test("a database above the binary max fails closed", async () => {
   await applyMigrations(pool, migrationsDirectory);
   await pool.query(
-    "insert into core_agent_schema_migrations(version, name, checksum, applied_at) values (11, 'future', $1, now())",
+    "insert into core_agent_schema_migrations(version, name, checksum, applied_at) values (12, 'future', $1, now())",
     ["0".repeat(64)],
   );
   await assert.rejects(applyMigrations(pool, migrationsDirectory), /database schema is newer than this binary/u);
 });
 
-test("a registered migration 011 validates and records atomically", async () => {
+test("a registered migration 012 validates and records atomically", async () => {
   const directory = await mkdtemp(join(tmpdir(), "core-agent-registered-migration-"));
   try {
     await cp(migrationsDirectory, directory, { recursive: true });
     const sql = "create table registered_manifest_object (id text primary key);\n";
-    await writeFile(join(directory, "011_registered.sql"), sql);
+    await writeFile(join(directory, "012_registered.sql"), sql);
     const manifests = new Map(migrationTestInternals.schemaManifests);
-    manifests.set(11, {
-      version: 11,
+    manifests.set(12, {
+      version: 12,
       name: "registered",
       checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
       objects: [["public", "registered_manifest_object", "r", "current_user"]],
@@ -1315,12 +1419,12 @@ test("a registered migration 011 validates and records atomically", async () => 
       indexes: [["registered_manifest_object", "registered_manifest_object_pkey", "CREATE UNIQUE INDEX registered_manifest_object_pkey ON public.registered_manifest_object USING btree (id)"]],
       validateAndConverge: async (client: PoolClient) => {
         const result = await client.query("select to_regclass('public.registered_manifest_object')::text as relation");
-        if (result.rows[0]?.relation !== "registered_manifest_object") throw new Error("schema 11 manifest validation failed");
+        if (result.rows[0]?.relation !== "registered_manifest_object") throw new Error("schema 12 manifest validation failed");
       },
     });
     await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
     await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
-    assert.equal((await pool.query("select max(version) as version from core_agent_schema_migrations")).rows[0]?.version, 11);
+    assert.equal((await pool.query("select max(version) as version from core_agent_schema_migrations")).rows[0]?.version, 12);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -1331,18 +1435,18 @@ test("a registered migration manifest failure rolls back both schema and record"
   try {
     await cp(migrationsDirectory, directory, { recursive: true });
     const sql = "create table rolled_back_manifest_object (id text primary key);\n";
-    await writeFile(join(directory, "011_registered.sql"), sql);
+    await writeFile(join(directory, "012_registered.sql"), sql);
     const manifests = new Map(migrationTestInternals.schemaManifests);
-    manifests.set(11, {
-      version: 11,
+    manifests.set(12, {
+      version: 12,
       name: "registered",
       checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
       objects: [["public", "rolled_back_manifest_object", "r", "current_user"]],
-      validateAndConverge: async () => { throw new Error("schema 11 manifest validation failed"); },
+      validateAndConverge: async () => { throw new Error("schema 12 manifest validation failed"); },
     });
-    await assert.rejects(migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests), /schema 11 manifest validation failed/);
+    await assert.rejects(migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests), /schema 12 manifest validation failed/);
     assert.equal((await pool.query("select to_regclass('public.rolled_back_manifest_object')::text as relation")).rows[0]?.relation, null);
-    assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 11")).rows[0]?.count, 0);
+    assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 12")).rows[0]?.count, 0);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -1383,10 +1487,10 @@ test("registered relation semantics validate exact kind-specific catalogs and am
     const semantics = await readSemantics();
     await pool.query("rollback");
     await cp(migrationsDirectory, directory, { recursive: true });
-    await writeFile(join(directory, "011_relation_semantics.sql"), v11Sql);
+    await writeFile(join(directory, "012_relation_semantics.sql"), v11Sql);
     const manifests = new Map(migrationTestInternals.schemaManifests);
-    manifests.set(11, {
-      version: 11, name: "relation_semantics",
+    manifests.set(12, {
+      version: 12, name: "relation_semantics",
       checksum: (await import("node:crypto")).createHash("sha256").update(v11Sql).digest("hex"),
       objects: [
         ["public", "registered_semantic_view", "v", "current_user"],
@@ -1425,29 +1529,29 @@ test("registered relation semantics validate exact kind-specific catalogs and am
       await pool.query(restore);
     }
     const v12Sql = "create or replace view registered_semantic_view as select 2::integer as id;\n";
-    await writeFile(join(directory, "012_relation_semantic_amendment.sql"), v12Sql);
+    await writeFile(join(directory, "013_relation_semantic_amendment.sql"), v12Sql);
     await pool.query("begin");
     const beforeView = (await readSemantics()).find((entry) => entry.name === "registered_semantic_view");
     await pool.query(v12Sql);
     const afterView = (await readSemantics()).find((entry) => entry.name === "registered_semantic_view");
     await pool.query("rollback");
-    manifests.set(12, {
-      version: 12, name: "relation_semantic_amendment",
+    manifests.set(13, {
+      version: 13, name: "relation_semantic_amendment",
       checksum: (await import("node:crypto")).createHash("sha256").update(v12Sql).digest("hex"),
       relationSemanticAmendments: [{ action: "replace", before: beforeView, after: afterView }],
     } as never);
     await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
     await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
-    assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 12")).rows[0]?.count, 1);
+    assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 13")).rows[0]?.count, 1);
 
     const v13Sql = "create or replace view registered_semantic_view as select 3::integer as id;\n";
-    await writeFile(join(directory, "013_missing_relation_semantic_amendment.sql"), v13Sql);
-    manifests.set(13, {
-      version: 13, name: "missing_relation_semantic_amendment",
+    await writeFile(join(directory, "014_missing_relation_semantic_amendment.sql"), v13Sql);
+    manifests.set(14, {
+      version: 14, name: "missing_relation_semantic_amendment",
       checksum: (await import("node:crypto")).createHash("sha256").update(v13Sql).digest("hex"),
     } as never);
     await assert.rejects(migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests), /relation semantic catalog/u);
-    assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 13")).rows[0]?.count, 0);
+    assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 14")).rows[0]?.count, 0);
     assert.equal((await readSemantics()).find((entry) => entry.name === "registered_semantic_view")?.definition, afterView.definition);
   } finally {
     await pool.query("rollback").catch(() => undefined);
@@ -1481,10 +1585,10 @@ test("a semantic revoke cannot disable validation for still-owned special relati
   try {
     const before = await probeRelationSemantics(v11Sql, names);
     await cp(migrationsDirectory, directory, { recursive: true });
-    await writeFile(join(directory, "011_semantic_revoke_base.sql"), v11Sql);
+    await writeFile(join(directory, "012_semantic_revoke_base.sql"), v11Sql);
     const manifests = new Map(migrationTestInternals.schemaManifests);
-    manifests.set(11, {
-      version: 11,
+    manifests.set(12, {
+      version: 12,
       name: "semantic_revoke_base",
       checksum: (await import("node:crypto")).createHash("sha256").update(v11Sql).digest("hex"),
       objects: [
@@ -1503,9 +1607,9 @@ test("a semantic revoke cannot disable validation for still-owned special relati
       ],
     } as never);
     await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
-    await writeFile(join(directory, "012_semantic_revoke_drift.sql"), v12Sql);
-    manifests.set(12, {
-      version: 12,
+    await writeFile(join(directory, "013_semantic_revoke_drift.sql"), v12Sql);
+    manifests.set(13, {
+      version: 13,
       name: "semantic_revoke_drift",
       checksum: (await import("node:crypto")).createHash("sha256").update(v12Sql).digest("hex"),
       relationSemanticAmendments: before.map((semantic) => ({ action: "revoke", before: semantic })),
@@ -1544,7 +1648,7 @@ test("a semantic revoke cannot disable validation for still-owned special relati
     assert.deepEqual({
       rejected,
       restartAccepted,
-      record: (await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 12")).rows[0]?.count,
+      record: (await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 13")).rows[0]?.count,
       objects: after.length,
       semantics: after,
     }, { rejected: true, restartAccepted: false, record: 0, objects: 5, semantics: before });
@@ -1561,10 +1665,10 @@ test("semantic revoke then re-add is rejected within and across manifest version
     try {
       const [semantic] = await probeRelationSemantics(v11Sql, ["semantic_readd_view"]);
       await cp(migrationsDirectory, directory, { recursive: true });
-      await writeFile(join(directory, "011_semantic_readd_base.sql"), v11Sql);
+      await writeFile(join(directory, "012_semantic_readd_base.sql"), v11Sql);
       const manifests = new Map(migrationTestInternals.schemaManifests);
-      manifests.set(11, {
-        version: 11, name: "semantic_readd_base",
+      manifests.set(12, {
+        version: 12, name: "semantic_readd_base",
         checksum: (await import("node:crypto")).createHash("sha256").update(v11Sql).digest("hex"),
         objects: [["public", "semantic_readd_view", "v", "current_user"]],
         relationSemantics: [semantic],
@@ -1572,9 +1676,9 @@ test("semantic revoke then re-add is rejected within and across manifest version
       } as never);
       await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
       const v12Sql = "select 12;\n";
-      await writeFile(join(directory, "012_semantic_readd_revoke.sql"), v12Sql);
-      manifests.set(12, {
-        version: 12, name: "semantic_readd_revoke",
+      await writeFile(join(directory, "013_semantic_readd_revoke.sql"), v12Sql);
+      manifests.set(13, {
+        version: 13, name: "semantic_readd_revoke",
         checksum: (await import("node:crypto")).createHash("sha256").update(v12Sql).digest("hex"),
         relationSemanticAmendments: crossVersion
           ? [{ action: "revoke", before: semantic }]
@@ -1582,9 +1686,9 @@ test("semantic revoke then re-add is rejected within and across manifest version
       } as never);
       if (crossVersion) {
         const v13Sql = "select 13;\n";
-        await writeFile(join(directory, "013_semantic_readd_restore.sql"), v13Sql);
-        manifests.set(13, {
-          version: 13, name: "semantic_readd_restore",
+        await writeFile(join(directory, "014_semantic_readd_restore.sql"), v13Sql);
+        manifests.set(14, {
+          version: 14, name: "semantic_readd_restore",
           checksum: (await import("node:crypto")).createHash("sha256").update(v13Sql).digest("hex"),
           relationSemanticAmendments: [{ action: "add", after: semantic }],
         } as never);
@@ -1597,7 +1701,7 @@ test("semantic revoke then re-add is rejected within and across manifest version
       }
       return {
         rejected,
-        records: (await pool.query("select count(*)::int as count from core_agent_schema_migrations where version >= 12")).rows[0]?.count,
+        records: (await pool.query("select count(*)::int as count from core_agent_schema_migrations where version >= 13")).rows[0]?.count,
       };
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -1617,11 +1721,11 @@ test("relation semantic declarations reject missing duplicate wrong and unowned 
     try {
       const [actual] = await probeRelationSemantics(sql, [relation]);
       await cp(migrationsDirectory, directory, { recursive: true });
-      await writeFile(join(directory, `011_semantic_${scenario}.sql`), sql);
+      await writeFile(join(directory, `012_semantic_${scenario}.sql`), sql);
       const manifests = new Map(migrationTestInternals.schemaManifests);
       const wrong = { ...actual as Record<string, unknown>, definition: " SELECT 99 AS id;" };
-      manifests.set(11, {
-        version: 11,
+      manifests.set(12, {
+        version: 12,
         name: `semantic_${scenario}`,
         checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
         objects: scenario === "unowned" ? [] : [["public", relation, "v", "current_user"]],
@@ -1639,7 +1743,7 @@ test("relation semantic declarations reject missing duplicate wrong and unowned 
       assert.equal((await pool.query("select to_regclass($1)::text as relation", [`public.${relation}`])).rows[0]?.relation, null);
       const migrationTable = (await pool.query("select to_regclass('public.core_agent_schema_migrations')::text as relation")).rows[0]?.relation;
       const record = migrationTable === null ? 0
-        : (await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 11")).rows[0]?.count;
+        : (await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 12")).rows[0]?.count;
       assert.equal(record, 0);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -1657,10 +1761,10 @@ test("migration transaction control is rejected before connect and cannot escape
   `;
   try {
     await cp(migrationsDirectory, directory, { recursive: true });
-    await writeFile(join(directory, "011_transaction_escape.sql"), sql);
+    await writeFile(join(directory, "012_transaction_escape.sql"), sql);
     const manifests = new Map(migrationTestInternals.schemaManifests);
-    manifests.set(11, {
-      version: 11, name: "transaction_escape",
+    manifests.set(12, {
+      version: 12, name: "transaction_escape",
       checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
       objects: [],
     } as never);
@@ -1677,9 +1781,9 @@ test("migration transaction control is rejected before connect and cannot escape
       "set session characteristics as transaction isolation level serializable",
     ]) {
       const commandSql = `${command};\n`;
-      await writeFile(join(directory, "011_transaction_escape.sql"), commandSql);
-      manifests.set(11, {
-        version: 11, name: "transaction_escape",
+      await writeFile(join(directory, "012_transaction_escape.sql"), commandSql);
+      manifests.set(12, {
+        version: 12, name: "transaction_escape",
         checksum: (await import("node:crypto")).createHash("sha256").update(commandSql).digest("hex"), objects: [],
       } as never);
       let rejectedConnects = 0;
@@ -1698,9 +1802,9 @@ test("migration transaction control is rejected before connect and cannot escape
       select 'begin; commit', E'rollback\\' escaped', "commit", $$ start transaction; $$;
       create function public.transaction_word_probe() returns text language sql as $body$ select 'prepare transaction' $body$;
     `;
-    await writeFile(join(directory, "011_transaction_escape.sql"), safeSql);
-    manifests.set(11, {
-      version: 11, name: "transaction_escape",
+    await writeFile(join(directory, "012_transaction_escape.sql"), safeSql);
+    manifests.set(12, {
+      version: 12, name: "transaction_escape",
       checksum: (await import("node:crypto")).createHash("sha256").update(safeSql).digest("hex"), objects: [],
     } as never);
     let connects = 0;
@@ -1744,21 +1848,21 @@ test("registered columns validate collation identity and generated semantics ato
     const columns = await readColumns();
     await pool.query("rollback");
     await cp(migrationsDirectory, directory, { recursive: true });
-    await writeFile(join(directory, "011_column_semantics.sql"), sql);
+    await writeFile(join(directory, "012_column_semantics.sql"), sql);
     const manifests = new Map(migrationTestInternals.schemaManifests);
-    manifests.set(11, {
-      version: 11, name: "column_semantics",
+    manifests.set(12, {
+      version: 12, name: "column_semantics",
       checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
       objects: [["public", "registered_column_semantics", "r", "current_user"]], columns,
     } as never);
     await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
     await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
-    manifests.set(11, {
-      ...manifests.get(11),
+    manifests.set(12, {
+      ...manifests.get(12),
       columns: columns.map((column) => column.name === "derived" ? { ...column, generated: "" } : column),
     } as never);
     await assert.rejects(migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests), /column catalog/u);
-    manifests.set(11, { ...manifests.get(11), columns } as never);
+    manifests.set(12, { ...manifests.get(12), columns } as never);
     await pool.query("alter table registered_column_semantics alter column collated type text collate \"POSIX\"");
     await assert.rejects(migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests), /column catalog/u);
     await pool.query("alter table registered_column_semantics alter column collated type text collate \"C\"");
@@ -1775,11 +1879,11 @@ test("registered columns validate collation identity and generated semantics ato
       from pg_class relation join pg_sequence sequence on sequence.seqrelid = relation.oid
       where relation.oid = 'public.registered_column_semantics_identity_seq'::regclass`)).rows[0];
     await pool.query("rollback");
-    await writeFile(join(directory, "012_column_identity.sql"), v12Sql);
+    await writeFile(join(directory, "013_column_identity.sql"), v12Sql);
     const beforeId = columns.find((column) => column.name === "id");
     const afterId = identityColumns.find((column) => column.name === "id");
-    manifests.set(12, {
-      version: 12, name: "column_identity",
+    manifests.set(13, {
+      version: 13, name: "column_identity",
       checksum: (await import("node:crypto")).createHash("sha256").update(v12Sql).digest("hex"),
       objects: [["public", "registered_column_semantics_identity_seq", "S", "current_user"]],
       relationSemantics: [identitySemantic],
@@ -1791,13 +1895,13 @@ test("registered columns validate collation identity and generated semantics ato
       where attrelid = 'public.registered_column_semantics'::regclass and attname = 'id'`)).rows[0]?.attidentity, "a");
 
     const v13Sql = "alter table registered_column_semantics alter column id set generated by default;\n";
-    await writeFile(join(directory, "013_missing_identity_amendment.sql"), v13Sql);
-    manifests.set(13, {
-      version: 13, name: "missing_identity_amendment",
+    await writeFile(join(directory, "014_missing_identity_amendment.sql"), v13Sql);
+    manifests.set(14, {
+      version: 14, name: "missing_identity_amendment",
       checksum: (await import("node:crypto")).createHash("sha256").update(v13Sql).digest("hex"),
     } as never);
     await assert.rejects(migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests), /column catalog/u);
-    assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 13")).rows[0]?.count, 0);
+    assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 14")).rows[0]?.count, 0);
     assert.equal((await pool.query(`select attidentity from pg_attribute
       where attrelid = 'public.registered_column_semantics'::regclass and attname = 'id'`)).rows[0]?.attidentity, "a");
   } finally {
@@ -1806,7 +1910,7 @@ test("registered columns validate collation identity and generated semantics ato
   }
 });
 
-test("registered migration 011 forward security objects validate and record in one transaction", async () => {
+test("registered migration 012 forward security objects validate and record in one transaction", async () => {
   const directory = await mkdtemp(join(tmpdir(), "core-agent-forward-security-"));
   try {
     await cp(migrationsDirectory, directory, { recursive: true });
@@ -1821,10 +1925,10 @@ test("registered migration 011 forward security objects validate and record in o
       create view registered_security_view as select id from registered_security_object;
     `;
     const relationSemantics = await probeRelationSemantics(sql, ["registered_security_sequence", "registered_security_view"]);
-    await writeFile(join(directory, "011_registered_security.sql"), sql);
+    await writeFile(join(directory, "012_registered_security.sql"), sql);
     const manifests = new Map(migrationTestInternals.schemaManifests);
-    manifests.set(11, {
-      version: 11,
+    manifests.set(12, {
+      version: 12,
       name: "registered_security",
       checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
       objects: [
@@ -1847,19 +1951,19 @@ test("registered migration 011 forward security objects validate and record in o
       routineAcls: [["revoke", "public", "registered_security_trigger", "f", "", "PUBLIC", "EXECUTE", false]],
       validateAndConverge: async (client: PoolClient) => {
         const result = await client.query("select to_regclass('public.registered_security_view')::text as relation");
-        if (result.rows[0]?.relation !== "registered_security_view") throw new Error("schema 11 manifest validation failed");
+        if (result.rows[0]?.relation !== "registered_security_view") throw new Error("schema 12 manifest validation failed");
       },
     });
     await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
     await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
-    assert.equal((await pool.query("select max(version) as version from core_agent_schema_migrations")).rows[0]?.version, 11);
+    assert.equal((await pool.query("select max(version) as version from core_agent_schema_migrations")).rows[0]?.version, 12);
     assert.equal((await pool.query("select to_regclass('public.registered_security_view')::text as relation")).rows[0]?.relation, "registered_security_view");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
 });
 
-test("registered migration 011 declares exact relation and routine ACL additions", async () => {
+test("registered migration 012 declares exact relation and routine ACL additions", async () => {
   const directory = await mkdtemp(join(tmpdir(), "core-agent-forward-acl-"));
   try {
     await cp(migrationsDirectory, directory, { recursive: true });
@@ -1871,10 +1975,10 @@ test("registered migration 011 declares exact relation and routine ACL additions
       revoke all on function registered_security_trigger() from public;
       grant execute on function registered_security_trigger() to core_agent_identity;
     `;
-    await writeFile(join(directory, "011_registered_acl.sql"), sql);
+    await writeFile(join(directory, "012_registered_acl.sql"), sql);
     const manifests = new Map(migrationTestInternals.schemaManifests);
-    manifests.set(11, {
-      version: 11,
+    manifests.set(12, {
+      version: 12,
       name: "registered_acl",
       checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
       objects: [["public", "registered_acl_object", "r", "current_user"]],
@@ -1921,7 +2025,7 @@ test("registered migration 011 declares exact relation and routine ACL additions
     await pool.query("drop role if exists core_agent_unknown_acl; create role core_agent_unknown_acl; grant select on registered_acl_object to core_agent_unknown_acl");
     await assert.rejects(
       migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests),
-      /schema 11 manifest validation failed: relation ACL/u,
+      /schema 12 manifest validation failed: relation ACL/u,
     );
     await pool.query("revoke all on registered_acl_object from core_agent_unknown_acl; drop role core_agent_unknown_acl");
   } finally {
@@ -1955,11 +2059,11 @@ test("registered ACL grants and revokes fold across versions for relations and r
     )).rows[0]!;
     await pool.query("rollback");
     await cp(migrationsDirectory, directory, { recursive: true });
-    await writeFile(join(directory, "011_acl_fold_grant.sql"), v11Sql);
-    await writeFile(join(directory, "012_acl_fold_revoke.sql"), v12Sql);
+    await writeFile(join(directory, "012_acl_fold_grant.sql"), v11Sql);
+    await writeFile(join(directory, "013_acl_fold_revoke.sql"), v12Sql);
     const manifests = new Map(migrationTestInternals.schemaManifests);
-    manifests.set(11, {
-      version: 11, name: "acl_fold_grant",
+    manifests.set(12, {
+      version: 12, name: "acl_fold_grant",
       checksum: (await import("node:crypto")).createHash("sha256").update(v11Sql).digest("hex"),
       objects: [["public", "registered_acl_fold", "r", "current_user"]],
       columns: [["registered_acl_fold", "id", "text", true, ""]],
@@ -1972,8 +2076,8 @@ test("registered ACL grants and revokes fold across versions for relations and r
         ["grant", "public", "registered_acl_fold_fn", "f", "", "core_agent_identity", "EXECUTE", false],
       ],
     } as never);
-    manifests.set(12, {
-      version: 12, name: "acl_fold_revoke",
+    manifests.set(13, {
+      version: 13, name: "acl_fold_revoke",
       checksum: (await import("node:crypto")).createHash("sha256").update(v12Sql).digest("hex"),
       relationAcls: [["revoke", "public", "registered_acl_fold", "r", "core_agent_app", "SELECT", false]],
       routineAcls: [["revoke", "public", "registered_acl_fold_fn", "f", "", "core_agent_identity", "EXECUTE", false]],
@@ -1982,7 +2086,7 @@ test("registered ACL grants and revokes fold across versions for relations and r
     await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
     assert.equal((await pool.query("select has_table_privilege('core_agent_app', 'registered_acl_fold', 'SELECT') as allowed")).rows[0]?.allowed, false);
     assert.equal((await pool.query("select has_function_privilege('core_agent_identity', 'registered_acl_fold_fn()', 'EXECUTE') as allowed")).rows[0]?.allowed, false);
-    assert.equal((await pool.query("select max(version)::int as version from core_agent_schema_migrations")).rows[0]?.version, 12);
+    assert.equal((await pool.query("select max(version)::int as version from core_agent_schema_migrations")).rows[0]?.version, 13);
   } finally {
     await pool.query("rollback").catch(() => undefined);
     await rm(directory, { recursive: true, force: true });
@@ -1993,18 +2097,18 @@ test("registered ACL repeated grants replace grant options deterministically", a
   await resetDatabase();
   const directory = await mkdtemp(join(tmpdir(), "core-agent-acl-grant-option-"));
   const sqlByVersion = new Map([
-    [11, `create table registered_acl_option (id text); grant select on registered_acl_option to core_agent_app;
+    [12, `create table registered_acl_option (id text); grant select on registered_acl_option to core_agent_app;
       create function registered_acl_option_fn() returns integer language sql set search_path = pg_catalog, public as 'select 1';
       revoke execute on function registered_acl_option_fn() from public; grant execute on function registered_acl_option_fn() to core_agent_identity;`],
-    [12, `grant select on registered_acl_option to core_agent_app with grant option;
+    [13, `grant select on registered_acl_option to core_agent_app with grant option;
       grant execute on function registered_acl_option_fn() to core_agent_identity with grant option;`],
-    [13, "select 1;"],
-    [14, `revoke grant option for select on registered_acl_option from core_agent_app;
+    [14, "select 1;"],
+    [15, `revoke grant option for select on registered_acl_option from core_agent_app;
       revoke grant option for execute on function registered_acl_option_fn() from core_agent_identity;`],
   ]);
   try {
     await pool.query("begin");
-    await pool.query(sqlByVersion.get(11)!);
+    await pool.query(sqlByVersion.get(12)!);
     const routine = (await pool.query<{ arguments: string; config: string[] | null; definition_hash: string; result: string }>(
       `select pg_get_function_identity_arguments(oid) as arguments, pg_get_function_result(oid) as result,
               proconfig as config, md5(pg_get_functiondef(oid)) as definition_hash
@@ -2020,8 +2124,8 @@ test("registered ACL repeated grants replace grant options deterministically", a
       relationAcls: [["grant", "public", "registered_acl_option", "r", "core_agent_app", "SELECT", grantable]],
       routineAcls: [["grant", "public", "registered_acl_option_fn", "f", "", "core_agent_identity", "EXECUTE", grantable]],
     });
-    manifests.set(11, {
-      version: 11, name: "acl_option_11", checksum: (await import("node:crypto")).createHash("sha256").update(`${sqlByVersion.get(11)}\n`).digest("hex"),
+    manifests.set(12, {
+      version: 12, name: "acl_option_12", checksum: (await import("node:crypto")).createHash("sha256").update(`${sqlByVersion.get(12)}\n`).digest("hex"),
       objects: [["public", "registered_acl_option", "r", "current_user"]], columns: [["registered_acl_option", "id", "text", false, ""]],
       routines: [["f", "registered_acl_option_fn", routine.arguments, routine.result, false, routine.config ?? [], routine.definition_hash]],
       routineAcls: [
@@ -2029,7 +2133,7 @@ test("registered ACL repeated grants replace grant options deterministically", a
         ...aclFor(false).routineAcls,
       ], relationAcls: aclFor(false).relationAcls,
     } as never);
-    for (const [version, grantable] of [[12, true], [13, true], [14, false]] as const) {
+    for (const [version, grantable] of [[13, true], [14, true], [15, false]] as const) {
       const sqlText = `${sqlByVersion.get(version)}\n`;
       manifests.set(version, {
         version, name: `acl_option_${version}`,
@@ -2052,7 +2156,7 @@ test("registered ACL repeated grants replace grant options deterministically", a
     );
     assert.deepEqual(relationGrant.rows, [{ grantable: false }]);
     assert.deepEqual(routineGrant.rows, [{ grantable: false }]);
-    assert.equal((await pool.query("select max(version)::int as version from core_agent_schema_migrations")).rows[0]?.version, 14);
+    assert.equal((await pool.query("select max(version)::int as version from core_agent_schema_migrations")).rows[0]?.version, 15);
   } finally {
     await pool.query("rollback").catch(() => undefined);
     await rm(directory, { recursive: true, force: true });
@@ -2067,12 +2171,12 @@ test("forward ACL fold rejects absent revokes and same-version duplicates before
       const sqlText = "create table acl_invalid_fold_probe (id integer);\n";
       try {
         await cp(migrationsDirectory, directory, { recursive: true });
-        await writeFile(join(directory, "011_acl_invalid_fold.sql"), sqlText);
+        await writeFile(join(directory, "012_acl_invalid_fold.sql"), sqlText);
         const relationEntry = ["grant", "public", "acl_invalid_fold_probe", "r", "core_agent_app", "SELECT", false] as const;
         const routineEntry = ["grant", "public", "missing_acl_fold_fn", "f", "", "core_agent_identity", "EXECUTE", false] as const;
         const manifests = new Map(migrationTestInternals.schemaManifests);
-        manifests.set(11, {
-          version: 11, name: "acl_invalid_fold", checksum: (await import("node:crypto")).createHash("sha256").update(sqlText).digest("hex"),
+        manifests.set(12, {
+          version: 12, name: "acl_invalid_fold", checksum: (await import("node:crypto")).createHash("sha256").update(sqlText).digest("hex"),
           relationAcls: scenario === "relation absent revoke"
             ? [["revoke", ...relationEntry.slice(1)]] : scenario === "relation duplicate grant" ? [relationEntry, relationEntry] : [],
           routineAcls: scenario === "routine absent revoke"
@@ -2093,10 +2197,10 @@ test("recorded registered view rejects replacement by a materialized view with t
     await cp(migrationsDirectory, directory, { recursive: true });
     const sql = "create view registered_relkind_object as select 1::integer as id;\n";
     const relationSemantics = await probeRelationSemantics(sql, ["registered_relkind_object"]);
-    await writeFile(join(directory, "011_registered_relkind.sql"), sql);
+    await writeFile(join(directory, "012_registered_relkind.sql"), sql);
     const manifests = new Map(migrationTestInternals.schemaManifests);
-    manifests.set(11, {
-      version: 11,
+    manifests.set(12, {
+      version: 12,
       name: "registered_relkind",
       checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
       objects: [["public", "registered_relkind_object", "v", "current_user"]],
@@ -2110,7 +2214,7 @@ test("recorded registered view rejects replacement by a materialized view with t
     await pool.query("drop view registered_relkind_object; create materialized view registered_relkind_object as select 1::integer as id");
     await assert.rejects(
       migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests),
-      /schema 11 manifest validation failed: relation catalog/u,
+      /schema 12 manifest validation failed: relation catalog/u,
     );
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -2122,10 +2226,10 @@ test("undeclared forward ACL rolls back its object and migration record atomical
   try {
     await cp(migrationsDirectory, directory, { recursive: true });
     const sql = "create table registered_acl_rollback (id text); grant select on registered_acl_rollback to public;\n";
-    await writeFile(join(directory, "011_acl_rollback.sql"), sql);
+    await writeFile(join(directory, "012_acl_rollback.sql"), sql);
     const manifests = new Map(migrationTestInternals.schemaManifests);
-    manifests.set(11, {
-      version: 11,
+    manifests.set(12, {
+      version: 12,
       name: "acl_rollback",
       checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
       objects: [["public", "registered_acl_rollback", "r", "current_user"]],
@@ -2133,10 +2237,10 @@ test("undeclared forward ACL rolls back its object and migration record atomical
     });
     await assert.rejects(
       migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests),
-      /schema 11 manifest validation failed: relation ACL/u,
+      /schema 12 manifest validation failed: relation ACL/u,
     );
     assert.equal((await pool.query("select to_regclass('registered_acl_rollback')::text as object")).rows[0]?.object, null);
-    assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 11")).rows[0]?.count, 0);
+    assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 12")).rows[0]?.count, 0);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -2179,13 +2283,13 @@ test("registered relation identities reject relkind owner and same-name category
       const directory = await mkdtemp(join(tmpdir(), "core-agent-object-identity-"));
       try {
         await cp(migrationsDirectory, directory, { recursive: true });
-        await writeFile(join(directory, "011_object_identity.sql"), scenario.sql);
+        await writeFile(join(directory, "012_object_identity.sql"), scenario.sql);
         const relationSemantics = scenario.object[2] === "S"
           ? await probeRelationSemantics(scenario.sql, ["registered_identity_object"])
           : undefined;
         const manifests = new Map(migrationTestInternals.schemaManifests);
-        manifests.set(11, {
-          version: 11,
+        manifests.set(12, {
+          version: 12,
           name: "object_identity",
           checksum: (await import("node:crypto")).createHash("sha256").update(scenario.sql).digest("hex"),
           objects: [scenario.object],
@@ -2196,7 +2300,7 @@ test("registered relation identities reject relkind owner and same-name category
         await pool.query(scenario.mutate);
         await assert.rejects(
           migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests),
-          /schema 11 manifest validation failed: relation catalog/u,
+          /schema 12 manifest validation failed: relation catalog/u,
         );
       } finally {
         await rm(directory, { recursive: true, force: true });
@@ -2205,7 +2309,7 @@ test("registered relation identities reject relkind owner and same-name category
   }
 });
 
-test("registered migration 011 amends an existing schema-1 relation atomically", async (t) => {
+test("registered migration 012 amends an existing schema-1 relation atomically", async (t) => {
   const scenarios = [
     { name: "declared add", declaration: "correct", succeeds: true },
     { name: "missing amendment", declaration: "missing", succeeds: false },
@@ -2218,7 +2322,7 @@ test("registered migration 011 amends an existing schema-1 relation atomically",
       const sql = "alter table runtime_containers add column capability_manifest_digest bytea;\n";
       try {
         await cp(migrationsDirectory, directory, { recursive: true });
-        await writeFile(join(directory, "011_runtime_capability_digest.sql"), sql);
+        await writeFile(join(directory, "012_runtime_capability_digest.sql"), sql);
         const manifests = new Map(migrationTestInternals.schemaManifests);
         const amendment = scenario.declaration === "missing" ? [] : [{
           action: "add",
@@ -2229,8 +2333,8 @@ test("registered migration 011 amends an existing schema-1 relation atomically",
             notNull: false, defaultExpression: "",
           },
         }];
-        manifests.set(11, {
-          version: 11,
+        manifests.set(12, {
+          version: 12,
           name: "runtime_capability_digest",
           checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
           columnAmendments: amendment,
@@ -2238,13 +2342,13 @@ test("registered migration 011 amends an existing schema-1 relation atomically",
         if (scenario.succeeds) {
           await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
           await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
-          assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 11")).rows[0]?.count, 1);
+          assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 12")).rows[0]?.count, 1);
           assert.equal((await pool.query(
             "select count(*)::int as count from information_schema.columns where table_schema = 'public' and table_name = 'runtime_containers' and column_name = 'capability_manifest_digest' and data_type = 'bytea'",
           )).rows[0]?.count, 1);
         } else {
           await assert.rejects(migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests), /manifest validation failed/u);
-          assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 11")).rows[0]?.count, 0);
+          assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 12")).rows[0]?.count, 0);
           assert.equal((await pool.query(
             "select count(*)::int as count from information_schema.columns where table_schema = 'public' and table_name = 'runtime_containers' and column_name = 'capability_manifest_digest'",
           )).rows[0]?.count, 0);
@@ -2320,17 +2424,17 @@ test("version-owned shape amendments deterministically add replace and revoke", 
     await pool.query("rollback");
 
     await cp(migrationsDirectory, directory, { recursive: true });
-    await writeFile(join(directory, "011_shape_evolution.sql"), v11Sql);
-    await writeFile(join(directory, "012_shape_amendments.sql"), v12Sql);
+    await writeFile(join(directory, "012_shape_evolution.sql"), v11Sql);
+    await writeFile(join(directory, "013_shape_amendments.sql"), v12Sql);
     const manifests = new Map(migrationTestInternals.schemaManifests);
-    manifests.set(11, {
-      version: 11, name: "shape_evolution",
+    manifests.set(12, {
+      version: 12, name: "shape_evolution",
       checksum: (await import("node:crypto")).createHash("sha256").update(v11Sql).digest("hex"),
       objects: [["public", "registered_shape_evolution", "r", "current_user"]],
       columns: before.columns, constraints: before.constraints, indexes: before.indexes,
     } as never);
-    manifests.set(12, {
-      version: 12, name: "shape_amendments",
+    manifests.set(13, {
+      version: 13, name: "shape_amendments",
       checksum: (await import("node:crypto")).createHash("sha256").update(v12Sql).digest("hex"),
       columnAmendments: amendments(before.columns, after.columns),
       constraintAmendments: amendments(before.constraints, after.constraints),
@@ -2338,7 +2442,7 @@ test("version-owned shape amendments deterministically add replace and revoke", 
     } as never);
     await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
     await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
-    assert.equal((await pool.query("select max(version)::int as version from core_agent_schema_migrations")).rows[0]?.version, 12);
+    assert.equal((await pool.query("select max(version)::int as version from core_agent_schema_migrations")).rows[0]?.version, 13);
     assert.equal((await pool.query("select count(*)::int as count from information_schema.columns where table_name = 'registered_shape_evolution' and column_name = 'digest' and data_type = 'bytea'")).rows[0]?.count, 1);
   } finally {
     await pool.query("rollback").catch(() => undefined);
@@ -2354,16 +2458,16 @@ test("invalid replacement amendment rolls back its SQL and migration record", as
   const base = { schema: "public", relation: "invalid_shape_amendment", relkind: "r", name: "id", position: 1, type: "text", notNull: true, defaultExpression: "" } as const;
   try {
     await cp(migrationsDirectory, directory, { recursive: true });
-    await writeFile(join(directory, "011_invalid_shape_base.sql"), v11Sql);
-    await writeFile(join(directory, "012_invalid_shape_change.sql"), v12Sql);
+    await writeFile(join(directory, "012_invalid_shape_base.sql"), v11Sql);
+    await writeFile(join(directory, "013_invalid_shape_change.sql"), v12Sql);
     const manifests = new Map(migrationTestInternals.schemaManifests);
-    manifests.set(11, {
-      version: 11, name: "invalid_shape_base",
+    manifests.set(12, {
+      version: 12, name: "invalid_shape_base",
       checksum: (await import("node:crypto")).createHash("sha256").update(v11Sql).digest("hex"),
       objects: [["public", "invalid_shape_amendment", "r", "current_user"]], columns: [base],
     } as never);
-    manifests.set(12, {
-      version: 12, name: "invalid_shape_change",
+    manifests.set(13, {
+      version: 13, name: "invalid_shape_change",
       checksum: (await import("node:crypto")).createHash("sha256").update(v12Sql).digest("hex"),
       columnAmendments: [{
         action: "replace", before: base,
@@ -2371,7 +2475,7 @@ test("invalid replacement amendment rolls back its SQL and migration record", as
       }],
     } as never);
     await assert.rejects(migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests), /column catalog/u);
-    assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 12")).rows[0]?.count, 0);
+    assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 13")).rows[0]?.count, 0);
     assert.equal((await pool.query("select data_type from information_schema.columns where table_name = 'invalid_shape_amendment' and column_name = 'id'")).rows[0]?.data_type, "text");
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -2390,17 +2494,17 @@ test("shape replace and revoke require exact existing history and rollback atomi
       const invented = { schema: "public", relation: "shape_history_probe", relkind: "r", name: "invented", position: 2, type: "bytea", notNull: false, defaultExpression: "" } as const;
       try {
         await cp(migrationsDirectory, directory, { recursive: true });
-        await writeFile(join(directory, "011_shape_history_base.sql"), v11Sql);
-        await writeFile(join(directory, "012_shape_history_invalid.sql"), v12Sql);
+        await writeFile(join(directory, "012_shape_history_base.sql"), v11Sql);
+        await writeFile(join(directory, "013_shape_history_invalid.sql"), v12Sql);
         const manifests = new Map(migrationTestInternals.schemaManifests);
-        manifests.set(11, {
-          version: 11, name: "shape_history_base",
+        manifests.set(12, {
+          version: 12, name: "shape_history_base",
           checksum: (await import("node:crypto")).createHash("sha256").update(v11Sql).digest("hex"),
           objects: [["public", "shape_history_probe", "r", "current_user"]],
           columns: [["shape_history_probe", "id", "text", true, ""]],
         } as never);
-        manifests.set(12, {
-          version: 12, name: "shape_history_invalid",
+        manifests.set(13, {
+          version: 13, name: "shape_history_invalid",
           checksum: (await import("node:crypto")).createHash("sha256").update(v12Sql).digest("hex"),
           columnAmendments: scenario === "replace absent"
             ? [{ action: "replace", before: invented, after: { ...invented, type: "text" } }]
@@ -2427,12 +2531,12 @@ test("shape replacement compares canonical fields rather than object property or
   const base = { schema: "public", relation: "shape_order_probe", relkind: "r", name: "id", position: 1, type: "text", notNull: true, defaultExpression: "" } as const;
   try {
     await cp(migrationsDirectory, directory, { recursive: true });
-    await writeFile(join(directory, "011_shape_order_base.sql"), v11Sql);
-    await writeFile(join(directory, "012_shape_order_replace.sql"), v12Sql);
+    await writeFile(join(directory, "012_shape_order_base.sql"), v11Sql);
+    await writeFile(join(directory, "013_shape_order_replace.sql"), v12Sql);
     const manifests = new Map(migrationTestInternals.schemaManifests);
-    manifests.set(11, { version: 11, name: "shape_order_base", checksum: (await import("node:crypto")).createHash("sha256").update(v11Sql).digest("hex"), objects: [["public", "shape_order_probe", "r", "current_user"]], columns: [base] } as never);
-    manifests.set(12, {
-      version: 12, name: "shape_order_replace", checksum: (await import("node:crypto")).createHash("sha256").update(v12Sql).digest("hex"),
+    manifests.set(12, { version: 12, name: "shape_order_base", checksum: (await import("node:crypto")).createHash("sha256").update(v11Sql).digest("hex"), objects: [["public", "shape_order_probe", "r", "current_user"]], columns: [base] } as never);
+    manifests.set(13, {
+      version: 13, name: "shape_order_replace", checksum: (await import("node:crypto")).createHash("sha256").update(v12Sql).digest("hex"),
       columnAmendments: [{
         action: "replace",
         before: { name: "id", relkind: "r", relation: "shape_order_probe", schema: "public", defaultExpression: "", notNull: true, type: "text", position: 1 },
@@ -2441,7 +2545,7 @@ test("shape replacement compares canonical fields rather than object property or
     } as never);
     await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
     await migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests);
-    assert.equal((await pool.query("select max(version)::int as version from core_agent_schema_migrations")).rows[0]?.version, 12);
+    assert.equal((await pool.query("select max(version)::int as version from core_agent_schema_migrations")).rows[0]?.version, 13);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -2475,16 +2579,16 @@ test("all shape kinds reject absent history and duplicate add or revoke operatio
       const v12Sql = "select 1;\n";
       try {
         await cp(migrationsDirectory, directory, { recursive: true });
-        await writeFile(join(directory, "011_shape_fold_guard.sql"), v11Sql);
-        await writeFile(join(directory, "012_shape_fold_invalid.sql"), v12Sql);
+        await writeFile(join(directory, "012_shape_fold_guard.sql"), v11Sql);
+        await writeFile(join(directory, "013_shape_fold_invalid.sql"), v12Sql);
         const manifests = new Map(migrationTestInternals.schemaManifests);
-        manifests.set(11, {
-          version: 11, name: "shape_fold_guard", checksum: (await import("node:crypto")).createHash("sha256").update(v11Sql).digest("hex"),
+        manifests.set(12, {
+          version: 12, name: "shape_fold_guard", checksum: (await import("node:crypto")).createHash("sha256").update(v11Sql).digest("hex"),
           objects: [["public", "shape_fold_guard", "r", "current_user"]], columns: [existingColumn],
           constraints: [existingConstraint], indexes: [existingIndex],
         } as never);
-        manifests.set(12, {
-          version: 12, name: "shape_fold_invalid", checksum: (await import("node:crypto")).createHash("sha256").update(v12Sql).digest("hex"),
+        manifests.set(13, {
+          version: 13, name: "shape_fold_invalid", checksum: (await import("node:crypto")).createHash("sha256").update(v12Sql).digest("hex"),
           ...amendments,
         } as never);
         await assert.rejects(migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests), /invalid (?:columns|constraints|indexes) (?:add|replace|revoke)/u);
@@ -2513,10 +2617,10 @@ test("registered views and materialized views require exact ordered column shape
           try {
             const relationSemantics = await probeRelationSemantics(sql, ["registered_column_view"]);
             await cp(migrationsDirectory, directory, { recursive: true });
-            await writeFile(join(directory, "011_view_shape.sql"), sql);
+            await writeFile(join(directory, "012_view_shape.sql"), sql);
             const manifests = new Map(migrationTestInternals.schemaManifests);
-            manifests.set(11, {
-              version: 11,
+            manifests.set(12, {
+              version: 12,
               name: "view_shape",
               checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
               objects: [["public", "registered_column_view", kind === "view" ? "v" : "m", "current_user"]],
@@ -2570,10 +2674,10 @@ test("registered routine ACLs accept canonical complex signatures without raw SQ
         order by proname, pg_get_function_identity_arguments(oid)`)).rows;
     await pool.query("rollback");
     await cp(migrationsDirectory, directory, { recursive: true });
-    await writeFile(join(directory, "011_routine_signatures.sql"), sql);
+    await writeFile(join(directory, "012_routine_signatures.sql"), sql);
     const manifests = new Map(migrationTestInternals.schemaManifests);
-    manifests.set(11, {
-      version: 11,
+    manifests.set(12, {
+      version: 12,
       name: "routine_signatures",
       checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
       routines: routineRows.map((row) => [row.kind, row.name, row.arguments, row.result, false, row.config ?? [], row.definition_hash]),
@@ -2625,10 +2729,10 @@ test("routine ACL injection-shaped declarations fail before migration SQL can mu
   const sql = "create table routine_acl_injection_probe (id integer);\n";
   try {
     await cp(migrationsDirectory, directory, { recursive: true });
-    await writeFile(join(directory, "011_routine_injection.sql"), sql);
+    await writeFile(join(directory, "012_routine_injection.sql"), sql);
     const manifests = new Map(migrationTestInternals.schemaManifests);
-    manifests.set(11, {
-      version: 11,
+    manifests.set(12, {
+      version: 12,
       name: "routine_injection",
       checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
       routineAcls: [["grant", "public", "registered_acl_complex", "f", "text[]); create table injected(); --", "core_agent_identity", "EXECUTE", false]],
@@ -2650,10 +2754,10 @@ test("relation ownership cannot be redeclared by a later manifest", async () => 
   const sql = "create table duplicate_owner_probe (id integer);\n";
   try {
     await cp(migrationsDirectory, directory, { recursive: true });
-    await writeFile(join(directory, "011_duplicate_owner.sql"), sql);
+    await writeFile(join(directory, "012_duplicate_owner.sql"), sql);
     const manifests = new Map(migrationTestInternals.schemaManifests);
-    manifests.set(11, {
-      version: 11,
+    manifests.set(12, {
+      version: 12,
       name: "duplicate_owner",
       checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
       objects: [["public", "runtime_containers", "r", "current_user"]],
@@ -2668,7 +2772,7 @@ test("relation ownership cannot be redeclared by a later manifest", async () => 
   }
 });
 
-test("registered migration 011 union failure rolls back every object and record", async () => {
+test("registered migration 012 union failure rolls back every object and record", async () => {
   const directory = await mkdtemp(join(tmpdir(), "core-agent-forward-union-failure-"));
   try {
     await cp(migrationsDirectory, directory, { recursive: true });
@@ -2676,10 +2780,10 @@ test("registered migration 011 union failure rolls back every object and record"
       create table registered_union_object (id text primary key);
       create function undeclared_union_function() returns integer language sql as 'select 1';
     `;
-    await writeFile(join(directory, "011_union_failure.sql"), sql);
+    await writeFile(join(directory, "012_union_failure.sql"), sql);
     const manifests = new Map(migrationTestInternals.schemaManifests);
-    manifests.set(11, {
-      version: 11,
+    manifests.set(12, {
+      version: 12,
       name: "union_failure",
       checksum: (await import("node:crypto")).createHash("sha256").update(sql).digest("hex"),
       objects: [["public", "registered_union_object", "r", "current_user"]],
@@ -2689,11 +2793,11 @@ test("registered migration 011 union failure rolls back every object and record"
     });
     await assert.rejects(
       migrationTestInternals.applyMigrationsWithManifests(pool, directory, manifests),
-      /schema 11 manifest validation failed: routine catalog/u,
+      /schema 12 manifest validation failed: routine catalog/u,
     );
     assert.equal((await pool.query("select to_regclass('public.registered_union_object')::text as relation")).rows[0]?.relation, null);
     assert.equal((await pool.query("select to_regprocedure('public.undeclared_union_function()')::text as routine")).rows[0]?.routine, null);
-    assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 11")).rows[0]?.count, 0);
+    assert.equal((await pool.query("select count(*)::int as count from core_agent_schema_migrations where version = 12")).rows[0]?.count, 0);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -2751,7 +2855,12 @@ test("recorded schema 10 rejects altered constraint index function owner ACL seq
         await applyMigrations(pool, migrationsDirectory);
         assert.equal((await pool.query("select has_table_privilege('public', 'private_identity_pii', 'select') as allowed")).rows[0]?.allowed, false);
       } else {
-        await assert.rejects(applyMigrations(pool, migrationsDirectory), /schema 10 (manifest validation|ACL convergence) failed/);
+        await assert.rejects(
+          applyMigrations(pool, migrationsDirectory),
+          category === "sequence catalog"
+            ? /schema 11 manifest validation failed: relation catalog/u
+            : /schema 10 (manifest validation|ACL convergence) failed/u,
+        );
       }
     });
   }
@@ -3114,7 +3223,7 @@ test("schema 10 upgrades a genuine v7 database and supports Worker claim plans",
     await applyMigrationPrefix(v7Directory, 7);
     assert.equal(await readSchemaVersion(db), 7);
     await applyMigrations(pool, migrationsDirectory);
-    assert.equal(await readSchemaVersion(db), 10);
+    assert.equal(await readSchemaVersion(db), 11);
 
     const plans = await db.connection().execute(async (connection) => {
       await sql`set enable_seqscan = off`.execute(connection);

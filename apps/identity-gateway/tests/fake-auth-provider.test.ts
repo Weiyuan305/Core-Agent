@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import type { AuthProviderAdapter } from "../src/providers/auth-provider.js";
@@ -11,6 +12,7 @@ const credential = Object.freeze({
   password: "correct horse battery staple",
 });
 const providerProof = Object.freeze({ accessToken: ["fake", "current", "jwt"].join("-") });
+const payloadHash = `sha256:${"a".repeat(64)}`;
 
 function createProvider(): FakeAuthProvider {
   return new FakeAuthProvider({
@@ -66,6 +68,27 @@ test("deterministic fake implements the closed adapter and returns only verified
     password: "a sufficiently long password",
   }), { kind: "verification_pending" });
   assert.equal(await provider.beginPasswordReset("unknown@example.test"), undefined);
+  await expectFailure(() => provider.completePasswordReset({
+    transaction_id: "password_reset_fake_0001",
+    authorization_code: "fake-recovery-code",
+    state: createHash("sha256").update("reset-state:password_reset_fake_0001").digest("hex"),
+    redirect_uri: "https://fake-auth.invalid/password-reset",
+    new_password: "must not reset another account",
+  }), "AUTH_INVALID");
+  assert.equal(await provider.beginPasswordReset(credential.email), undefined);
+  assert.equal((await provider.completePasswordReset({
+    transaction_id: "password_reset_fake_0002",
+    authorization_code: "fake-recovery-code",
+    state: createHash("sha256").update("reset-state:password_reset_fake_0002").digest("hex"),
+    redirect_uri: "https://fake-auth.invalid/password-reset",
+    new_password: "a new sufficiently long password",
+  })).providerSubject, "provider-subject-1");
+  await expectFailure(() => provider.signInEmail(credential), "AUTH_INVALID");
+  assert.equal((await provider.signInEmail({
+    email: credential.email,
+    password: "a new sufficiently long password",
+  })).providerSubject, "provider-subject-1");
+  await expectFailure(() => provider.verifyCurrentSubject(providerProof), "AUTH_INVALID");
 });
 
 test("deterministic fake accepts inert own data properties without invoking getters or reflecting input", async () => {
@@ -123,39 +146,45 @@ test("deterministic fake rejects inherited or accessor credentials with a stable
 test("deterministic fake validates one-time Apple sign-in and link transactions", async () => {
   const provider = createProvider();
   const signInStart = await provider.beginApple({
-    flowKind: "sign_in",
-    clientKind: "web",
-    redirectUri: "https://identity.example.test/auth/v1/apple/callback",
+    schema_version: 1,
+    idempotency_key: "idem_fake_start",
+    payload_hash: payloadHash,
+    client_kind: "web",
+    redirect_uri: "https://identity.example.test/auth/v1/apple/callback",
   });
-  const signInUrl = new URL(signInStart.authorizationUrl);
+  const signInUrl = new URL(signInStart.authorization_url);
   const callback = {
-    transactionId: signInStart.transactionId,
-    authorizationCode: "fake-authorization-code",
+    schema_version: 1 as const,
+    idempotency_key: "idem_fake_callback",
+    payload_hash: payloadHash,
+    transaction_id: signInStart.transaction_id,
+    authorization_code: "fake-authorization-code",
     state: signInUrl.searchParams.get("state") ?? "",
-    nonce: signInUrl.searchParams.get("nonce") ?? "",
-    redirectUri: "https://identity.example.test/auth/v1/apple/callback",
-    clientKind: "web" as const,
+    client_kind: "web" as const,
   };
 
-  assert.equal(signInStart.expiresAt, "2026-08-17T01:07:03.000Z");
+  assert.equal(signInStart.expires_at, "2026-08-17T01:07:03.000Z");
   assert.equal((await provider.completeApple(callback)).identityKind, "apple");
   await expectFailure(() => provider.completeApple(callback), "AUTH_CALLBACK_INVALID");
 
-  const linkStart = await provider.beginApple({
-    flowKind: "link",
-    clientKind: "web",
-    redirectUri: "https://identity.example.test/auth/v1/apple/callback",
+  const linkStart = await provider.beginAppleLink({
+    schema_version: 1,
+    idempotency_key: "idem_fake_link_start",
+    payload_hash: payloadHash,
+    client_kind: "web",
+    redirect_uri: "https://identity.example.test/auth/v1/apple/callback",
     authenticatedActorId: "actor-1",
     providerProof,
   });
-  const linkUrl = new URL(linkStart.authorizationUrl);
+  const linkUrl = new URL(linkStart.authorization_url);
   assert.equal((await provider.linkApple({
-    transactionId: linkStart.transactionId,
-    authorizationCode: "fake-link-code",
+    schema_version: 1,
+    idempotency_key: "idem_fake_link_callback",
+    payload_hash: payloadHash,
+    transaction_id: linkStart.transaction_id,
+    authorization_code: "fake-link-code",
     state: linkUrl.searchParams.get("state") ?? "",
-    nonce: linkUrl.searchParams.get("nonce") ?? "",
-    redirectUri: "https://identity.example.test/auth/v1/apple/callback",
-    clientKind: "web",
+    client_kind: "web",
     authenticatedActorId: "actor-1",
     providerProof,
   })).identityKind, "apple");
@@ -164,19 +193,27 @@ test("deterministic fake validates one-time Apple sign-in and link transactions"
 test("deterministic fake rejects changed Apple callback authority before returning a subject", async () => {
   const provider = createProvider();
   const start = await provider.beginApple({
-    flowKind: "sign_in",
-    clientKind: "iphone",
-    redirectUri: "coreagent://auth/callback",
+    schema_version: 1,
+    idempotency_key: "idem_fake_native_start",
+    payload_hash: payloadHash,
+    client_kind: "iphone",
+    redirect_uri: "coreagent://auth/callback",
+    nonce: "opaque-native-nonce",
+    pkce_code_challenge: "a".repeat(43),
+    pkce_code_challenge_method: "S256",
   });
-  const url = new URL(start.authorizationUrl);
+  const url = new URL(start.authorization_url);
 
   await expectFailure(() => provider.completeApple({
-    transactionId: start.transactionId,
-    authorizationCode: "fake-code",
+    schema_version: 1,
+    idempotency_key: "idem_fake_native_callback",
+    payload_hash: payloadHash,
+    transaction_id: start.transaction_id,
+    authorization_code: "fake-code",
     state: `${url.searchParams.get("state") ?? ""}-changed`,
-    nonce: url.searchParams.get("nonce") ?? "",
-    redirectUri: "coreagent://auth/callback",
-    clientKind: "iphone",
+    nonce: "opaque-native-nonce",
+    pkce_code_verifier: "b".repeat(43),
+    client_kind: "iphone",
   }), "AUTH_CALLBACK_INVALID");
 });
 

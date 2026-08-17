@@ -9,6 +9,7 @@
     "check": "npm run build && npm test"
   },
   "dependencies": {
+    "@core-agent/contracts": "0.5.0",
     "@core-agent/runtime-core": "0.1.0",
     "@supabase/supabase-js": "2.112.2"
   }

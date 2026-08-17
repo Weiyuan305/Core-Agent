@@ -4,16 +4,19 @@ import {
   timingSafeEqual,
 } from "node:crypto";
 import { createRequire } from "node:module";
+import { types as utilTypes } from "node:util";
 
 import type {
   AppleAuthorizationCallback,
   AppleAuthorizationInput,
   AppleAuthorizationStart,
+  AppleLinkAuthorizationInput,
   AppleLinkInput,
   AuthProviderAdapter,
   EmailCredentialInput,
   ProviderClientKind,
   ProviderProof,
+  PasswordResetCompletionInput,
   VerifiedProviderSubject,
 } from "./auth-provider.js";
 import {
@@ -35,6 +38,7 @@ export interface SupabaseClientCreationOptions {
     readonly persistSession: false;
     readonly detectSessionInUrl: false;
     readonly flowType: "pkce";
+    readonly experimental: { readonly appendPkceFlowIdToRedirects: false };
     readonly storageKey: string;
     readonly storage: TransientStorage;
   };
@@ -49,6 +53,7 @@ interface SupabaseAuthPort {
   setSession(input: { readonly access_token: string; readonly refresh_token: string }): Promise<unknown>;
   signOut(input: { readonly scope: "local" | "global" }): Promise<unknown>;
   resetPasswordForEmail(email: string, options: { readonly redirectTo: string }): Promise<unknown>;
+  updateUser(input: { readonly password: string }): Promise<unknown>;
   linkIdentity(input: unknown): Promise<unknown>;
   readonly admin: {
     deleteUser(providerSubject: string, shouldSoftDelete: boolean): Promise<unknown>;
@@ -68,7 +73,7 @@ export type SupabaseClientFactory = (
 export interface OAuthTransactionRecord {
   readonly oauth_transaction_id: string;
   readonly provider: "supabase";
-  readonly flow_kind: "apple_sign_in" | "apple_link";
+  readonly flow_kind: "apple_sign_in" | "apple_link" | "password_reset";
   readonly actor_id: string | null;
   readonly client_kind: ProviderClientKind;
   readonly state_digest: Uint8Array;
@@ -104,27 +109,35 @@ export interface SupabaseAuthProviderOptions {
 }
 
 interface ParsedAppleStart {
-  readonly flowKind: "sign_in" | "link";
   readonly clientKind: ProviderClientKind;
   readonly redirectUri: string;
-  readonly actorId: string | null;
-  readonly accessToken: string | null;
+  readonly nonce: string | null;
+  readonly pkceChallenge: string | null;
 }
 
 interface ParsedAppleCallback {
   readonly transactionId: string;
   readonly authorizationCode: string;
   readonly state: string;
-  readonly nonce: string;
-  readonly redirectUri: string;
   readonly clientKind: ProviderClientKind;
+  readonly nonce: string | null;
+  readonly pkceVerifier: string | null;
 }
 
-interface DecryptedPkceEnvelope {
+interface WebPkceEnvelope {
+  readonly kind: "web" | "password_reset";
   readonly flowId: string;
   readonly verifier: string;
   readonly verifierDigest: string;
 }
+
+interface NativePkceEnvelope {
+  readonly kind: "native";
+  readonly flowId: string;
+  readonly challenge: string;
+}
+
+type DecryptedPkceEnvelope = WebPkceEnvelope | NativePkceEnvelope;
 
 const oauthTransactionTtlMs = 5 * 60 * 1_000;
 const transientRefreshPlaceholder = "core-agent-transient-proof";
@@ -251,6 +264,21 @@ function sha256(value: string): Uint8Array {
   return Uint8Array.from(createHash("sha256").update(value, "utf8").digest());
 }
 
+function sha256Base64Url(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("base64url");
+}
+
+function copyBytes(value: unknown, minimum: number, maximum: number): Uint8Array | undefined {
+  if (!ArrayBuffer.isView(value) || utilTypes.isProxy(value)) return undefined;
+  try {
+    const copy: unknown = structuredClone(value);
+    if (!(copy instanceof Uint8Array) || copy.byteLength < minimum || copy.byteLength > maximum) return undefined;
+    return copy;
+  } catch {
+    return undefined;
+  }
+}
+
 function equalDigest(left: Uint8Array, right: Uint8Array): boolean {
   if (left.byteLength !== 32 || right.byteLength !== 32) return false;
   return timingSafeEqual(left, right);
@@ -311,6 +339,58 @@ function parseStoredString(value: string | null): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function parseStoredFlowId(value: string | null): string | undefined {
+  if (value === null) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed) || parsed.length !== 1) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(parsed, "0");
+    const flowId = descriptor !== undefined && "value" in descriptor ? descriptor.value : undefined;
+    return typeof flowId === "string" && /^[A-Za-z0-9_-]{8,64}$/u.test(flowId) ? flowId : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+interface ParsedOAuthTransaction {
+  readonly transactionId: string;
+  readonly flowKind: OAuthTransactionRecord["flow_kind"];
+  readonly actorId: string | null;
+  readonly clientKind: ProviderClientKind;
+  readonly stateDigest: Uint8Array;
+  readonly nonceDigest: Uint8Array;
+  readonly ciphertext: Uint8Array;
+  readonly redirectUri: string;
+  readonly expiresAt: number;
+}
+
+function parseOAuthTransaction(record: unknown): ParsedOAuthTransaction | undefined {
+  if (utilTypes.isProxy(record)) return undefined;
+  const transactionId = ownString(record, "oauth_transaction_id");
+  const provider = ownString(record, "provider");
+  const flowKind = ownString(record, "flow_kind");
+  const actor = ownData(record, "actor_id");
+  const clientKind = readClientKind(ownData(record, "client_kind"));
+  const stateDigest = copyBytes(ownData(record, "state_digest"), 32, 32);
+  const nonceDigest = copyBytes(ownData(record, "nonce_digest"), 32, 32);
+  const ciphertext = copyBytes(ownData(record, "pkce_verifier_ciphertext"), 1, 65_536);
+  const redirectUri = ownString(record, "redirect_uri");
+  const status = ownString(record, "status");
+  const expiresAtText = ownString(record, "expires_at");
+  const expiresAt = expiresAtText === undefined ? Number.NaN : new Date(expiresAtText).getTime();
+  if (transactionId === undefined || transactionId.length === 0 || transactionId.length > 256
+    || provider !== "supabase"
+    || (flowKind !== "apple_sign_in" && flowKind !== "apple_link" && flowKind !== "password_reset")
+    || (actor !== null && (typeof actor !== "string" || actor.length === 0 || actor.length > 256))
+    || clientKind === undefined || stateDigest === undefined || nonceDigest === undefined
+    || ciphertext === undefined || redirectUri === undefined || redirectUri.length === 0
+    || redirectUri.length > 2_048 || status !== "pending" || !Number.isFinite(expiresAt)) return undefined;
+  return {
+    transactionId, flowKind, actorId: actor as string | null, clientKind,
+    stateDigest, nonceDigest, ciphertext, redirectUri, expiresAt,
+  };
 }
 
 async function safeProviderCall<T>(operation: () => Promise<T>, fallback?: ProviderFailureCode): Promise<T> {
@@ -389,29 +469,88 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
     if (typeof email !== "string" || !validEmail(normalizeEmail(email))) {
       throw new ProviderFailure("AUTH_INVALID");
     }
-    const { client, storage } = this.#newClient();
+    const transactionId = `oauth_${encodeOpaque(this.#randomBytes(18))}`;
+    const state = encodeOpaque(this.#randomBytes(32));
+    const redirect = new URL(this.#passwordResetRedirectUri);
+    redirect.searchParams.set("transaction_id", transactionId);
+    redirect.searchParams.set("state", state);
+    const exactRedirect = redirect.toString();
+    const expiresAt = new Date(this.#now().getTime() + oauthTransactionTtlMs).toISOString();
+    const { client, storage, storageKey } = this.#newClient(undefined, transactionId);
+    let verifierBytes: Uint8Array | undefined;
     try {
       requireResultData(await safeProviderCall(() => client.auth.resetPasswordForEmail(
         normalizeEmail(email),
-        { redirectTo: this.#passwordResetRedirectUri },
+        { redirectTo: exactRedirect },
       )));
+      const flowId = parseStoredFlowId(await storage.getItem(`${storageKey}-flows-code-verifier`));
+      const verifier = flowId === undefined ? undefined : parseStoredString(await storage.getItem(
+        `${storageKey}-flow-${flowId}-code-verifier`,
+      ));
+      if (flowId === undefined || verifier === undefined || !/^[A-Za-z0-9._~-]{43,128}\/recovery$/u.test(verifier)) {
+        throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+      }
+      verifierBytes = utf8.encode(JSON.stringify({
+        kind: "password_reset",
+        flowId,
+        verifier,
+        verifierDigest: Buffer.from(sha256(verifier)).toString("hex"),
+      } satisfies WebPkceEnvelope));
+      const ciphertext = copyBytes(await safeProviderCall(
+        () => this.#transactionProtector.encrypt(verifierBytes!),
+      ), 1, 65_536);
+      if (ciphertext === undefined) throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+      await safeProviderCall(() => this.#transactionStore.save(Object.freeze({
+        oauth_transaction_id: transactionId,
+        provider: "supabase",
+        flow_kind: "password_reset",
+        actor_id: null,
+        client_kind: "web",
+        state_digest: sha256(state),
+        nonce_digest: sha256(`password-reset:${transactionId}`),
+        pkce_verifier_ciphertext: ciphertext,
+        redirect_uri: exactRedirect,
+        status: "pending",
+        expires_at: expiresAt,
+      })));
     } finally {
+      verifierBytes?.fill(0);
       storage.clear();
     }
   }
 
   async beginApple(input: AppleAuthorizationInput): Promise<AppleAuthorizationStart> {
+    return this.#beginAppleTransaction(input, "apple_sign_in", null, null);
+  }
+
+  async beginAppleLink(input: AppleLinkAuthorizationInput): Promise<AppleAuthorizationStart> {
+    const actorId = ownString(input, "authenticatedActorId");
+    if (actorId === undefined || actorId.length === 0 || actorId.length > 256) {
+      throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+    }
+    return this.#beginAppleTransaction(
+      input,
+      "apple_link",
+      actorId,
+      readProof(ownData(input, "providerProof")),
+    );
+  }
+
+  async #beginAppleTransaction(
+    input: AppleAuthorizationInput,
+    flowKind: "apple_sign_in" | "apple_link",
+    actorId: string | null,
+    accessToken: string | null,
+  ): Promise<AppleAuthorizationStart> {
     const parsed = this.#parseAppleStart(input);
     const transactionId = `oauth_${encodeOpaque(this.#randomBytes(18))}`;
     const state = encodeOpaque(this.#randomBytes(32));
-    const nonce = encodeOpaque(this.#randomBytes(32));
+    const nonce = parsed.nonce ?? encodeOpaque(this.#randomBytes(32));
     const expiresAt = new Date(this.#now().getTime() + oauthTransactionTtlMs).toISOString();
     const { client, storage, storageKey } = this.#newClient(undefined, transactionId);
     let verifierBytes: Uint8Array | undefined;
     try {
-      if (parsed.flowKind === "link") {
-        await this.#hydrateProof(client, parsed.accessToken ?? "");
-      }
+      if (accessToken !== null) await this.#hydrateProof(client, accessToken);
       const oauthRequest = {
         provider: "apple",
         options: {
@@ -420,50 +559,63 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
           queryParams: { state, nonce },
         },
       } as const;
-      const result = parsed.flowKind === "link"
+      const result = flowKind === "apple_link"
         ? await safeProviderCall(() => client.auth.linkIdentity(oauthRequest), "AUTH_CONFLICT")
         : await safeProviderCall(() => client.auth.signInWithOAuth(oauthRequest), "AUTH_CALLBACK_INVALID");
-      const data = requireResultData(result, parsed.flowKind === "link" ? "AUTH_CONFLICT" : "AUTH_CALLBACK_INVALID");
-      const authorizationUrl = ownString(data, "url");
+      const data = requireResultData(result, flowKind === "apple_link" ? "AUTH_CONFLICT" : "AUTH_CALLBACK_INVALID");
+      const rawAuthorizationUrl = ownString(data, "url");
       const flowId = ownString(data, "flowId");
-      if (authorizationUrl === undefined || flowId === undefined || !/^[A-Za-z0-9_-]{8,64}$/u.test(flowId)) {
+      if (rawAuthorizationUrl === undefined || flowId === undefined || !/^[A-Za-z0-9_-]{8,64}$/u.test(flowId)) {
         throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
       }
+      let authorizationUrl: URL;
       try {
-        const parsedUrl = new URL(authorizationUrl);
-        if (parsedUrl.protocol !== "https:") throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+        authorizationUrl = new URL(rawAuthorizationUrl);
+        if (authorizationUrl.protocol !== "https:") throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
       } catch (error) {
         throw mapProviderFailure(error, "AUTH_PROVIDER_UNAVAILABLE");
       }
-      const verifier = parseStoredString(await storage.getItem(
-        `${storageKey}-flow-${flowId}-code-verifier`,
-      ));
-      if (verifier === undefined || verifier.length < 43 || verifier.length > 512) {
-        throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+      let envelope: DecryptedPkceEnvelope;
+      if (parsed.clientKind === "web") {
+        const verifier = parseStoredString(await storage.getItem(
+          `${storageKey}-flow-${flowId}-code-verifier`,
+        ));
+        if (verifier === undefined || verifier.length < 43 || verifier.length > 512) {
+          throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+        }
+        envelope = {
+          kind: "web", flowId, verifier,
+          verifierDigest: Buffer.from(sha256(verifier)).toString("hex"),
+        };
+      } else {
+        envelope = { kind: "native", flowId, challenge: parsed.pkceChallenge! };
+        authorizationUrl.searchParams.set("code_challenge", parsed.pkceChallenge!);
+        authorizationUrl.searchParams.set("code_challenge_method", "S256");
       }
-      verifierBytes = utf8.encode(JSON.stringify({
-        flowId,
-        verifier,
-        verifierDigest: Buffer.from(sha256(verifier)).toString("hex"),
-      } satisfies DecryptedPkceEnvelope));
-      const ciphertext = await safeProviderCall(
+      verifierBytes = utf8.encode(JSON.stringify(envelope));
+      const ciphertext = copyBytes(await safeProviderCall(
         () => this.#transactionProtector.encrypt(verifierBytes!),
-      );
+      ), 1, 65_536);
+      if (ciphertext === undefined) throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
       const transaction: OAuthTransactionRecord = Object.freeze({
         oauth_transaction_id: transactionId,
         provider: "supabase",
-        flow_kind: parsed.flowKind === "link" ? "apple_link" : "apple_sign_in",
-        actor_id: parsed.actorId,
+        flow_kind: flowKind,
+        actor_id: actorId,
         client_kind: parsed.clientKind,
         state_digest: sha256(state),
         nonce_digest: sha256(nonce),
-        pkce_verifier_ciphertext: Uint8Array.from(ciphertext),
+        pkce_verifier_ciphertext: ciphertext,
         redirect_uri: parsed.redirectUri,
         status: "pending",
         expires_at: expiresAt,
       });
       await safeProviderCall(() => this.#transactionStore.save(transaction));
-      return Object.freeze({ transactionId, authorizationUrl, expiresAt });
+      return Object.freeze({
+        transaction_id: transactionId,
+        authorization_url: authorizationUrl.toString(),
+        expires_at: expiresAt,
+      });
     } finally {
       verifierBytes?.fill(0);
       storage.clear();
@@ -482,6 +634,51 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
     if (actorId === undefined || actorId.length === 0) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
     const accessToken = readProof(proof);
     return this.#completeAppleTransaction(parsed, "apple_link", actorId, accessToken);
+  }
+
+  async completePasswordReset(input: PasswordResetCompletionInput): Promise<VerifiedProviderSubject> {
+    const transactionId = ownString(input, "transaction_id");
+    const authorizationCode = ownString(input, "authorization_code");
+    const state = ownString(input, "state");
+    const redirectUri = ownString(input, "redirect_uri");
+    const newPassword = ownString(input, "new_password");
+    if (transactionId === undefined || transactionId.length === 0 || transactionId.length > 256
+      || authorizationCode === undefined || authorizationCode.length < 8 || authorizationCode.length > 8_192
+      || state === undefined || state.length < 8 || state.length > 4_096
+      || redirectUri === undefined || redirectUri.length > 2_048
+      || newPassword === undefined || newPassword.length < 8 || newPassword.length > 1_024) {
+      throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+    }
+    const transaction = await this.#consumeTransaction(transactionId);
+    const expectedRedirect = new URL(this.#passwordResetRedirectUri);
+    expectedRedirect.searchParams.set("transaction_id", transactionId);
+    expectedRedirect.searchParams.set("state", state);
+    if (transaction.flowKind !== "password_reset" || transaction.actorId !== null
+      || transaction.clientKind !== "web" || transaction.redirectUri !== redirectUri
+      || transaction.redirectUri !== expectedRedirect.toString()
+      || transaction.expiresAt <= this.#now().getTime()
+      || !equalDigest(transaction.stateDigest, sha256(state))) {
+      throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+    }
+    const envelope = await this.#decryptEnvelope(transaction.ciphertext);
+    if (envelope.kind !== "password_reset") throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+    const { client, storage, storageKey } = this.#newClient(undefined, transactionId);
+    try {
+      await storage.setItem(`${storageKey}-flow-${envelope.flowId}-code-verifier`, JSON.stringify(envelope.verifier));
+      const data = requireResultData(await safeProviderCall(
+        () => client.auth.exchangeCodeForSession(authorizationCode, { flowId: envelope.flowId }),
+        "AUTH_CALLBACK_INVALID",
+      ), "AUTH_CALLBACK_INVALID");
+      if (ownData(data, "session") === null || ownData(data, "session") === undefined) {
+        throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+      }
+      const subject = copySubject(ownData(data, "user"), "email_password");
+      requireResultData(await safeProviderCall(() => client.auth.updateUser({ password: newPassword })));
+      await this.#signOut(client, "global");
+      return subject;
+    } finally {
+      storage.clear();
+    }
   }
 
   async revokeCurrentProviderSession(input: ProviderProof): Promise<void> {
@@ -562,6 +759,7 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
         persistSession: false,
         detectSessionInUrl: false,
         flowType: "pkce",
+        experimental: { appendPkceFlowIdToRedirects: false },
         storageKey,
         storage,
       },
@@ -575,42 +773,48 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
   }
 
   #parseAppleStart(input: AppleAuthorizationInput): ParsedAppleStart {
-    const flowKind = ownString(input, "flowKind");
-    const clientKind = readClientKind(ownData(input, "clientKind"));
-    const redirectUri = ownString(input, "redirectUri");
-    if ((flowKind !== "sign_in" && flowKind !== "link") || clientKind === undefined
-      || redirectUri === undefined || !validateRedirectUri(redirectUri, this.#appleRedirectUris)) {
+    const clientKind = readClientKind(ownData(input, "client_kind"));
+    const redirectUri = ownString(input, "redirect_uri");
+    const nonce = ownString(input, "nonce");
+    const challenge = ownString(input, "pkce_code_challenge");
+    const method = ownString(input, "pkce_code_challenge_method");
+    if (clientKind === undefined || redirectUri === undefined
+      || !validateRedirectUri(redirectUri, this.#appleRedirectUris)) {
       throw new ProviderFailure("AUTH_CALLBACK_INVALID");
     }
-    if (flowKind === "sign_in") {
-      return { flowKind, clientKind, redirectUri, actorId: null, accessToken: null };
+    if (clientKind === "web") {
+      if (nonce !== undefined || challenge !== undefined || method !== undefined) {
+        throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+      }
+      return { clientKind, redirectUri, nonce: null, pkceChallenge: null };
     }
-    const actorId = ownString(input, "authenticatedActorId");
-    if (actorId === undefined || actorId.length === 0) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
-    return {
-      flowKind,
-      clientKind,
-      redirectUri,
-      actorId,
-      accessToken: readProof(ownData(input, "providerProof")),
-    };
+    if (nonce === undefined || nonce.length < 8 || nonce.length > 4_096
+      || challenge === undefined || !/^[A-Za-z0-9_-]{43}$/u.test(challenge) || method !== "S256") {
+      throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+    }
+    return { clientKind, redirectUri, nonce, pkceChallenge: challenge };
   }
 
   #parseAppleCallback(input: AppleAuthorizationCallback): ParsedAppleCallback {
-    const transactionId = ownString(input, "transactionId");
-    const authorizationCode = ownString(input, "authorizationCode");
+    const transactionId = ownString(input, "transaction_id");
+    const authorizationCode = ownString(input, "authorization_code");
     const state = ownString(input, "state");
     const nonce = ownString(input, "nonce");
-    const redirectUri = ownString(input, "redirectUri");
-    const clientKind = readClientKind(ownData(input, "clientKind"));
+    const verifier = ownString(input, "pkce_code_verifier");
+    const clientKind = readClientKind(ownData(input, "client_kind"));
     if (transactionId === undefined || transactionId.length === 0 || transactionId.length > 256
       || authorizationCode === undefined || authorizationCode.length === 0 || authorizationCode.length > 8_192
       || state === undefined || state.length === 0 || state.length > 4_096
-      || nonce === undefined || nonce.length === 0 || nonce.length > 4_096
-      || redirectUri === undefined || clientKind === undefined) {
+      || clientKind === undefined
+      || (clientKind === "web" && (nonce !== undefined || verifier !== undefined))
+      || (clientKind !== "web" && (nonce === undefined || nonce.length < 8 || nonce.length > 4_096
+        || verifier === undefined || !/^[A-Za-z0-9._~-]{43}$/u.test(verifier)))) {
       throw new ProviderFailure("AUTH_CALLBACK_INVALID");
     }
-    return { transactionId, authorizationCode, state, nonce, redirectUri, clientKind };
+    return {
+      transactionId, authorizationCode, state, clientKind,
+      nonce: nonce ?? null, pkceVerifier: verifier ?? null,
+    };
   }
 
   async #completeAppleTransaction(
@@ -619,46 +823,29 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
     expectedActorId: string | null,
     accessToken: string | null,
   ): Promise<VerifiedProviderSubject> {
-    const transaction = await safeProviderCall(
-      () => this.#transactionStore.consume(callback.transactionId),
-    );
-    const expiresAt = transaction === undefined ? Number.NaN : new Date(transaction.expires_at).getTime();
-    if (transaction === undefined || transaction.provider !== "supabase"
-      || transaction.status !== "pending" || transaction.flow_kind !== expectedFlowKind
-      || transaction.actor_id !== expectedActorId || transaction.client_kind !== callback.clientKind
-      || transaction.redirect_uri !== callback.redirectUri
-      || !Number.isFinite(expiresAt) || expiresAt <= this.#now().getTime()
-      || !equalDigest(transaction.state_digest, sha256(callback.state))
-      || !equalDigest(transaction.nonce_digest, sha256(callback.nonce))) {
+    const transaction = await this.#consumeTransaction(callback.transactionId);
+    if (transaction.flowKind !== expectedFlowKind || transaction.actorId !== expectedActorId
+      || transaction.clientKind !== callback.clientKind
+      || !validateRedirectUri(transaction.redirectUri, this.#appleRedirectUris)
+      || transaction.expiresAt <= this.#now().getTime()
+      || !equalDigest(transaction.stateDigest, sha256(callback.state))
+      || (callback.clientKind !== "web"
+        && !equalDigest(transaction.nonceDigest, sha256(callback.nonce!)))) {
       throw new ProviderFailure("AUTH_CALLBACK_INVALID");
     }
-
-    let plaintext: Uint8Array | undefined;
-    let envelope: DecryptedPkceEnvelope;
-    try {
-      plaintext = await this.#transactionProtector.decrypt(transaction.pkce_verifier_ciphertext);
-      const parsed: unknown = JSON.parse(utf8Decoder.decode(plaintext));
-      const flowId = ownString(parsed, "flowId");
-      const verifier = ownString(parsed, "verifier");
-      const verifierDigest = ownString(parsed, "verifierDigest");
-      if (flowId === undefined || !/^[A-Za-z0-9_-]{8,64}$/u.test(flowId)
-        || verifier === undefined || verifier.length < 43 || verifier.length > 512
-        || verifierDigest === undefined || !/^[a-f0-9]{64}$/u.test(verifierDigest)
-        || !equalDigest(sha256(verifier), Uint8Array.from(Buffer.from(verifierDigest, "hex")))) {
-        throw new ProviderFailure("AUTH_CALLBACK_INVALID");
-      }
-      envelope = { flowId, verifier, verifierDigest };
-    } catch (error) {
-      throw mapProviderFailure(error, "AUTH_CALLBACK_INVALID");
-    } finally {
-      plaintext?.fill(0);
+    const envelope = await this.#decryptEnvelope(transaction.ciphertext);
+    const verifier = envelope.kind === "web" ? envelope.verifier : callback.pkceVerifier;
+    if ((callback.clientKind === "web" && envelope.kind !== "web")
+      || (callback.clientKind !== "web" && (envelope.kind !== "native" || verifier === null
+        || sha256Base64Url(verifier) !== envelope.challenge))) {
+      throw new ProviderFailure("AUTH_CALLBACK_INVALID");
     }
 
     const { client, storage, storageKey } = this.#newClient(undefined, callback.transactionId);
     try {
       await storage.setItem(
         `${storageKey}-flow-${envelope.flowId}-code-verifier`,
-        JSON.stringify(envelope.verifier),
+        JSON.stringify(verifier),
       );
       let currentSubject: VerifiedProviderSubject | undefined;
       if (accessToken !== null) currentSubject = await this.#hydrateProof(client, accessToken);
@@ -677,6 +864,52 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       return subject;
     } finally {
       storage.clear();
+    }
+  }
+
+  async #consumeTransaction(transactionId: string): Promise<ParsedOAuthTransaction> {
+    const consumed = await safeProviderCall(
+      () => this.#transactionStore.consume(transactionId),
+      "AUTH_CALLBACK_INVALID",
+    );
+    const transaction = parseOAuthTransaction(consumed);
+    if (transaction === undefined || transaction.transactionId !== transactionId) {
+      throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+    }
+    return transaction;
+  }
+
+  async #decryptEnvelope(ciphertext: Uint8Array): Promise<DecryptedPkceEnvelope> {
+    let plaintext: Uint8Array | undefined;
+    try {
+      plaintext = copyBytes(await this.#transactionProtector.decrypt(ciphertext), 1, 65_536);
+      if (plaintext === undefined) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+      const parsed: unknown = JSON.parse(utf8Decoder.decode(plaintext));
+      const kind = ownString(parsed, "kind");
+      const flowId = ownString(parsed, "flowId");
+      if (flowId === undefined || !/^[A-Za-z0-9_-]{8,64}$/u.test(flowId)) {
+        throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+      }
+      if (kind === "native") {
+        const challenge = ownString(parsed, "challenge");
+        if (challenge === undefined || !/^[A-Za-z0-9_-]{43}$/u.test(challenge)) {
+          throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+        }
+        return { kind, flowId, challenge };
+      }
+      const verifier = ownString(parsed, "verifier");
+      const verifierDigest = ownString(parsed, "verifierDigest");
+      if ((kind !== "web" && kind !== "password_reset") || verifier === undefined
+        || verifier.length < 43 || verifier.length > 512
+        || verifierDigest === undefined || !/^[a-f0-9]{64}$/u.test(verifierDigest)
+        || !equalDigest(sha256(verifier), Uint8Array.from(Buffer.from(verifierDigest, "hex")))) {
+        throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+      }
+      return { kind, flowId, verifier, verifierDigest };
+    } catch (error) {
+      throw mapProviderFailure(error, "AUTH_CALLBACK_INVALID");
+    } finally {
+      plaintext?.fill(0);
     }
   }
 }

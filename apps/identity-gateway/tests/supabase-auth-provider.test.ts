@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import test from "node:test";
 
-import type { ProviderClientKind } from "../src/providers/auth-provider.js";
+import type {
+  AppleAuthorizationCallback,
+  ProviderClientKind,
+} from "../src/providers/auth-provider.js";
 import { mapProviderFailure, ProviderFailure } from "../src/providers/provider-errors.js";
 import {
   SupabaseAuthProvider,
@@ -22,9 +26,18 @@ const credential = Object.freeze({
 const currentJwt = ["provider", "jwt", "sentinel"].join("-");
 const providerProof = Object.freeze({ accessToken: currentJwt });
 const pkceVerifier = ["pkce", "verifier", "sentinel", "x".repeat(32)].join("-");
+const nativePkceVerifier = "n".repeat(43);
+const nativePkceChallenge = createHash("sha256").update(nativePkceVerifier).digest("base64url");
+const nativeNonce = "native-nonce-proof";
+const recoveryVerifier = `${"r".repeat(43)}/recovery`;
 const providerAccessToken = ["provider", "access", "sentinel"].join("-");
 const providerRefreshToken = ["provider", "refresh", "sentinel"].join("-");
 const serviceRoleKey = ["service", "role", "sentinel"].join("-");
+const payloadHash = `sha256:${"a".repeat(64)}`;
+
+function sha256ForTest(value: string): Uint8Array {
+  return Uint8Array.from(createHash("sha256").update(value, "utf8").digest());
+}
 
 class MemoryTransactionStore implements OAuthTransactionStore {
   readonly records = new Map<string, OAuthTransactionRecord>();
@@ -163,6 +176,14 @@ function createHarness(input: {
       },
       resetPasswordForEmail: async (...arguments_: unknown[]) => {
         methodCalls.push({ name: "resetPasswordForEmail", arguments: arguments_ });
+        await authOptions.storage.setItem(
+          `${authOptions.storageKey}-flow-resetflow01-code-verifier`,
+          JSON.stringify(recoveryVerifier),
+        );
+        await authOptions.storage.setItem(
+          `${authOptions.storageKey}-flows-code-verifier`,
+          JSON.stringify(["resetflow01"]),
+        );
         return { data: {}, error: null };
       },
       signInWithOAuth: async (request: unknown) => begin("signInWithOAuth", request),
@@ -185,6 +206,10 @@ function createHarness(input: {
           },
           error: null,
         };
+      },
+      updateUser: async (attributes: unknown) => {
+        methodCalls.push({ name: "updateUser", arguments: [attributes] });
+        return { data: { user: user("email") }, error: null };
       },
       admin: {
         deleteUser: async (...arguments_: unknown[]) => {
@@ -232,18 +257,32 @@ async function expectFailure(
 }
 
 function callbackFromStart(
-  start: { readonly transactionId: string; readonly authorizationUrl: string },
+  start: { readonly transaction_id: string; readonly authorization_url: string },
+  clientKind?: "web",
+): Extract<AppleAuthorizationCallback, { readonly client_kind: "web" }>;
+function callbackFromStart(
+  start: { readonly transaction_id: string; readonly authorization_url: string },
+  clientKind: "iphone" | "macos",
+): Extract<AppleAuthorizationCallback, { readonly client_kind: "iphone" | "macos" }>;
+function callbackFromStart(
+  start: { readonly transaction_id: string; readonly authorization_url: string },
   clientKind: ProviderClientKind = "web",
-) {
-  const url = new URL(start.authorizationUrl);
-  return {
-    transactionId: start.transactionId,
-    authorizationCode: "one-time-authorization-code",
+): AppleAuthorizationCallback {
+  const url = new URL(start.authorization_url);
+  const base = {
+    schema_version: 1 as const,
+    idempotency_key: "idem_apple_callback",
+    payload_hash: payloadHash,
+    transaction_id: start.transaction_id,
+    authorization_code: "one-time-authorization-code",
     state: url.searchParams.get("state") ?? "",
-    nonce: url.searchParams.get("nonce") ?? "",
-    redirectUri: clientKind === "web" ? callbackUri : nativeCallbackUri,
-    clientKind,
+    client_kind: clientKind,
   };
+  return (clientKind === "web" ? base : {
+    ...base,
+    nonce: nativeNonce,
+    pkce_code_verifier: nativePkceVerifier,
+  }) as AppleAuthorizationCallback;
 }
 
 test("Supabase email, proof, reset, current-session revoke, and deletion use fresh bounded clients", async () => {
@@ -288,10 +327,12 @@ test("Supabase email, proof, reset, current-session revoke, and deletion use fre
   const revokeSetSession = harness.methodCalls.filter((call) => call.name === "setSession").at(-1);
   assert.equal((revokeSetSession?.arguments[0] as { readonly access_token: string }).access_token, currentJwt);
   assert.equal(JSON.stringify(harness.store.records).includes(currentJwt), false);
-  assert.deepEqual(
-    harness.methodCalls.find((call) => call.name === "resetPasswordForEmail")?.arguments,
-    ["user@example.test", { redirectTo: "https://identity.example.test/auth/v1/password/reset/callback" }],
-  );
+  const resetArguments = harness.methodCalls.find((call) => call.name === "resetPasswordForEmail")?.arguments;
+  assert.equal(resetArguments?.[0], "user@example.test");
+  const resetUrl = new URL((resetArguments?.[1] as { readonly redirectTo: string }).redirectTo);
+  assert.equal(`${resetUrl.origin}${resetUrl.pathname}`, "https://identity.example.test/auth/v1/password/reset/callback");
+  assert.match(resetUrl.searchParams.get("transaction_id") ?? "", /^oauth_[A-Za-z0-9_-]+$/u);
+  assert.match(resetUrl.searchParams.get("state") ?? "", /^[A-Za-z0-9_-]+$/u);
   assert.deepEqual(harness.methodCalls.find((call) => call.name === "deleteUser")?.arguments, [
     "provider-subject-1",
     false,
@@ -540,190 +581,300 @@ test("Supabase fails closed without invoking accessor-shaped result fields", asy
   assert.equal(accessorCalls, 0);
 });
 
-test("Supabase Apple start persists the actual digest/ciphertext transaction schema without raw PKCE", async () => {
-  const harness = createHarness();
-  const start = await harness.provider.beginApple({
-    flowKind: "sign_in",
-    clientKind: "web",
-    redirectUri: callbackUri,
+function webAppleStart() {
+  return {
+    schema_version: 1 as const,
+    idempotency_key: "idem_apple_start",
+    payload_hash: payloadHash,
+    client_kind: "web" as const,
+    redirect_uri: callbackUri,
+  };
+}
+
+function nativeAppleStart(client_kind: "iphone" | "macos" = "iphone") {
+  return {
+    schema_version: 1 as const,
+    idempotency_key: "idem_native_apple_start",
+    payload_hash: payloadHash,
+    client_kind,
+    redirect_uri: nativeCallbackUri,
+    nonce: nativeNonce,
+    pkce_code_challenge: nativePkceChallenge,
+    pkce_code_challenge_method: "S256" as const,
+  };
+}
+
+test("installed Supabase 2.112.2 default factory captures SDK PKCE state offline", async () => {
+  const runtimePackage = createRequire(import.meta.url)("@supabase/supabase-js/package.json") as {
+    readonly version?: unknown;
+  };
+  assert.equal(runtimePackage.version, "2.112.2");
+  const store = new MemoryTransactionStore();
+  let randomSeed = 0;
+  const provider = new SupabaseAuthProvider({
+    supabaseUrl: "https://example.supabase.co",
+    publishableKey: "publishable-key-not-secret",
+    serviceRoleKey,
+    appleRedirectUris: [callbackUri],
+    passwordResetRedirectUri: callbackUri,
+    transactionStore: store,
+    transactionProtector: protector,
+    now: () => new Date(fixedNow),
+    randomBytes: (length) => {
+      randomSeed += 1;
+      return Uint8Array.from({ length }, (_, index) => (index + randomSeed) % 256);
+    },
   });
-  const transaction = harness.store.records.get(start.transactionId);
+
+  const start = await provider.beginApple(webAppleStart());
+  const authorizationUrl = new URL(start.authorization_url);
+  assert.equal(authorizationUrl.origin, "https://example.supabase.co");
+  assert.equal(authorizationUrl.pathname, "/auth/v1/authorize");
+  assert.match(authorizationUrl.searchParams.get("code_challenge") ?? "", /^[A-Za-z0-9_-]{43}$/u);
+  const transaction = store.records.get(start.transaction_id);
+  assert(transaction !== undefined);
+  const envelope = JSON.parse(new TextDecoder().decode(
+    await protector.decrypt(transaction.pkce_verifier_ciphertext),
+  )) as { readonly kind?: unknown; readonly flowId?: unknown; readonly verifier?: unknown };
+  assert.equal(envelope.kind, "web");
+  assert.match(String(envelope.flowId), /^[A-Za-z0-9_-]{8,64}$/u);
+  assert.match(String(envelope.verifier), /^[A-Za-z0-9._~-]{43,128}$/u);
+});
+
+test("Supabase Apple Web uses the released request/callback shape and trusted provider evidence", async () => {
+  const harness = createHarness();
+  const start = await harness.provider.beginApple(webAppleStart());
+  const transaction = harness.store.records.get(start.transaction_id);
 
   assert(transaction !== undefined);
   assert.deepEqual(Object.keys(transaction).sort(), [
-    "actor_id",
-    "client_kind",
-    "expires_at",
-    "flow_kind",
-    "nonce_digest",
-    "oauth_transaction_id",
-    "pkce_verifier_ciphertext",
-    "provider",
-    "redirect_uri",
-    "state_digest",
-    "status",
+    "actor_id", "client_kind", "expires_at", "flow_kind", "nonce_digest",
+    "oauth_transaction_id", "pkce_verifier_ciphertext", "provider", "redirect_uri",
+    "state_digest", "status",
   ]);
-  assert.equal(transaction.provider, "supabase");
   assert.equal(transaction.flow_kind, "apple_sign_in");
-  assert.equal(transaction.actor_id, null);
-  assert.equal(transaction.client_kind, "web");
   assert.equal(transaction.redirect_uri, callbackUri);
-  assert.equal(transaction.status, "pending");
   assert.equal(transaction.state_digest.byteLength, 32);
   assert.equal(transaction.nonce_digest.byteLength, 32);
-  assert.notDeepEqual([...transaction.pkce_verifier_ciphertext], [...Buffer.from(pkceVerifier)]);
   assert.equal(JSON.stringify(transaction).includes(pkceVerifier), false);
-  const startUrl = new URL(start.authorizationUrl);
-  assert.notEqual(startUrl.searchParams.get("state"), startUrl.searchParams.get("nonce"));
-  assert.equal(JSON.stringify(transaction).includes(startUrl.searchParams.get("state") ?? ""), false);
-  assert.equal(JSON.stringify(transaction).includes(startUrl.searchParams.get("nonce") ?? ""), false);
-  assert.deepEqual(Object.keys(start).sort(), ["authorizationUrl", "expiresAt", "transactionId"]);
-  assert.equal(start.expiresAt, "2026-08-17T02:05:00.000Z");
-  await expectFailure(() => harness.provider.beginApple({
-    flowKind: "sign_in",
-    clientKind: "web",
-    redirectUri: "https://attacker.example.test/callback",
-  }), "AUTH_CALLBACK_INVALID");
+  assert.deepEqual(Object.keys(start).sort(), ["authorization_url", "expires_at", "transaction_id"]);
+  const callback = callbackFromStart(start);
+  assert.equal("nonce" in callback, false);
+  assert.equal((await harness.provider.completeApple(callback)).identityKind, "apple");
+  assert.deepEqual(harness.exchangedVerifiers, [pkceVerifier]);
+  assert.equal(harness.store.records.has(start.transaction_id), false);
+  await expectFailure(() => harness.provider.completeApple(callback), "AUTH_CALLBACK_INVALID");
 });
 
-test("Supabase Apple callback validates and consumes state, nonce, PKCE, redirect, client, expiry, and flow before exchange", async () => {
+test("Supabase Apple native binds caller nonce and exact S256 challenge before exchanging its verifier", async () => {
   const harness = createHarness();
-  const start = await harness.provider.beginApple({
-    flowKind: "sign_in",
-    clientKind: "web",
-    redirectUri: callbackUri,
-  });
-  const callback = callbackFromStart(start);
-  const subject = await harness.provider.completeApple(callback);
+  const start = await harness.provider.beginApple(nativeAppleStart());
+  const url = new URL(start.authorization_url);
+  assert.equal(url.searchParams.get("nonce"), nativeNonce);
+  assert.equal(url.searchParams.get("code_challenge"), nativePkceChallenge);
+  assert.equal(url.searchParams.get("code_challenge_method")?.toUpperCase(), "S256");
 
+  const subject = await harness.provider.completeApple(callbackFromStart(start, "iphone"));
   assert.equal(subject.identityKind, "apple");
-  assert.deepEqual(harness.exchangedVerifiers, [pkceVerifier]);
-  assert.deepEqual(
-    harness.methodCalls.find((call) => call.name === "exchangeCodeForSession")?.arguments,
-    ["one-time-authorization-code", { flowId: "signinflow01" }],
-  );
-  assert.equal(harness.store.records.has(start.transactionId), false);
-  await expectFailure(() => harness.provider.completeApple(callback), "AUTH_CALLBACK_INVALID");
+  assert.deepEqual(harness.exchangedVerifiers, [nativePkceVerifier]);
 
-  for (const changed of [
-    { field: "state", value: "changed-state" },
-    { field: "nonce", value: "changed-nonce" },
-    { field: "redirectUri", value: nativeCallbackUri },
-    { field: "clientKind", value: "iphone" },
-  ] as const) {
+  const wrong = createHarness();
+  const wrongStart = await wrong.provider.beginApple(nativeAppleStart());
+  await expectFailure(() => wrong.provider.completeApple({
+    ...callbackFromStart(wrongStart, "iphone"),
+    pkce_code_verifier: "x".repeat(43),
+  }), "AUTH_CALLBACK_INVALID");
+  assert.equal(wrong.methodCalls.some((call) => call.name === "exchangeCodeForSession"), false);
+});
+
+test("Supabase Apple rejects Web/native cross-shapes and mismatched state/client before exchange", async () => {
+  const web = createHarness();
+  await expectFailure(() => web.provider.beginApple({ ...webAppleStart(), nonce: nativeNonce } as never), "AUTH_CALLBACK_INVALID");
+  await expectFailure(() => web.provider.beginApple({ ...nativeAppleStart(), pkce_code_challenge: "x".repeat(42) } as never), "AUTH_CALLBACK_INVALID");
+
+  for (const mutate of [
+    (callback: AppleAuthorizationCallback) => ({ ...callback, state: "changed-state" }),
+    (callback: AppleAuthorizationCallback) => ({ ...callback, client_kind: "iphone" as const }),
+    (callback: AppleAuthorizationCallback) => ({ ...callback, nonce: nativeNonce }),
+  ]) {
     const isolated = createHarness();
-    const isolatedStart = await isolated.provider.beginApple({
-      flowKind: "sign_in",
-      clientKind: "web",
-      redirectUri: callbackUri,
-    });
-    const invalid = { ...callbackFromStart(isolatedStart), [changed.field]: changed.value };
-    await expectFailure(() => isolated.provider.completeApple(invalid as never), "AUTH_CALLBACK_INVALID");
+    const isolatedStart = await isolated.provider.beginApple(webAppleStart());
+    await expectFailure(() => isolated.provider.completeApple(mutate(callbackFromStart(isolatedStart)) as never), "AUTH_CALLBACK_INVALID");
     assert.equal(isolated.methodCalls.some((call) => call.name === "exchangeCodeForSession"), false);
   }
 });
 
-test("Supabase Apple callback fails closed for expired or tampered encrypted verifier transactions", async () => {
+test("Supabase Apple callback rejects expired, tampered, accessor, and Proxy transaction records without traps", async () => {
   let now = new Date(fixedNow);
   const expired = createHarness({ now: () => new Date(now) });
-  const expiredStart = await expired.provider.beginApple({
-    flowKind: "sign_in",
-    clientKind: "web",
-    redirectUri: callbackUri,
-  });
+  const expiredStart = await expired.provider.beginApple(webAppleStart());
   now = new Date(fixedNow.getTime() + 5 * 60 * 1_000);
-  await expectFailure(
-    () => expired.provider.completeApple(callbackFromStart(expiredStart)),
-    "AUTH_CALLBACK_INVALID",
-  );
-  assert.equal(expired.methodCalls.some((call) => call.name === "exchangeCodeForSession"), false);
+  await expectFailure(() => expired.provider.completeApple(callbackFromStart(expiredStart)), "AUTH_CALLBACK_INVALID");
 
   const tampered = createHarness();
-  const tamperedStart = await tampered.provider.beginApple({
-    flowKind: "sign_in",
-    clientKind: "web",
-    redirectUri: callbackUri,
-  });
-  const transaction = tampered.store.records.get(tamperedStart.transactionId);
+  const tamperedStart = await tampered.provider.beginApple(webAppleStart());
+  const transaction = tampered.store.records.get(tamperedStart.transaction_id);
   assert(transaction !== undefined);
   transaction.pkce_verifier_ciphertext[0] = (transaction.pkce_verifier_ciphertext[0] ?? 0) ^ 1;
-  await expectFailure(
-    () => tampered.provider.completeApple(callbackFromStart(tamperedStart)),
-    "AUTH_CALLBACK_INVALID",
-  );
-  assert.equal(tampered.methodCalls.some((call) => call.name === "exchangeCodeForSession"), false);
+  await expectFailure(() => tampered.provider.completeApple(callbackFromStart(tamperedStart)), "AUTH_CALLBACK_INVALID");
 
-  const invalidExpiry = createHarness();
-  const invalidExpiryStart = await invalidExpiry.provider.beginApple({
-    flowKind: "sign_in",
-    clientKind: "web",
-    redirectUri: callbackUri,
-  });
-  const invalidExpiryTransaction = invalidExpiry.store.records.get(invalidExpiryStart.transactionId);
-  assert(invalidExpiryTransaction !== undefined);
-  invalidExpiry.store.records.set(invalidExpiryStart.transactionId, {
-    ...invalidExpiryTransaction,
-    expires_at: "not-a-timestamp",
-  });
-  await expectFailure(
-    () => invalidExpiry.provider.completeApple(callbackFromStart(invalidExpiryStart)),
-    "AUTH_CALLBACK_INVALID",
-  );
-  assert.equal(invalidExpiry.methodCalls.some((call) => call.name === "exchangeCodeForSession"), false);
-});
-
-test("Supabase Apple callback bounds unknown protector errors without prototype inspection", async () => {
-  let prototypeTrapCalls = 0;
-  const protectorError = new Proxy({}, {
-    getPrototypeOf() {
-      prototypeTrapCalls += 1;
-      throw new Error("prototype inspection is forbidden");
+  let accessorCalls = 0;
+  const accessorRecord = Object.defineProperties({}, {
+    oauth_transaction_id: { value: "oauth_accessor", enumerable: true },
+    provider: { value: "supabase", enumerable: true },
+    flow_kind: { value: "apple_sign_in", enumerable: true },
+    actor_id: {
+      enumerable: true,
+      get() {
+        accessorCalls += 1;
+        throw new Error("transaction accessor must not execute");
+      },
     },
+    client_kind: { value: "web", enumerable: true },
+    state_digest: { value: sha256ForTest("opaque-state"), enumerable: true },
+    nonce_digest: { value: sha256ForTest("opaque-nonce"), enumerable: true },
+    pkce_verifier_ciphertext: { value: Uint8Array.of(1), enumerable: true },
+    redirect_uri: { value: callbackUri, enumerable: true },
+    status: { value: "pending", enumerable: true },
+    expires_at: { value: new Date(fixedNow.getTime() + 60_000).toISOString(), enumerable: true },
+  }) as OAuthTransactionRecord;
+  const accessorProvider = new SupabaseAuthProvider({
+    supabaseUrl: "https://example.supabase.co", publishableKey: "publishable-key-not-secret",
+    serviceRoleKey, appleRedirectUris: [callbackUri], passwordResetRedirectUri: callbackUri,
+    transactionStore: { async save() {}, async consume() { return accessorRecord; } },
+    transactionProtector: protector, createClient: () => ({ auth: {} }) as never,
+    now: () => new Date(fixedNow),
   });
-  const failingProtector: TransactionProtector = {
-    encrypt: protector.encrypt,
-    async decrypt() {
-      throw protectorError;
+  await expectFailure(() => accessorProvider.completeApple({
+    ...callbackFromStart({ transaction_id: "oauth_accessor", authorization_url: "https://example.test/?state=opaque-state" }),
+  }), "AUTH_CALLBACK_INVALID");
+  assert.equal(accessorCalls, 0);
+
+  const validRecord = {
+    oauth_transaction_id: "oauth_malformed_bytes",
+    provider: "supabase" as const,
+    flow_kind: "apple_sign_in" as const,
+    actor_id: null,
+    client_kind: "web" as const,
+    state_digest: sha256ForTest("opaque-state"),
+    nonce_digest: sha256ForTest("opaque-nonce"),
+    pkce_verifier_ciphertext: Uint8Array.of(1),
+    redirect_uri: callbackUri,
+    status: "pending" as const,
+    expires_at: new Date(fixedNow.getTime() + 60_000).toISOString(),
+  };
+  for (const malformedRecord of [
+    { ...validRecord, state_digest: new DataView(new ArrayBuffer(32)) as never },
+    { ...validRecord, state_digest: new Uint8Array(31) },
+    { ...validRecord, pkce_verifier_ciphertext: new Uint8Array(65_537) },
+  ]) {
+    let clientCreations = 0;
+    const malformedProvider = new SupabaseAuthProvider({
+      supabaseUrl: "https://example.supabase.co", publishableKey: "publishable-key-not-secret",
+      serviceRoleKey, appleRedirectUris: [callbackUri], passwordResetRedirectUri: callbackUri,
+      transactionStore: { async save() {}, async consume() { return malformedRecord; } },
+      transactionProtector: protector,
+      createClient: () => { clientCreations += 1; return { auth: {} } as never; },
+      now: () => new Date(fixedNow),
+    });
+    await expectFailure(() => malformedProvider.completeApple({
+      ...callbackFromStart({
+        transaction_id: "oauth_malformed_bytes",
+        authorization_url: "https://example.test/?state=opaque-state",
+      }),
+    }), "AUTH_CALLBACK_INVALID");
+    assert.equal(clientCreations, 0);
+  }
+
+  let descriptorTrapCalls = 0;
+  const proxyStore: OAuthTransactionStore = {
+    async save() {},
+    async consume() {
+      return new Proxy({}, {
+        getOwnPropertyDescriptor() {
+          descriptorTrapCalls += 1;
+          throw new Error("descriptor trap must not execute");
+        },
+      }) as OAuthTransactionRecord;
     },
   };
-  const harness = createHarness({ transactionProtector: failingProtector });
-  const start = await harness.provider.beginApple({
-    flowKind: "sign_in",
-    clientKind: "web",
-    redirectUri: callbackUri,
+  const proxyProvider = new SupabaseAuthProvider({
+    supabaseUrl: "https://example.supabase.co", publishableKey: "publishable-key-not-secret",
+    serviceRoleKey, appleRedirectUris: [callbackUri], passwordResetRedirectUri: callbackUri,
+    transactionStore: proxyStore, transactionProtector: protector, createClient: () => ({ auth: {} }) as never,
   });
-
-  await expectFailure(
-    () => harness.provider.completeApple(callbackFromStart(start)),
-    "AUTH_CALLBACK_INVALID",
-  );
-  assert.equal(prototypeTrapCalls, 0);
-  assert.equal(harness.methodCalls.some((call) => call.name === "exchangeCodeForSession"), false);
+  await expectFailure(() => proxyProvider.completeApple({
+    ...callbackFromStart({ transaction_id: "oauth_proxy", authorization_url: "https://example.test/?state=opaque-state" }),
+  }), "AUTH_CALLBACK_INVALID");
+  assert.equal(descriptorTrapCalls, 0);
 });
 
-test("Supabase Apple link binds the authenticated actor and current proof without returning provider tokens", async () => {
+test("Supabase Apple link start/callback mirror released Web/native shapes plus actor proof", async () => {
   const harness = createHarness();
-  const start = await harness.provider.beginApple({
-    flowKind: "link",
-    clientKind: "web",
-    redirectUri: callbackUri,
-    authenticatedActorId: "actor-1",
-    providerProof,
+  const start = await harness.provider.beginAppleLink({
+    ...webAppleStart(), authenticatedActorId: "actor-1", providerProof,
   });
-  const stored = harness.store.records.get(start.transactionId);
-  assert.equal(stored?.flow_kind, "apple_link");
-  assert.equal(stored?.actor_id, "actor-1");
-
+  assert.equal(harness.store.records.get(start.transaction_id)?.flow_kind, "apple_link");
   const result = await harness.provider.linkApple({
-    ...callbackFromStart(start),
-    authenticatedActorId: "actor-1",
-    providerProof,
+    ...callbackFromStart(start), authenticatedActorId: "actor-1", providerProof,
   });
-
   assert.equal(result.identityKind, "apple");
   assert.equal(JSON.stringify(result).includes(currentJwt), false);
-  assert.equal(JSON.stringify(result).includes(providerAccessToken), false);
-  assert.equal(JSON.stringify(result).includes(providerRefreshToken), false);
-  assert.equal(harness.methodCalls.filter((call) => call.name === "setSession").length, 2);
   assert.equal(harness.methodCalls.filter((call) => call.name === "linkIdentity").length, 1);
+});
+
+test("Supabase password recovery persists a one-time transaction, updates password, and globally revokes without token output", async () => {
+  const harness = createHarness();
+  await harness.provider.beginPasswordReset("USER@EXAMPLE.TEST");
+  const resetCall = harness.methodCalls.find((call) => call.name === "resetPasswordForEmail");
+  const resetRedirect = new URL((resetCall?.arguments[1] as { redirectTo: string }).redirectTo);
+  const transactionId = resetRedirect.searchParams.get("transaction_id") ?? "";
+  const state = resetRedirect.searchParams.get("state") ?? "";
+  const transaction = harness.store.records.get(transactionId);
+  assert.equal(transaction?.flow_kind, "password_reset");
+  assert.equal(transaction?.redirect_uri, resetRedirect.toString());
+  const result = await harness.provider.completePasswordReset({
+    transaction_id: transactionId,
+    authorization_code: "one-time-recovery-code",
+    state,
+    redirect_uri: resetRedirect.toString(),
+    new_password: "new correct horse battery staple",
+  });
+  assert.equal(result.providerSubject, "provider-subject-1");
+  assert.deepEqual(harness.exchangedVerifiers, [recoveryVerifier]);
+  assert.deepEqual(harness.methodCalls.find((call) => call.name === "updateUser")?.arguments,
+    [{ password: "new correct horse battery staple" }]);
+  assert.deepEqual(harness.methodCalls.filter((call) => call.name === "signOut").at(-1)?.arguments,
+    [{ scope: "global" }]);
+  assert.equal(JSON.stringify(result).includes(providerAccessToken), false);
+  assert.equal(harness.store.records.has(transactionId), false);
+  await expectFailure(() => harness.provider.completePasswordReset({
+    transaction_id: transactionId, authorization_code: "one-time-recovery-code", state,
+    redirect_uri: resetRedirect.toString(), new_password: "another valid password",
+  }), "AUTH_CALLBACK_INVALID");
+
+  for (const mutate of [
+    (input: { state: string; redirect_uri: string }) => ({ ...input, state: `${input.state}-changed` }),
+    (input: { state: string; redirect_uri: string }) => ({
+      ...input,
+      redirect_uri: input.redirect_uri.replace("/callback", "/other"),
+    }),
+  ]) {
+    const isolated = createHarness();
+    await isolated.provider.beginPasswordReset("USER@EXAMPLE.TEST");
+    const isolatedResetCall = isolated.methodCalls.find((call) => call.name === "resetPasswordForEmail");
+    const isolatedRedirect = new URL((isolatedResetCall?.arguments[1] as { redirectTo: string }).redirectTo);
+    const isolatedInput = mutate({
+      state: isolatedRedirect.searchParams.get("state") ?? "",
+      redirect_uri: isolatedRedirect.toString(),
+    });
+    await expectFailure(() => isolated.provider.completePasswordReset({
+      transaction_id: isolatedRedirect.searchParams.get("transaction_id") ?? "",
+      authorization_code: "one-time-recovery-code",
+      state: isolatedInput.state,
+      redirect_uri: isolatedInput.redirect_uri,
+      new_password: "another valid password",
+    }), "AUTH_CALLBACK_INVALID");
+    assert.equal(isolated.methodCalls.some((call) => call.name === "exchangeCodeForSession"), false);
+  }
 });

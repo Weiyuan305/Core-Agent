@@ -114,6 +114,7 @@ const schemaManifestEntries = [
   [8, "outbox_exhausted_recovery_index", "622b248d1df5b2636ac6616ab59274e1cd6bf2ae4a54d1e97b8b7fbe5a61209b"],
   [9, "agent_run_failure_code", "5c67f4d0bb65a25cf331acd122e3ae1ba48ef287f34e2cd97844e96b1f95af95"],
   [10, "identity_authority", "eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381"],
+  [11, "password_reset_transactions", "fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393"],
 ] as const;
 
 const schemaManifests = new Map<number, SchemaManifest>(schemaManifestEntries.map(([version, name, checksum]) => [
@@ -319,6 +320,16 @@ async function convergeSchema10Acls(
   }
 }
 
+const oauthFlowKindConstraintBase: ConstraintShape = {
+  schema: "public",
+  relation: "oauth_transactions",
+  relkind: "r",
+  name: "oauth_transactions_flow_kind_check",
+  type: "c",
+  validated: true,
+  definition: "CHECK (flow_kind = ANY (ARRAY['apple_sign_in'::text, 'apple_link'::text]))",
+};
+
 schemaManifests.set(10, {
   ...schemaManifests.get(10)!,
   objects: ownedTables([
@@ -330,7 +341,20 @@ schemaManifests.set(10, {
   routines: schema10Routines,
   routineAcls: schema10Routines.flatMap(([kind, name]) => ["PUBLIC", "core_agent_app", "core_agent_identity"].map((grantee) =>
     ["revoke", "public", name, kind, "", grantee, "EXECUTE", false] as const)),
+  constraints: [oauthFlowKindConstraintBase],
   validateAndConverge: convergeSchema10Acls,
+});
+
+schemaManifests.set(11, {
+  ...schemaManifests.get(11)!,
+  constraintAmendments: [{
+    action: "replace",
+    before: oauthFlowKindConstraintBase,
+    after: {
+      ...oauthFlowKindConstraintBase,
+      definition: "CHECK (flow_kind = ANY (ARRAY['apple_sign_in'::text, 'apple_link'::text, 'password_reset'::text]))",
+    },
+  }],
 });
 
 function quoteIdentifier(value: string): string {

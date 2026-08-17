@@ -4,11 +4,13 @@ import type {
   AppleAuthorizationCallback,
   AppleAuthorizationInput,
   AppleAuthorizationStart,
+  AppleLinkAuthorizationInput,
   AppleLinkInput,
   AuthProviderAdapter,
   EmailCredentialInput,
   ProviderClientKind,
   ProviderProof,
+  PasswordResetCompletionInput,
   VerifiedProviderSubject,
 } from "./auth-provider.js";
 import { ProviderFailure } from "./provider-errors.js";
@@ -32,12 +34,14 @@ interface StoredFakeSubject {
 }
 
 interface FakeAppleTransaction {
-  readonly flowKind: "sign_in" | "link";
+  readonly flowKind: "sign_in" | "link" | "password_reset";
   readonly actorId: string | null;
+  readonly passwordResetEmail: string | null;
   readonly clientKind: ProviderClientKind;
   readonly redirectUri: string;
   readonly stateDigest: string;
   readonly nonceDigest: string;
+  readonly pkceChallenge: string | null;
   readonly expiresAt: number;
 }
 
@@ -45,6 +49,10 @@ const oauthTtlMs = 5 * 60 * 1_000;
 
 function digest(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function pkceChallenge(verifier: string): string {
+  return createHash("sha256").update(verifier, "utf8").digest("base64url");
 }
 
 function ownData(value: unknown, key: string): unknown {
@@ -149,46 +157,113 @@ export class FakeAuthProvider implements AuthProviderAdapter {
     if (typeof email !== "string" || !validEmail(normalizeEmail(email))) {
       throw new ProviderFailure("AUTH_INVALID");
     }
+    this.#transactionCounter += 1;
+    const transactionId = `password_reset_fake_${this.#transactionCounter.toString().padStart(4, "0")}`;
+    const state = digest(`reset-state:${transactionId}`);
+    this.#transactions.set(transactionId, {
+      flowKind: "password_reset",
+      actorId: null,
+      passwordResetEmail: normalizeEmail(email),
+      clientKind: "web",
+      redirectUri: "https://fake-auth.invalid/password-reset",
+      stateDigest: digest(state),
+      nonceDigest: digest(`reset-nonce:${transactionId}`),
+      pkceChallenge: null,
+      expiresAt: this.#now().getTime() + oauthTtlMs,
+    });
   }
 
   async beginApple(input: AppleAuthorizationInput): Promise<AppleAuthorizationStart> {
-    const flowKind = ownString(input, "flowKind");
-    const clientKind = readClientKind(ownData(input, "clientKind"));
-    const redirectUri = ownString(input, "redirectUri");
-    if ((flowKind !== "sign_in" && flowKind !== "link") || clientKind === undefined
-      || redirectUri === undefined || redirectUri.length === 0) {
+    return this.#beginApple(input, "sign_in", null);
+  }
+
+  async beginAppleLink(input: AppleLinkAuthorizationInput): Promise<AppleAuthorizationStart> {
+    const actorId = ownString(input, "authenticatedActorId") ?? null;
+    if (actorId === null) throw new ProviderFailure("AUTH_INVALID");
+    await this.verifyCurrentSubject(ownData(input, "providerProof") as ProviderProof);
+    return this.#beginApple(input, "link", actorId);
+  }
+
+  async completePasswordReset(input: PasswordResetCompletionInput): Promise<VerifiedProviderSubject> {
+    const transactionId = ownString(input, "transaction_id");
+    const authorizationCode = ownString(input, "authorization_code");
+    const state = ownString(input, "state");
+    const redirectUri = ownString(input, "redirect_uri");
+    const password = ownString(input, "new_password");
+    if (transactionId === undefined || authorizationCode === undefined || authorizationCode.length < 8
+      || state === undefined || redirectUri === undefined || password === undefined
+      || password.length < 8 || password.length > 1_024) {
+      throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+    }
+    const transaction = this.#transactions.get(transactionId);
+    this.#transactions.delete(transactionId);
+    if (transaction === undefined || transaction.flowKind !== "password_reset"
+      || transaction.redirectUri !== redirectUri || transaction.expiresAt <= this.#now().getTime()
+      || transaction.stateDigest !== digest(state)) {
+      throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+    }
+    const email = transaction.passwordResetEmail;
+    const fixture = email === null ? undefined : this.#subjects.get(email);
+    if (email === null || fixture === undefined) throw new ProviderFailure("AUTH_INVALID");
+    this.#subjects.set(email, { passwordDigest: digest(password), subject: fixture.subject });
+    for (const [proofDigest, subject] of this.#proofs) {
+      if (subject.providerSubject === fixture.subject.providerSubject) this.#proofs.delete(proofDigest);
+    }
+    return copySubject(fixture.subject);
+  }
+
+  #beginApple(
+    input: AppleAuthorizationInput,
+    flowKind: "sign_in" | "link",
+    actorId: string | null,
+  ): AppleAuthorizationStart {
+    const clientKind = readClientKind(ownData(input, "client_kind"));
+    const redirectUri = ownString(input, "redirect_uri");
+    if (clientKind === undefined || redirectUri === undefined || redirectUri.length === 0) {
       throw new ProviderFailure("AUTH_INVALID");
     }
-    let actorId: string | null = null;
-    if (flowKind === "link") {
-      actorId = ownString(input, "authenticatedActorId") ?? null;
-      const proof = ownData(input, "providerProof");
-      if (actorId === null) throw new ProviderFailure("AUTH_INVALID");
-      await this.verifyCurrentSubject(proof as ProviderProof);
+    const callerNonce = ownString(input, "nonce");
+    const callerChallenge = ownString(input, "pkce_code_challenge");
+    const callerMethod = ownString(input, "pkce_code_challenge_method");
+    if (clientKind === "web") {
+      if (callerNonce !== undefined || callerChallenge !== undefined || callerMethod !== undefined) {
+        throw new ProviderFailure("AUTH_INVALID");
+      }
+    } else if (callerNonce === undefined || callerNonce.length < 8
+      || callerChallenge === undefined || !/^[A-Za-z0-9_-]{43}$/u.test(callerChallenge)
+      || callerMethod !== "S256") {
+      throw new ProviderFailure("AUTH_INVALID");
     }
 
     this.#transactionCounter += 1;
     const transactionId = `oauth_fake_${this.#transactionCounter.toString().padStart(4, "0")}`;
     const state = digest(`state:${transactionId}`);
-    const nonce = digest(`nonce:${transactionId}`);
+    const nonce = callerNonce ?? digest(`nonce:${transactionId}`);
     const expiresAt = this.#now().getTime() + oauthTtlMs;
     this.#transactions.set(transactionId, {
       flowKind,
       actorId,
+      passwordResetEmail: null,
       clientKind,
       redirectUri,
       stateDigest: digest(state),
       nonceDigest: digest(nonce),
+      pkceChallenge: callerChallenge ?? null,
       expiresAt,
     });
     const authorizationUrl = new URL("https://fake-auth.invalid/apple");
     authorizationUrl.searchParams.set("state", state);
     authorizationUrl.searchParams.set("nonce", nonce);
 
+    if (callerChallenge !== undefined) {
+      authorizationUrl.searchParams.set("code_challenge", callerChallenge);
+      authorizationUrl.searchParams.set("code_challenge_method", "S256");
+    }
+
     return Object.freeze({
-      transactionId,
-      authorizationUrl: authorizationUrl.toString(),
-      expiresAt: new Date(expiresAt).toISOString(),
+      transaction_id: transactionId,
+      authorization_url: authorizationUrl.toString(),
+      expires_at: new Date(expiresAt).toISOString(),
     });
   }
 
@@ -223,25 +298,29 @@ export class FakeAuthProvider implements AuthProviderAdapter {
 
   #consumeAppleCallback(
     input: AppleAuthorizationCallback,
-    expectedFlow: FakeAppleTransaction["flowKind"],
+    expectedFlow: "sign_in" | "link",
     expectedActorId: string | null,
   ): void {
-    const transactionId = ownString(input, "transactionId");
-    const authorizationCode = ownString(input, "authorizationCode");
+    const transactionId = ownString(input, "transaction_id");
+    const authorizationCode = ownString(input, "authorization_code");
     const state = ownString(input, "state");
     const nonce = ownString(input, "nonce");
-    const redirectUri = ownString(input, "redirectUri");
-    const clientKind = readClientKind(ownData(input, "clientKind"));
+    const verifier = ownString(input, "pkce_code_verifier");
+    const clientKind = readClientKind(ownData(input, "client_kind"));
     if (transactionId === undefined || authorizationCode === undefined || authorizationCode.length === 0
-      || state === undefined || nonce === undefined || redirectUri === undefined || clientKind === undefined) {
+      || state === undefined || clientKind === undefined
+      || (clientKind === "web" && (nonce !== undefined || verifier !== undefined))
+      || (clientKind !== "web" && (nonce === undefined || nonce.length < 8
+        || verifier === undefined || !/^[A-Za-z0-9._~-]{43}$/u.test(verifier)))) {
       throw new ProviderFailure("AUTH_CALLBACK_INVALID");
     }
     const transaction = this.#transactions.get(transactionId);
     this.#transactions.delete(transactionId);
     if (transaction === undefined || transaction.flowKind !== expectedFlow
       || transaction.actorId !== expectedActorId || transaction.clientKind !== clientKind
-      || transaction.redirectUri !== redirectUri || transaction.expiresAt <= this.#now().getTime()
-      || transaction.stateDigest !== digest(state) || transaction.nonceDigest !== digest(nonce)) {
+      || transaction.expiresAt <= this.#now().getTime() || transaction.stateDigest !== digest(state)
+      || (clientKind !== "web" && (transaction.nonceDigest !== digest(nonce!)
+        || transaction.pkceChallenge !== pkceChallenge(verifier!)))) {
       throw new ProviderFailure("AUTH_CALLBACK_INVALID");
     }
   }

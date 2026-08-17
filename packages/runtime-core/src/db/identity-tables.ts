@@ -57,7 +57,7 @@ export interface IdentityInvitationTable {
 export interface OauthTransactionTable {
   oauth_transaction_id: string;
   provider: "supabase";
-  flow_kind: "apple_sign_in" | "apple_link";
+  flow_kind: "apple_sign_in" | "apple_link" | "password_reset";
   actor_id: string | null;
   client_kind: "web" | "iphone" | "macos";
   state_digest: Digest;
