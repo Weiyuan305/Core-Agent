@@ -8,6 +8,125 @@
 - Original implementation commit: `2240a1bb0645e50a22204783f7cac5362924d906`
 - No merge or push was performed.
 
+## Round 14 review fixes (2026-08-18)
+
+### Review resolution
+
+- Re-read the receiving-review, TDD, verification-before-completion, and
+  Supabase skill instructions before changing production code. No new schema or
+  authority decision was required; the approved, still-unmerged migration 012
+  was sufficient.
+- Every split public limiter call now declares its dimension. Stable route/client
+  admission uses `dimensions: "client"`; the exact second admission uses
+  `dimensions: "account"` with the server-issued transaction/invitation identity
+  or authenticated Actor. Apple sign-in callback account admission is keyed by
+  the durable transaction and occurs before its one-use provider exchange.
+  Reauthentication and Apple link no longer consume a duplicated client
+  dimension through a default `both` call.
+- Email provider-start admission now returns a monotonically increasing
+  `providerStartAttempt`. Finalize-success and finalize-failure lock the row and
+  require the exact still-reserved generation, so an expired lease's stale
+  provider result cannot overwrite a newer reservation.
+- Existing invitation acceptance performs stable client admission, exact
+  invitation lookup/account admission, and only then Core Session
+  authentication. Its serializable final transaction locks and revalidates the
+  exact Actor and Core Session, including Actor/subject/client kind, status,
+  resource version, idle expiry, and absolute expiry before accepting the
+  invitation or issuing a Session.
+- Ambiguous password-reset recovery always commits `expired` and scrubs every
+  checkpoint. If the protected subject resolves to an Actor, all Sessions are
+  revoked even when its AuthSubject is inactive; corrupt ciphertext and missing
+  subjects still scrub durably without claiming success.
+- Email signup and invited signup durable start hashes now incorporate a
+  purpose-separated password HMAC, and Apple-link start uses its own purpose
+  HMAC. Only the overall canonical hash is persisted. Owned password byte copies
+  are cleared. Exact Apple-link start replay still performs a fresh password
+  authentication; a changed password conflicts before any new provider start.
+- Apple-link provider acquisition creates a separate database-clock 30-minute
+  settlement deadline. Initial callbacks remain constrained by the OAuth
+  authorization expiry. A provider-completed Web callback receives a signed
+  dual-deadline settlement cookie; after a Core rollback it can resume after the
+  authorization expiry without repeating the provider effect. At the exact
+  settlement boundary the serializable Core command commits `expired`, scrubs
+  the provider checkpoint, and returns a terminal calm error.
+- Removed the dormant unconditional test return. The obsolete generic
+  `updated_at` recovery assertions were replaced by the released fail-closed
+  behavior: concurrent corrupt checkpoints, missing subjects, and inactive
+  subjects execute and assert durable scrub/revocation.
+
+### Round 14 RED and focused GREEN evidence
+
+- `node --import tsx --test --test-name-pattern='unknown provider-start outcome' packages/runtime-core/tests/email-verification-transactions.test.ts`
+  was RED 0/1 because the admission returned no generation and stale
+  finalization was accepted. The same real PostgreSQL focus is GREEN 1/1.
+- The focused Fastify rate/order group was RED 0/4: Apple start lacked the exact
+  account admission, invitation accept authenticated before exact invitation
+  admission, Apple link calls omitted explicit dimensions, and callback account
+  admission was missing. It is GREEN 4/4 after the route changes.
+- `node --import tsx --test --test-name-pattern='Apple sign-in start and callback consume' apps/identity-gateway/tests/routes.test.ts`
+  was RED 0/1 with the observed order `client rate -> completeApple -> account
+  rate -> issueSession`; it is GREEN 1/1 with `client rate -> transaction account
+  rate -> completeApple -> issueSession`.
+- Real Fastify/PostgreSQL invitation Session revoke/idle-expiry barriers are
+  GREEN 1/1 and prove zero Membership creation after authority changes between
+  preliminary authentication and the final command.
+- Real Fastify/Supabase-adapter/PostgreSQL reset ambiguity coverage is GREEN 1/1:
+  concurrent corrupt ciphertext, missing subject, and inactive subject all
+  terminate and scrub; the resolvable inactive Actor's Session is revoked.
+- The real email start suite is GREEN 1/1 for changed-password conflict and stale
+  attempt fencing. The Supabase Apple-link focus is GREEN and observes two real
+  password authentications for initial start plus exact replay, while a changed
+  password conflicts without another provider start.
+- The Apple-link real production-composition focus is GREEN 1/1: forced Core
+  rollback returns 500 with a settlement cookie, the original authorization
+  cookie is rejected after authorization expiry, the settlement cookie resumes
+  successfully without another provider link effect, and exact settlement
+  expiry commits scrubbed `expired` state.
+- `node --import tsx --test --test-name-pattern='explicit route-client' packages/runtime-core/tests/public-rate-limits.test.ts`
+  — PASS 1/1 against PostgreSQL. Same-client/different account facts share the
+  client bucket, same-account/different clients share the account bucket, and
+  different server accounts remain independent rather than collapsing globally.
+
+### Round 14 final verification
+
+- `npm run check -w @core-agent/contracts` — PASS: build, 180/180, schemas,
+  86 valid fixtures / 11 invalid fixtures, and current compatibility.
+- `npm run check -w @core-agent/runtime-core` — PASS: build and 83/83.
+- `npm run check -w @core-agent/identity-gateway` — PASS: build and 108/108.
+- `CONTROL_PLANE_TEST_DATABASE_URL=... npm run test:postgres -w @core-agent/identity-gateway`
+  — PASS 2/2 in 5049.855042 ms with real Fastify, production composition,
+  pinned Supabase adapter, and PostgreSQL.
+- The first local formal PostgreSQL run observed 342/343 Runtime Core tests pass;
+  its sole failure was the auth-bootstrap test because the hand-created
+  disposable container used host `trust` and therefore could not reject a wrong
+  password. No product behavior failed. The authoritative protected SCRAM run
+  below covered that test.
+- `npm run test:runtime:database-ci-equivalent` — PASS 3/3 in
+  141825.677459 ms. The fresh protected run asserted Runtime Core PostgreSQL
+  343/343, Identity Gateway PostgreSQL 2/2, Control Plane API PostgreSQL 14/14,
+  and integration 93/93; injected-failure cleanup and output-leak redaction also
+  passed. The expected-count manifest changed from 342 to the observed 343 only
+  after the new rate-dimension PostgreSQL test ran.
+- `npm run compat:history -w @core-agent/contracts -- --base e7624fe0425ff470b646f8322254d5e9e3857da8`,
+  `node scripts/verify-no-secret.mjs identity-auth-private-sentinel`, gateway
+  log-call scan, and `git diff --check` — PASS. Migrations 010/011 and Contracts
+  0.5.0 have no base diff.
+- Exact pins remain Fastify 5.11.2, `@fastify/cookie` 11.1.2, Supabase JS
+  2.112.2, and Contracts 0.6.0. SHA-256: 010
+  `eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381`;
+  011 `fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393`;
+  amended 012
+  `61e62a78b86769866a242e138f64db9ea8c560bbada0806acf2d1414fc895f4f`.
+- Official CI-equivalent and topology residual scans found zero labeled
+  containers, volumes, or networks.
+- `npm run check` again passes Contracts, Runtime Core, Identity Gateway, and
+  Control Plane API (17/17), then stops only at the untouched Worker's two known
+  TS2345 `project_platform_memberships` dispatcher errors. The Worker base diff
+  is empty. `npm run test:runtime:database-auth-topology` likewise stops 0/1 at
+  that Worker image build before topology execution and cleans its resources.
+- Round 14 implementation commit:
+  `ce9269ce2` (`fix(identity): close round 14 gateway review`).
+
 ## Round 13 review fixes (2026-08-18)
 
 ### Feasibility and provider-boundary decision
