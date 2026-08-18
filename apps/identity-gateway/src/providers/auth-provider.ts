@@ -98,10 +98,11 @@ export interface PasswordResetStartInput {
   readonly email: string;
   readonly idempotencyKey: string;
   readonly payloadHash: string;
+  readonly expectedSubject: VerifiedProviderSubject;
 }
 
 export interface PasswordResetCompletionInput {
-  readonly binding: PasswordResetStart;
+  readonly binding: PasswordResetStart & { readonly settlement_not_after: string };
   readonly authorization_code: string;
   readonly new_password: string;
   readonly payloadHash: string;
@@ -120,7 +121,7 @@ export interface AuthProviderAdapter {
   completeApple(input: AppleAuthorizationCallback): Promise<VerifiedProviderSubject>;
   verifyCurrentSubject(input: ProviderProof): Promise<VerifiedProviderSubject>;
   reauthenticatePassword(input: EmailCredentialInput): Promise<VerifiedProviderSubject>;
-  beginPasswordReset(input: string | PasswordResetStartInput): Promise<PasswordResetStart>;
+  beginPasswordReset(input: PasswordResetStartInput): Promise<PasswordResetStart>;
   completePasswordReset(input: PasswordResetCompletionInput): Promise<VerifiedProviderSubject>;
   linkApple(input: AppleLinkInput): Promise<VerifiedProviderSubject>;
   revokeCurrentProviderSession(input: ProviderProof): Promise<void>;

@@ -43,6 +43,7 @@ interface FakeAppleTransaction {
   readonly flowKind: "sign_in" | "link" | "password_reset";
   readonly actorId: string | null;
   readonly passwordResetEmail: string | null;
+  readonly passwordResetProviderSubject: string | null;
   readonly clientKind: ProviderClientKind;
   readonly redirectUri: string;
   readonly stateDigest: string;
@@ -311,12 +312,20 @@ export class FakeAuthProvider implements AuthProviderAdapter {
     return this.signInEmail(input);
   }
 
-  async beginPasswordReset(input: string | PasswordResetStartInput): Promise<PasswordResetStart> {
-    const email = typeof input === "string" ? input : ownString(input, "email");
+  async beginPasswordReset(input: PasswordResetStartInput): Promise<PasswordResetStart> {
+    const email = ownString(input, "email");
+    const expectedSubject = ownData(input, "expectedSubject");
+    const expectedProviderSubject = ownString(expectedSubject, "providerSubject");
+    const expectedEmail = ownString(expectedSubject, "normalizedEmail");
+    const expectedProvider = ownString(expectedSubject, "provider");
+    const expectedKind = ownString(expectedSubject, "identityKind");
     if (typeof email !== "string" || !validEmail(normalizeEmail(email))) {
       throw new ProviderFailure("AUTH_INVALID");
     }
-    const idempotency = typeof input === "string" ? undefined : readIdempotency(input);
+    if (expectedProvider !== "supabase" || expectedKind !== "email_password"
+      || expectedProviderSubject === undefined || expectedProviderSubject.length < 1
+      || expectedEmail !== normalizeEmail(email)) throw new ProviderFailure("AUTH_INVALID");
+    const idempotency = readIdempotency(input);
     if (idempotency !== undefined) assertFakeStartHash(idempotency.payloadHash, canonicalProviderStartPayloadHash({
       flowKind: "password_reset",
       idempotencyKey: idempotency.key,
@@ -336,6 +345,7 @@ export class FakeAuthProvider implements AuthProviderAdapter {
       flowKind: "password_reset",
       actorId: null,
       passwordResetEmail: normalizeEmail(email),
+      passwordResetProviderSubject: expectedProviderSubject,
       clientKind: "web",
       redirectUri: "https://fake-auth.invalid/password-reset",
       stateDigest: digest(state),
@@ -391,7 +401,8 @@ export class FakeAuthProvider implements AuthProviderAdapter {
     }
     const email = transaction.passwordResetEmail;
     const fixture = email === null ? undefined : this.#subjects.get(email);
-    if (email === null || fixture === undefined) throw new ProviderFailure("AUTH_INVALID");
+    if (email === null || fixture === undefined
+      || fixture.subject.providerSubject !== transaction.passwordResetProviderSubject) throw new ProviderFailure("AUTH_INVALID");
     this.#subjects.set(email, { passwordDigest: digest(password), subject: fixture.subject });
     for (const [proofDigest, subject] of this.#proofs) {
       if (subject.providerSubject === fixture.subject.providerSubject) this.#proofs.delete(proofDigest);
@@ -421,6 +432,7 @@ export class FakeAuthProvider implements AuthProviderAdapter {
       flowKind,
       actorId,
       passwordResetEmail: null,
+      passwordResetProviderSubject: null,
       clientKind,
       redirectUri,
       stateDigest: digest(state),

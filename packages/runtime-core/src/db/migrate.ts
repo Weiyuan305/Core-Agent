@@ -115,7 +115,7 @@ const schemaManifestEntries = [
   [9, "agent_run_failure_code", "5c67f4d0bb65a25cf331acd122e3ae1ba48ef287f34e2cd97844e96b1f95af95"],
   [10, "identity_authority", "eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381"],
   [11, "password_reset_transactions", "fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393"],
-  [12, "email_verification_transactions", "9bd9e2521bac3c6e172ee170bc163d42fbecd69e7af352d9415c1e80040ef32c"],
+  [12, "email_verification_transactions", "663e23fedca217cce340316229c50dd6b507caf5104815946f090c2e281f3980"],
 ] as const;
 
 const schemaManifests = new Map<number, SchemaManifest>(schemaManifestEntries.map(([version, name, checksum]) => [
@@ -444,10 +444,12 @@ schemaManifests.set(12, {
   columnAmendments: [
     { action: "add", after: { schema: "public", relation: "oauth_transactions", relkind: "r", name: "provider_completion_status", position: 15, type: "text", notNull: true, defaultExpression: "'pending'::text", collation: "pg_catalog.\"default\"", identity: "", generated: "" } },
     { action: "add", after: { schema: "public", relation: "oauth_transactions", relkind: "r", name: "provider_completion_started_at", position: 16, type: "timestamp with time zone", notNull: false, defaultExpression: "", collation: "", identity: "", generated: "" } },
-    { action: "add", after: { schema: "public", relation: "oauth_transactions", relkind: "r", name: "provider_subject_ciphertext", position: 17, type: "bytea", notNull: false, defaultExpression: "", collation: "", identity: "", generated: "" } },
-    { action: "add", after: { schema: "public", relation: "oauth_transactions", relkind: "r", name: "provider_completion_payload_hash", position: 18, type: "text", notNull: false, defaultExpression: "", collation: "pg_catalog.\"default\"", identity: "", generated: "" } },
-    { action: "add", after: { schema: "public", relation: "oauth_transactions", relkind: "r", name: "provider_completed_at", position: 19, type: "timestamp with time zone", notNull: false, defaultExpression: "", collation: "", identity: "", generated: "" } },
-    { action: "add", after: { schema: "public", relation: "oauth_transactions", relkind: "r", name: "provider_evidence_at", position: 20, type: "timestamp with time zone", notNull: false, defaultExpression: "", collation: "", identity: "", generated: "" } },
+    { action: "add", after: { schema: "public", relation: "oauth_transactions", relkind: "r", name: "expected_provider_subject_ciphertext", position: 17, type: "bytea", notNull: false, defaultExpression: "", collation: "", identity: "", generated: "" } },
+    { action: "add", after: { schema: "public", relation: "oauth_transactions", relkind: "r", name: "provider_subject_ciphertext", position: 18, type: "bytea", notNull: false, defaultExpression: "", collation: "", identity: "", generated: "" } },
+    { action: "add", after: { schema: "public", relation: "oauth_transactions", relkind: "r", name: "provider_completion_payload_hash", position: 19, type: "text", notNull: false, defaultExpression: "", collation: "pg_catalog.\"default\"", identity: "", generated: "" } },
+    { action: "add", after: { schema: "public", relation: "oauth_transactions", relkind: "r", name: "provider_settlement_expires_at", position: 20, type: "timestamp with time zone", notNull: false, defaultExpression: "", collation: "", identity: "", generated: "" } },
+    { action: "add", after: { schema: "public", relation: "oauth_transactions", relkind: "r", name: "provider_completed_at", position: 21, type: "timestamp with time zone", notNull: false, defaultExpression: "", collation: "", identity: "", generated: "" } },
+    { action: "add", after: { schema: "public", relation: "oauth_transactions", relkind: "r", name: "provider_evidence_at", position: 22, type: "timestamp with time zone", notNull: false, defaultExpression: "", collation: "", identity: "", generated: "" } },
   ],
   constraintAmendments: [{
     action: "replace",
@@ -456,6 +458,10 @@ schemaManifests.set(12, {
       ...publicRateLimitBucketConstraintBase,
       definition: "CHECK (bucket_kind = ANY (ARRAY['signup'::text, 'login'::text, 'reset'::text, 'email_verification'::text, 'reset_complete'::text, 'apple_start'::text, 'apple_link'::text, 'apple_callback'::text, 'invitation_accept'::text, 'reauthenticate'::text]))",
     },
+  }, {
+    action: "add", after: { schema: "public", relation: "oauth_transactions", relkind: "r",
+      name: "oauth_transactions_expected_provider_subject_ciphertext_check", type: "c", validated: true,
+      definition: "CHECK (expected_provider_subject_ciphertext IS NULL OR octet_length(expected_provider_subject_ciphertext) >= 33 AND octet_length(expected_provider_subject_ciphertext) <= 65536)" },
   }, {
     action: "replace", before: authSubjectProviderIdentityKindConstraintBase,
     after: { ...authSubjectProviderIdentityKindConstraintBase,
@@ -475,7 +481,7 @@ schemaManifests.set(12, {
   }, {
     action: "add", after: { schema: "public", relation: "oauth_transactions", relkind: "r",
       name: "oauth_transactions_provider_completion_state_check", type: "c", validated: true,
-      definition: "CHECK (flow_kind <> 'password_reset'::text AND provider_completion_status = 'pending'::text AND provider_completion_started_at IS NULL AND provider_subject_ciphertext IS NULL AND provider_completion_payload_hash IS NULL AND provider_completed_at IS NULL AND provider_evidence_at IS NULL OR flow_kind = 'password_reset'::text AND provider_completion_status = 'pending'::text AND provider_completion_started_at IS NULL AND provider_subject_ciphertext IS NULL AND provider_completion_payload_hash IS NULL AND provider_completed_at IS NULL AND provider_evidence_at IS NULL OR flow_kind = 'password_reset'::text AND provider_completion_status = 'provider_started'::text AND provider_completion_started_at IS NOT NULL AND provider_subject_ciphertext IS NOT NULL AND provider_completion_payload_hash IS NOT NULL AND provider_completed_at IS NULL AND provider_evidence_at IS NULL OR flow_kind = 'password_reset'::text AND provider_completion_status = 'provider_completed'::text AND provider_completion_started_at IS NOT NULL AND provider_subject_ciphertext IS NOT NULL AND provider_completion_payload_hash IS NOT NULL AND provider_completed_at IS NOT NULL AND provider_evidence_at IS NOT NULL AND provider_evidence_at >= provider_completion_started_at AND provider_evidence_at <= provider_completed_at)" },
+      definition: "CHECK (flow_kind <> 'password_reset'::text AND provider_completion_status = 'pending'::text AND provider_completion_started_at IS NULL AND expected_provider_subject_ciphertext IS NULL AND provider_subject_ciphertext IS NULL AND provider_completion_payload_hash IS NULL AND provider_settlement_expires_at IS NULL AND provider_completed_at IS NULL AND provider_evidence_at IS NULL OR flow_kind = 'password_reset'::text AND provider_completion_status = 'pending'::text AND provider_completion_started_at IS NULL AND expected_provider_subject_ciphertext IS NOT NULL AND provider_subject_ciphertext IS NULL AND provider_completion_payload_hash IS NULL AND provider_settlement_expires_at IS NULL AND provider_completed_at IS NULL AND provider_evidence_at IS NULL OR flow_kind = 'password_reset'::text AND status = 'expired'::text AND provider_completion_status = 'pending'::text AND provider_completion_started_at IS NULL AND expected_provider_subject_ciphertext IS NULL AND provider_subject_ciphertext IS NULL AND provider_completion_payload_hash IS NULL AND provider_settlement_expires_at IS NULL AND provider_completed_at IS NULL AND provider_evidence_at IS NULL OR flow_kind = 'password_reset'::text AND provider_completion_status = 'provider_started'::text AND provider_completion_started_at IS NOT NULL AND expected_provider_subject_ciphertext IS NOT NULL AND provider_subject_ciphertext IS NOT NULL AND provider_completion_payload_hash IS NOT NULL AND provider_settlement_expires_at = (provider_completion_started_at + '00:30:00'::interval) AND provider_completed_at IS NULL AND provider_evidence_at IS NULL OR flow_kind = 'password_reset'::text AND provider_completion_status = 'provider_completed'::text AND provider_completion_started_at IS NOT NULL AND expected_provider_subject_ciphertext IS NOT NULL AND provider_subject_ciphertext IS NOT NULL AND provider_completion_payload_hash IS NOT NULL AND provider_settlement_expires_at = (provider_completion_started_at + '00:30:00'::interval) AND provider_completed_at IS NOT NULL AND provider_evidence_at IS NOT NULL AND provider_evidence_at >= provider_completion_started_at AND provider_evidence_at <= provider_completed_at AND provider_completed_at <= provider_settlement_expires_at)" },
   }],
 });
 

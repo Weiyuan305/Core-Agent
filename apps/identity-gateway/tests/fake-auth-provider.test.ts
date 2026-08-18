@@ -5,6 +5,8 @@ import type {
   AppleLinkAuthorizationInput,
   AppleLinkInput,
   AuthProviderAdapter,
+  PasswordResetStart,
+  PasswordResetStartInput,
 } from "../src/providers/auth-provider.js";
 import { canonicalProviderStartPayloadHash } from "../src/providers/auth-provider.js";
 import { FakeAuthProvider } from "../src/providers/fake-auth-provider.js";
@@ -17,6 +19,28 @@ const credential = Object.freeze({
 });
 const providerProof = Object.freeze({ accessToken: ["fake", "current", "jwt"].join("-") });
 const payloadHash = `sha256:${"a".repeat(64)}`;
+
+function resetStartInput(email: string, providerSubject: string): PasswordResetStartInput {
+  const normalizedEmail = email.toLowerCase();
+  const idempotencyKey = `idem_reset_${providerSubject}`;
+  return {
+    email, idempotencyKey,
+    payloadHash: canonicalProviderStartPayloadHash({
+      flowKind: "password_reset", idempotencyKey, normalizedEmail,
+    }),
+    expectedSubject: {
+      provider: "supabase", providerSubject, identityKind: "email_password",
+      normalizedEmail, verifiedAt: "2026-08-01T00:00:00.000Z",
+    },
+  };
+}
+
+function resetCompletionBinding(binding: PasswordResetStart) {
+  return {
+    ...binding,
+    settlement_not_after: new Date(new Date(binding.expires_at).getTime() + 30 * 60 * 1_000).toISOString(),
+  };
+}
 
 type HasProviderProof<T> = "providerProof" extends keyof T ? true : false;
 
@@ -111,20 +135,22 @@ test("deterministic fake implements the closed adapter and returns only verified
     verificationCode: "fake-email-verification-code",
     expectedProviderSubject: signup.expectedProviderSubject,
   }), "AUTH_CALLBACK_INVALID");
-  const unknownBinding = await provider.beginPasswordReset("unknown@example.test");
+  const unknownBinding = await provider.beginPasswordReset(resetStartInput(
+    "unknown@example.test", "unregistered-subject",
+  ));
   assert.deepEqual(Object.keys(unknownBinding).sort(), ["expires_at", "state", "transaction_id"]);
   assert.equal(Object.isFrozen(unknownBinding), true);
   assert.equal(JSON.stringify(unknownBinding).includes("unknown@example.test"), false);
   await expectFailure(() => provider.completePasswordReset({
-    binding: unknownBinding,
+    binding: resetCompletionBinding(unknownBinding),
     authorization_code: "fake-recovery-code",
     new_password: "must not reset another account",
     payloadHash: `sha256:${"a".repeat(64)}`,
   }), "AUTH_INVALID");
-  const binding = await provider.beginPasswordReset(credential.email);
+  const binding = await provider.beginPasswordReset(resetStartInput(credential.email, "provider-subject-1"));
   assert.equal(binding.expires_at, "2026-08-17T01:07:03.000Z");
   assert.equal((await provider.completePasswordReset({
-    binding,
+    binding: resetCompletionBinding(binding),
     authorization_code: "fake-recovery-code",
     new_password: "a new sufficiently long password",
     payloadHash: `sha256:${"a".repeat(64)}`,

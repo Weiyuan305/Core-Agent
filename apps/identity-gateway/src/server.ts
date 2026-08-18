@@ -48,7 +48,9 @@ import { Pool } from "pg";
 
 import { buildIdentityGatewayApp, type GatewayAuthenticatedSession, type IdentityGatewayOperations } from "./app.js";
 import { assertManagedSecretFile, loadIdentityGatewayConfig } from "./config.js";
+import type { VerifiedProviderSubject } from "./providers/auth-provider.js";
 import { SupabaseAuthProvider, type OAuthTransactionRecord, type OAuthTransactionStore, type TransactionProtector } from "./providers/supabase-auth-provider.js";
+import { PASSWORD_RESET_SETTLEMENT_SECONDS } from "./security.js";
 
 export interface ProductionIdentityGatewayOptions {
   readonly environment?: NodeJS.ProcessEnv;
@@ -102,8 +104,10 @@ function oauthStore(db: Kysely<RuntimeDatabase>): OAuthTransactionStore {
     redirect_uri: row.redirect_uri, status: "pending", expires_at: row.expires_at.toISOString(),
     provider_completion_status: row.provider_completion_status,
     ...(row.provider_completion_started_at === null ? {} : { provider_completion_started_at: row.provider_completion_started_at.toISOString() }),
+    ...(row.expected_provider_subject_ciphertext === null ? {} : { expected_provider_subject_ciphertext: Uint8Array.from(row.expected_provider_subject_ciphertext) }),
     ...(row.provider_subject_ciphertext === null ? {} : { provider_subject_ciphertext: Uint8Array.from(row.provider_subject_ciphertext) }),
     ...(row.provider_completion_payload_hash === null ? {} : { provider_completion_payload_hash: row.provider_completion_payload_hash }),
+    ...(row.provider_settlement_expires_at === null ? {} : { provider_settlement_expires_at: row.provider_settlement_expires_at.toISOString() }),
     ...(row.provider_completed_at === null ? {} : { provider_completed_at: row.provider_completed_at.toISOString() }),
     ...(row.provider_evidence_at === null ? {} : { provider_evidence_at: row.provider_evidence_at.toISOString() }),
   });
@@ -122,7 +126,9 @@ function oauthStore(db: Kysely<RuntimeDatabase>): OAuthTransactionStore {
         pkce_verifier_ciphertext: record.pkce_verifier_ciphertext, redirect_uri: record.redirect_uri,
         status: "pending", expires_at: new Date(record.expires_at), consumed_at: null,
         provider_completion_status: "pending", provider_completion_started_at: null,
+        expected_provider_subject_ciphertext: record.expected_provider_subject_ciphertext ?? null,
         provider_subject_ciphertext: null, provider_completion_payload_hash: null,
+        provider_settlement_expires_at: null,
         provider_completed_at: null, provider_evidence_at: null,
         created_at: now, updated_at: now,
       }).execute();
@@ -148,7 +154,9 @@ function oauthStore(db: Kysely<RuntimeDatabase>): OAuthTransactionStore {
         pkce_verifier_ciphertext: record.pkce_verifier_ciphertext, redirect_uri: record.redirect_uri,
         status: "pending", expires_at: new Date(record.expires_at), consumed_at: null,
         provider_completion_status: "pending", provider_completion_started_at: null,
+        expected_provider_subject_ciphertext: record.expected_provider_subject_ciphertext ?? null,
         provider_subject_ciphertext: null, provider_completion_payload_hash: null,
+        provider_settlement_expires_at: null,
         provider_completed_at: null, provider_evidence_at: null,
         created_at: now, updated_at: now,
       }).onConflict((conflict) => conflict.column("oauth_transaction_id").doNothing()).executeTakeFirst();
@@ -159,6 +167,7 @@ function oauthStore(db: Kysely<RuntimeDatabase>): OAuthTransactionStore {
       const result = await db.updateTable("oauth_transactions").set({
         state_digest: record.state_digest, nonce_digest: record.nonce_digest,
         pkce_verifier_ciphertext: record.pkce_verifier_ciphertext,
+        expected_provider_subject_ciphertext: record.expected_provider_subject_ciphertext ?? null,
         redirect_uri: record.redirect_uri, expires_at: new Date(record.expires_at), updated_at: now,
       }).where("oauth_transaction_id", "=", record.oauth_transaction_id)
         .where("status", "=", "pending").executeTakeFirst();
@@ -170,30 +179,46 @@ function oauthStore(db: Kysely<RuntimeDatabase>): OAuthTransactionStore {
       return row === undefined ? undefined : recordFromRow(row);
     },
     async beginPasswordResetCompletion(input: {
-      readonly transactionId: string; readonly providerSubjectCiphertext: Uint8Array; readonly payloadHash: string;
+      readonly transactionId: string; readonly payloadHash: string; readonly settlementNotAfter: string;
     }) {
       return db.transaction().execute(async (trx) => {
         const now = (await sql<{ now: Date }>`select clock_timestamp() as now`.execute(trx)).rows[0]?.now;
-        if (!(now instanceof Date) || !Number.isFinite(now.getTime())) throw new DomainError("INTERNAL_ERROR", "OAuth database clock is unavailable");
+        const settlementNotAfter = new Date(input.settlementNotAfter);
+        if (!(now instanceof Date) || !Number.isFinite(now.getTime())
+          || !Number.isFinite(settlementNotAfter.getTime()) || settlementNotAfter.toISOString() !== input.settlementNotAfter) {
+          throw new DomainError("INTERNAL_ERROR", "OAuth database clock is unavailable");
+        }
         const row = await trx.selectFrom("oauth_transactions").selectAll()
           .where("oauth_transaction_id", "=", input.transactionId).forUpdate().executeTakeFirst();
         if (row === undefined || row.flow_kind !== "password_reset" || row.status !== "pending"
-          || row.expires_at.getTime() <= now.getTime()) throw new DomainError("UNAUTHENTICATED", "Password reset authority is invalid");
+          || settlementNotAfter.getTime() !== row.expires_at.getTime() + PASSWORD_RESET_SETTLEMENT_SECONDS * 1_000) {
+          throw new DomainError("UNAUTHENTICATED", "Password reset authority is invalid");
+        }
         if (row.provider_completion_status === "provider_started") {
           if (row.provider_completion_started_at === null || row.provider_subject_ciphertext === null
             || row.provider_completion_payload_hash !== input.payloadHash
-            || !Buffer.from(row.provider_subject_ciphertext).equals(Buffer.from(input.providerSubjectCiphertext))) {
+            || row.provider_settlement_expires_at === null
+            || row.provider_settlement_expires_at.getTime() <= now.getTime()) {
             throw new DomainError("UNAUTHENTICATED", "Password reset checkpoint conflicts");
           }
-          return { startedAt: row.provider_completion_started_at.toISOString() };
+          return {
+            kind: "existing" as const,
+            startedAt: row.provider_completion_started_at.toISOString(),
+            settlementExpiresAt: row.provider_settlement_expires_at.toISOString(),
+          };
         }
-        if (row.provider_completion_status !== "pending") throw new DomainError("IDEMPOTENCY_CONFLICT", "Password reset provider completion changed");
+        if (row.provider_completion_status !== "pending" || row.expected_provider_subject_ciphertext === null
+          || row.expires_at.getTime() <= now.getTime()) {
+          throw new DomainError("IDEMPOTENCY_CONFLICT", "Password reset provider completion changed");
+        }
+        const settlementExpiresAt = new Date(now.getTime() + PASSWORD_RESET_SETTLEMENT_SECONDS * 1_000);
         await trx.updateTable("oauth_transactions").set({
           provider_completion_status: "provider_started", provider_completion_started_at: now,
-          provider_subject_ciphertext: input.providerSubjectCiphertext,
-          provider_completion_payload_hash: input.payloadHash, updated_at: now,
+          provider_subject_ciphertext: row.expected_provider_subject_ciphertext,
+          provider_completion_payload_hash: input.payloadHash,
+          provider_settlement_expires_at: settlementExpiresAt, updated_at: now,
         }).where("oauth_transaction_id", "=", input.transactionId).executeTakeFirstOrThrow();
-        return { startedAt: now.toISOString() };
+        return { kind: "acquired" as const, startedAt: now.toISOString(), settlementExpiresAt: settlementExpiresAt.toISOString() };
       });
     },
     async checkpointPasswordResetCompletion(input: { readonly transactionId: string; readonly providerEvidenceAt: string }) {
@@ -207,6 +232,7 @@ function oauthStore(db: Kysely<RuntimeDatabase>): OAuthTransactionStore {
           .where("oauth_transaction_id", "=", input.transactionId).forUpdate().executeTakeFirst();
         if (row === undefined || row.flow_kind !== "password_reset" || row.status !== "pending"
           || row.provider_completion_started_at === null || row.provider_subject_ciphertext === null
+          || row.provider_settlement_expires_at === null || row.provider_settlement_expires_at.getTime() <= now.getTime()
           || evidenceAt.getTime() < row.provider_completion_started_at.getTime()
           || evidenceAt.getTime() > now.getTime()) throw new DomainError("UNAUTHENTICATED", "Password reset checkpoint evidence is invalid");
         if (row.provider_completion_status === "provider_completed") return;
@@ -289,6 +315,15 @@ async function requireCompanyAdminForTenant(
   if (authority === undefined) throw new DomainError("UNAUTHENTICATED", "Active company administrator authority is required");
 }
 
+function providerIdentityKindAccepts(
+  verifiedKind: VerifiedProviderSubject["identityKind"],
+  storedKind: "email_password" | "apple" | "email_password_apple",
+): boolean {
+  return verifiedKind === "email_password"
+    ? storedKind === "email_password" || storedKind === "email_password_apple"
+    : storedKind === "apple" || storedKind === "email_password_apple";
+}
+
 function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, piiProtector: TransactionProtector): IdentityGatewayOperations {
   const verificationDependencies = { db, hmacKey: piiKey, protector: aesProtector(piiKey, "email-verification") };
   const unavailable = (): never => { throw new DomainError("DEPENDENCY_UNAVAILABLE", "Identity operation is unavailable", true); };
@@ -299,10 +334,13 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
     deviceLabel: string | undefined,
     idempotency: NonNullable<Parameters<IdentityGatewayOperations["issueSession"]>[3]>,
   ) => {
-    const subjectRow = await trx.selectFrom("auth_subjects").select(["auth_subject_id", "actor_id"])
+    const subjectRow = await trx.selectFrom("auth_subjects").select(["auth_subject_id", "actor_id", "provider_identity_kind"])
       .where("provider", "=", subject.provider).where("provider_subject", "=", subject.providerSubject)
       .where("status", "=", "active").executeTakeFirst();
     if (subjectRow === undefined) throw new DomainError("UNAUTHENTICATED", "Verified subject is not registered");
+    if (!providerIdentityKindAccepts(subject.identityKind, subjectRow.provider_identity_kind)) {
+      throw new DomainError("UNAUTHENTICATED", "Verified authentication method is not linked");
+    }
     const actor = await trx.selectFrom("actors").select("resource_version")
       .where("actor_id", "=", subjectRow.actor_id).executeTakeFirstOrThrow();
     const membership = await trx.selectFrom("memberships").select("tenant_id")
@@ -334,6 +372,35 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
   return Object.freeze({
     async consumeRateLimit(input) {
       return consumePublicRateLimit({ db, hmacKey: piiKey }, { ...input, limit: 20, windowMs: 15 * 60 * 1_000 });
+    },
+    async preparePasswordReset(normalizedEmail) {
+      const emailHmac = invitationEmailHmac(piiKey, normalizedEmail);
+      try {
+        const subject = await db.selectFrom("private_identity_pii")
+          .innerJoin("auth_subjects", "auth_subjects.actor_id", "private_identity_pii.actor_id")
+          .select(["auth_subjects.provider_subject", "auth_subjects.provider_identity_kind", "auth_subjects.verified_at"])
+          .where("private_identity_pii.normalized_email_hmac", "=", emailHmac)
+          .where("auth_subjects.provider", "=", "supabase")
+          .where("auth_subjects.status", "=", "active")
+          .where("auth_subjects.provider_identity_kind", "in", ["email_password", "email_password_apple"])
+          .orderBy("auth_subjects.auth_subject_id")
+          .executeTakeFirst();
+        if (subject !== undefined) {
+          return Object.freeze({
+            provider: "supabase" as const, providerSubject: subject.provider_subject,
+            identityKind: "email_password" as const, normalizedEmail,
+            verifiedAt: subject.verified_at.toISOString(),
+          });
+        }
+        return Object.freeze({
+          provider: "supabase" as const,
+          providerSubject: `unregistered_${emailHmac.toString("base64url")}`,
+          identityKind: "email_password" as const, normalizedEmail,
+          verifiedAt: "1970-01-01T00:00:00.000Z",
+        });
+      } finally {
+        emailHmac.fill(0);
+      }
     },
     async beginEmailVerification(input) {
       if (input.invitationSecret === undefined) {
@@ -534,7 +601,7 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
     async issueSession(subject, clientKind, deviceLabel, idempotency) {
       if (idempotency === undefined) throw new DomainError("INVALID_REQUEST", "Session issuance idempotency is required");
       return withDatabaseTransactionRetry(db, async (trx) => {
-        let subjectRow = await trx.selectFrom("auth_subjects").select(["auth_subject_id", "actor_id"])
+        let subjectRow = await trx.selectFrom("auth_subjects").select(["auth_subject_id", "actor_id", "provider_identity_kind"])
           .where("provider", "=", subject.provider).where("provider_subject", "=", subject.providerSubject)
           .where("status", "=", "active").executeTakeFirst();
         if (subjectRow === undefined && idempotency.operation === "apple_sign_in") {
@@ -554,11 +621,14 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
           }, { requestId: `request_${randomUUID()}`, traceId: `trace_${randomUUID()}` }, {
             ...registrationPayload, payload_hash: canonicalPayloadHash(registrationPayload),
           });
-          subjectRow = await trx.selectFrom("auth_subjects").select(["auth_subject_id", "actor_id"])
+          subjectRow = await trx.selectFrom("auth_subjects").select(["auth_subject_id", "actor_id", "provider_identity_kind"])
             .where("provider", "=", subject.provider).where("provider_subject", "=", subject.providerSubject)
             .where("status", "=", "active").executeTakeFirst();
         }
         if (subjectRow === undefined) throw new DomainError("UNAUTHENTICATED", "Verified subject is not registered");
+        if (!providerIdentityKindAccepts(subject.identityKind, subjectRow.provider_identity_kind)) {
+          throw new DomainError("UNAUTHENTICATED", "Verified authentication method is not linked");
+        }
         const actor = await trx.selectFrom("actors").select("resource_version")
           .where("actor_id", "=", subjectRow.actor_id).executeTakeFirstOrThrow();
         const membership = await trx.selectFrom("memberships").select("tenant_id")
@@ -773,13 +843,23 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
       }
       if (input.kind === "password_reset_completed" && input.verifiedSubject !== undefined) {
         const payload = input.payload as { idempotency_key: string; payload_hash: string; transaction_id: string };
-        return withDatabaseTransactionRetry(db, async (trx) => {
+        const settlement = await withDatabaseTransactionRetry(db, async (trx) => {
           const transaction = await trx.selectFrom("oauth_transactions").selectAll()
             .where("oauth_transaction_id", "=", payload.transaction_id).forUpdate().executeTakeFirst();
           if (transaction === undefined || transaction.flow_kind !== "password_reset"
             || transaction.status !== "pending" || transaction.provider_completion_status !== "provider_completed"
-            || transaction.provider_subject_ciphertext === null) {
+            || transaction.provider_subject_ciphertext === null
+            || transaction.provider_settlement_expires_at === null) {
             throw new DomainError("UNAUTHENTICATED", "Password-reset completion authority is invalid");
+          }
+          const now = (await sql<{ now: Date }>`select clock_timestamp() as now`.execute(trx)).rows[0]?.now;
+          if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
+            throw new DomainError("INTERNAL_ERROR", "Password-reset database clock is unavailable");
+          }
+          if (transaction.provider_settlement_expires_at.getTime() <= now.getTime()) {
+            await trx.updateTable("oauth_transactions").set({ status: "expired", updated_at: now })
+              .where("oauth_transaction_id", "=", payload.transaction_id).executeTakeFirstOrThrow();
+            return { kind: "expired" as const };
           }
           const subject = await trx.selectFrom("auth_subjects").select("actor_id")
             .where("provider", "=", input.verifiedSubject!.provider)
@@ -787,12 +867,14 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
             .where("status", "=", "active").forUpdate().executeTakeFirst();
           if (subject === undefined) throw new DomainError("UNAUTHENTICATED", "Password-reset subject is not registered");
           await revokeCoreSessionsInTransaction({ db }, trx, { actorId: subject.actor_id, reason: "password_reset" });
-          const now = (await sql<{ now: Date }>`select clock_timestamp() as now`.execute(trx)).rows[0]?.now;
-          if (!(now instanceof Date)) throw new DomainError("INTERNAL_ERROR", "Password-reset database clock is unavailable");
           await trx.updateTable("oauth_transactions").set({ status: "consumed", consumed_at: now, updated_at: now })
             .where("oauth_transaction_id", "=", payload.transaction_id).executeTakeFirstOrThrow();
-          return { schema_version: 1 };
+          return { kind: "settled" as const, response: { schema_version: 1 } };
         }, { isolationLevel: "serializable" });
+        if (settlement.kind === "expired") {
+          throw new DomainError("UNAUTHENTICATED", "Password-reset settlement authority expired");
+        }
+        return settlement.response;
       }
       return unavailable();
     },

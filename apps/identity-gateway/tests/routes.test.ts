@@ -122,6 +122,10 @@ async function buildApp(
         rateLimitCalls += 1;
         return options.rateLimitAfter !== undefined && rateLimitCalls > options.rateLimitAfter ? 60_000 : null;
       },
+      async preparePasswordReset(input: string) {
+        calls.push({ name: "preparePasswordReset", input });
+        return subject;
+      },
       async issueSession(_subject: unknown, clientKind: "web" | "iphone" | "macos", deviceLabel?: string, idempotency?: unknown) { calls.push({ name: "issueSession", input: { clientKind, deviceLabel, idempotency } }); return { session: { schema_version: 1, actor_id: "actor_server", actor_resource_version: 1, session_id: "session_01", session_resource_version: 1, client_kind: clientKind, idle_expires_at: "2026-08-18T00:00:00.000Z", absolute_expires_at: "2026-09-16T00:00:00.000Z", reauthentication_required: false }, sessionSecret: secret, csrfSecret: csrf }; },
       async authenticateSession(input: unknown) {
         calls.push({ name: "authenticateSession", input });
@@ -257,12 +261,17 @@ test("password reset normalizes one account identifier for rate limit and provid
     payload: { ...idem, email: "STUDENT@EXAMPLE.TEST" },
   });
   assert.equal(response.statusCode, 202);
-  assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit", "beginPasswordReset"]);
+  assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit", "preparePasswordReset", "beginPasswordReset"]);
   assert.equal((calls[0]?.input as { accountIdentifier?: unknown }).accountIdentifier, "student@example.test");
-  assert.deepEqual(calls[1]?.input, {
+  assert.equal(calls[1]?.input, "student@example.test");
+  assert.deepEqual(calls[2]?.input, {
     email: "student@example.test",
     idempotencyKey: idem.idempotency_key,
     payloadHash: idem.payload_hash,
+    expectedSubject: {
+      provider: "supabase", providerSubject: "subject_01", identityKind: "email_password",
+      normalizedEmail: "current@example.test", verifiedAt: "2026-08-17T00:00:00.000Z",
+    },
   });
   await app.close();
 });
@@ -341,6 +350,63 @@ test("password-reset completion retains its recovery cookie when the Core revoca
   assert.doesNotMatch(String(completion.headers["set-cookie"] ?? ""), /core_agent_recovery=;[^\n]*Max-Age=0/u);
   assert.deepEqual(calls.slice(-2).map(({ name }) => name), ["completePasswordReset", "executeAuthorityCommand"]);
   assert.equal((calls.at(-2)?.input as { payloadHash?: unknown }).payloadHash, payloadHash);
+  await app.close();
+});
+
+test("password-reset completion preserves its recovery cookie on 429 and clears it after retry or terminal failure", async () => {
+  const calls: Array<{ name: string; input: unknown }> = [];
+  let completionRates = 0;
+  const app = await buildApp(calls, {
+    rateLimit(input) {
+      if (input.bucketKind !== "reset_complete") return null;
+      completionRates += 1;
+      return completionRates === 1 ? 1_000 : null;
+    },
+  });
+  const start = await app.inject({
+    method: "POST", url: "/auth/v1/password/reset/start",
+    headers: { host, origin, "content-type": "application/json" },
+    payload: { ...idem, email: "student@example.test" },
+  });
+  const recoveryCookie = ([] as string[]).concat(start.headers["set-cookie"] ?? [])
+    .find((value) => value.startsWith("core_agent_recovery="))?.split(";", 1)[0];
+  assert.notEqual(recoveryCookie, undefined);
+  const facts = {
+    schema_version: 1 as const, idempotency_key: "idem_reset_rate_retry",
+    authorization_code: "one-time-authorization-code", new_password: "updated-correct-horse",
+  };
+  const payloadHash = canonicalPayloadHash({
+    schema_version: facts.schema_version, idempotency_key: facts.idempotency_key,
+    reset_code_digest: digest(facts.authorization_code), new_value_digest: digest(facts.new_password),
+  });
+  const headers = { host, origin, "content-type": "application/json", cookie: recoveryCookie! };
+  const limited = await app.inject({
+    method: "POST", url: "/auth/v1/password/reset/complete", headers,
+    payload: { ...facts, payload_hash: payloadHash },
+  });
+  assert.equal(limited.statusCode, 429, limited.body);
+  assert.doesNotMatch(String(limited.headers["set-cookie"] ?? ""), /core_agent_recovery=;[^\n]*Max-Age=0/u);
+  const retried = await app.inject({
+    method: "POST", url: "/auth/v1/password/reset/complete", headers,
+    payload: { ...facts, payload_hash: payloadHash },
+  });
+  assert.equal(retried.statusCode, 200, retried.body);
+  assert.match(String(retried.headers["set-cookie"] ?? ""), /core_agent_recovery=;[^\n]*Max-Age=0/u);
+
+  const terminalStart = await app.inject({
+    method: "POST", url: "/auth/v1/password/reset/start",
+    headers: { host, origin, "content-type": "application/json" },
+    payload: { schema_version: 1, idempotency_key: "idem_terminal_start", payload_hash: `sha256:${"f".repeat(64)}`, email: "student@example.test" },
+  });
+  const terminalCookie = ([] as string[]).concat(terminalStart.headers["set-cookie"] ?? [])
+    .find((value) => value.startsWith("core_agent_recovery="))?.split(";", 1)[0];
+  const terminal = await app.inject({
+    method: "POST", url: "/auth/v1/password/reset/complete",
+    headers: { ...headers, cookie: terminalCookie! },
+    payload: { ...facts, idempotency_key: "idem_terminal_completion", payload_hash: `sha256:${"e".repeat(64)}` },
+  });
+  assert.equal(terminal.statusCode, 400, terminal.body);
+  assert.match(String(terminal.headers["set-cookie"] ?? ""), /core_agent_recovery=;[^\n]*Max-Age=0/u);
   await app.close();
 });
 

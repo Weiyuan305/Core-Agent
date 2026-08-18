@@ -104,14 +104,24 @@ alter table auth_subjects
 alter table oauth_transactions
   add column provider_completion_status text not null default 'pending',
   add column provider_completion_started_at timestamptz,
+  add column expected_provider_subject_ciphertext bytea
+    constraint oauth_transactions_expected_provider_subject_ciphertext_check
+    check (expected_provider_subject_ciphertext is null or octet_length(expected_provider_subject_ciphertext) between 33 and 65536),
   add column provider_subject_ciphertext bytea
     constraint oauth_transactions_provider_subject_ciphertext_check
     check (provider_subject_ciphertext is null or octet_length(provider_subject_ciphertext) between 33 and 65536),
   add column provider_completion_payload_hash text
     constraint oauth_transactions_provider_completion_payload_hash_check
     check (provider_completion_payload_hash is null or provider_completion_payload_hash ~ '^sha256:[0-9a-f]{64}$'),
+  add column provider_settlement_expires_at timestamptz,
   add column provider_completed_at timestamptz,
   add column provider_evidence_at timestamptz;
+
+-- Version-11 password-reset rows cannot satisfy the version-12 exact-subject
+-- binding. Preserve them as terminal history, but never let them resume.
+update oauth_transactions
+set status = 'expired', updated_at = clock_timestamp()
+where flow_kind = 'password_reset' and status = 'pending';
 
 alter table oauth_transactions
   add constraint oauth_transactions_provider_completion_status_check
@@ -119,21 +129,36 @@ alter table oauth_transactions
   add constraint oauth_transactions_provider_completion_state_check
   check (
     (flow_kind <> 'password_reset' and provider_completion_status = 'pending'
-      and provider_completion_started_at is null and provider_subject_ciphertext is null
+      and provider_completion_started_at is null and expected_provider_subject_ciphertext is null
+      and provider_subject_ciphertext is null
       and provider_completion_payload_hash is null
+      and provider_settlement_expires_at is null
       and provider_completed_at is null and provider_evidence_at is null)
     or (flow_kind = 'password_reset' and provider_completion_status = 'pending'
-      and provider_completion_started_at is null and provider_subject_ciphertext is null
+      and provider_completion_started_at is null and expected_provider_subject_ciphertext is not null
+      and provider_subject_ciphertext is null
       and provider_completion_payload_hash is null
+      and provider_settlement_expires_at is null
+      and provider_completed_at is null and provider_evidence_at is null)
+    or (flow_kind = 'password_reset' and status = 'expired' and provider_completion_status = 'pending'
+      and provider_completion_started_at is null and expected_provider_subject_ciphertext is null
+      and provider_subject_ciphertext is null
+      and provider_completion_payload_hash is null
+      and provider_settlement_expires_at is null
       and provider_completed_at is null and provider_evidence_at is null)
     or (flow_kind = 'password_reset' and provider_completion_status = 'provider_started'
-      and provider_completion_started_at is not null and provider_subject_ciphertext is not null
+      and provider_completion_started_at is not null and expected_provider_subject_ciphertext is not null
+      and provider_subject_ciphertext is not null
       and provider_completion_payload_hash is not null
+      and provider_settlement_expires_at = provider_completion_started_at + interval '30 minutes'
       and provider_completed_at is null and provider_evidence_at is null)
     or (flow_kind = 'password_reset' and provider_completion_status = 'provider_completed'
-      and provider_completion_started_at is not null and provider_subject_ciphertext is not null
+      and provider_completion_started_at is not null and expected_provider_subject_ciphertext is not null
+      and provider_subject_ciphertext is not null
       and provider_completion_payload_hash is not null
+      and provider_settlement_expires_at = provider_completion_started_at + interval '30 minutes'
       and provider_completed_at is not null and provider_evidence_at is not null
       and provider_evidence_at >= provider_completion_started_at
-      and provider_evidence_at <= provider_completed_at)
+      and provider_evidence_at <= provider_completed_at
+      and provider_completed_at <= provider_settlement_expires_at)
   );

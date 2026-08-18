@@ -14,11 +14,14 @@ export const APPLE_FLOW_COOKIE_NAME = "core_agent_apple_flow";
 export const CSRF_HEADER_NAME = "x-core-agent-csrf";
 export const CORE_SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 const flowMaxAgeSeconds = 5 * 60;
+export const PASSWORD_RESET_SETTLEMENT_SECONDS = 30 * 60;
+const recoveryCookieMaxAgeSeconds = flowMaxAgeSeconds + PASSWORD_RESET_SETTLEMENT_SECONDS;
 
 export interface RecoveryCookieBinding {
   readonly transactionId: string;
   readonly state: string;
   readonly expiresAt: string;
+  readonly settlementNotAfter: string;
 }
 
 export interface AppleFlowCookieBinding {
@@ -119,8 +122,8 @@ export function clearWebSessionCookies(reply: FastifyReply): void {
   appendSetCookie(reply, `${CORE_CSRF_COOKIE_NAME}=; Secure; SameSite=Lax; Path=/; Max-Age=0`);
 }
 
-function flowCookie(reply: FastifyReply, name: string, value: string, path: string): void {
-  appendSetCookie(reply, `${name}=${cookieValue(value)}; Secure; HttpOnly; SameSite=Lax; Path=${path}; Max-Age=${flowMaxAgeSeconds}`);
+function flowCookie(reply: FastifyReply, name: string, value: string, path: string, maxAgeSeconds = flowMaxAgeSeconds): void {
+  appendSetCookie(reply, `${name}=${cookieValue(value)}; Secure; HttpOnly; SameSite=Lax; Path=${path}; Max-Age=${maxAgeSeconds}`);
 }
 
 function clearFlowCookie(reply: FastifyReply, name: string, path: string): void {
@@ -128,7 +131,7 @@ function clearFlowCookie(reply: FastifyReply, name: string, path: string): void 
 }
 
 export function issueRecoveryCookie(reply: FastifyReply, value: string): void {
-  flowCookie(reply, RECOVERY_COOKIE_NAME, value, "/auth/v1/password/reset/complete");
+  flowCookie(reply, RECOVERY_COOKIE_NAME, value, "/auth/v1/password/reset/complete", recoveryCookieMaxAgeSeconds);
 }
 
 export function clearRecoveryCookie(reply: FastifyReply): void {
@@ -190,14 +193,36 @@ function strictFutureUtc(value: string, now: Date): boolean {
   return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value && timestamp > now.getTime();
 }
 
-export function sealRecoveryCookie(key: Uint8Array, binding: RecoveryCookieBinding): string {
-  return seal(key, "recovery", { transaction_id: binding.transactionId, state: binding.state, expires_at: binding.expiresAt });
+function strictUtc(value: string): number | undefined {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)) return undefined;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value ? timestamp : undefined;
+}
+
+export function sealRecoveryCookie(key: Uint8Array, binding: Omit<RecoveryCookieBinding, "settlementNotAfter">): string {
+  const authorizationExpiry = strictUtc(binding.expiresAt);
+  if (authorizationExpiry === undefined) invalidAuthentication();
+  const settlementNotAfter = new Date(authorizationExpiry + PASSWORD_RESET_SETTLEMENT_SECONDS * 1_000).toISOString();
+  return seal(key, "recovery", {
+    transaction_id: binding.transactionId, state: binding.state, expires_at: binding.expiresAt,
+    settlement_not_after: settlementNotAfter,
+  });
 }
 
 export function readRecoveryCookie(key: Uint8Array, value: string, now: Date): RecoveryCookieBinding {
   const parsed = open(key, "recovery", value);
-  if (!exactRecord(parsed, ["transaction_id", "state", "expires_at"]) || !boundedString(parsed.transaction_id) || !boundedString(parsed.state) || !boundedString(parsed.expires_at) || !strictFutureUtc(parsed.expires_at, now)) invalidAuthentication();
-  return { transactionId: parsed.transaction_id, state: parsed.state, expiresAt: parsed.expires_at };
+  if (!exactRecord(parsed, ["transaction_id", "state", "expires_at", "settlement_not_after"])
+    || !boundedString(parsed.transaction_id) || !boundedString(parsed.state)
+    || !boundedString(parsed.expires_at) || !boundedString(parsed.settlement_not_after)) invalidAuthentication();
+  const authorizationExpiry = strictUtc(parsed.expires_at);
+  const settlementNotAfter = strictUtc(parsed.settlement_not_after);
+  if (authorizationExpiry === undefined || settlementNotAfter === undefined
+    || settlementNotAfter !== authorizationExpiry + PASSWORD_RESET_SETTLEMENT_SECONDS * 1_000
+    || settlementNotAfter <= now.getTime()) invalidAuthentication();
+  return {
+    transactionId: parsed.transaction_id, state: parsed.state, expiresAt: parsed.expires_at,
+    settlementNotAfter: parsed.settlement_not_after,
+  };
 }
 
 export function sealAppleFlowCookie(key: Uint8Array, binding: AppleFlowCookieBinding): string {

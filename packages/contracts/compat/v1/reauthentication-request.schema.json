@@ -3,22 +3,6 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
-    "client_kind": {
-      "anyOf": [
-        {
-          "const": "web",
-          "type": "string"
-        },
-        {
-          "const": "iphone",
-          "type": "string"
-        },
-        {
-          "const": "macos",
-          "type": "string"
-        }
-      ]
-    },
     "expected_resource_version": {
       "minimum": 1,
       "type": "integer"

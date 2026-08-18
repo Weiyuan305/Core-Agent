@@ -3,6 +3,8 @@ import test from "node:test";
 
 import Fastify, { type FastifyInstance } from "fastify";
 
+import { readRecoveryCookie, sealRecoveryCookie } from "../src/security.js";
+
 const origin = "https://app.example.test";
 const host = "identity.example.test";
 const webRedirect = `${origin}/auth/apple/callback`;
@@ -58,6 +60,13 @@ function provider() {
 function operations() {
   return {
     async consumeRateLimit() { return null; },
+    async preparePasswordReset(normalizedEmail: string) {
+      return {
+        provider: "supabase" as const, providerSubject: "provider_subject",
+        identityKind: "email_password" as const, normalizedEmail,
+        verifiedAt: "2026-08-17T00:00:00.000Z",
+      };
+    },
     async issueSession(_subject: unknown, clientKind: "web" | "iphone" | "macos") {
       return {
         session: { ...session, client_kind: clientKind },
@@ -286,11 +295,31 @@ test("recovery cookie is dedicated, HttpOnly, and never exposes its binding or c
   const response = await app.inject({ method: "POST", url: "/auth/v1/password/reset/start", headers: jsonHeaders, payload: { ...idem, email: "student@example.test" } });
   assert.equal(response.statusCode, 202);
   const cookie = ([] as string[]).concat(response.headers["set-cookie"] ?? []).find((value) => value.startsWith("core_agent_recovery="));
-  assert.match(cookie ?? "", /Secure; HttpOnly; SameSite=Lax; Path=\/auth\/v1\/password\/reset\/complete/u);
+  assert.match(cookie ?? "", /Secure; HttpOnly; SameSite=Lax; Path=\/auth\/v1\/password\/reset\/complete; Max-Age=2100/u);
   assert.equal(response.body.includes("reset_01"), false);
   assert.equal(response.body.includes("reset_state_01"), false);
   assert.deepEqual(response.json(), { schema_version: 1, accepted: true });
   await app.close();
+});
+
+test("recovery cookie authenticates separate authorization and bounded settlement deadlines", () => {
+  const sealed = sealRecoveryCookie(flowKey, {
+    transactionId: "reset_settlement_01", state: "reset_settlement_state",
+    expiresAt: "2026-08-17T00:05:00.000Z",
+  });
+  const atAuthorizationBoundary = readRecoveryCookie(flowKey, sealed, new Date("2026-08-17T00:05:00.000Z"));
+  assert.deepEqual(atAuthorizationBoundary, {
+    transactionId: "reset_settlement_01", state: "reset_settlement_state",
+    expiresAt: "2026-08-17T00:05:00.000Z", settlementNotAfter: "2026-08-17T00:35:00.000Z",
+  });
+  assert.deepEqual(
+    readRecoveryCookie(flowKey, sealed, new Date("2026-08-17T00:34:59.999Z")),
+    atAuthorizationBoundary,
+  );
+  assert.throws(
+    () => readRecoveryCookie(flowKey, sealed, new Date("2026-08-17T00:35:00.000Z")),
+    /AUTH_INVALID/u,
+  );
 });
 
 test("Apple Web flow uses a distinct short-lived cookie and clears every terminal callback", async () => {

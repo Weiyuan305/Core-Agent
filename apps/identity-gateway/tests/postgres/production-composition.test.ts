@@ -182,6 +182,7 @@ test("production composition atomically verifies email, registers Task 3, issues
 
     let nativePasswordCalls = 0;
     let nativeLinkStartCalls = 0;
+    let existingAppleStarts = 0;
     const nativeProvider: AuthProviderAdapter = {
       async reauthenticatePassword(input) {
         nativePasswordCalls += 1;
@@ -200,9 +201,16 @@ test("production composition atomically verifies email, registers Task 3, issues
       signUpEmail: async () => { throw new Error("unused provider method"); },
       recoverVerifiedEmailSubject: async () => { throw new Error("unused provider method"); },
       verifyEmail: async () => { throw new Error("unused provider method"); },
-      signInEmail: async () => { throw new Error("unused provider method"); },
-      beginApple: async () => { throw new Error("unused provider method"); },
-      completeApple: async () => { throw new Error("unused provider method"); },
+      async signInEmail() { return verifiedSubject; },
+      async beginApple() {
+        existingAppleStarts += 1;
+        return {
+          transaction_id: `composition-existing-apple-${existingAppleStarts}`,
+          authorization_url: "https://provider.example.test/auth/v1/authorize?state=composition-existing-apple-state&redirect_to=https%3A%2F%2Fapp.example.test%2Fauth%2Fapple%2Fcallback",
+          expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
+        };
+      },
+      async completeApple() { return { ...verifiedSubject, identityKind: "apple" }; },
       verifyCurrentSubject: async () => { throw new Error("unused provider method"); },
       beginPasswordReset: async () => { throw new Error("unused provider method"); },
       completePasswordReset: async () => { throw new Error("unused provider method"); },
@@ -226,6 +234,31 @@ test("production composition atomically verifies email, registers Task 3, issues
       provider: nativeProvider,
       operations,
     });
+    const appleSignIn = async (idempotencyKey: string) => {
+      const start = await nativeApp.inject({
+        method: "POST", url: "/auth/v1/apple/start",
+        headers: { host: "identity.example.test", origin: "https://app.example.test", "content-type": "application/json" },
+        payload: {
+          schema_version: 1, idempotency_key: `${idempotencyKey}-start`, payload_hash: `sha256:${"1".repeat(64)}`,
+          client_kind: "web", redirect_uri: "https://app.example.test/auth/apple/callback",
+        },
+      });
+      assert.equal(start.statusCode, 200, start.body);
+      const cookie = ([] as string[]).concat(start.headers["set-cookie"] ?? [])
+        .find((value) => value.startsWith("core_agent_apple_flow="))!.split(";", 1)[0]!;
+      return nativeApp.inject({
+        method: "POST", url: "/auth/v1/apple/callback",
+        headers: { host: "identity.example.test", origin: "https://app.example.test", "content-type": "application/json", cookie },
+        payload: {
+          schema_version: 1, idempotency_key: `${idempotencyKey}-callback`, payload_hash: `sha256:${"2".repeat(64)}`,
+          client_kind: "web", transaction_id: `composition-existing-apple-${existingAppleStarts}`,
+          authorization_code: "composition-existing-apple-code", state: "composition-existing-apple-state",
+        },
+      });
+    };
+    const appleBeforeLink = await appleSignIn("composition-apple-before-link");
+    assert.equal(appleBeforeLink.statusCode, 401, appleBeforeLink.body);
+    assert.equal((await pool.query("select count(*)::int as count from core_sessions where actor_id = $1", [registered.actorId])).rows[0]?.count, 1);
     const webAsNative = await nativeApp.inject({
       method: "POST", url: "/auth/v1/reauthenticate",
       headers: {
@@ -328,6 +361,17 @@ test("production composition atomically verifies email, registers Task 3, issues
         )).rows[0], { count: 1, provider_identity_kind: "email_password_apple" });
       }
     }
+    const appleAfterLink = await appleSignIn("composition-apple-after-link");
+    assert.equal(appleAfterLink.statusCode, 200, appleAfterLink.body);
+    const passwordAfterLink = await nativeApp.inject({
+      method: "POST", url: "/auth/v1/email/sign-in",
+      headers: { host: "identity.example.test", origin: "https://app.example.test", "content-type": "application/json" },
+      payload: {
+        schema_version: 1, idempotency_key: "composition-password-after-link", payload_hash: `sha256:${"3".repeat(64)}`,
+        email: verifiedSubject.normalizedEmail, password: "composition-password", client_kind: "web",
+      },
+    });
+    assert.equal(passwordAfterLink.statusCode, 200, passwordAfterLink.body);
     await nativeApp.close();
 
     const reauthenticationPayload = {
@@ -648,7 +692,11 @@ test("production composition atomically verifies email, registers Task 3, issues
         confirmedSubjects.set(subject.providerSubject, verifiedSubject);
         return verifiedSubject;
       },
-      signInEmail: unavailableProvider,
+      async signInEmail(input) {
+        const appleSubject = [...appleSubjects.values()].find((subject) => subject.normalizedEmail === input.email);
+        if (appleSubject === undefined) return unavailableProvider();
+        return { ...appleSubject, identityKind: "email_password" };
+      },
       async beginApple(input) {
         const clientKind = (input as { client_kind: string }).client_kind;
         const deviceLabel = (input as { device_label?: string }).device_label ?? "default";
@@ -752,6 +800,15 @@ test("production composition atomically verifies email, registers Task 3, issues
     });
     assert.equal(webB2c.statusCode, 200, webB2c.body);
     assert.equal(webB2c.json().transport, "web_cookie");
+    const passwordAgainstAppleOnly = await onboardingApp.inject({
+      method: "POST", url: "/auth/v1/email/sign-in", headers: publicHeaders,
+      payload: {
+        schema_version: 1, idempotency_key: "composition-password-against-apple-only",
+        payload_hash: `sha256:${"7".repeat(64)}`, email: "apple-b2c-web@example.test",
+        password: "composition-password", client_kind: "web",
+      },
+    });
+    assert.equal(passwordAgainstAppleOnly.statusCode, 401, passwordAgainstAppleOnly.body);
 
     const nativeB2cStart = await appleStart("iphone", "Apple B2C Native");
     const nativeB2c = await onboardingApp.inject({
@@ -1570,6 +1627,9 @@ test("production composition atomically verifies email, registers Task 3, issues
       authSubjectId: registered.authSubjectId, clientKind: "macos",
     });
     let providerPasswordUpdates = 0;
+    let resetProviderFailure: string | undefined;
+    let resetGatewayNow = new Date();
+    let resetAuthorizationExpiresAt = "";
     const resetTransactionId = "oauth_composition_password_reset";
     const resetState = "composition-password-reset-state";
     const resetProvider: AuthProviderAdapter = {
@@ -1579,32 +1639,40 @@ test("production composition atomically verifies email, registers Task 3, issues
         await pool.query(`insert into oauth_transactions (
           oauth_transaction_id, provider, flow_kind, actor_id, client_kind, state_digest, nonce_digest,
           pkce_verifier_ciphertext, redirect_uri, status, expires_at, consumed_at, created_at, updated_at,
-          provider_completion_status, provider_completion_started_at, provider_subject_ciphertext,
-          provider_completion_payload_hash, provider_completed_at, provider_evidence_at
+          provider_completion_status, provider_completion_started_at, expected_provider_subject_ciphertext,
+          provider_subject_ciphertext, provider_completion_payload_hash, provider_settlement_expires_at,
+          provider_completed_at, provider_evidence_at
         ) values ($1, 'supabase', 'password_reset', null, 'web', $2, $3, $4, $5, 'pending',
-          $6, null, $7, $7, 'pending', null, null, null, null, null)`, [
+          $6, null, $7, $7, 'pending', null, $8, null, null, null, null, null)`, [
           resetTransactionId, Buffer.alloc(32, 0x61), Buffer.alloc(32, 0x62),
           Buffer.alloc(33, 0x63), onboardingConfig.passwordResetRedirectUri,
-          new Date(now.getTime() + 5 * 60_000), now,
+          new Date(now.getTime() + 5 * 60_000), now, Buffer.alloc(33, 0x64),
         ]);
-        return { transaction_id: resetTransactionId, state: resetState, expires_at: new Date(now.getTime() + 5 * 60_000).toISOString() };
+        resetGatewayNow = now;
+        resetAuthorizationExpiresAt = new Date(now.getTime() + 5 * 60_000).toISOString();
+        return { transaction_id: resetTransactionId, state: resetState, expires_at: resetAuthorizationExpiresAt };
       },
       async completePasswordReset(input) {
-        const current = (await pool.query<{ provider_completion_status: string }>(
-          "select provider_completion_status from oauth_transactions where oauth_transaction_id = $1",
-          [resetTransactionId],
-        )).rows[0];
-        if (current?.provider_completion_status === "pending") {
-          const startedAt = (await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now;
-          await pool.query(`update oauth_transactions set provider_completion_status = 'provider_started',
-            provider_completion_started_at = $2, provider_subject_ciphertext = $3,
-            provider_completion_payload_hash = $4, updated_at = $2
-            where oauth_transaction_id = $1`, [resetTransactionId, startedAt, Buffer.alloc(33, 0x64), input.payloadHash]);
-          providerPasswordUpdates += 1;
-          const completedAt = (await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now;
-          await pool.query(`update oauth_transactions set provider_completion_status = 'provider_completed',
-            provider_completed_at = $2, provider_evidence_at = $2, updated_at = $2
-            where oauth_transaction_id = $1`, [resetTransactionId, completedAt]);
+        try {
+          const current = (await pool.query<{ provider_completion_status: string }>(
+            "select provider_completion_status from oauth_transactions where oauth_transaction_id = $1",
+            [resetTransactionId],
+          )).rows[0];
+          if (current?.provider_completion_status === "pending") {
+            const startedAt = (await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now;
+            await pool.query(`update oauth_transactions set provider_completion_status = 'provider_started',
+              provider_completion_started_at = $2, provider_subject_ciphertext = expected_provider_subject_ciphertext,
+              provider_completion_payload_hash = $3, provider_settlement_expires_at = $2::timestamptz + interval '30 minutes',
+              updated_at = $2 where oauth_transaction_id = $1`, [resetTransactionId, startedAt, input.payloadHash]);
+            providerPasswordUpdates += 1;
+            const completedAt = (await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now;
+            await pool.query(`update oauth_transactions set provider_completion_status = 'provider_completed',
+              provider_completed_at = $2, provider_evidence_at = $2, updated_at = $2
+              where oauth_transaction_id = $1`, [resetTransactionId, completedAt]);
+          }
+        } catch (error) {
+          resetProviderFailure = error instanceof Error ? error.message : String(error);
+          throw error;
         }
         return verifiedSubject;
       },
@@ -1622,6 +1690,7 @@ test("production composition atomically verifies email, registers Task 3, issues
           return operations.executeAuthorityCommand(input);
         },
       },
+      now: () => resetGatewayNow,
     });
     const resetStart = await resetApp.inject({
       method: "POST", url: "/auth/v1/password/reset/start", headers: publicHeaders,
@@ -1651,10 +1720,11 @@ test("production composition atomically verifies email, registers Task 3, issues
     });
     assert.equal(failedReset.statusCode, 500, failedReset.body);
     assert.doesNotMatch(String(failedReset.headers["set-cookie"] ?? ""), /core_agent_recovery=;[^\n]*Max-Age=0/u);
-    assert.equal(providerPasswordUpdates, 1);
+    assert.equal(providerPasswordUpdates, 1, resetProviderFailure ?? "provider password update did not run");
     assert.equal((await pool.query(
       "select status from core_sessions where session_id = $1", [resetSiblingSession.session.session_id],
     )).rows[0]?.status, "active");
+    resetGatewayNow = new Date(Date.parse(resetAuthorizationExpiresAt) + 1);
     const completedReset = await resetApp.inject({
       method: "POST", url: "/auth/v1/password/reset/complete",
       headers: { ...publicHeaders, cookie: recoveryCookie }, payload: resetPayload,

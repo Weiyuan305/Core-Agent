@@ -97,7 +97,8 @@ const identityColumnShape = {
     "redirect_uri:text:NO", "status:text:NO", "expires_at:timestamptz:NO", "consumed_at:timestamptz:YES",
     "created_at:timestamptz:NO", "updated_at:timestamptz:NO",
     "provider_completion_status:text:NO", "provider_completion_started_at:timestamptz:YES",
-    "provider_subject_ciphertext:bytea:YES", "provider_completion_payload_hash:text:YES",
+    "expected_provider_subject_ciphertext:bytea:YES", "provider_subject_ciphertext:bytea:YES",
+    "provider_completion_payload_hash:text:YES", "provider_settlement_expires_at:timestamptz:YES",
     "provider_completed_at:timestamptz:YES",
     "provider_evidence_at:timestamptz:YES",
   ],
@@ -404,6 +405,15 @@ test("empty database migrates exactly to schema version 12 with durable email ve
     "created_at",
     "updated_at",
   ]);
+  const passwordResetSettlementColumns = await sql<{ column_name: string }>`
+    select column_name from information_schema.columns
+    where table_schema = 'public' and table_name = 'oauth_transactions'
+      and column_name in ('expected_provider_subject_ciphertext', 'provider_settlement_expires_at')
+    order by ordinal_position
+  `.execute(db);
+  assert.deepEqual(passwordResetSettlementColumns.rows.map((row) => row.column_name), [
+    "expected_provider_subject_ciphertext", "provider_settlement_expires_at",
+  ]);
   const runtimeCommandColumn = await sql<{ column_name: string }>`
     select column_name from information_schema.columns
     where table_schema = 'public' and table_name = 'worker_jobs' and column_name = 'runtime_command'
@@ -475,11 +485,13 @@ test("schema 12 upgrades schema 10 through password reset and email verification
     await pool.query(`insert into oauth_transactions (
       oauth_transaction_id, provider, flow_kind, actor_id, client_kind,
       state_digest, nonce_digest, pkce_verifier_ciphertext, redirect_uri,
-      status, expires_at, consumed_at, created_at, updated_at
+      status, expires_at, consumed_at, created_at, updated_at,
+      expected_provider_subject_ciphertext
     ) values (
       'oauth_v11_password_reset', 'supabase', 'password_reset', null, 'web',
       decode(repeat('04', 32), 'hex'), decode(repeat('05', 32), 'hex'), decode('06', 'hex'),
-      'https://app.example.test/auth/reset', 'pending', now() + interval '10 minutes', null, now(), now()
+      'https://app.example.test/auth/reset', 'pending', now() + interval '10 minutes', null, now(), now(),
+      decode(repeat('0a', 33), 'hex')
     )`);
     await assert.rejects(
       pool.query(`insert into oauth_transactions (
@@ -530,9 +542,9 @@ test("schema 12 reconverges a dirty recorded schema 11 and preserves password-re
 
     await applyMigrations(pool, migrationsDirectory);
     assert.equal(await readSchemaVersion(db), 12);
-    assert.equal((await pool.query(
-      "select count(*)::int as count from oauth_transactions where oauth_transaction_id = 'oauth_v11_dirty_password_reset'",
-    )).rows[0]?.count, 1);
+    assert.deepEqual((await pool.query(
+      "select status, count(*)::int as count from oauth_transactions where oauth_transaction_id = 'oauth_v11_dirty_password_reset' group by status",
+    )).rows[0], { status: "expired", count: 1 });
     const privileges = (await pool.query<{ app_private_read: boolean; identity_conversation_read: boolean; identity_email_update: boolean }>(`
       select
         has_table_privilege('core_agent_app', 'private_identity_pii', 'select') as app_private_read,

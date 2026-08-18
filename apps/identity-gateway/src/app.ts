@@ -115,6 +115,7 @@ export interface IdentityGatewayOperations {
     readonly accountIdentifier: string;
     readonly clientIdentifier: string;
   }) => Promise<number | null>;
+  readonly preparePasswordReset: (normalizedEmail: string) => Promise<VerifiedProviderSubject>;
   readonly issueSession: (
     subject: VerifiedProviderSubject,
     clientKind: ProviderClientKind,
@@ -227,7 +228,7 @@ export async function buildIdentityGatewayApp(dependencies: BuildIdentityGateway
       && request.cookies?.core_agent_apple_flow !== undefined) clearAppleFlowCookie(reply);
     const mapped = mapIdentityGatewayError(error, identifiers);
     if (path === "/auth/v1/password/reset/complete" && request.cookies?.core_agent_recovery !== undefined
-      && mapped.statusCode < 500) clearRecoveryCookie(reply);
+      && mapped.statusCode < 500 && mapped.statusCode !== 429) clearRecoveryCookie(reply);
     void reply.code(mapped.statusCode).type("application/json").send(mapped.envelope);
   });
 

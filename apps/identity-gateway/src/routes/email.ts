@@ -186,10 +186,12 @@ export async function registerEmailRoutes(app: FastifyInstance, dependencies: Id
     const normalizedEmail = body.email.toLowerCase();
     rateLimitFailure(await dependencies.operations.consumeRateLimit({ bucketKind: "reset", accountIdentifier: normalizedEmail, clientIdentifier: request.identityContext.clientIdentifier }));
     const idempotency = request.body as { idempotency_key: string; payload_hash: string };
+    const expectedSubject = await dependencies.operations.preparePasswordReset(normalizedEmail);
     const binding = await dependencies.provider.beginPasswordReset({
       email: normalizedEmail,
       idempotencyKey: idempotency.idempotency_key,
       payloadHash: idempotency.payload_hash,
+      expectedSubject,
     });
     issueRecoveryCookie(reply, sealRecoveryCookie(dependencies.flowCookieKey, { transactionId: binding.transaction_id, state: binding.state, expiresAt: binding.expires_at }));
     return reply.code(202).send({ schema_version: 1, accepted: true });
@@ -215,7 +217,10 @@ export async function registerEmailRoutes(app: FastifyInstance, dependencies: Id
     });
     if (body.payload_hash !== expectedPayloadHash) throw new IdentityGatewayFailure("INVALID_REQUEST");
     const subject = await dependencies.provider.completePasswordReset({
-      binding: { transaction_id: binding.transactionId, state: binding.state, expires_at: binding.expiresAt },
+      binding: {
+        transaction_id: binding.transactionId, state: binding.state, expires_at: binding.expiresAt,
+        settlement_not_after: binding.settlementNotAfter,
+      },
       authorization_code: body.authorization_code,
       new_password: body.new_password,
       payloadHash: expectedPayloadHash,

@@ -71,8 +71,10 @@ export interface OauthTransactionTable {
   updated_at: Date;
   provider_completion_status: "pending" | "provider_started" | "provider_completed";
   provider_completion_started_at: Date | null;
+  expected_provider_subject_ciphertext: ColumnType<Buffer | null, Uint8Array | null, Uint8Array | null>;
   provider_subject_ciphertext: ColumnType<Buffer | null, Uint8Array | null, Uint8Array | null>;
   provider_completion_payload_hash: string | null;
+  provider_settlement_expires_at: Date | null;
   provider_completed_at: Date | null;
   provider_evidence_at: Date | null;
 }

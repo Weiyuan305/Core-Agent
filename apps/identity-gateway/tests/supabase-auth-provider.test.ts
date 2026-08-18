@@ -9,6 +9,7 @@ import type {
   AppleLinkAuthorizationInput,
   AppleLinkInput,
   PasswordResetCompletionInput,
+  PasswordResetStartInput,
   ProviderClientKind,
 } from "../src/providers/auth-provider.js";
 import { canonicalProviderStartPayloadHash } from "../src/providers/auth-provider.js";
@@ -41,6 +42,39 @@ const providerAccessToken = ["provider", "access", "sentinel"].join("-");
 const providerRefreshToken = ["provider", "refresh", "sentinel"].join("-");
 const serviceRoleKey = ["service", "role", "sentinel"].join("-");
 const payloadHash = `sha256:${"a".repeat(64)}`;
+const resetExpectedSubject = Object.freeze({
+  provider: "supabase" as const,
+  providerSubject: "provider-subject-1",
+  identityKind: "email_password" as const,
+  normalizedEmail: "user@example.test",
+  verifiedAt: "2026-08-01T00:00:00.000Z",
+});
+
+function passwordResetStartInput(
+  idempotencyKey = "idem_password_reset",
+  email = resetExpectedSubject.normalizedEmail,
+  expectedSubject = resetExpectedSubject,
+): PasswordResetStartInput {
+  return Object.freeze({
+    email,
+    idempotencyKey,
+    payloadHash: canonicalProviderStartPayloadHash({
+      flowKind: "password_reset", idempotencyKey, normalizedEmail: email.toLowerCase(),
+    }),
+    expectedSubject,
+  });
+}
+
+function passwordResetCompletionBinding(binding: {
+  readonly transaction_id: string;
+  readonly state: string;
+  readonly expires_at: string;
+}): PasswordResetCompletionInput["binding"] {
+  return Object.freeze({
+    ...binding,
+    settlement_not_after: new Date(new Date(binding.expires_at).getTime() + 30 * 60 * 1_000).toISOString(),
+  });
+}
 
 type HasProviderProof<T> = "providerProof" extends keyof T ? true : false;
 
@@ -53,7 +87,9 @@ function sha256ForTest(value: string): Uint8Array {
 
 class MemoryTransactionStore implements OAuthTransactionStore {
   readonly records = new Map<string, OAuthTransactionRecord>();
+  readonly completionEvents: string[] = [];
   failCheckpointOnce = false;
+  yieldExistingPasswordResetAttemptOnce = false;
 
   async save(record: OAuthTransactionRecord): Promise<void> {
     assert.equal(this.records.has(record.oauth_transaction_id), false);
@@ -82,22 +118,35 @@ class MemoryTransactionStore implements OAuthTransactionStore {
   }
 
   async beginPasswordResetCompletion(input: {
-    transactionId: string; providerSubjectCiphertext: Uint8Array; payloadHash: string;
-  }): Promise<{ startedAt: string }> {
+    transactionId: string; payloadHash: string; settlementNotAfter: string;
+  }): Promise<{ kind: "acquired" | "existing"; startedAt: string; settlementExpiresAt: string }> {
+    this.completionEvents.push("provider_started");
     const record = this.records.get(input.transactionId);
     assert.notEqual(record, undefined);
     const startedAt = fixedNow.toISOString();
+    const settlementExpiresAt = new Date(fixedNow.getTime() + 30 * 60 * 1_000).toISOString();
+    assert.equal(input.settlementNotAfter, new Date(fixedNow.getTime() + 35 * 60 * 1_000).toISOString());
     if (record?.provider_completion_status === "provider_started") {
       assert.equal(record.provider_completion_payload_hash, input.payloadHash);
-      return { startedAt: record.provider_completion_started_at! };
+      return {
+        kind: "existing",
+        startedAt: record.provider_completion_started_at!,
+        settlementExpiresAt: record.provider_settlement_expires_at!,
+      };
     }
+    assert(record?.expected_provider_subject_ciphertext instanceof Uint8Array);
     this.records.set(input.transactionId, {
       ...record!, provider_completion_status: "provider_started",
       provider_completion_started_at: startedAt,
-      provider_subject_ciphertext: Uint8Array.from(input.providerSubjectCiphertext),
+      provider_subject_ciphertext: Uint8Array.from(record!.expected_provider_subject_ciphertext!),
       provider_completion_payload_hash: input.payloadHash,
+      provider_settlement_expires_at: settlementExpiresAt,
     });
-    return { startedAt };
+    if (this.yieldExistingPasswordResetAttemptOnce) {
+      this.yieldExistingPasswordResetAttemptOnce = false;
+      return { kind: "existing", startedAt, settlementExpiresAt };
+    }
+    return { kind: "acquired", startedAt, settlementExpiresAt };
   }
 
   async checkpointPasswordResetCompletion(input: { transactionId: string; providerEvidenceAt: string }): Promise<void> {
@@ -265,6 +314,7 @@ function createHarness(input: {
       signInWithOAuth: async (request: unknown) => begin("signInWithOAuth", request),
       linkIdentity: async (request: unknown) => begin("linkIdentity", request),
       exchangeCodeForSession: async (code: string, exchangeOptions: unknown) => {
+        store.completionEvents.push("exchange_code");
         methodCalls.push({ name: "exchangeCodeForSession", arguments: [code, exchangeOptions] });
         const flowId = (exchangeOptions as { readonly flowId: string }).flowId;
         const stored = await authOptions.storage.getItem(
@@ -383,7 +433,7 @@ test("Supabase email, proof, reset, current-session revoke, and deletion use fre
     await harness.provider.signInEmail(credential),
     await harness.provider.verifyCurrentSubject(providerProof),
     await harness.provider.reauthenticatePassword(credential),
-    await harness.provider.beginPasswordReset("USER@EXAMPLE.TEST"),
+    await harness.provider.beginPasswordReset(passwordResetStartInput()),
     await harness.provider.revokeCurrentProviderSession(providerProof),
     await harness.provider.deleteProviderSubject("provider-subject-1"),
   ];
@@ -909,14 +959,7 @@ test("Supabase provider starts replay one idempotent effect", async () => {
   assert.deepEqual(appleReplay, appleFirst);
   assert.equal(harness.methodCalls.filter(({ name }) => name === "signInWithOAuth").length, 1);
 
-  const reset = {
-    email: "USER@EXAMPLE.TEST",
-    idempotencyKey: "idem_password_reset",
-    payloadHash: canonicalProviderStartPayloadHash({
-      flowKind: "password_reset", idempotencyKey: "idem_password_reset",
-      normalizedEmail: "user@example.test",
-    }),
-  };
+  const reset = passwordResetStartInput();
   const resetFirst = await harness.provider.beginPasswordReset(reset);
   const resetReplay = await harness.provider.beginPasswordReset(reset);
   assert.deepEqual(resetReplay, resetFirst);
@@ -1406,9 +1449,27 @@ test("installed Supabase 2.112.2 Apple link uses only its operation-local passwo
   }
 });
 
+test("Supabase password reset start durably prebinds the exact expected Core subject", async () => {
+  const harness = createHarness();
+  const expectedSubject = resetExpectedSubject;
+  const idempotencyKey = "idem_reset_prebound_subject";
+  const payloadHash = canonicalProviderStartPayloadHash({
+    flowKind: "password_reset", idempotencyKey, normalizedEmail: expectedSubject.normalizedEmail,
+  });
+  const binding = await harness.provider.beginPasswordReset({
+    email: expectedSubject.normalizedEmail, idempotencyKey, payloadHash, expectedSubject,
+  } as PasswordResetStartInput & { expectedSubject: typeof expectedSubject });
+  const stored = harness.store.records.get(binding.transaction_id) as OAuthTransactionRecord & {
+    expected_provider_subject_ciphertext?: Uint8Array;
+  };
+  assert(stored.expected_provider_subject_ciphertext instanceof Uint8Array);
+  assert.equal(JSON.stringify(stored).includes(expectedSubject.providerSubject), false);
+  assert.equal(JSON.stringify(stored).includes(expectedSubject.normalizedEmail), false);
+});
+
 test("Supabase password recovery uses the fresh admin atomic password-and-session update path", async () => {
   const harness = createHarness();
-  const binding = await harness.provider.beginPasswordReset("USER@EXAMPLE.TEST");
+  const binding = await harness.provider.beginPasswordReset(passwordResetStartInput());
   const resetCall = harness.methodCalls.find((call) => call.name === "resetPasswordForEmail");
   const sentRedirect = (resetCall?.arguments[1] as { redirectTo: string }).redirectTo;
   assert.equal(sentRedirect, passwordResetCallbackUri);
@@ -1425,7 +1486,7 @@ test("Supabase password recovery uses the fresh admin atomic password-and-sessio
   assert.equal(transaction?.flow_kind, "password_reset");
   assert.equal(transaction?.redirect_uri, passwordResetCallbackUri);
   const result = await harness.provider.completePasswordReset({
-    binding,
+    binding: passwordResetCompletionBinding(binding),
     authorization_code: "one-time-recovery-code",
     new_password: "new correct horse battery staple",
     payloadHash: resetCompletionPayloadHash,
@@ -1439,13 +1500,14 @@ test("Supabase password recovery uses the fresh admin atomic password-and-sessio
       .map((call) => call.name),
     ["exchangeCodeForSession", "updateUserById"],
   );
+  assert.deepEqual(harness.store.completionEvents, ["provider_started", "exchange_code"]);
   assert.equal(harness.methodCalls.some((call) => call.name === "updateUser"), false);
   assert.equal(harness.methodCalls.some((call) => call.name === "signOut"), false);
   assert.equal(harness.clientCalls.at(-1)?.key, serviceRoleKey);
   assert.equal(JSON.stringify(result).includes(providerAccessToken), false);
   assert.equal(harness.store.records.get(binding.transaction_id)?.provider_completion_status, "provider_completed");
   const replay = await harness.provider.completePasswordReset({
-    binding, authorization_code: "one-time-recovery-code", new_password: "new correct horse battery staple",
+    binding: passwordResetCompletionBinding(binding), authorization_code: "one-time-recovery-code", new_password: "new correct horse battery staple",
     payloadHash: resetCompletionPayloadHash,
   });
   assert.equal(replay.providerSubject, result.providerSubject);
@@ -1455,7 +1517,7 @@ test("Supabase password recovery uses the fresh admin atomic password-and-sessio
     ["exchangeCodeForSession", "updateUserById"],
   );
   await expectFailure(() => harness.provider.completePasswordReset({
-    binding, authorization_code: "one-time-recovery-code", new_password: "a different valid password",
+    binding: passwordResetCompletionBinding(binding), authorization_code: "one-time-recovery-code", new_password: "a different valid password",
     payloadHash: `sha256:${"f".repeat(64)}`,
   } as PasswordResetCompletionInput), "AUTH_CALLBACK_INVALID");
 
@@ -1464,10 +1526,10 @@ test("Supabase password recovery uses the fresh admin atomic password-and-sessio
     (input: typeof binding) => ({ ...input, expires_at: "2026-08-17T02:04:59.000Z" }),
   ]) {
     const isolated = createHarness();
-    const isolatedBinding = await isolated.provider.beginPasswordReset("USER@EXAMPLE.TEST");
+    const isolatedBinding = await isolated.provider.beginPasswordReset(passwordResetStartInput());
     const isolatedInput = mutate(isolatedBinding);
     await expectFailure(() => isolated.provider.completePasswordReset({
-      binding: isolatedInput,
+      binding: passwordResetCompletionBinding(isolatedInput),
       authorization_code: "one-time-recovery-code",
       new_password: "another valid password",
       payloadHash: resetCompletionPayloadHash,
@@ -1477,10 +1539,11 @@ test("Supabase password recovery uses the fresh admin atomic password-and-sessio
 });
 
 test("Supabase password recovery checkpoint failure restarts from exact causal provider evidence", async () => {
-  const harness = createHarness({ failResetCheckpointOnce: true });
-  const binding = await harness.provider.beginPasswordReset("USER@EXAMPLE.TEST");
+  let now = new Date(fixedNow);
+  const harness = createHarness({ failResetCheckpointOnce: true, now: () => new Date(now) });
+  const binding = await harness.provider.beginPasswordReset(passwordResetStartInput());
   await expectFailure(() => harness.provider.completePasswordReset({
-    binding, authorization_code: "one-time-recovery-code", new_password: "new correct horse battery staple",
+    binding: passwordResetCompletionBinding(binding), authorization_code: "one-time-recovery-code", new_password: "new correct horse battery staple",
     payloadHash: resetCompletionPayloadHash,
   }), "AUTH_PROVIDER_UNAVAILABLE");
   assert.equal(harness.store.records.get(binding.transaction_id)?.provider_completion_status, "provider_started");
@@ -1488,8 +1551,9 @@ test("Supabase password recovery checkpoint failure restarts from exact causal p
     harness.methodCalls.filter((call) => ["exchangeCodeForSession", "updateUserById"].includes(call.name)).map((call) => call.name),
     ["exchangeCodeForSession", "updateUserById"],
   );
+  now = new Date(Date.parse(binding.expires_at) + 1);
   const recovered = await harness.provider.completePasswordReset({
-    binding, authorization_code: "already-used-code", new_password: "new correct horse battery staple",
+    binding: passwordResetCompletionBinding(binding), authorization_code: "already-used-code", new_password: "new correct horse battery staple",
     payloadHash: resetCompletionPayloadHash,
   });
   assert.equal(recovered.providerSubject, "provider-subject-1");
@@ -1504,19 +1568,45 @@ test("Supabase password recovery checkpoint failure restarts from exact causal p
       failResetCheckpointOnce: true,
       adminUser: user("email", "provider-subject-1", "user@example.test", "2026-08-01T00:00:00.000Z", evidence),
     });
-    const invalidBinding = await invalid.provider.beginPasswordReset("USER@EXAMPLE.TEST");
+    const invalidBinding = await invalid.provider.beginPasswordReset(passwordResetStartInput());
     await expectFailure(() => invalid.provider.completePasswordReset({
-      binding: invalidBinding, authorization_code: "one-time-recovery-code", new_password: "new correct horse battery staple",
+      binding: passwordResetCompletionBinding(invalidBinding), authorization_code: "one-time-recovery-code", new_password: "new correct horse battery staple",
       payloadHash: resetCompletionPayloadHash,
     }), "AUTH_PROVIDER_UNAVAILABLE");
     await expectFailure(() => invalid.provider.completePasswordReset({
-      binding: invalidBinding, authorization_code: "already-used-code", new_password: "new correct horse battery staple",
+      binding: passwordResetCompletionBinding(invalidBinding), authorization_code: "already-used-code", new_password: "new correct horse battery staple",
       payloadHash: resetCompletionPayloadHash,
     }), "AUTH_CALLBACK_INVALID");
   }
 });
 
-test("Supabase password recovery returns no subject when the atomic admin update fails", async () => {
+test("Supabase password recovery settlement uses its bounded post-provider deadline", async () => {
+  for (const testCase of [
+    { now: "2026-08-17T02:29:59.999Z", accepted: true },
+    { now: "2026-08-17T02:30:00.000Z", accepted: false },
+  ]) {
+    let now = new Date(fixedNow);
+    const harness = createHarness({ failResetCheckpointOnce: true, now: () => new Date(now) });
+    const binding = await harness.provider.beginPasswordReset(passwordResetStartInput());
+    await expectFailure(() => harness.provider.completePasswordReset({
+      binding: passwordResetCompletionBinding(binding), authorization_code: "one-time-recovery-code",
+      new_password: "new correct horse battery staple", payloadHash: resetCompletionPayloadHash,
+    }), "AUTH_PROVIDER_UNAVAILABLE");
+    now = new Date(testCase.now);
+    const retry = () => harness.provider.completePasswordReset({
+      binding: passwordResetCompletionBinding(binding), authorization_code: "already-used-code",
+      new_password: "new correct horse battery staple", payloadHash: resetCompletionPayloadHash,
+    });
+    if (testCase.accepted) {
+      assert.equal((await retry()).providerSubject, resetExpectedSubject.providerSubject);
+    } else {
+      await expectFailure(retry, "AUTH_CALLBACK_INVALID");
+    }
+    assert.equal(harness.methodCalls.filter((call) => call.name === "updateUserById").length, 1);
+  }
+});
+
+test("Supabase password recovery crash before admin update is not falsely recovered and allows a new start", async () => {
   let providerBodyGetterCalls = 0;
   const adminError = Object.defineProperties({}, {
     status: { value: 503, enumerable: true },
@@ -1528,11 +1618,15 @@ test("Supabase password recovery returns no subject when the atomic admin update
       },
     },
   });
-  const harness = createHarness({ adminUpdateError: adminError });
-  const binding = await harness.provider.beginPasswordReset("USER@EXAMPLE.TEST");
+  const harness = createHarness({
+    adminUpdateError: adminError,
+    adminUser: user("email", resetExpectedSubject.providerSubject, resetExpectedSubject.normalizedEmail,
+      resetExpectedSubject.verifiedAt, "2026-08-17T01:59:59.999Z"),
+  });
+  const binding = await harness.provider.beginPasswordReset(passwordResetStartInput());
 
   await expectFailure(() => harness.provider.completePasswordReset({
-    binding,
+    binding: passwordResetCompletionBinding(binding),
     authorization_code: "one-time-recovery-code",
     new_password: "new correct horse battery staple",
     payloadHash: resetCompletionPayloadHash,
@@ -1545,6 +1639,29 @@ test("Supabase password recovery returns no subject when the atomic admin update
   );
   assert.equal(harness.methodCalls.some((call) => call.name === "signOut"), false);
   assert.equal(providerBodyGetterCalls, 0);
+  assert.equal(harness.store.records.get(binding.transaction_id)?.provider_completion_status, "provider_started");
+  await expectFailure(() => harness.provider.completePasswordReset({
+    binding: passwordResetCompletionBinding(binding), authorization_code: "already-used-code",
+    new_password: "new correct horse battery staple", payloadHash: resetCompletionPayloadHash,
+  }), "AUTH_CALLBACK_INVALID");
+  const replacement = await harness.provider.beginPasswordReset(passwordResetStartInput("idem_password_reset_replacement"));
+  assert.notEqual(replacement.transaction_id, binding.transaction_id);
+  assert.equal(harness.methodCalls.filter((call) => call.name === "updateUserById").length, 1);
+});
+
+test("Supabase password recovery losing concurrent provider-start admission performs no provider effect", async () => {
+  const harness = createHarness({
+    adminUser: user("email", resetExpectedSubject.providerSubject, resetExpectedSubject.normalizedEmail,
+      resetExpectedSubject.verifiedAt, "2026-08-17T01:59:59.999Z"),
+  });
+  const binding = await harness.provider.beginPasswordReset(passwordResetStartInput());
+  harness.store.yieldExistingPasswordResetAttemptOnce = true;
+  await expectFailure(() => harness.provider.completePasswordReset({
+    binding: passwordResetCompletionBinding(binding), authorization_code: "one-time-recovery-code",
+    new_password: "new correct horse battery staple", payloadHash: resetCompletionPayloadHash,
+  }), "AUTH_CALLBACK_INVALID");
+  assert.equal(harness.methodCalls.some((call) => call.name === "exchangeCodeForSession"), false);
+  assert.equal(harness.methodCalls.some((call) => call.name === "updateUserById"), false);
 });
 
 test("Supabase password recovery requires the admin update to return the exact recovered subject", async () => {
@@ -1554,10 +1671,10 @@ test("Supabase password recovery requires the admin update to return the exact r
     { user: user("email", "different-provider-subject") },
   ]) {
     const harness = createHarness({ adminUpdateData });
-    const binding = await harness.provider.beginPasswordReset("USER@EXAMPLE.TEST");
+    const binding = await harness.provider.beginPasswordReset(passwordResetStartInput());
 
     await expectFailure(() => harness.provider.completePasswordReset({
-      binding,
+      binding: passwordResetCompletionBinding(binding),
       authorization_code: "one-time-recovery-code",
       new_password: "new correct horse battery staple",
       payloadHash: resetCompletionPayloadHash,
