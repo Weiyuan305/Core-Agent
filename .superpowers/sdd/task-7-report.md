@@ -2,10 +2,10 @@
 
 ## Status
 
-- Status: DONE
+- Status: DONE_WITH_CONCERNS
 - Branch: `feat/identity-gateway-v1`
 - Base: `e7624fe0425ff470b646f8322254d5e9e3857da8`
-- Implementation commit: `2240a1bb0645e50a22204783f7cac5362924d906`
+- Original implementation commit: `2240a1bb0645e50a22204783f7cac5362924d906`
 - No merge or push was performed.
 
 ## Delivered
@@ -313,4 +313,149 @@ Production changes followed genuine focused REDs:
   here is the pinned offline SDK boundary plus deterministic adapter parity.
 
 - Review-fix implementation commit: `00937575b9e0caa310526567bccd4bd281173f65`
+- No merge or push was performed.
+
+## Round 2 review fixes (2026-08-18)
+
+Status: `DONE_WITH_CONCERNS`. Every Round 2 identity finding is implemented and
+verified. The remaining concern is still the untouched Control Plane Worker
+dispatcher compile error; it prevents the repository-wide `check` tail and the
+auth-topology wrapper from starting, but does not affect the passing official
+database CI-equivalent gate.
+
+### Delivered Round 2 corrections
+
+- Invitation registration now resolves the exact pending invitation before any
+  provider call and durably seals its id, Tenant, role, resource version, and
+  SHA-256 secret digest into the schema-12 binding. The row contains no plaintext
+  invitation secret or email. A verified invitee is created by the new
+  caller-owned `registerInvitedIdentity` service as Actor + AuthSubject + private
+  PII only; it creates no self Tenant, Membership, or Profile. `acceptInvitation`
+  then creates only the invitation-authorized B2B Membership/Profile in the same
+  transaction as schema-12 consumption, invited registration, and Session issue.
+- Email verification start now has explicit `reserved`, `finalized`, and `failed`
+  provider-start states plus bounded attempts. Reservation commits before the
+  provider effect. A definite provider rejection marks the row failed and permits
+  one controlled retry; unavailable/unknown finalization remains reserved and
+  fails closed so the provider effect is not repeated. Expired start replays and
+  consumes commit `expired` before returning a stable public failure.
+- The gateway and repository compute canonical start hashes from normalized
+  email, request client kind, device label, flow kind, and invitation digest.
+  Caller hashes are compared to the server result using constant-time byte
+  comparison and temporary buffers are cleared. The Apple/password-reset provider
+  starts likewise compute their canonical hashes from the actual flow facts.
+- Email verification loads the durable client kind and exact binding before
+  calling `verifyOtp`. A wrong Web/native transport performs zero provider effect,
+  does not consume schema 12, and remains retryable with the correct transport.
+- Public invitation acceptance uses deterministic server-derived subkeys for the
+  acceptance and Session stages. Both stages are in one transaction: the first
+  request returns the one-time Session secret; replay returns calm
+  `IDEMPOTENCY_CONFLICT`, persists no raw secret, and creates no additional Session.
+  The Session subkey payload includes the bound client kind and device label.
+- Reauthentication and protected Session revocation now validate the released
+  canonical payload hash, expected resource version, and durable idempotency
+  record. Each uses database clock and row locks inside one caller-owned
+  transaction; the Task 6 recent-reauth guard and final revocation remain in that
+  same transaction. Replay returns the stored safe view, changed payload and stale
+  versions conflict, and concurrent requests settle once.
+- Company creation and company invitation creation now turn replay of a
+  previously delivered one-time secret into a calm conflict rather than
+  serializing `undefined` into a 500 response. No invitation or Session secret is
+  persisted for replay.
+- Invited registration maps only the two exact identity unique constraints to a
+  public conflict. Error classification reads own data descriptors only, never
+  invokes accessors/prototype traps, and rethrows unrelated database errors.
+- Contracts 0.6.0 add `verification_id` to the current invitation registration
+  response and its current 0.6 release artifact. Contracts 0.5.0 and migrations
+  010/011 remain byte-identical.
+
+### Round 2 RED evidence
+
+The production edits followed focused failing tests:
+
+- `npm run test -w @core-agent/contracts` — RED: 179/180, because invitation
+  registration did not publish the durable `verification_id`.
+- `node --import tsx --test apps/identity-gateway/tests/*.test.ts` — initial Round
+  2 RED: 66/70. The four failures proved missing reservation/finalization,
+  invitation binding, pre-provider cross-mode validation, and unsafe one-time
+  replay behavior.
+- `node --import tsx --test --test-concurrency=1 packages/runtime-core/tests/email-verification-transactions.test.ts`
+  — schema-12 state-machine RED: 0/2 for the old start semantics; later caller-owned
+  expiry RED was 1/2 because throwing inside the outer transaction rolled the
+  `expired` transition back.
+- The new invited-identity registration focus was RED 0/1 before the service
+  existed. Caller-owned invitation acceptance initially rolled back the composed
+  graph, and exact bound-digest mismatch was not rejected.
+- Route-focused one-time replay RED had two failures: company/invitation creation
+  replays reached 500 through missing required secrets. Invitation acceptance
+  initially reused the public key for both operations and could not complete the
+  first accept + Session transaction.
+- Reauthentication/Session-revoke focuses were RED for missing caller-owned
+  reauthentication export, stale-version acceptance, replay version drift, and a
+  Session authentication version of 2 where the released expected version was 1.
+- Provider-start forged-payload RED showed that the same supplied hash with changed
+  normalized input was accepted; the unknown-finalization focus was 0/1 because a
+  retry repeated the provider effect instead of returning a bounded conflict.
+- `node --import tsx --test --test-name-pattern='invited registration applies' packages/runtime-core/tests/register-b2c-collision.test.ts`
+  — final self-review RED: 0/1 at module load because the invited service did not
+  expose or implement bounded accessor-safe collision classification. The same
+  exact command is GREEN 1/1 after the fix.
+
+### Round 2 real-boundary evidence
+
+- `CONTROL_PLANE_TEST_DATABASE_URL=postgresql://core_agent_ci@127.0.0.1:55439/core_agent_runtime npm run test:postgres -w @core-agent/identity-gateway`
+  — PASS 1/1. Real Fastify plus production composition proves B2B invited admin
+  and consultant onboarding, exact Membership/Profile/session results, no self
+  graph, company/invitation one-time-secret replay, Task 6 protected mutation,
+  expired schema-12 convergence, replay, and concurrent single settlement.
+- The same production-composition suite proves the invalid matrix: wrong or
+  replaced secret, revoked/expired invitation, email mismatch, changed payload,
+  late binding drift after a valid start, replay, and concurrent verification all
+  leave zero partial identity graph and at most one Session/provider settlement.
+- Full trust-only Runtime Core PostgreSQL was observed at 336 total / 335 pass / 1
+  expected protected-role-bootstrap failure because
+  `CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE` was intentionally absent. The
+  official protected run below asserts all 336, including empty -> 12, schema 10
+  -> 12, schema 11 -> 12, dirty schema-11 reconvergence, ACL/catalog/rollback,
+  restart, expiry, replay/conflict, and concurrency.
+
+### Final Round 2 verification
+
+- `npm run check -w @core-agent/contracts` — PASS: 180/180; schemas, cumulative
+  0.6 compatibility, 85 valid fixtures, and 11 invalid fixtures.
+- `npm run check -w @core-agent/runtime-core` — PASS: build and 82/82.
+- `npm run check -w @core-agent/identity-gateway` — PASS: build and 72/72.
+- `npm run test:unit` — PASS: Runtime 192/192, Contracts 180/180, Runtime Core
+  82/82, Identity Gateway 72/72, and Web 129/129 across 9 files.
+- `npm run test:runtime:database-ci-equivalent` — PASS: 3/3 in
+  125249.099542 ms. The fresh protected run asserted Runtime Core PostgreSQL 336,
+  Identity Gateway PostgreSQL 1, Control Plane API PostgreSQL 14, and integration
+  93; injected-failure cleanup and output-leak redaction also passed.
+- `npm run compat:history -w @core-agent/contracts -- --base e7624fe0425ff470b646f8322254d5e9e3857da8`
+  — PASS. Accepted 0.5.0 was not modified.
+- `npm ls fastify @fastify/cookie @supabase/supabase-js @core-agent/contracts --depth=1`
+  — PASS: Fastify 5.11.2, Cookie 11.1.2, Supabase 2.112.2, Contracts 0.6.0.
+- `node scripts/verify-no-secret.mjs identity-auth-private-sentinel` and
+  `git diff --check` — PASS. Gateway production source has no console/request/reply
+  logging calls; public contracts retain their credential/PII forbidden-name gate.
+- Official-CI residual checks found zero labeled containers, volumes, or networks.
+  Base diffs for migrations 010/011 and Contracts 0.5.0 are empty.
+- SHA-256: 010
+  `eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381`;
+  011 `fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393`;
+  amended 012 `ebb81c2f6de869228e6b6e16bc92f055412d28441217b8eb51266c46c496d6b2`.
+
+### Remaining independent concern and commit
+
+- Root `npm run check` again passes Task 7 packages and Control Plane API 17/17,
+  then fails only at untouched `apps/control-plane-worker/src/main.ts:60,129`
+  with the same two TS2345 `project_platform_memberships` dispatcher diagnostics.
+  Standalone Worker build exits 1 with the same output, and its diff from the Task
+  7 base is empty.
+- `npm run test:runtime:database-auth-topology` remains 0/1 because that same
+  Worker Docker build fails before topology execution; its failed run cleaned all
+  exact resources. The passing official database CI-equivalent is the formal Task
+  7 database gate.
+- Round 2 implementation commit:
+  `d92335a9f` (`fix(identity): close gateway review findings`).
 - No merge or push was performed.
