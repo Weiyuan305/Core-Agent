@@ -8,6 +8,92 @@
 - Original implementation commit: `2240a1bb0645e50a22204783f7cac5362924d906`
 - No merge or push was performed.
 
+## Round 10 review fixes (2026-08-18)
+
+Status: `DONE_WITH_CONCERNS`. Both remaining Provider-started settlement findings
+are fixed through the pinned Supabase adapter and production Fastify/PostgreSQL
+composition. The only failed formal gates are the unchanged Worker compile defect
+and the already documented integration teardown-only database-drop failure.
+
+### Delivered Round 10 corrections
+
+- A `provider_started` password reset with the exact encrypted subject and exact
+  normalized email, but Provider evidence predating the durable attempt, now
+  returns the closed internal settlement checkpoint. It does not become a public
+  success and does not mark the Provider operation completed.
+- The adapter's former 30-second process-clock lease is removed. A concurrent loser
+  cannot turn an arbitrarily long in-flight Provider update into a terminal 401 or
+  clear the recovery Cookie merely because a Gateway clock advanced. Malformed or
+  future evidence and subject/email mismatch remain immediate terminal failures.
+- The internal checkpoint always reaches the existing production caller-owned
+  serializable transaction. PostgreSQL `clock_timestamp()` alone decides whether
+  settlement is still in progress (stable 503 with Cookie retained) or expired
+  (commit `expired`, scrub every encrypted/checkpoint field, then terminal 401 and
+  Cookie clear). No Provider effect occurs inside the retrying database phase.
+- The real barrier test advances the Gateway clock beyond the removed lease while
+  the winner remains inside the actual Supabase adapter exchange. The loser stays
+  retryable; after the winner's forced Core rollback, the loser resumes the durable
+  Provider checkpoint, revokes Sessions, and consumes the OAuth transaction without
+  repeating exchange or password update. A separate clock-skew phase proves a DB
+  clock one hour ahead of the Gateway still commits expiration and full scrub.
+- No migration, public Contract, or formal test-count manifest changed in Round 10.
+
+### Round 10 RED evidence
+
+- From `apps/identity-gateway`,
+  `node --import tsx --test --test-name-pattern='arbitrary adapter delay'
+  tests/supabase-auth-provider.test.ts` — RED 1 total / 0 pass / 1 fail. The
+  adapter returned `AUTH_CALLBACK_INVALID` instead of the internal settlement
+  checkpoint after 30.001 seconds.
+- The first disposable PostgreSQL package run reported 2 total / 0 pass / 2 fail.
+  The scoped production test returned 401 rather than the required 503 for the
+  long-running winner's loser. The other top-level failure was only strict config
+  rejecting a password-bearing test URL and is not counted as behavior evidence;
+  the database was recreated with host-trust and the exact no-password localhost
+  URL used by repository gates.
+- With the already captured loser assertion diagnostically admitted so execution
+  could reach the second phase, the focused real Fastify/Supabase/PostgreSQL test
+  was RED 1 total / 0 pass / 1 fail: the public response was terminal, but the DB
+  row remained `pending/provider_started` with both encrypted subjects, payload
+  hash, start time, and settlement deadline instead of committing expired/scrub.
+
+### Round 10 GREEN and final verification
+
+- Adapter focus — PASS 2/2 for causal checkpoint recovery and arbitrary adapter
+  delay. `npm run check -w @core-agent/identity-gateway` — PASS build and 97/97.
+  `npm run check -w @core-agent/runtime-core` — PASS build and 83/83.
+  `npm run check -w @core-agent/contracts` — PASS 180/180, schema/compatibility
+  checks, 86 valid fixtures and 11 invalid fixtures.
+- Final disposable production run:
+  `CONTROL_PLANE_TEST_DATABASE_URL=postgresql://core_agent_ci@127.0.0.1:55446/core_agent_runtime
+  npm run test:postgres -w @core-agent/identity-gateway` — PASS 2/2 in
+  4381.785 ms. It uses real `SupabaseAuthProvider`, the production OAuth store,
+  envelope protector, operations, Fastify injection, and PostgreSQL.
+- Root `npm run test:unit` — PASS: Runtime 192/192, Contracts 180/180, Runtime
+  Core 83/83, Gateway 97/97, Web 129/129 across nine files. Contracts explicit
+  history compatibility against the Task 7 base passed.
+- `npm run test:runtime:database-ci-equivalent` reported 3 total / 2 pass / 1 fail
+  in 164813.307333 ms. The protected PostgreSQL phase passed and advanced into the
+  integration command; integration reported 94 total / 93 pass / 1 teardown-only
+  failure in `agent-run.test.ts` after-hook database drop. Injected-failure cleanup
+  and output-leak redaction passed. No identity behavior failed.
+- Root `npm run check` again reaches Contracts, Core, Gateway, and API, then stops
+  only at the unchanged Worker `project_platform_memberships` TS2345 errors at
+  `main.ts:60` and `main.ts:129`. Database-auth topology is 0/1 because its image
+  build stops at the same Worker errors before topology execution.
+- `git diff --check`, sentinel secret scan, forbidden Gateway log scan, exact pin
+  check, historical Contracts 0.5 and migration 010/011 base diffs, checksum scan,
+  and final Docker labeled-resource/residual scans pass. Fastify 5.11.2, Cookie
+  11.1.2, Supabase JS 2.112.2, and Contracts 0.6.0 remain exact.
+- SHA-256 remains 010
+  `eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381`;
+  011 `fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393`;
+  unmerged 012
+  `42a2120802daa43b19f842e638e310c4285d927bc292186d996ff61af3d83767`.
+- Round 10 implementation commit:
+  `49b34e6758f5232e6cb361c11c01e2bfbc59c49e`.
+- No merge or push was performed.
+
 ## Round 9 review fixes (2026-08-18)
 
 Status: `DONE_WITH_CONCERNS`. Both remaining reset-settlement findings are fixed

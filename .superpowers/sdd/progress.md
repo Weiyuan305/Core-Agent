@@ -7,7 +7,7 @@
 - Base: `e7624fe0425ff470b646f8322254d5e9e3857da8`
 - Brief: `.superpowers/sdd/task-7-brief.md`
 - Baseline: Contracts 179/179 with fixtures 84/11; Identity Gateway 28/28.
-- Current phase: Round 9 review fixes implemented and verified; ready for cumulative parent review.
+- Current phase: Round 10 review fixes implemented and verified; ready for cumulative parent review.
 - User-approved amendment: forward-only schema 12 adds durable encrypted
   email-verification/start-idempotency authority; Entitlement reservation moved to
   schema 13. Historical 010/011 and Contracts 0.5.0 are untouched.
@@ -17,13 +17,13 @@
   explicitly unavailable; no provider or internal-detail leakage.
 - Result: Contracts 0.6.0 180/180 with fixtures 86/11; Runtime Core 83/83;
   Identity Gateway 97/97; real Fastify plus pinned Supabase adapter and PostgreSQL
-  production composition 2/2. The Round 9 official protected database stage
+  production composition 2/2. The Round 10 official protected database stage
   accepted Runtime Core 340 + Gateway 2 + API 14; all identity behavior passed.
-- Concern: the official integration phase reported the two unchanged teardown-only
-  failures (agent-run database-drop after-hook and harness-cleanup startup-delay
-  classification). The untouched Control Plane Worker still has the two existing
-  `project_platform_memberships` TS2345 errors, so root check and
-  database-auth-topology stop at that independent build before topology execution.
+- Concern: the official integration phase reported the unchanged agent-run
+  database-drop after-hook teardown failure. The untouched Control Plane Worker
+  still has the two existing `project_platform_memberships` TS2345 errors, so root
+  check and database-auth-topology stop at that independent build before topology
+  execution.
 - Original commit: `2240a1bb0645e50a22204783f7cac5362924d906`
 - Review-fix implementation commit: `00937575b9e0caa310526567bccd4bd281173f65`
 - Round 2 implementation commit: `d92335a9f`
@@ -34,3 +34,4 @@
 - Round 7 implementation commit: `97078db1df594a573259f51bea2ca50c01467378`
 - Round 8 implementation commit: `4d180ce11ddeed5e937d88c280f9e8fff4e2f7e2`
 - Round 9 implementation commit: `27162e2d8ead727ca3bcc4956b02c369809212e8`
+- Round 10 implementation commit: `49b34e6758f5232e6cb361c11c01e2bfbc59c49e`
