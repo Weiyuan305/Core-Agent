@@ -8,6 +8,80 @@
 - Original implementation commit: `2240a1bb0645e50a22204783f7cac5362924d906`
 - No merge or push was performed.
 
+## Round 18 review fix (2026-08-19)
+
+### Outcome and boundary
+
+- Apple OAuth `authorization_code`, `state`, and native `nonce` now use one
+  field-specific 8..4,096-character validator at the invitation canonical-proof
+  preflight, exactly matching Contracts 0.6.0. The shared `boundedString` remains
+  unchanged at 1..2,048 characters for transaction ids, timestamps, recovery
+  fields, and other ordinary inputs.
+- The Apple flow-cookie seal and read boundaries authenticate the full 4,096-
+  character state. Only the Apple encrypted-envelope ceiling was raised, to the
+  closed 12,288-base64url-character bound needed for the existing closed payload;
+  the recovery-cookie envelope remains capped at 4,096. Sealing rejects a 4,097-
+  character state, reading still rejects an ordinary 2,049-character transaction
+  id, and no public schema or provider behavior changed.
+- Contract and Gateway regressions cover Web and native invitation proofs at 2,049
+  and exactly 4,096, reject 4,097 independently for authorization code, state, and
+  nonce, preserve key-order-independent canonical hashing, and round-trip Apple
+  cookies at both newly reachable sizes.
+
+### Strict RED then GREEN
+
+- Contract boundary baseline:
+  `node --import tsx --test --test-name-pattern="Apple and invitation proofs" tests/public-auth.test.ts`
+  in Contracts was already GREEN 1/1, proving the approved 0.6 schema accepts the
+  requested lengths before any production edit.
+- Cookie RED:
+  `node --import tsx --test --test-name-pattern="Apple flow cookie round-trips" tests/security.test.ts`
+  was 0/1. A 2,049-character contract-valid Apple state returned `AUTH_INVALID`
+  from `readAppleFlowCookie` at `security.ts:254`.
+- Invitation preflight RED:
+  `node --import tsx --test --test-name-pattern="Apple invitation proof preflight matches" tests/routes.test.ts`
+  was 0/1. The first 2,049-character Web proof threw `INVALID_REQUEST` from
+  `assertInvitationAcceptancePayloadHash` at `security.ts:408`.
+- After the minimal field-specific implementation, the same three commands were
+  GREEN 1/1, 1/1, and 1/1. The final cookie focus, including the unchanged ordinary
+  2,048 boundary assertion, is GREEN 1/1.
+
+### Final verification and self-review
+
+- Final `npm run check -w @core-agent/identity-gateway` — PASS: build and 119/119.
+- `npm run check -w @core-agent/contracts` — PASS: 180/180, 86 valid and 11 invalid
+  fixtures, generated-schema check, and cumulative compatibility.
+- Protected `npm run test:unit` — PASS: Runtime 192/192, Contracts 180/180,
+  Runtime Core 83/83, Identity Gateway 119/119, and Web 129/129 across 9 files.
+  The initial managed-sandbox run stopped at Runtime 189/192 only because its
+  test-only loopback TCP and Unix socket listeners received `EPERM`; the identical
+  protected rerun is fully green.
+- Official `npm run test:runtime:database-ci-equivalent` — PASS 3/3 in
+  128,938.539875 ms. The fresh protected gate retained the observed manifest
+  summaries Runtime Core PostgreSQL 344, Identity Gateway PostgreSQL 2, Control
+  Plane API PostgreSQL 14, and integration 93; injected-failure cleanup and output-
+  leak redaction passed. Exact label scans afterward found zero containers,
+  volumes, or networks.
+- Compatibility history from base passes. Exact pins remain Fastify 5.11.2,
+  `@fastify/cookie` 11.1.2, Supabase JS 2.112.2, and Contracts 0.6.0.
+  `git diff --check`, the sentinel scanner, production logging scan, accepted 0.5
+  release diff, and historical migration diff are empty.
+- No migration changed. SHA-256 remains: 010
+  `eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381`;
+  011 `fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393`;
+  012 `2e7a7d0b8f910ff5253ace5dff1f0cc242224ec432e75621f15f57d93d14af12`.
+- Self-review found no provider call, persistence, authority, output/logging, or
+  public-contract change. The known untouched Worker TS2345 concern documented in
+  Round 17 remains independent and was not expanded into this bounded fix.
+
+### Files and commit
+
+- Production: `apps/identity-gateway/src/security.ts`.
+- Tests: `apps/identity-gateway/tests/security.test.ts`, `routes.test.ts`, and
+  `packages/contracts/tests/public-auth.test.ts`.
+- Round 18 implementation commit: `dddf1d20c`
+  (`fix(identity): align apple oauth proof bounds`). No merge or push was performed.
+
 ## Round 17 review fixes (2026-08-19)
 
 ### Outcome and design

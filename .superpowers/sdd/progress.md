@@ -7,7 +7,8 @@
 - Base: `e7624fe0425ff470b646f8322254d5e9e3857da8`
 - Brief: `.superpowers/sdd/task-7-brief.md`
 - Baseline: Contracts 179/179 with fixtures 84/11; Identity Gateway 28/28.
-- Current phase: Round 17 review fixes implemented and verified; ready for cumulative parent review.
+- Current phase: Round 18 Apple OAuth proof-bound fix implemented and verified;
+  ready for cumulative parent review.
 - User-approved amendment: forward-only schema 12 adds durable encrypted
   email-verification/start-idempotency authority; Entitlement reservation moved to
   schema 13. Historical 010/011 and Contracts 0.5.0 are untouched.
@@ -16,7 +17,7 @@
   provider effects outside automatically retried transactions; Task 9 deletion
   explicitly unavailable; no provider or internal-detail leakage.
 - Result: Contracts 0.6.0 180/180 with fixtures 86/11; Runtime Core 83/83;
-  Identity Gateway 117/117; real Fastify plus pinned Supabase adapter and PostgreSQL
+  Identity Gateway 119/119; real Fastify plus pinned Supabase adapter and PostgreSQL
   production composition 2/2. The Round 17 official CI-equivalent is fully green
   3/3 and accepted Runtime Core 344 + Gateway 2 + API 14 + integration 93.
 - Concern: the untouched Control Plane Worker still has the two existing
@@ -40,3 +41,4 @@
 - Round 15 implementation commit: `b346bf60a`.
 - Round 16 implementation commit: `7af365f2b`.
 - Round 17 implementation commit: `2a9fb545b`.
+- Round 18 implementation commit: `dddf1d20c`.
