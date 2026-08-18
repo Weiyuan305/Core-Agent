@@ -8,6 +8,109 @@
 - Original implementation commit: `2240a1bb0645e50a22204783f7cac5362924d906`
 - No merge or push was performed.
 
+## Round 4 review fixes (2026-08-18)
+
+Status: `DONE_WITH_CONCERNS`. All three Round 4 identity findings are implemented
+and verified at the HTTP, pinned provider-adapter, and real PostgreSQL boundaries.
+The only remaining failures are the independently reproduced unchanged integration
+database-drop teardown and Control Plane Worker compile errors described below.
+
+### Delivered Round 4 corrections
+
+- Native reauthentication now requires an explicit released `client_kind` and,
+  after Task 6 Session authentication, compares it exactly with the stored Session
+  kind. A Web Session secret cannot be replayed as native, and iphone/macos cannot
+  cross modes. The check precedes actor rate limiting, recent reauthentication,
+  provider password verification, and durable mutation. Web Cookie/CSRF behavior
+  remains compatible when `client_kind` is omitted or explicitly `web`.
+- Schema 12 now records a database-clock `provider_verification_started_at`, a
+  bounded attempt lease, and a 32-byte proof HMAC. OTP verification is admitted
+  durably before the provider effect. Concurrent callers with the same proof see
+  `in_progress`; a different proof is rejected; after the lease, the exact proof
+  may recover from the original start timestamp without repeating an unconstrained
+  attempt. No verification code, provider subject, email, or provider token is
+  stored in plaintext.
+- General pre-verification service-role recovery was removed. The gateway first
+  calls the one-use provider OTP operation. Only after that call fails may it load
+  the matching durable attempt and inspect the exact service-role subject. The
+  pinned Supabase adapter accepts only own-data subject/email and a strict UTC
+  `email_confirmed_at` within `[provider_verification_started_at, database_now]`.
+  Pre-confirmed, mismatched, old, future, and malformed facts fail closed. A
+  successful verification checkpoint also enforces the same causal window.
+- Apple sign-in start, Apple link start, every Apple callback, invitation Apple
+  callback, and reauthentication now consume a route/client pre-auth bucket before
+  Session authentication or any provider effect. Link/reauth flows consume an
+  additional actor bucket only after authentication. Invalid Session/provider
+  attempts therefore count while account identifiers remain server-derived.
+- The current Contracts 0.6 reauthentication request adds optional
+  `client_kind`; the accepted 0.5 release remains untouched. Public rate-limit
+  storage adds the independent `apple_start` and `apple_link` buckets through the
+  still-unmerged migration 012 and exact schema-manifest amendment.
+
+### Round 4 RED evidence
+
+- `node --import tsx --test --test-name-pattern='native Session transport|pre-auth route rate|Apple sign-in start|email verification (verifies|recovers|skips)' apps/identity-gateway/tests/routes.test.ts`
+  — RED: 6 tests / 0 pass / 6 fail. The failures proved missing stored-mode checks,
+  pre-auth rate ordering, and causally gated OTP recovery.
+- `CONTROL_PLANE_TEST_DATABASE_URL=postgresql://core_agent_ci@127.0.0.1:55443/core_agent_round4 node --import tsx --test --test-name-pattern='provider verification attempt' packages/runtime-core/tests/email-verification-transactions.test.ts`
+  — RED: 1/1 failed because no durable attempt admission/release API existed.
+- `node --import tsx --test --test-name-pattern='caused by the durable attempt' apps/identity-gateway/tests/supabase-auth-provider.test.ts`
+  — RED: 1/1 failed with `Missing expected rejection`; the adapter accepted a
+  pre-existing confirmation without causal timestamp bounds.
+
+### Focused and package GREEN evidence
+
+- The same focused HTTP command is GREEN 6/6. Full gateway route and security
+  suites are respectively 26/26 and 19/19. Ordered traces prove pre-auth rate
+  consumption precedes Session/provider calls, including repeated invalid calls.
+- The real PostgreSQL email-verification repository suite is GREEN 4/4, covering
+  durable started/recovery state, exact proof conflict, lease concurrency,
+  checkpoint causality, release, restart, and old/future rejection. Focused fresh,
+  schema-10, and dirty schema-11 topology cases are GREEN 3/3.
+- Pinned Supabase causal recovery is GREEN 1/1 and deterministic fake parity is
+  green. Tests use a one-use OTP: forced checkpoint failure followed by restart
+  performs a second failing verify call and only then recovers the exact subject;
+  pre-confirmed, wrong-email, old, future, and malformed timestamps reject.
+- `npm run check -w @core-agent/identity-gateway` — PASS: build and 83/83.
+- `npm run check -w @core-agent/runtime-core` — PASS: build and 82/82 unit tests.
+- `npm run check -w @core-agent/contracts` — PASS: 180/180, with 85 valid and 11
+  invalid fixtures and cumulative 0.6 compatibility.
+- `npm run test:unit` — PASS: Runtime 192, Contracts 180, Runtime Core 82,
+  Identity Gateway 83, and Web 129 across 9 files.
+- Real Fastify plus production composition is GREEN 1/1. It proves Web-secret as
+  iphone rejection, iphone/macos mismatch rejection, correct native and Web modes,
+  no downstream provider/durable effect on mismatch, and the causal one-use OTP
+  checkpoint/restart/concurrency path against PostgreSQL.
+
+### Formal database, topology, and audit evidence
+
+- A clean protected PostgreSQL 17 SCRAM run observed Runtime Core PostgreSQL
+  `339 tests / 339 pass / 0 fail` in 154482.247833 ms. The checked count manifest
+  was updated from this observed summary only.
+- `npm run test:runtime:database-ci-equivalent` reached and passed its protected
+  Runtime Core 339, Identity Gateway 1, and Control Plane API 14 summaries. All 93
+  integration behavior subtests passed, but the wrapper ended 2/3 because the
+  unchanged `agent-run.test.ts` after-hook again failed to drop its database
+  (94 total / 93 pass / 1 teardown failure). This is the same independently
+  repeated teardown concern recorded in Round 3, so it was not blindly rerun.
+- Root `npm run check` again passes Contracts, Runtime Core, Gateway 83, and
+  Control Plane API 17, then stops only on unchanged
+  `apps/control-plane-worker/src/main.ts:60,129` TS2345 diagnostics for
+  `project_platform_memberships`. `npm run test:runtime:database-auth-topology`
+  consequently reports 0/1 before topology execution at the same Worker Docker
+  build; its exact resources were cleaned.
+- `npm ls fastify @fastify/cookie @supabase/supabase-js @core-agent/contracts --depth=1`
+  — PASS: Fastify 5.11.2, Cookie 11.1.2, Supabase 2.112.2, Contracts 0.6.0.
+- Sentinel and exact protected-credential `verify-no-secret` scans, gateway logging
+  residual scan, and `git diff --check` pass. Base diffs for migrations 010/011 and Contracts
+  0.5 are empty. SHA-256: 010
+  `eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381`;
+  011 `fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393`;
+  amended 012 `7545113387693ca0a944dd09033df0941333bfbbc9e8f23d3d622b84a6155bf8`.
+- Round 4 implementation commit:
+  `7834f552c2b6dac9ed9a836f96c9bef97b00b457`.
+- No merge or push was performed.
+
 ## Round 3 review fixes (2026-08-18)
 
 Status: `DONE_WITH_CONCERNS`. All Round 3 Identity Gateway findings are fixed
