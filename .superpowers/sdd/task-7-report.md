@@ -8,6 +8,85 @@
 - Original implementation commit: `2240a1bb0645e50a22204783f7cac5362924d906`
 - No merge or push was performed.
 
+## Round 19 review fixes (2026-08-19)
+
+### Outcome and security boundary
+
+- Web Apple cookies no longer contain raw OAuth state. Sealing computes a fixed
+  `hmac-sha256` digest with the managed 32-byte flow key and a closed
+  `apple-flow:{sign_in|link}:state:v1` purpose. The authenticated encrypted payload
+  contains only transaction id, fixed state digest, exact Web client kind, link
+  Actor when applicable, authorization/settlement deadlines, and flow kind. Web
+  callbacks recompute that digest over the released body state and compare it in
+  constant time before provider work; only a matching body state is forwarded.
+  Web has no nonce field, and native state/nonce remains cookie-free.
+- The Apple encrypted-value parser is again closed at 1,536 base64url characters,
+  and both Apple cookie issuers reject any complete `Set-Cookie` header at 2,048
+  bytes or more. Real Fastify injection proves 4,096 ASCII and 4,096 emoji states
+  produce equal fixed-size headers below 2,048 bytes, survive the actual
+  `Set-Cookie` -> `Cookie` path, and reject a changed state before the provider.
+- OAuth proof validation now counts Unicode code points with a bounded iterator,
+  not UTF-16 code units. It accepts 8..4,096 code points and at most 16,384 UTF-8
+  bytes. Contracts, Web/native invitation preflight, and the real Fastify boundary
+  accept 4,096 emoji and reject 4,097 while the shared ordinary 2,048-character
+  helper remains unchanged.
+- Provider authorization URLs are checked with that same exact state validator
+  immediately after every Apple start effect. State lengths 1 and 7 now return the
+  stable calm `AUTH_PROVIDER_UNAVAILABLE` 503 before any Web cookie or native
+  response. Apple link cookies additionally bind the server-authenticated Actor.
+- No public schema, database schema, provider effect ordering, or response field
+  changed. Supabase JS remains pinned at 2.112.2; the required official changelog
+  markdown request returned no relevant breaking item for this local boundary fix.
+
+### Strict RED then GREEN
+
+- Contracts baseline
+  `node --import tsx --test --test-name-pattern="Apple and invitation proofs" tests/public-auth.test.ts`
+  was already GREEN 1/1: the approved JSON Schema correctly treats 4,096 emoji as
+  4,096 code points and rejects 4,097.
+- Gateway invitation preflight focus was RED 0/1. Its new 4,096-emoji native proof
+  threw `INVALID_REQUEST` from `security.ts:416`, proving the UTF-16 length defect.
+- The combined security focus was RED 0/3:
+  `node --import tsx --test --test-name-pattern="fixed purpose digest|compact real Set-Cookie|rejects short provider state" tests/security.test.ts`.
+  The decrypted cookie still returned raw state and exceeded the new bound; the
+  real 4,096-ASCII start emitted a header above 2,048 bytes; and a one-code-point
+  provider state returned the wrong 401 instead of the start-boundary 503.
+- After the minimal production changes, the same invitation focus is GREEN 1/1,
+  the same security focus is GREEN 3/3, and the Contracts focus remains GREEN 1/1.
+
+### Full verification and self-review
+
+- Final `npm run check -w @core-agent/identity-gateway` — PASS: build and 121/121.
+- `npm run check -w @core-agent/contracts` — PASS: 180/180, 86 valid and 11 invalid
+  fixtures, generated schema, and cumulative compatibility checks.
+- Protected `npm run test:unit` — PASS: Runtime 192/192, Contracts 180/180,
+  Runtime Core 83/83, Identity Gateway 121/121, and Web 129/129 across 9 files.
+- Official `npm run test:runtime:database-ci-equivalent` — PASS 3/3 in
+  153,243.754209 ms. Its fresh protected run retained Runtime Core PostgreSQL 344,
+  Identity Gateway PostgreSQL 2, Control Plane API PostgreSQL 14, and integration
+  93, including the updated real Apple link cookie fixture; injected-failure
+  cleanup and output-leak redaction passed. Exact label scans afterward found zero
+  containers, volumes, or networks.
+- Compatibility history from the Task 7 base passes. Exact pins remain Fastify
+  5.11.2, `@fastify/cookie` 11.1.2, Supabase JS 2.112.2, and Contracts 0.6.0.
+  `git diff --check`, unique-sentinel and production logging scans, accepted 0.5
+  release diff, and historical migration diff are empty.
+- Migration checksums remain: 010
+  `eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381`;
+  011 `fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393`;
+  012 `2e7a7d0b8f910ff5253ace5dff1f0cc242224ec432e75621f15f57d93d14af12`.
+- Self-review found no raw state/nonce in decrypted cookie data, no provider effect
+  inside a retried transaction, no authority regression, and no public leakage.
+  The known untouched Worker TS2345 concern remains independent.
+
+### Files and commit
+
+- Production: `apps/identity-gateway/src/security.ts` and `src/routes/apple.ts`.
+- Tests: Gateway security/routes/real PostgreSQL production composition plus the
+  Contracts public-auth boundary test.
+- Round 19 implementation commit: `e24417eff`
+  (`fix(identity): compact apple flow proof binding`). No merge or push occurred.
+
 ## Round 18 review fix (2026-08-19)
 
 ### Outcome and boundary
