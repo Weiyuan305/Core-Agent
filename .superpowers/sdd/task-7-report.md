@@ -8,6 +8,82 @@
 - Original implementation commit: `2240a1bb0645e50a22204783f7cac5362924d906`
 - No merge or push was performed.
 
+## Round 12 review fix (2026-08-18)
+
+Status: `DONE_WITH_CONCERNS`. The final concurrent exact-observation loser now
+resumes a durable Provider-completed password-reset settlement. All Task 7 gates,
+including the official protected database CI-equivalent, pass. The only concern
+remains the unchanged Control Plane Worker compile defect that prevents the
+separate auth-topology image from reaching its scenario.
+
+### Delivered Round 12 correction
+
+- Two requests may both load the same `provider_started` row and independently
+  obtain exact service-role evidence before either reaches Core. If the winner
+  commits `provider_completed` and then rolls back its Session-revocation phase,
+  the loser now resumes only when the locked row is the same pending password-reset
+  transaction, its canonical completion payload hash matches, the observation is
+  exact and causal under the same PostgreSQL clock, and its evidence timestamp is
+  the already persisted completion evidence.
+- Core decrypts the durable encrypted Provider subject inside that caller-owned
+  serializable observation transaction and checks every closed subject field
+  against the adapter observation. It returns the durable subject, not the caller
+  value, to the existing Session-revoke/consume phase. The production builder now
+  shares the same purpose-derived OAuth envelope protector between the pinned
+  adapter and Core composition; secret source buffers retain their existing
+  zeroization.
+- Invalid typed observations remain terminal, old evidence remains retryable, and
+  future or malformed evidence remains terminal before the already-completed
+  branch can run. An exact observation with a different durable subject or
+  evidence also fails closed. No Provider effect moved inside a database retry.
+- The real deterministic barrier performs one Provider exchange/password update,
+  forces the first durable Provider checkpoint attempt to fail, then admits two
+  exact retries before releasing either Core observation. The winner commits the
+  observation and is forced to 500 in phase two with its Cookie retained; the
+  loser sees `provider_completed`, revokes all Core Sessions, consumes the
+  transaction, returns 200, and clears the Cookie without repeating Provider work.
+  A second barrier gives the concurrent loser a closed subject-mismatch observation;
+  it remains 401, clears its Cookie, leaves the Session active, and cannot consume
+  the winner's completed checkpoint.
+
+### Round 12 RED/GREEN evidence
+
+- Focused RED against disposable PostgreSQL 17 on localhost:
+  `CONTROL_PLANE_TEST_DATABASE_URL=postgresql://core_agent_ci@127.0.0.1:55448/core_agent_runtime node --import tsx --test --test-concurrency=1 --test-name-pattern='defer provider-started reset settlement' tests/postgres/production-composition.test.ts`
+  — 1 total / 0 pass / 1 fail. The exact race returned statuses `[401, 500]`
+  instead of `[200, 500]`, proving the loser was rejected solely because the
+  winner had already changed the row to `provider_completed`.
+- The same focused command is GREEN 1/1 in 1576.613375 ms. The complete Gateway
+  check is build plus 98/98. The direct formal Gateway PostgreSQL package is GREEN
+  2/2 in 3667.627125 ms; its formal count is unchanged because both new barrier
+  matrices extend the existing production reset test.
+
+### Round 12 final verification
+
+- Contracts pass 180/180 plus 86 valid and 11 invalid fixtures; Runtime Core
+  passes build and 83/83. Root `test:unit` passes Runtime 192/192, Contracts
+  180/180, Runtime Core 83/83, Gateway 98/98, and Web 129/129 across nine files.
+- `npm run test:runtime:database-ci-equivalent` is GREEN 3/3 in
+  145457.801333 ms. Its fresh protected stage accepted Runtime Core PostgreSQL
+  340, Gateway PostgreSQL 2, API PostgreSQL 14, and integration 93; injected-failure
+  cleanup and output-leak redaction also passed. Exact labeled resources and the
+  owned Round 12 database were absent afterward.
+- Contracts history compatibility, exact pins, sentinel secret scan, forbidden
+  log/legacy-checkpoint scan, `git diff --check`, and base immutability for
+  Contracts 0.5, migrations 010/011, and the Worker source pass. Fastify remains
+  5.11.2, Cookie 11.1.2, Supabase JS 2.112.2, and Contracts 0.6.0.
+- Migration 012 is unchanged. SHA-256 remains 010
+  `eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381`;
+  011 `fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393`;
+  012 `42a2120802daa43b19f842e638e310c4285d927bc292186d996ff61af3d83767`.
+- Root `npm run check` again reaches and passes Contracts, Core, Gateway, and API,
+  then stops only at unchanged Worker TS2345 diagnostics at `src/main.ts:60` and
+  `src/main.ts:129`. `database-auth-topology` is 0/1 because its image build
+  reaches the same Worker diagnostics; all exact cleanup resources are absent.
+- Round 12 implementation commit:
+  `6660f03bd` (`fix(identity): resume concurrent reset settlement`).
+- No merge or push was performed.
+
 ## Round 11 review fixes (2026-08-18)
 
 Status: `DONE_WITH_CONCERNS`. The final Provider-started observation finding is

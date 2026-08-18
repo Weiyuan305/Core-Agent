@@ -7,7 +7,7 @@
 - Base: `e7624fe0425ff470b646f8322254d5e9e3857da8`
 - Brief: `.superpowers/sdd/task-7-brief.md`
 - Baseline: Contracts 179/179 with fixtures 84/11; Identity Gateway 28/28.
-- Current phase: Round 11 final review fix implemented and verified; ready for cumulative parent review.
+- Current phase: Round 12 final concurrent-settlement review fix implemented and verified; ready for cumulative parent review.
 - User-approved amendment: forward-only schema 12 adds durable encrypted
   email-verification/start-idempotency authority; Entitlement reservation moved to
   schema 13. Historical 010/011 and Contracts 0.5.0 are untouched.
@@ -34,3 +34,4 @@
 - Round 9 implementation commit: `27162e2d8ead727ca3bcc4956b02c369809212e8`
 - Round 10 implementation commit: `49b34e6758f5232e6cb361c11c01e2bfbc59c49e`
 - Round 11 implementation commit: `5984028b3`
+- Round 12 implementation commit: `6660f03bd`
