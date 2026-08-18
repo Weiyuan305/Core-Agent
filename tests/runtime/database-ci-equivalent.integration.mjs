@@ -186,7 +186,7 @@ async function runCiEquivalentScenario({ injectedFailure = false, injectedOutput
     assert.match(postgresOutput, /a normally issued Apple Session becomes eligible after verified password reauthentication/u);
     assert.match(postgresOutput, /protected reauthenticated mutations serialize behind disable unlink and revoke/u);
     assert.match(postgresOutput, /transaction-scoped guard retains canonical locks through a real protected Session command/u);
-    assert.match(postgresOutput, /public fixed-window rate limits persist only account and IP-device HMACs/u);
+    assert.match(postgresOutput, /public fixed-window rate limits persist independent account and IP-device HMAC dimensions/u);
     const integrationOutput = protectedRun("npm", ["run", "test:integration"], environment, credential, credentialFile);
     assertNodeTestSummaries(integrationOutput, [expectedCounts.integration.testCount]);
     assert.match(integrationOutput, /provision, converse, stream, restart, and resume/u);

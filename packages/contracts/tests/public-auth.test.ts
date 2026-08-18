@@ -153,7 +153,7 @@ const requestCases: Array<[string, unknown, unknown]> = [
   ["reauthentication", ReauthenticationRequestSchema, { ...idem, expected_resource_version: 1, password: "correct-horse" }],
   ["invitation inspect", InvitationInspectRequestSchema, { schema_version: 1, invitation_secret: invitationSecret }],
   ["invitation email registration", InvitationEmailRegistrationRequestSchema, { ...idem, invitation_secret: invitationSecret, email: "invitee@example.test", password: "correct-horse", client_kind: "web" }],
-  ["invitation acceptance", InvitationAcceptanceRequestSchema, { ...idem, expected_resource_version: 1, invitation_secret: invitationSecret, authentication_proof: { kind: "email_password", client_kind: "web", verification_proof: "opaque_verified_email_proof" } }],
+  ["invitation acceptance", InvitationAcceptanceRequestSchema, { ...idem, expected_resource_version: 1, invitation_secret: invitationSecret, client_kind: "web" }],
   ["invitation revoke", InvitationRevokeRequestSchema, { ...idem, expected_resource_version: 1, invitation_id: "invitation_01", reason_code: "administrator_revoked" }],
   ["company creation", CompanyCreateRequestSchema, { ...idem, display_name: "Synthetic Company", administrator_email: "admin@example.test" }],
   ["company member invite", CompanyMemberInviteRequestSchema, { ...idem, tenant_id: "tenant_01", email: "invitee@example.test", role: "consultant" }],
@@ -251,7 +251,9 @@ test("Apple and invitation proofs use closed Web and native PKCE variants", () =
 
   const accept = compileRequired("InvitationAcceptanceRequestSchema", InvitationAcceptanceRequestSchema);
   const common = { ...idem, expected_resource_version: 1, invitation_secret: invitationSecret };
-  assert.equal(accept.Check({ ...common, authentication_proof: { kind: "email_password", client_kind: "web", verification_proof: "opaque_verified_email_proof" } }), true);
+  assert.equal(accept.Check({ ...common, client_kind: "web" }), true);
+  assert.equal(accept.Check({ ...common, client_kind: "web", verification_proof: "provider-access-token" }), false);
+  assert.equal(accept.Check({ ...common, authentication_proof: { kind: "email_password", client_kind: "web", verification_proof: "provider-access-token" } }), true, "the immutable 0.5 wire branch stays parseable, but the Gateway rejects it");
   assert.equal(accept.Check({ ...common, authentication_proof: { kind: "email_password", client_kind: "web", email: "invitee@example.test", password: "correct-horse" } }), false);
   assert.equal(accept.Check({ ...common, authentication_proof: { kind: "apple", client_kind: "web", transaction_id: "oauth_01", authorization_code: "opaque_code", state: "opaque_state" } }), true);
   assert.equal(accept.Check({ ...common, authentication_proof: { kind: "apple", client_kind: "macos", transaction_id: "oauth_01", authorization_code: "opaque_code", state: "opaque_state", nonce: "opaque_native_nonce", pkce_code_verifier: "b".repeat(43) } }), true);
@@ -634,12 +636,14 @@ test("invitation registration stays pending until final verified-email acceptanc
     ...idem,
     expected_resource_version: 1,
     invitation_secret: invitationSecret,
-    authentication_proof: {
-      kind: "email_password",
-      client_kind: "web",
-      verification_proof: "opaque_verified_email_proof",
-    },
+    client_kind: "web",
   }), true);
+  assert.equal(accept.Check({
+    ...idem,
+    expected_resource_version: 1,
+    invitation_secret: invitationSecret,
+    authentication_proof: { kind: "email_password", client_kind: "web", verification_proof: "provider-access-token" },
+  }), true, "0.6 remains additive while the Gateway rejects this legacy branch before authentication");
 });
 
 test("public views return every resource version required by the next mutation", () => {

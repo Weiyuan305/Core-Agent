@@ -13,6 +13,7 @@ import { IdentityGatewayFailure } from "../errors.js";
 import type { AppleAuthorizationCallback, AppleAuthorizationStart } from "../providers/auth-provider.js";
 import {
   APPLE_FLOW_COOKIE_NAME,
+  assertAppleCallbackPayloadHash,
   assertClientTransport,
   assertExactRedirect,
   clearAppleFlowCookie,
@@ -84,7 +85,6 @@ export function canonicalWebAppleCallback(
   body: AppleCallbackBody,
   flowKind: "sign_in" | "link",
 ): AppleAuthorizationCallback {
-  clearAppleFlowCookie(reply);
   const sealed = request.cookies[APPLE_FLOW_COOKIE_NAME];
   if (sealed === undefined) throw new IdentityGatewayFailure("AUTH_INVALID");
   const binding = readAppleFlowCookie(dependencies.flowCookieKey, sealed, dependencies.now());
@@ -154,6 +154,7 @@ export async function registerAppleRoutes(app: FastifyInstance, dependencies: Id
   app.post("/auth/v1/apple/callback", { schema: { body: AppleAuthorizationCallbackRequestSchema, response: { 200: AppleAuthorizationCallbackResponseSchema } } }, async (request, reply) => {
     const body = request.body as AppleCallbackBody;
     assertClientTransport(request, body.client_kind, dependencies.config);
+    assertAppleCallbackPayloadHash(body, "apple_sign_in");
     await consumePreAuthRateLimit(request, dependencies, "apple_callback", "route:apple_sign_in_callback");
     const callback = body.client_kind === "web"
       ? canonicalWebAppleCallback(request, reply, dependencies, body, "sign_in")
@@ -164,6 +165,7 @@ export async function registerAppleRoutes(app: FastifyInstance, dependencies: Id
       payloadHash: body.payload_hash,
       operation: "apple_sign_in",
     });
+    if (body.client_kind === "web") clearAppleFlowCookie(reply);
     return deliverSession(reply, issued, body.client_kind);
   });
 
@@ -193,6 +195,7 @@ export async function registerAppleRoutes(app: FastifyInstance, dependencies: Id
   app.post("/auth/v1/apple/link/callback", { schema: { body: AppleIdentityLinkRequestSchema, response: { 200: AppleIdentityLinkResponseSchema } } }, async (request, reply) => {
     const body = request.body as AppleCallbackBody;
     assertClientTransport(request, body.client_kind, dependencies.config);
+    assertAppleCallbackPayloadHash(body, "apple_link");
     await consumePreAuthRateLimit(request, dependencies, "apple_callback", "route:apple_link_callback");
     const authority = await authenticateClientMutation(request, dependencies, body.client_kind);
     await dependencies.operations.requireRecentReauthentication(authority);
@@ -200,11 +203,16 @@ export async function registerAppleRoutes(app: FastifyInstance, dependencies: Id
       ? canonicalWebAppleCallback(request, reply, dependencies, body, "link")
       : body;
     const subject = await dependencies.provider.linkApple({ ...callback, authenticatedActorId: authority.actorId });
-    return dependencies.operations.executeProtectedAuthorityCommand({
+    const result = await dependencies.operations.executeProtectedAuthorityCommand({
       kind: "apple_identity_link",
-      payload: { schema_version: body.schema_version, idempotency_key: body.idempotency_key, payload_hash: body.payload_hash },
+      payload: {
+        schema_version: body.schema_version, idempotency_key: body.idempotency_key,
+        payload_hash: body.payload_hash, transaction_id: callback.transaction_id,
+      },
       authority,
       verifiedSubject: subject,
     });
+    if (body.client_kind === "web") clearAppleFlowCookie(reply);
+    return result;
   });
 }

@@ -29,16 +29,52 @@ function emailVerificationPayload(idempotencyKey = idem.idempotency_key) {
   return { ...facts, payload_hash: canonicalPayloadHash(facts) };
 }
 
+function emailSignInPayload<T extends {
+  schema_version: 1; idempotency_key: string; email: string; password: string;
+  client_kind: "web" | "iphone" | "macos"; device_label?: string;
+}>(facts: T): T & { payload_hash: string } {
+  return {
+    ...facts,
+    payload_hash: canonicalPayloadHash({
+      schema_version: facts.schema_version,
+      idempotency_key: facts.idempotency_key,
+      normalized_email: facts.email.toLowerCase(),
+      sign_in_proof_digest: digest(facts.password),
+      client_kind: facts.client_kind,
+      ...(facts.device_label === undefined ? {} : { device_label: facts.device_label }),
+    }),
+  };
+}
+
+function appleCallbackPayload<T extends {
+  schema_version: 1; idempotency_key: string; client_kind: "web" | "iphone" | "macos";
+  transaction_id: string; authorization_code: string; state: string;
+  nonce?: string; pkce_code_verifier?: string;
+}>(flowKind: "apple_sign_in" | "apple_link", facts: T): T & { payload_hash: string } {
+  return {
+    ...facts,
+    payload_hash: canonicalPayloadHash({
+      schema_version: facts.schema_version,
+      flow_kind: flowKind,
+      idempotency_key: facts.idempotency_key,
+      client_kind: facts.client_kind,
+      transaction_id: facts.transaction_id,
+      code_proof_digest: digest(facts.authorization_code),
+      state_proof_digest: digest(facts.state),
+      ...(facts.nonce === undefined ? {} : { nonce_proof_digest: digest(facts.nonce) }),
+      ...(facts.pkce_code_verifier === undefined ? {} : { pkce_proof_digest: digest(facts.pkce_code_verifier) }),
+    }),
+  };
+}
+
 function invitationAcceptancePayload<T extends {
   schema_version: 1; idempotency_key: string; expected_resource_version: number;
-  invitation_secret: string; authentication_proof: Record<string, unknown>; device_label?: string;
+  invitation_secret: string; authentication_proof?: Record<string, unknown>;
+  client_kind?: "web" | "iphone" | "macos"; device_label?: string;
 }>(facts: T): T & { payload_hash: string } {
   const proof = facts.authentication_proof;
-  const canonicalProof = proof.kind === "email_password"
-    ? {
-      kind: proof.kind, client_kind: proof.client_kind,
-      verification_proof_digest: digest(String(proof.verification_proof)),
-    }
+  const canonicalProof = proof === undefined
+    ? { kind: "core_session", client_kind: facts.client_kind }
     : {
       kind: proof.kind, client_kind: proof.client_kind,
       callback_proof_digest: digest(JSON.stringify(proof)),
@@ -50,7 +86,7 @@ function invitationAcceptancePayload<T extends {
       idempotency_key: facts.idempotency_key,
       expected_resource_version: facts.expected_resource_version,
       invitation_digest: digest(facts.invitation_secret),
-      authentication_proof: canonicalProof,
+      authentication: canonicalProof,
       ...(facts.device_label === undefined ? {} : { device_label: facts.device_label }),
     }),
   };
@@ -71,6 +107,7 @@ async function buildApp(
       readonly accountIdentifier?: unknown;
       readonly clientIdentifier?: unknown;
     }) => number | null;
+    readonly trustedProxyAddresses?: ReadonlySet<string>;
   } = {},
 ): Promise<FastifyInstance> {
   const path = "../src/app.ts";
@@ -86,7 +123,7 @@ async function buildApp(
   let rateLimitCalls = 0;
   let providerAttemptStarted = false;
   return module.buildIdentityGatewayApp({
-    config: { publicOrigins: new Set([origin]), cookieHost: host, publicBaseUrl: `https://${host}`, providerUrl: "https://apple.example.test", appleWebRedirectUris: new Set([redirect]), appleNativeRedirectUris: new Set(["coreagent://auth/apple/callback"]), passwordResetRedirectUri: `${origin}/auth/password/reset/callback`, publicAuthEnabled: true },
+    config: { publicOrigins: new Set([origin]), cookieHost: host, publicBaseUrl: `https://${host}`, providerUrl: "https://apple.example.test", appleWebRedirectUris: new Set([redirect]), appleNativeRedirectUris: new Set(["coreagent://auth/apple/callback"]), passwordResetRedirectUri: `${origin}/auth/password/reset/callback`, publicAuthEnabled: true, trustedProxyAddresses: options.trustedProxyAddresses ?? new Set() },
     flowCookieKey: Buffer.alloc(32, 0x34),
     now: () => new Date("2026-08-17T00:00:00.000Z"),
     provider: {
@@ -110,7 +147,7 @@ async function buildApp(
       async signInEmail(input: unknown) { calls.push({ name: "signInEmail", input }); return subject; },
       async beginApple(input: unknown) { calls.push({ name: "beginApple", input }); return { transaction_id: "oauth_01", authorization_url: `https://apple.example.test/auth/v1/authorize?state=state_01&redirect_to=${encodeURIComponent((input as { redirect_uri: string }).redirect_uri)}`, expires_at: "2026-08-17T00:05:00.000Z" }; },
       async reauthenticateAndBeginAppleLink(input: unknown) { calls.push({ name: "reauthenticateAndBeginAppleLink", input }); return { transaction_id: "oauth_link", authorization_url: `https://apple.example.test/auth/v1/authorize?state=state_link&redirect_to=${encodeURIComponent((input as { redirect_uri: string }).redirect_uri)}`, expires_at: "2026-08-17T00:05:00.000Z" }; },
-      async completeApple(input: unknown) { calls.push({ name: "completeApple", input }); return subject; }, async linkApple() { return subject; },
+      async completeApple(input: unknown) { calls.push({ name: "completeApple", input }); return subject; }, async linkApple(input: unknown) { calls.push({ name: "linkApple", input }); return subject; },
       async beginPasswordReset(input: unknown) { calls.push({ name: "beginPasswordReset", input }); return { transaction_id: "reset_01", state: "state_reset", expires_at: "2026-08-17T00:05:00.000Z" }; },
       async completePasswordReset(input: unknown) { calls.push({ name: "completePasswordReset", input }); return subject; }, async verifyCurrentSubject() { return subject; },
       async reauthenticatePassword() { return subject; }, async revokeCurrentProviderSession() {}, async deleteProviderSubject() {},
@@ -143,6 +180,10 @@ async function buildApp(
         const kind = (input as { kind?: unknown }).kind;
         if (kind === "password_reset_completed" && options.failPasswordResetAuthority === true) throw new Error("forced Core revocation rollback");
         if (kind === "reauthenticate") return { schema_version: 1, reauthenticated_at: "2026-08-17T00:00:00.000Z", valid_until: "2026-08-17T00:10:00.000Z", session_resource_version: 2 };
+        if (kind === "invitation_inspect" || kind === "invitation_rate_identity") return {
+          schema_version: 1, invitation_id: "invitation_01", tenant_id: "tenant_01", role: "admin",
+          status: "pending", expires_at: "2026-08-18T00:00:00.000Z", resource_version: 1,
+        };
         if (kind === "invitation_accept") return {
           schema_version: 1, tenant_id: "tenant_01", invitation_resource_version: 2,
           membership_id: "membership_01", membership_resource_version: 1, role: "admin",
@@ -241,14 +282,75 @@ async function buildApp(
 test("route sequencing rate-limits before provider and issues Session after provider", async () => {
   const calls: Array<{ name: string; input: unknown }> = [];
   const app = await buildApp(calls);
-  const response = await app.inject({ method: "POST", url: "/auth/v1/email/sign-in", headers: { host, origin, "content-type": "application/json" }, payload: { ...idem, email: "STUDENT@EXAMPLE.TEST", password: "correct-horse", client_kind: "web" } });
+  const payload = emailSignInPayload({ schema_version: 1, idempotency_key: idem.idempotency_key, email: "STUDENT@EXAMPLE.TEST", password: "correct-horse", client_kind: "web" });
+  const response = await app.inject({ method: "POST", url: "/auth/v1/email/sign-in", headers: { host, origin, "content-type": "application/json" }, payload });
   assert.equal(response.statusCode, 200);
   assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit", "signInEmail", "issueSession"]);
   assert.equal((calls[1]?.input as { email?: unknown }).email, "student@example.test");
   assert.deepEqual((calls[2]?.input as { idempotency?: unknown }).idempotency, {
-    idempotencyKey: idem.idempotency_key, payloadHash: idem.payload_hash, operation: "email_sign_in",
+    idempotencyKey: idem.idempotency_key, payloadHash: payload.payload_hash, operation: "email_sign_in",
   });
   await app.close();
+});
+
+test("email sign-in binds normalized email password client and device before provider", async () => {
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const app = await buildApp(calls);
+  const original = {
+    schema_version: 1 as const,
+    idempotency_key: "idem_email_signin_hash",
+    email: "STUDENT@EXAMPLE.TEST",
+    password: "correct-horse",
+    client_kind: "web" as const,
+    device_label: "Browser",
+  };
+  const payloadHash = canonicalPayloadHash({
+    schema_version: original.schema_version,
+    idempotency_key: original.idempotency_key,
+    normalized_email: "student@example.test",
+    sign_in_proof_digest: digest(original.password),
+    client_kind: original.client_kind,
+    device_label: original.device_label,
+  });
+  const response = await app.inject({
+    method: "POST", url: "/auth/v1/email/sign-in",
+    headers: { host, origin, "content-type": "application/json" },
+    payload: { ...original, password: "changed-horse", payload_hash: payloadHash },
+  });
+  assert.equal(response.statusCode, 400, response.body);
+  assert.equal(calls.some(({ name }) => name === "signInEmail" || name === "issueSession"), false);
+  await app.close();
+});
+
+test("client rate identity ignores X-Forwarded-For by default and honors only an explicit trusted proxy", async () => {
+  const directCalls: Array<{ name: string; input: unknown }> = [];
+  const direct = await buildApp(directCalls);
+  for (const forwarded of ["203.0.113.10", "203.0.113.11"]) {
+    await direct.inject({
+      method: "POST", url: "/auth/v1/email/sign-in",
+      remoteAddress: "127.0.0.1",
+      headers: { host, origin, "content-type": "application/json", "x-forwarded-for": forwarded },
+      payload: emailSignInPayload({ schema_version: 1, idempotency_key: idem.idempotency_key, email: "student@example.test", password: "correct-horse", client_kind: "web" }),
+    });
+  }
+  const directIdentifiers = directCalls.filter(({ name }) => name === "consumeRateLimit")
+    .map(({ input }) => (input as { clientIdentifier?: unknown }).clientIdentifier);
+  assert.deepEqual(directIdentifiers, ["127.0.0.1", "127.0.0.1"]);
+  assert.equal(directIdentifiers.includes("untrusted-forwarded-address"), false);
+  await direct.close();
+
+  const proxiedCalls: Array<{ name: string; input: unknown }> = [];
+  const proxied = await buildApp(proxiedCalls, { trustedProxyAddresses: new Set(["127.0.0.1"]) });
+  await proxied.inject({
+    method: "POST", url: "/auth/v1/email/sign-in", remoteAddress: "127.0.0.1",
+    headers: { host, origin, "content-type": "application/json", "x-forwarded-for": "198.51.100.25" },
+    payload: emailSignInPayload({ schema_version: 1, idempotency_key: idem.idempotency_key, email: "student@example.test", password: "correct-horse", client_kind: "web" }),
+  });
+  const proxiedRate = proxiedCalls.find(({ name }) => name === "consumeRateLimit")?.input as {
+    readonly clientIdentifier?: unknown;
+  };
+  assert.equal(proxiedRate.clientIdentifier, "198.51.100.25");
+  await proxied.close();
 });
 
 test("password reset normalizes one account identifier for rate limit and provider", async () => {
@@ -285,10 +387,11 @@ test("email verification and password-reset completion consume stable client rou
     payload: emailVerificationPayload("idem_completion_rate"),
   });
   assert.equal(verification.statusCode, 429, verification.body);
-  assert.deepEqual(calls.map(({ name }) => name), ["prepareEmailVerification", "consumeRateLimit"]);
-  assert.equal((calls[1]?.input as { bucketKind?: unknown }).bucketKind, "email_verification");
-  assert.equal((calls[1]?.input as { accountIdentifier?: unknown }).accountIdentifier, "route:email_verification");
-  assert.match(String((calls[1]?.input as { clientIdentifier?: unknown }).clientIdentifier), /./u);
+  assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit"]);
+  assert.equal((calls[0]?.input as { bucketKind?: unknown }).bucketKind, "email_verification");
+  assert.equal((calls[0]?.input as { accountIdentifier?: unknown }).accountIdentifier, "route:email_verification");
+  assert.equal((calls[0]?.input as { dimensions?: unknown }).dimensions, "client");
+  assert.match(String((calls[0]?.input as { clientIdentifier?: unknown }).clientIdentifier), /./u);
   await app.close();
 
   const resetCalls: Array<{ name: string; input: unknown }> = [];
@@ -428,12 +531,53 @@ test("Apple sign-in start and callback consume route buckets before provider eff
   const callback = await app.inject({
     method: "POST", url: "/auth/v1/apple/callback",
     headers: { host, origin, "content-type": "application/json", cookie: flowCookie!.split(";", 1)[0]! },
-    payload: { ...idem, client_kind: "web", transaction_id: "oauth_01", authorization_code: "opaque-code", state },
+    payload: appleCallbackPayload("apple_sign_in", { schema_version: 1, idempotency_key: idem.idempotency_key, client_kind: "web", transaction_id: "oauth_01", authorization_code: "opaque-code", state: state! }),
   });
   assert.equal(callback.statusCode, 200, callback.body);
   assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit", "completeApple", "issueSession"]);
   assert.equal((calls[0]?.input as { bucketKind?: unknown }).bucketKind, "apple_callback");
   await app.close();
+});
+
+test("Apple sign-in and link callbacks bind every closed proof fact before provider", async () => {
+  for (const flowKind of ["apple_sign_in", "apple_link"] as const) {
+    const calls: Array<{ name: string; input: unknown }> = [];
+    const app = await buildApp(calls);
+    const facts = {
+      schema_version: 1 as const,
+      idempotency_key: `idem_${flowKind}_callback_hash`,
+      client_kind: "iphone" as const,
+      transaction_id: `oauth_${flowKind}_hash`,
+      authorization_code: "original-authorization-code",
+      state: "original-state-proof",
+      nonce: "original-nonce-proof",
+      pkce_code_verifier: "v".repeat(43),
+    };
+    const payloadHash = canonicalPayloadHash({
+      schema_version: facts.schema_version,
+      flow_kind: flowKind,
+      idempotency_key: facts.idempotency_key,
+      client_kind: facts.client_kind,
+      transaction_id: facts.transaction_id,
+      code_proof_digest: digest(facts.authorization_code),
+      state_proof_digest: digest(facts.state),
+      nonce_proof_digest: digest(facts.nonce),
+      pkce_proof_digest: digest(facts.pkce_code_verifier),
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: flowKind === "apple_sign_in" ? "/auth/v1/apple/callback" : "/auth/v1/apple/link/callback",
+      headers: {
+        host, "content-type": "application/json",
+        ...(flowKind === "apple_link" ? { authorization: `Bearer ${secret}` } : {}),
+      },
+      payload: { ...facts, authorization_code: "changed-authorization-code", payload_hash: payloadHash },
+    });
+    assert.equal(response.statusCode, 400, `${flowKind}: ${response.body}`);
+    assert.equal(calls.some(({ name }) => name === "completeApple" || name === "linkApple"
+      || name === "issueSession" || name === "executeProtectedAuthorityCommand"), false);
+    await app.close();
+  }
 });
 
 function callbackLimiter(after: number): (input: {
@@ -457,10 +601,11 @@ test("rotating Apple Web callback transactions cannot bypass one stable client r
   const callback = (transactionId: string, remoteAddress: string) => app.inject({
     method: "POST" as const, url: "/auth/v1/apple/callback", remoteAddress,
     headers: { host, origin, "content-type": "application/json" },
-    payload: {
-      ...idem, client_kind: "web", transaction_id: transactionId,
+    payload: appleCallbackPayload("apple_sign_in", {
+      schema_version: 1, idempotency_key: idem.idempotency_key,
+      client_kind: "web", transaction_id: transactionId,
       authorization_code: "opaque-code", state: "state-rotated",
-    },
+    }),
   });
 
   const first = await callback("attacker-transaction-1", "203.0.113.10");
@@ -489,11 +634,12 @@ test("native Apple sign-in and link callbacks use stable route buckets before pr
         host, "content-type": "application/json",
         ...(route.includes("/link/") ? { authorization: `Bearer ${secret}` } : {}),
       },
-      payload: {
-        ...idem, client_kind: "iphone", transaction_id: transactionId,
+      payload: appleCallbackPayload(route.includes("/link/") ? "apple_link" : "apple_sign_in", {
+        schema_version: 1, idempotency_key: idem.idempotency_key,
+        client_kind: "iphone", transaction_id: transactionId,
         authorization_code: "opaque-code", state: "state-native",
         nonce: "native-nonce-12345678", pkce_code_verifier: "v".repeat(43),
-      },
+      }),
     });
 
     const first = await request("attacker-native-1", "203.0.113.20");
@@ -592,7 +738,7 @@ test("a definite email provider-start failure is marked failed and one retry per
   await app.close();
 });
 
-test("an unknown email start-finalization outcome stays reserved and never repeats the provider effect", async () => {
+test("an unknown email start-finalization outcome is retryable during its durable lease", async () => {
   const calls: Array<{ name: string; input: unknown }> = [];
   const app = await buildApp(calls, { failFinalizedCompletion: true });
   const payload = { ...idem, email: "student@example.test", password: "correct-horse", client_kind: "web" };
@@ -605,7 +751,7 @@ test("an unknown email start-finalization outcome stays reserved and never repea
     headers: { host, origin, "content-type": "application/json" }, payload,
   });
   assert.equal(first.statusCode, 500);
-  assert.equal(retry.statusCode, 409);
+  assert.equal(retry.statusCode, 503);
   assert.equal(calls.filter(({ name }) => name === "signUpEmail").length, 1);
   assert.deepEqual(calls.filter(({ name }) => name === "finalizeEmailVerificationStart").map(({ input }) => (
     (input as { outcome: string }).outcome
@@ -629,9 +775,20 @@ test("invitation email registration reserves its provider start idempotently", a
   assert.equal(first.statusCode, 202);
   assert.equal(replay.statusCode, 202);
   assert.deepEqual(calls.map(({ name }) => name), [
-    "consumeRateLimit", "beginEmailVerification", "signUpEmail", "finalizeEmailVerificationStart",
-    "consumeRateLimit", "beginEmailVerification",
+    "consumeRateLimit", "executeAuthorityCommand", "consumeRateLimit", "beginEmailVerification", "signUpEmail", "finalizeEmailVerificationStart",
+    "consumeRateLimit", "executeAuthorityCommand", "consumeRateLimit", "beginEmailVerification",
   ]);
+  const rates = calls.filter(({ name }) => name === "consumeRateLimit").map(({ input }) => input as {
+    accountIdentifier: string; dimensions?: string;
+  });
+  assert.deepEqual(rates.map(({ accountIdentifier, dimensions }) => ({ accountIdentifier, dimensions })), [
+    { accountIdentifier: "route:invitation_register", dimensions: "client" },
+    { accountIdentifier: "invitation_01", dimensions: "account" },
+    { accountIdentifier: "route:invitation_register", dimensions: "client" },
+    { accountIdentifier: "invitation_01", dimensions: "account" },
+  ]);
+  assert.equal(JSON.stringify(rates).includes("invited@example.test"), false);
+  assert.equal(JSON.stringify(rates).includes("i".repeat(43)), false);
   const binding = calls.find(({ name }) => name === "beginEmailVerification")?.input as Record<string, unknown>;
   assert.equal(binding.normalizedEmail, "invited@example.test");
   assert.equal(binding.clientKind, "web");
@@ -653,14 +810,14 @@ test("email verification verifies the provider subject, registers Task 3, and is
   assert.equal(response.statusCode, 200);
   assert.equal(response.json().transport, "web_cookie");
   assert.deepEqual(calls.map(({ name }) => name), [
-    "prepareEmailVerification", "consumeRateLimit", "admitEmailVerificationProviderAttempt", "verifyEmail",
+    "consumeRateLimit", "prepareEmailVerification", "consumeRateLimit", "admitEmailVerificationProviderAttempt", "verifyEmail",
     "checkpointEmailVerification", "completeEmailVerification",
   ]);
-  const providerInput = calls[3]?.input as Record<string, unknown>;
+  const providerInput = calls[4]?.input as Record<string, unknown>;
   assert.deepEqual(providerInput, {
     verificationCode: "opaque-email-token-hash", expectedProviderSubject: "subject_01",
   });
-  const completion = calls[5]?.input as { idempotencyKey?: unknown; payloadHash?: unknown };
+  const completion = calls[6]?.input as { idempotencyKey?: unknown; payloadHash?: unknown };
   assert.equal(completion.idempotencyKey, idem.idempotency_key);
   assert.equal(completion.payloadHash, emailVerificationPayload().payload_hash);
   await app.close();
@@ -676,7 +833,7 @@ test("email verification rejects a cross-mode request before any provider effect
     payload: emailVerificationPayload(),
   });
   assert.equal(nativeAttempt.statusCode, 400);
-  assert.deepEqual(calls.map(({ name }) => name), ["prepareEmailVerification"]);
+  assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit", "prepareEmailVerification"]);
   calls.length = 0;
   const webRetry = await app.inject({
     method: "POST",
@@ -686,7 +843,7 @@ test("email verification rejects a cross-mode request before any provider effect
   });
   assert.equal(webRetry.statusCode, 200);
   assert.deepEqual(calls.map(({ name }) => name), [
-    "prepareEmailVerification", "consumeRateLimit", "admitEmailVerificationProviderAttempt", "verifyEmail",
+    "consumeRateLimit", "prepareEmailVerification", "consumeRateLimit", "admitEmailVerificationProviderAttempt", "verifyEmail",
     "checkpointEmailVerification", "completeEmailVerification",
   ]);
   await app.close();
@@ -991,6 +1148,89 @@ test("invitation acceptance rejects changed proof facts under the same hash befo
   await app.close();
 });
 
+test("existing invitation acceptance uses Core Session authority and rejects provider access tokens", async () => {
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const app = await buildApp(calls);
+  const facts = {
+    schema_version: 1 as const,
+    idempotency_key: "idem_existing_invitee",
+    expected_resource_version: 1,
+    invitation_secret: "i".repeat(43),
+    client_kind: "web" as const,
+    device_label: "Existing Browser",
+  };
+  const payload = {
+    ...facts,
+    payload_hash: canonicalPayloadHash({
+      schema_version: facts.schema_version,
+      idempotency_key: facts.idempotency_key,
+      expected_resource_version: facts.expected_resource_version,
+      invitation_digest: digest(facts.invitation_secret),
+      authentication: { kind: "core_session", client_kind: facts.client_kind },
+      device_label: facts.device_label,
+    }),
+  };
+  const accepted = await app.inject({
+    method: "POST", url: "/auth/v1/invitations/accept",
+    headers: {
+      host, origin, "content-type": "application/json", "x-core-agent-csrf": csrf,
+      cookie: `core_agent_session=${secret}; core_agent_csrf=${csrf}`,
+    },
+    payload,
+  });
+  assert.equal(accepted.statusCode, 200, `${accepted.body}\n${JSON.stringify(calls)}`);
+  assert.equal(calls.some(({ name }) => name === "verifyCurrentSubject"), false);
+  assert.equal(calls.some(({ name }) => name === "completeApple"), false);
+  assert.equal(calls.some(({ name }) => name === "authenticateSession"), true);
+  const command = calls.filter(({ name }) => name === "executeAuthorityCommand").at(-1)?.input as {
+    readonly authority?: { readonly actorId?: unknown };
+    readonly verifiedSubject?: unknown;
+  };
+  assert.equal(command.authority?.actorId, "actor_server");
+  assert.equal(command.verifiedSubject, undefined);
+  const rates = calls.filter(({ name }) => name === "consumeRateLimit").map(({ input }) => input as {
+    readonly accountIdentifier?: unknown; readonly dimensions?: unknown;
+  });
+  assert.deepEqual(rates.map(({ dimensions }) => dimensions), ["client", "account"]);
+  assert.deepEqual(rates.map(({ accountIdentifier }) => accountIdentifier), [
+    "route:invitation_accept", "invitation_01",
+  ]);
+  assert.equal(JSON.stringify(rates).includes(facts.invitation_secret), false);
+
+  const callsBeforeForbidden = calls.length;
+  const forbidden = await app.inject({
+    method: "POST", url: "/auth/v1/invitations/accept",
+    headers: { host, origin, "content-type": "application/json" },
+    payload: {
+      schema_version: facts.schema_version,
+      idempotency_key: "idem_legacy_provider_proof",
+      expected_resource_version: facts.expected_resource_version,
+      invitation_secret: facts.invitation_secret,
+      device_label: facts.device_label,
+      authentication_proof: {
+        kind: "email_password", client_kind: "web", verification_proof: "provider-access-token",
+      },
+      payload_hash: canonicalPayloadHash({
+        schema_version: facts.schema_version,
+        idempotency_key: "idem_legacy_provider_proof",
+        expected_resource_version: facts.expected_resource_version,
+        invitation_digest: digest(facts.invitation_secret),
+        authentication: {
+          kind: "email_password", client_kind: "web",
+          callback_proof_digest: digest(JSON.stringify({
+            kind: "email_password", client_kind: "web", verification_proof: "provider-access-token",
+          })),
+        },
+        device_label: facts.device_label,
+      }),
+    },
+  });
+  assert.equal(forbidden.statusCode, 400, forbidden.body);
+  assert.equal(calls.length, callsBeforeForbidden, "legacy provider proof is rejected before rate, Session, provider, or database effects");
+  assert.equal(JSON.stringify(calls).includes("provider-access-token"), false);
+  await app.close();
+});
+
 test("email and invitation Session delivery fail closed when issued mode differs from validated mode", async () => {
   const calls: Array<{ name: string; input: unknown }> = [];
   const base = await buildApp(calls);
@@ -1007,7 +1247,7 @@ test("email and invitation Session delivery fail closed when issued mode differs
       async issueSession() { return { session: { schema_version: 1, actor_id: "actor_server", actor_resource_version: 1, session_id: "session_native", session_resource_version: 1, client_kind: "iphone", idle_expires_at: "2026-08-18T00:00:00.000Z", absolute_expires_at: "2026-09-16T00:00:00.000Z", reauthentication_required: false }, sessionSecret: secret }; },
     } as never,
   });
-  const response = await app.inject({ method: "POST", url: "/auth/v1/email/sign-in", headers: { host, origin, "content-type": "application/json" }, payload: { ...idem, email: "student@example.test", password: "correct-horse", client_kind: "web" } });
+  const response = await app.inject({ method: "POST", url: "/auth/v1/email/sign-in", headers: { host, origin, "content-type": "application/json" }, payload: emailSignInPayload({ schema_version: 1, idempotency_key: idem.idempotency_key, email: "student@example.test", password: "correct-horse", client_kind: "web" }) });
   assert.equal(response.statusCode, 500);
   assert.equal(response.body.includes(secret), false);
   assert.equal(response.headers["set-cookie"], undefined);
@@ -1042,14 +1282,18 @@ test("Apple link callback consumes its independent callback rate limit before pr
   const response = await app.inject({
     method: "POST", url: "/auth/v1/apple/link/callback",
     headers: { host, "content-type": "application/json", authorization: `Bearer ${secret}` },
-    payload: { ...idem, client_kind: "iphone", transaction_id: "oauth_link", authorization_code: "opaque-code", state: "state-link", nonce: "nonce-link", pkce_code_verifier: "v".repeat(43) },
+    payload: appleCallbackPayload("apple_link", { schema_version: 1, idempotency_key: idem.idempotency_key, client_kind: "iphone", transaction_id: "oauth_link", authorization_code: "opaque-code", state: "state-link", nonce: "nonce-link", pkce_code_verifier: "v".repeat(43) }),
   });
   assert.equal(response.statusCode, 200);
-  assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit", "authenticateSession", "requireRecentReauthentication", "executeProtectedAuthorityCommand"]);
+  assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit", "authenticateSession", "requireRecentReauthentication", "linkApple", "executeProtectedAuthorityCommand"]);
   const rate = calls[0]?.input as Record<string, unknown>;
   assert.equal(rate.bucketKind, "apple_callback");
   const durable = calls.at(-1)?.input as { payload?: unknown };
-  assert.deepEqual(durable.payload, idem);
+  assert.deepEqual(durable.payload, {
+    schema_version: 1, idempotency_key: idem.idempotency_key,
+    payload_hash: (calls.find(({ name }) => name === "linkApple")?.input as { payload_hash: string }).payload_hash,
+    transaction_id: "oauth_link",
+  });
   await app.close();
 });
 
@@ -1135,7 +1379,7 @@ test("management mutation delegates one transaction-scoped reauth plus durable c
   await app.close();
 });
 
-test("durable commands receive verified facts but never passwords or provider proofs", async () => {
+test("durable commands receive server authority but never passwords or provider proofs", async () => {
   const calls: Array<{ name: string; input: unknown }> = [];
   const app = await buildApp(calls);
   const headers = { host, origin, "content-type": "application/json", cookie: `core_agent_session=${secret}; core_agent_csrf=${csrf}`, "x-core-agent-csrf": csrf };
@@ -1165,24 +1409,23 @@ test("durable commands receive verified facts but never passwords or provider pr
   assert.equal(reauthenticationCommand.verifiedSubject === undefined, false);
 
   calls.length = 0;
-  const proof = "opaque-provider-proof";
   const acceptance = await app.inject({
     method: "POST",
     url: "/auth/v1/invitations/accept",
-    headers: { host, origin, "content-type": "application/json" },
+    headers,
     payload: invitationAcceptancePayload({
       schema_version: 1,
       idempotency_key: idem.idempotency_key,
       expected_resource_version: 1,
       invitation_secret: "i".repeat(43),
-      authentication_proof: { kind: "email_password", client_kind: "web", verification_proof: proof },
+      client_kind: "web",
       device_label: "Invitation Browser",
     }),
   });
   assert.equal(acceptance.statusCode, 200);
   const acceptanceCommand = calls.find(({ name, input }) => name === "executeAuthorityCommand" && (input as { kind?: unknown }).kind === "invitation_accept")?.input as { payload?: unknown; verifiedSubject?: unknown };
-  assert.equal(JSON.stringify(acceptanceCommand.payload).includes(proof), false);
-  assert.equal(acceptanceCommand.verifiedSubject === undefined, false);
+  assert.equal(acceptanceCommand.verifiedSubject, undefined);
+  assert.equal((acceptanceCommand as { authority?: { actorId?: unknown } }).authority?.actorId, "actor_server");
   assert.equal(calls.some(({ name }) => name === "issueSession"), false,
     "acceptance and its one-time Session secret must be one atomic authority operation");
   assert.equal(acceptance.json().issuedSession, undefined);

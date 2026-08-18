@@ -177,6 +177,50 @@ test("durable email verification converges starts across restart and consumes ex
   assert.equal(consumed.provider_hmac_bytes, 32);
 });
 
+test("unknown provider-start outcome has a database-clock lease and the exact key can reacquire", async () => {
+  const module = await import("../src/index.js") as Record<string, unknown>;
+  const begin = module.beginEmailVerificationTransaction as (
+    dependencies: unknown,
+    input: unknown,
+  ) => Promise<{ kind: string; verificationId: string }>;
+  let clock = new Date(now);
+  const dependencies = {
+    db, hmacKey, protector, ttlMs: 10 * 60_000, providerStartLeaseMs: 30_000,
+    databaseNow: async () => new Date(clock),
+    randomBytes: (length: number) => Buffer.alloc(length, 0x73),
+  };
+  const input = {
+    idempotencyKey: "unknown-provider-start",
+    payloadHash: canonicalPayloadHash({
+      schema_version: 1, flow_kind: "b2c", idempotency_key: "unknown-provider-start",
+      normalized_email: "unknown-start@example.test", client_kind: "web",
+    }),
+    normalizedEmail: "unknown-start@example.test", clientKind: "web", flow: { kind: "b2c" },
+  };
+  const first = await begin(dependencies, input);
+  clock = new Date(now.getTime() + 29_999);
+  assert.equal((await begin(dependencies, input)).kind, "in_progress");
+  clock = new Date(now.getTime() + 30_000);
+  assert.deepEqual(await begin(dependencies, input), { ...first, kind: "reserved" });
+  const row = (await pool.query<{
+    provider_start_attempt: number;
+    provider_start_reserved_at: Date;
+  }>(`select provider_start_attempt, provider_start_reserved_at
+      from email_verification_transactions where email_verification_transaction_id = $1`,
+  [first.verificationId])).rows[0]!;
+  assert.equal(row.provider_start_attempt, 2);
+  assert.equal(row.provider_start_reserved_at.toISOString(), clock.toISOString());
+
+  await assert.rejects(begin(dependencies, {
+    ...input,
+    payloadHash: canonicalPayloadHash({
+      schema_version: 1, flow_kind: "b2c", idempotency_key: "unknown-provider-start",
+      normalized_email: "changed@example.test", client_kind: "web",
+    }),
+    normalizedEmail: "changed@example.test",
+  }), (error: unknown) => (error as { code?: unknown }).code === "IDEMPOTENCY_CONFLICT");
+});
+
 test("invitation email verification encrypts exact invitation authority and durably commits expiry", async () => {
   const module = await import("../src/index.js") as Record<string, unknown>;
   const begin = module.beginEmailVerificationTransaction as (dependencies: unknown, input: unknown) => Promise<{ kind: string; verificationId: string }>;

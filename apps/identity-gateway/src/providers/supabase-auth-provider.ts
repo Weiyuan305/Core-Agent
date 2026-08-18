@@ -6,6 +6,8 @@ import {
 import { createRequire } from "node:module";
 import { types as utilTypes } from "node:util";
 
+import { strictUtcTimestampMilliseconds } from "@core-agent/runtime-core";
+
 import type {
   AppleAuthorizationCallback,
   AppleAuthorizationInput,
@@ -136,6 +138,14 @@ export interface OAuthTransactionStore {
     readonly transactionId: string;
     readonly providerEvidenceAt: string;
   }): Promise<void>;
+  beginAppleLinkCompletion?(input: {
+    readonly transactionId: string;
+    readonly payloadHash: string;
+  }): Promise<{ readonly kind: "acquired" | "existing" }>;
+  checkpointAppleLinkCompletion?(input: {
+    readonly transactionId: string;
+    readonly providerSubjectCiphertext: Uint8Array;
+  }): Promise<void>;
 }
 
 export interface TransactionProtector {
@@ -173,6 +183,7 @@ interface ParsedAppleCallback {
   readonly clientKind: ProviderClientKind;
   readonly nonce: string | null;
   readonly pkceVerifier: string | null;
+  readonly payloadHash: string;
 }
 
 interface WebPkceEnvelope {
@@ -351,13 +362,6 @@ function validEmail(email: string): boolean {
   return email.length >= 3 && email.length <= 320 && /^[^@\s]+@[^@\s]+$/u.test(email);
 }
 
-function strictUtcMilliseconds(value: string): number | undefined {
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)) return undefined;
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== value) return undefined;
-  return timestamp;
-}
-
 /** Internal durable reset-subject decoder shared with the Core settlement phase. */
 export async function readProtectedPasswordResetSubject(
   protector: TransactionProtector,
@@ -377,7 +381,37 @@ export async function readProtectedPasswordResetSubject(
       || providerSubject === undefined || providerSubject.length < 1 || providerSubject.length > 1_024
       || identityKind !== "email_password" || normalizedEmail === undefined
       || !validEmail(normalizedEmail) || normalizedEmail !== normalizeEmail(normalizedEmail)
-      || verifiedAt === undefined || strictUtcMilliseconds(verifiedAt) === undefined) {
+      || verifiedAt === undefined || strictUtcTimestampMilliseconds(verifiedAt) === undefined) {
+      throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+    }
+    return Object.freeze({ provider, providerSubject, identityKind, normalizedEmail, verifiedAt });
+  } catch (error) {
+    throw mapProviderFailure(error, "AUTH_CALLBACK_INVALID");
+  } finally {
+    plaintext?.fill(0);
+  }
+}
+
+/** Internal durable Apple-link subject decoder shared with the Core CAS phase. */
+export async function readProtectedAppleLinkSubject(
+  protector: TransactionProtector,
+  ciphertext: Uint8Array,
+): Promise<VerifiedProviderSubject> {
+  let plaintext: Uint8Array | undefined;
+  try {
+    plaintext = copyBytes(await protector.decrypt(ciphertext), 1, 65_536);
+    if (plaintext === undefined) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+    const parsed: unknown = JSON.parse(utf8Decoder.decode(plaintext));
+    const provider = ownString(parsed, "provider");
+    const providerSubject = ownString(parsed, "providerSubject");
+    const identityKind = ownString(parsed, "identityKind");
+    const normalizedEmail = ownString(parsed, "normalizedEmail");
+    const verifiedAt = ownString(parsed, "verifiedAt");
+    if (ownString(parsed, "kind") !== "apple_link_subject" || provider !== "supabase"
+      || providerSubject === undefined || providerSubject.length < 1 || providerSubject.length > 1_024
+      || identityKind !== "apple" || normalizedEmail === undefined
+      || normalizedEmail !== normalizeEmail(normalizedEmail) || !validEmail(normalizedEmail)
+      || verifiedAt === undefined || strictUtcTimestampMilliseconds(verifiedAt) === undefined) {
       throw new ProviderFailure("AUTH_CALLBACK_INVALID");
     }
     return Object.freeze({ provider, providerSubject, identityKind, normalizedEmail, verifiedAt });
@@ -484,8 +518,8 @@ function copySubject(
     throw new ProviderFailure("AUTH_INVALID");
   }
   if (confirmedAt === undefined) throw new ProviderFailure("AUTH_EMAIL_UNVERIFIED");
-  const verifiedTime = new Date(confirmedAt);
-  if (!Number.isFinite(verifiedTime.getTime())) throw new ProviderFailure("AUTH_EMAIL_UNVERIFIED");
+  const verifiedTimestamp = strictUtcTimestampMilliseconds(confirmedAt);
+  if (verifiedTimestamp === undefined) throw new ProviderFailure("AUTH_EMAIL_UNVERIFIED");
 
   let identityKind = forcedIdentityKind;
   if (identityKind === undefined) {
@@ -501,7 +535,7 @@ function copySubject(
     providerSubject,
     identityKind,
     normalizedEmail: normalizeEmail(email),
-    verifiedAt: verifiedTime.toISOString(),
+    verifiedAt: new Date(verifiedTimestamp).toISOString(),
   });
 }
 
@@ -514,7 +548,7 @@ function readExpectedPasswordResetSubject(input: unknown, normalizedEmail: strin
   const verifiedAt = ownString(subject, "verifiedAt");
   if (provider !== "supabase" || providerSubject === undefined || providerSubject.length < 1 || providerSubject.length > 1_024
     || identityKind !== "email_password" || email !== normalizedEmail
-    || verifiedAt === undefined || strictUtcMilliseconds(verifiedAt) === undefined) {
+    || verifiedAt === undefined || strictUtcTimestampMilliseconds(verifiedAt) === undefined) {
     throw new ProviderFailure("AUTH_CALLBACK_INVALID");
   }
   return Object.freeze({ provider, providerSubject, identityKind, normalizedEmail: email, verifiedAt });
@@ -626,14 +660,15 @@ function parseOAuthTransaction(record: unknown): ParsedOAuthTransaction | undefi
       || providerSettlementExpiresAt !== undefined
       || providerCompletedAt !== undefined || providerEvidenceAt !== undefined))
     || (completionStatus === "provider_started" && (completionStartedAt === undefined
-      || providerSubjectCiphertext === undefined || providerCompletionPayloadHash === undefined
+      || (flowKind === "password_reset" ? providerSubjectCiphertext === undefined : providerSubjectCiphertext !== undefined)
+      || providerCompletionPayloadHash === undefined
       || !/^sha256:[a-f0-9]{64}$/u.test(providerCompletionPayloadHash)
-      || providerSettlementExpiresAt === undefined || strictUtcMilliseconds(providerSettlementExpiresAt) === undefined
+      || providerSettlementExpiresAt === undefined || strictUtcTimestampMilliseconds(providerSettlementExpiresAt) === undefined
       || providerCompletedAt !== undefined || providerEvidenceAt !== undefined))
     || (completionStatus === "provider_completed" && (completionStartedAt === undefined
       || providerSubjectCiphertext === undefined || providerCompletionPayloadHash === undefined
       || !/^sha256:[a-f0-9]{64}$/u.test(providerCompletionPayloadHash)
-      || providerSettlementExpiresAt === undefined || strictUtcMilliseconds(providerSettlementExpiresAt) === undefined
+      || providerSettlementExpiresAt === undefined || strictUtcTimestampMilliseconds(providerSettlementExpiresAt) === undefined
       || providerCompletedAt === undefined || providerEvidenceAt === undefined))) return undefined;
   return {
     transactionId, flowKind, actorId: actor as string | null, clientKind,
@@ -772,9 +807,9 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
     const verificationStartedAt = ownString(input, "verificationStartedAt");
     const recoveryNotAfter = ownString(input, "recoveryNotAfter");
     const verificationStartedTimestamp = verificationStartedAt === undefined
-      ? undefined : strictUtcMilliseconds(verificationStartedAt);
+      ? undefined : strictUtcTimestampMilliseconds(verificationStartedAt);
     const recoveryNotAfterTimestamp = recoveryNotAfter === undefined
-      ? undefined : strictUtcMilliseconds(recoveryNotAfter);
+      ? undefined : strictUtcTimestampMilliseconds(recoveryNotAfter);
     if (expectedProviderSubject === undefined || expectedProviderSubject.length < 1
       || expectedProviderSubject.length > 1_024 || expectedNormalizedEmail === undefined
       || expectedNormalizedEmail !== normalizeEmail(expectedNormalizedEmail) || !validEmail(expectedNormalizedEmail)
@@ -788,7 +823,7 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       ));
       const providerUser = ownData(data, "user");
       const confirmedAt = ownString(providerUser, "email_confirmed_at");
-      const confirmedTimestamp = confirmedAt === undefined ? undefined : strictUtcMilliseconds(confirmedAt);
+      const confirmedTimestamp = confirmedAt === undefined ? undefined : strictUtcTimestampMilliseconds(confirmedAt);
       if (confirmedTimestamp === undefined || confirmedTimestamp < verificationStartedTimestamp
         || confirmedTimestamp > recoveryNotAfterTimestamp) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
       const subject = copySubject(providerUser, "email_password");
@@ -843,6 +878,18 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       providerSubject: subject.providerSubject, identityKind: "email_password",
       normalizedEmail: subject.normalizedEmail, verifiedAt: subject.verifiedAt,
     });
+  }
+
+  async #protectAppleLinkSubject(subject: VerifiedProviderSubject): Promise<Uint8Array> {
+    return this.#protectStartEnvelope({
+      kind: "apple_link_subject", provider: subject.provider,
+      providerSubject: subject.providerSubject, identityKind: "apple",
+      normalizedEmail: subject.normalizedEmail, verifiedAt: subject.verifiedAt,
+    });
+  }
+
+  async #readAppleLinkSubject(ciphertext: Uint8Array): Promise<VerifiedProviderSubject> {
+    return readProtectedAppleLinkSubject(this.#transactionProtector, ciphertext);
   }
 
   async #readPasswordResetSubject(ciphertext: Uint8Array): Promise<VerifiedProviderSubject> {
@@ -1238,49 +1285,9 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       || !equalDigest(transaction.stateDigest, sha256(state))) {
       throw new ProviderFailure("AUTH_CALLBACK_INVALID");
     }
-    const inspectEvidence = async (subject: VerifiedProviderSubject): Promise<PasswordResetProviderObservation> => {
-      const { client, storage } = this.#newClient(this.#serviceRoleKey);
-      try {
-        const data = requireResultData(await safeProviderCall(
-          () => client.auth.admin.getUserById(subject.providerSubject),
-        ));
-        const providerUser = ownData(data, "user");
-        if (ownString(providerUser, "id") !== subject.providerSubject) {
-          return Object.freeze({
-            kind: "password_reset_provider_observation" as const,
-            outcome: "invalid" as const,
-            reason: "provider_subject_mismatch" as const,
-          });
-        }
-        if (normalizeEmail(ownString(providerUser, "email") ?? "") !== subject.normalizedEmail) {
-          return Object.freeze({
-            kind: "password_reset_provider_observation" as const,
-            outcome: "invalid" as const,
-            reason: "provider_email_mismatch" as const,
-          });
-        }
-        const evidence = ownString(providerUser, "updated_at");
-        if (evidence === undefined || strictUtcMilliseconds(evidence) === undefined) {
-          return Object.freeze({
-            kind: "password_reset_provider_observation" as const,
-            outcome: "invalid" as const,
-            reason: "provider_evidence_malformed" as const,
-          });
-        }
-        return Object.freeze({
-          kind: "password_reset_provider_observation" as const,
-          outcome: "exact" as const,
-          verifiedSubject: subject,
-          providerEvidenceAt: evidence,
-        });
-      } finally {
-        storage.clear();
-      }
-    };
-
     if (transaction.providerCompletionStatus === "provider_completed") {
       const settlementExpiresAt = transaction.providerSettlementExpiresAt === undefined
-        ? undefined : strictUtcMilliseconds(transaction.providerSettlementExpiresAt);
+        ? undefined : strictUtcTimestampMilliseconds(transaction.providerSettlementExpiresAt);
       if (transaction.providerSubjectCiphertext === undefined || transaction.providerCompletionPayloadHash !== payloadHash
         || settlementExpiresAt === undefined || settlementExpiresAt > bindingSettlementNotAfter) {
         throw new ProviderFailure("AUTH_CALLBACK_INVALID");
@@ -1289,13 +1296,16 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
     }
     if (transaction.providerCompletionStatus === "provider_started") {
       const settlementExpiresAt = transaction.providerSettlementExpiresAt === undefined
-        ? undefined : strictUtcMilliseconds(transaction.providerSettlementExpiresAt);
+        ? undefined : strictUtcTimestampMilliseconds(transaction.providerSettlementExpiresAt);
       if (transaction.providerSubjectCiphertext === undefined || transaction.providerCompletionPayloadHash !== payloadHash
         || settlementExpiresAt === undefined || settlementExpiresAt > bindingSettlementNotAfter) {
         throw new ProviderFailure("AUTH_CALLBACK_INVALID");
       }
-      const subject = await this.#readPasswordResetSubject(transaction.providerSubjectCiphertext);
-      return inspectEvidence(subject);
+      await this.#readPasswordResetSubject(transaction.providerSubjectCiphertext);
+      return Object.freeze({
+        kind: "password_reset_provider_observation" as const,
+        outcome: "ambiguous" as const,
+      });
     }
 
     if (transaction.expiresAt <= this.#now().getTime()
@@ -1331,8 +1341,8 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
         const providerUser = ownData(adminData, "user");
         if (ownString(providerUser, "id") !== subject.providerSubject) throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
         const evidence = ownString(providerUser, "updated_at");
-        const startedTimestamp = strictUtcMilliseconds(started.startedAt);
-        const evidenceTimestamp = evidence === undefined ? undefined : strictUtcMilliseconds(evidence);
+        const startedTimestamp = strictUtcTimestampMilliseconds(started.startedAt);
+        const evidenceTimestamp = evidence === undefined ? undefined : strictUtcTimestampMilliseconds(evidence);
         if (startedTimestamp === undefined || evidenceTimestamp === undefined
           || evidenceTimestamp < startedTimestamp || evidenceTimestamp > this.#now().getTime()) {
           throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
@@ -1483,6 +1493,7 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
     const nonce = ownString(input, "nonce");
     const verifier = ownString(input, "pkce_code_verifier");
     const clientKind = readClientKind(ownData(input, "client_kind"));
+    const idempotency = readStartIdempotency(input);
     if (transactionId === undefined || transactionId.length === 0 || transactionId.length > 256
       || authorizationCode === undefined || authorizationCode.length === 0 || authorizationCode.length > 8_192
       || state === undefined || state.length === 0 || state.length > 4_096
@@ -1495,6 +1506,7 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
     return {
       transactionId, authorizationCode, state, clientKind,
       nonce: nonce ?? null, pkceVerifier: verifier ?? null,
+      payloadHash: idempotency.payloadHash,
     };
   }
 
@@ -1503,7 +1515,19 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
     expectedFlowKind: OAuthTransactionRecord["flow_kind"],
     expectedActorId: string | null,
   ): Promise<VerifiedProviderSubject> {
-    const transaction = await this.#consumeTransaction(callback.transactionId);
+    let transaction: ParsedOAuthTransaction;
+    if (expectedFlowKind === "apple_link") {
+      const load = this.#transactionStore.loadStart;
+      if (load === undefined) throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+      const loaded = parseOAuthTransaction(await safeProviderCall(
+        () => load.call(this.#transactionStore, callback.transactionId),
+        "AUTH_CALLBACK_INVALID",
+      ));
+      if (loaded === undefined) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+      transaction = loaded;
+    } else {
+      transaction = await this.#consumeTransaction(callback.transactionId);
+    }
     if (transaction.flowKind !== expectedFlowKind || transaction.actorId !== expectedActorId
       || transaction.clientKind !== callback.clientKind
       || !validateRedirectUri(transaction.redirectUri, this.#appleRedirectUris)
@@ -1519,6 +1543,28 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       || (callback.clientKind !== "web" && (envelope.kind !== "native" || verifier === null
         || sha256Base64Url(verifier) !== envelope.challenge))) {
       throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+    }
+
+    if (expectedFlowKind === "apple_link") {
+      if (transaction.providerCompletionStatus === "provider_completed") {
+        if (transaction.providerCompletionPayloadHash !== callback.payloadHash
+          || transaction.providerSubjectCiphertext === undefined) {
+          throw new ProviderFailure("AUTH_CONFLICT");
+        }
+        return this.#readAppleLinkSubject(transaction.providerSubjectCiphertext);
+      }
+      if (transaction.providerCompletionStatus === "provider_started") {
+        if (transaction.providerCompletionPayloadHash !== callback.payloadHash) {
+          throw new ProviderFailure("AUTH_CONFLICT");
+        }
+        throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+      }
+      const begin = this.#transactionStore.beginAppleLinkCompletion;
+      if (begin === undefined) throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+      const admission = await safeProviderCall(() => begin.call(this.#transactionStore, {
+        transactionId: callback.transactionId, payloadHash: callback.payloadHash,
+      }));
+      if (admission.kind !== "acquired") throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
     }
 
     const { client, storage, storageKey } = this.#newClient(undefined, callback.transactionId);
@@ -1546,6 +1592,19 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
         throw new ProviderFailure("AUTH_CALLBACK_INVALID");
       }
       await this.#signOut(client, "local");
+      if (expectedFlowKind === "apple_link") {
+        const checkpoint = this.#transactionStore.checkpointAppleLinkCompletion;
+        if (checkpoint === undefined) throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+        const ciphertext = await this.#protectAppleLinkSubject(subject);
+        try {
+          await safeProviderCall(() => checkpoint.call(this.#transactionStore, {
+            transactionId: callback.transactionId,
+            providerSubjectCiphertext: ciphertext,
+          }));
+        } finally {
+          ciphertext.fill(0);
+        }
+      }
       return subject;
     } finally {
       storage.clear();

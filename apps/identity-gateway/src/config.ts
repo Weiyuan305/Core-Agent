@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { isIP } from "node:net";
 
 export interface IdentityGatewayConfig {
   readonly databaseUrl: string;
@@ -18,6 +19,7 @@ export interface IdentityGatewayConfig {
   readonly host: "127.0.0.1" | "0.0.0.0";
   readonly port: number;
   readonly publicAuthEnabled: boolean;
+  readonly trustedProxyAddresses: ReadonlySet<string>;
 }
 
 const allowedIdentityKeys = new Set([
@@ -39,6 +41,7 @@ const allowedIdentityKeys = new Set([
   "IDENTITY_GATEWAY_PORT",
   "IDENTITY_GATEWAY_CONTAINER_BIND",
   "IDENTITY_PUBLIC_AUTH_ENABLED",
+  "IDENTITY_TRUSTED_PROXY_ADDRESSES",
 ]);
 
 function invalidConfiguration(): never {
@@ -119,6 +122,17 @@ function cookieHost(value: string): string {
   return value;
 }
 
+function trustedProxyAddresses(value: string | undefined): ReadonlySet<string> {
+  if (value === undefined || value === "") return new Set();
+  const entries = value.split(",");
+  if (entries.length > 128 || entries.some((entry) => entry.length < 1 || entry.trim() !== entry || isIP(entry) === 0)) {
+    invalidConfiguration();
+  }
+  const unique = new Set(entries);
+  if (unique.size !== entries.length) invalidConfiguration();
+  return unique;
+}
+
 function port(value: string): number {
   if (!/^[1-9]\d{0,4}$/u.test(value)) invalidConfiguration();
   const parsed = Number(value);
@@ -171,6 +185,7 @@ export function loadIdentityGatewayConfig(environment: NodeJS.ProcessEnv): Ident
     host: hostValue,
     port: port(required(environment, "IDENTITY_GATEWAY_PORT")),
     publicAuthEnabled: exactBoolean(required(environment, "IDENTITY_PUBLIC_AUTH_ENABLED")),
+    trustedProxyAddresses: trustedProxyAddresses(environment.IDENTITY_TRUSTED_PROXY_ADDRESSES),
   });
 }
 

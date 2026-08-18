@@ -8,6 +8,151 @@
 - Original implementation commit: `2240a1bb0645e50a22204783f7cac5362924d906`
 - No merge or push was performed.
 
+## Round 13 review fixes (2026-08-18)
+
+### Feasibility and provider-boundary decision
+
+- Re-read `superpowers:receiving-code-review`,
+  `superpowers:test-driven-development`,
+  `superpowers:verification-before-completion`, and `supabase:supabase` before
+  changing production code.
+- Inspected the installed, exactly pinned `@supabase/supabase-js` and
+  `@supabase/auth-js` 2.112.2 source. The Admin user response exposes only the
+  generic user `updated_at`; it has no operation-specific password-update
+  receipt or password-change timestamp. Therefore a loaded
+  `provider_started` reset cannot safely infer success from later admin
+  inspection. The implementation is deliberately fail-closed: it decrypts the
+  exact prebound subject inside a serializable caller-owned PostgreSQL
+  transaction, revokes every Core Session for that exact active subject,
+  durably terminalizes and scrubs the OAuth checkpoint, returns the stable
+  recovery-required public failure, and permits a new reset. It never labels
+  generic `updated_at` as causal success and never repeats an admin password
+  update from an arbitrary code.
+- The immutable Contracts 0.5 invitation provider-proof branch creates an
+  additive-compatibility constraint. Contracts 0.6 keeps that legacy branch
+  parseable but marks it as a wire-compatibility shape only; the Gateway rejects
+  it before rate limiting, Session authentication, provider work, or database
+  work. New email invitees use durable schema-12 onboarding, and existing
+  invitees authenticate with an exact Core Session transport.
+
+### Round 13 RED evidence
+
+- Strict timestamp focus was RED 98/99 because the shared parser/export did not
+  exist. It then proved zero fractional digits and 1..9 digits, while rejecting
+  invalid calendar dates, offsets, excess precision, and trailing garbage for
+  both `email_confirmed_at` and reset evidence.
+- Supabase reset focus was RED 100/101 because a loaded `provider_started`
+  checkpoint still attempted to recover through generic `updated_at` rather
+  than returning an ambiguous fail-closed observation.
+- Real PostgreSQL provider-start lease focus was RED 0/1: the same exact key
+  remained permanently `in_progress`. Route focus was separately RED 0/1
+  because the unknown outcome returned a terminal conflict instead of a
+  retryable 503.
+- Invitation contract focus was RED 3/5 before the Core Session branch and
+  provider-proof rejection were represented. A later full compatibility gate
+  was genuinely RED after all 180 contract tests and 86/11 fixtures passed:
+  `initial v1` and release `0.5.0` both reported
+  `union_narrowed at $.anyOf`. The final additive object evolution resolves this
+  without changing 0.5.
+- Independent-dimension rate-limit PostgreSQL focus was RED 0/1 because one
+  combined row let either account or client rotation bypass the other. Trusted
+  proxy route focus was RED 0/1 because the client identity did not yet use
+  Fastify's `request.ip` trust boundary.
+- Email sign-in and Apple callback canonical-binding focuses were each RED 0/1:
+  a changed password/code/state fact under the caller's old hash reached the
+  effect path.
+- Supabase Apple-link focus was RED 0/1 because provider success had no durable
+  `provider_completed` checkpoint. The real Fastify/PostgreSQL composition
+  focus then proved the pre-fix Core rollback repeated the one-time provider
+  exchange.
+- The first official CI-equivalent Round 13 rerun was RED 2/3 only because the
+  observed Runtime Core PostgreSQL count increased from 340 to 342. After
+  updating that count from a protected 342/342 summary, the next run was RED
+  2/3 only because its proof marker retained the old rate-limit test title.
+  Both REDs were gate-wiring evidence, not guessed count changes.
+
+### Round 13 implementation and real-boundary GREEN
+
+- Added one shared closed UTC parser accepting only exact UTC `Z` RFC3339
+  calendar timestamps with zero or 1..9 fractional digits, truncating the
+  provider/PostgreSQL boundary to JavaScript milliseconds. All Supabase subject,
+  confirmation, reset-evidence, fake-provider, and durable-flow timestamp reads
+  use it.
+- Schema 012 now records `provider_start_reserved_at`. Concurrent first starts
+  still use `INSERT ... ON CONFLICT` admission; an exact same-key reservation is
+  retryable only after a bounded database-clock lease, payload conflicts stay
+  closed, finalized starts replay without provider work, and unknown outcomes
+  are 503 rather than fake 202/409 success.
+- Public invitation acceptance now uses an exact Web cookie+CSRF or native
+  bearer Core Session for existing identities, verifies the stored Session
+  client kind, and derives Actor/AuthSubject/email only in production
+  composition. The immutable provider-proof branch is explicitly rejected with
+  zero effect. New invitees retain the durable email/Apple onboarding paths.
+- Rate limiting persists two independently contended HMAC rows in one atomic SQL
+  statement: actual-account/constant-client and constant-account/actual-client.
+  Stable route/client admission precedes verification/invitation lookup;
+  transaction or invitation IDs are server-issued account dimensions. Fastify
+  does not trust X-Forwarded-For by default and accepts only the bounded exact
+  `IDENTITY_TRUSTED_PROXY_ADDRESSES` allowlist, using `request.ip`.
+- Apple link completion reserves `provider_started`, checkpoints the encrypted
+  exact Apple subject as `provider_completed` immediately after the one-time
+  exchange, and performs the Core CAS, idempotency completion, and OAuth consume
+  in one serializable post-provider transaction. A Core rollback returns 500
+  while retaining the Web Apple cookie; exact replay skips the provider and
+  consumes once after Core success.
+- Email sign-in and Apple sign-in/link callback hashes are recomputed from closed
+  normalized request facts, including secret digests and every mode-specific
+  callback fact, before rate/provider/durable effects. Caller hashes cannot
+  detach an idempotent identity from the actual proof.
+- Real production-composition PostgreSQL remains 2/2. It proves the Apple-link
+  checkpoint/Core-rollback/replay sequence with one provider exchange and the
+  reset ambiguous checkpoint path with Core Session revocation, durable scrub,
+  no admin inspection, stable public error, and a new reset start.
+
+### Round 13 final verification
+
+- `npm run check --workspace=@core-agent/contracts` — PASS: 180/180, generated
+  schema drift clean, 86 valid/11 invalid fixtures, cumulative 0.6 compatibility.
+- `npm run compat:history --workspace=@core-agent/contracts -- --base e7624fe0425ff470b646f8322254d5e9e3857da8`
+  — PASS; Contracts 0.5 is unchanged.
+- `npm run check --workspace=@core-agent/runtime-core` — PASS: build and 83/83.
+- `npm run check --workspace=@core-agent/identity-gateway` — PASS: build and
+  107/107.
+- `npm run test:runtime` — PASS 192/192. `npm run test:unit` — PASS, including
+  Runtime 192/192, Contracts 180/180, Runtime Core 83/83, Identity Gateway
+  107/107, and Web 129/129 across 9 files.
+- Protected formal `npm run test:postgres` — PASS: Runtime Core PostgreSQL
+  342/342, Identity Gateway production composition 2/2, Control Plane API
+  14/14. Protected migration-only rerun — PASS 128/128, including fresh,
+  schema-10, schema-11 clean/dirty/consumed upgrades, ACL/catalog/rollback,
+  restart, and schema-12 convergence.
+- `npm run test:runtime:database-ci-equivalent` — PASS 3/3 in
+  141209.988042 ms. Its fresh protected scenario asserted PostgreSQL
+  342+2+14 and integration 93, secret-output rejection, injected-failure
+  cleanup, and exact Docker resource cleanup.
+- `npm ls fastify @fastify/cookie @supabase/supabase-js @supabase/auth-js` —
+  exact Fastify 5.11.2, Cookie 11.1.2, Supabase JS/Auth JS 2.112.2.
+- Historical migration diffs for 010/011 are empty. SHA-256 remains 010
+  `eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381`,
+  011 `fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393`;
+  amended 012 is
+  `6107af0bdc7574884326132cdaade446419cf77e207f45507abebac27471f93b`.
+- `git diff --check`, protected sentinel scan over every changed Task 7 file,
+  provider-token/public-auth residual scan, stale Entitlement-012 scan, and
+  stale causal-`updated_at` claim scan all pass. Public-auth contract tests retain
+  their provider/PII/credential forbidden-name gate.
+
+### Independent concern
+
+- Root `npm run check` passes Task 7 packages and Control Plane API 17/17, then
+  fails only in untouched `apps/control-plane-worker/src/main.ts:60,129` with
+  the pre-existing TS2345 `project_platform_memberships` union mismatch.
+  `npm run test:runtime:database-auth-topology` likewise stops 0/1 while building
+  that unchanged Worker, before any topology scenario executes. Task 7 has no
+  Worker/harness diff, prior review instructions explicitly excluded them, and
+  the topology harness cleaned its exact disposable resources. The fully fresh
+  official database CI-equivalent above is green.
+
 ## Round 12 review fix (2026-08-18)
 
 Status: `DONE_WITH_CONCERNS`. The final concurrent exact-observation loser now

@@ -279,12 +279,14 @@ It supports:
 Password reset completion is a checkpointed saga. Before the provider password
 mutation, the adapter durably binds an encrypted exact provider subject and a
 database-clock start time plus the server-validated completion payload hash to the
-pending reset transaction. A successful provider
-mutation checkpoints causal `updated_at` evidence before Core Session revocation.
-Restart after a Core rollback skips the provider mutation and finishes revocation;
-restart after a checkpoint failure may use only exact subject inspection whose own
-timestamp is within the durable attempt window. The transaction becomes consumed
-only after all Core Sessions are revoked.
+pending reset transaction. A successful provider mutation must checkpoint before Core
+Session revocation. Supabase 2.112.2 exposes no operation-specific password-update
+receipt: its generic user `updated_at` is not causal evidence. Therefore a restart
+after an uncheckpointed provider attempt fails closed by revoking the exact subject's
+Core Sessions, terminalizing and scrubbing the transaction, and requiring a new reset;
+it never reports that the password mutation succeeded. A durable provider-completed
+checkpoint may resume only Core revocation until its bounded settlement deadline. The
+transaction becomes consumed only after all Core Sessions are revoked.
 
 The adapter never returns a provider error body, password, refresh token, Apple token,
 or arbitrary metadata to a route handler. Failures map to a small internal vocabulary:
@@ -328,7 +330,8 @@ Apple Web authorization start also creates a separate short-lived `Secure`,
 `HttpOnly`, `SameSite=Lax` Apple-flow Cookie. It binds the Core
 `transaction_id`/callback state created at start; callback reconstructs that
 Core binding from the Cookie, requires an exact match before exchange, and
-clears the Cookie on every terminal success or failure. This Cookie is distinct
+clears the Cookie on success and terminal non-retryable failure. Retryable 429/5xx
+responses preserve it so a checkpointed flow can settle. This Cookie is distinct
 from both the Core Session Cookie and the password-reset recovery Cookie and
 cannot be used in either role.
 
@@ -359,10 +362,18 @@ password before it may perform those actions.
 
 Login, sign-up, password-reset start/completion, email-verification completion,
 invitation acceptance, Apple callback, and reauthentication have independent
-account/IP/device rate limits. Completion routes use stable server-owned route buckets
-so rotating transaction identifiers or proofs cannot bypass them. Email verification
-also has a bounded durable provider-attempt count. Public errors do not reveal whether
-an email, invitation, Actor, or Tenant exists.
+account/IP/device rate limits. Account and client dimensions are independent database
+counters. Completion routes first use stable server-owned client route buckets, then
+an additional server-derived transaction/invitation/Actor account bucket, so rotating
+transaction identifiers or proofs cannot bypass them. Forwarded addresses are trusted
+only through an explicit proxy-IP allowlist and otherwise Fastify's direct request IP
+is used. Email verification also has a bounded durable provider-attempt count. Public
+errors do not reveal whether an email, invitation, Actor, or Tenant exists.
+
+Existing invited identities authenticate invitation acceptance with their opaque Core
+Session (Web Cookie+CSRF or exact native bearer and stored client kind). No browser or
+native client submits a provider access token. New invited identities use the durable
+email-verification or Apple onboarding transaction before atomic invitation acceptance.
 
 ## 8. Trusted Context issuance and verification
 

@@ -39,6 +39,7 @@ import {
   revokeCoreSessionsInTransaction,
   revokeInvitation,
   suspendMembership,
+  strictUtcTimestampMilliseconds,
   withDatabaseTransactionRetry,
   type RuntimeDatabase,
 } from "@core-agent/runtime-core";
@@ -50,6 +51,7 @@ import { buildIdentityGatewayApp, type GatewayAuthenticatedSession, type Identit
 import { assertManagedSecretFile, loadIdentityGatewayConfig } from "./config.js";
 import type { PasswordResetProviderObservation, VerifiedProviderSubject } from "./providers/auth-provider.js";
 import {
+  readProtectedAppleLinkSubject,
   readProtectedPasswordResetSubject,
   SupabaseAuthProvider,
   type OAuthTransactionRecord,
@@ -79,13 +81,6 @@ async function readManagedSecret(reference: string): Promise<Buffer> {
 function deriveKey(material: Uint8Array, purpose: string): Buffer {
   if (material.byteLength < 32) throw new Error("Identity Gateway key material is invalid");
   return createHmac("sha256", material).update(`core-agent:identity-gateway:${purpose}:v1`, "utf8").digest();
-}
-
-function strictUtcMilliseconds(value: string): number | undefined {
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)) return undefined;
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== value) return undefined;
-  return timestamp;
 }
 
 function aesProtector(key: Uint8Array, purpose: string): TransactionProtector {
@@ -253,6 +248,62 @@ function oauthStore(db: Kysely<RuntimeDatabase>): OAuthTransactionStore {
         await trx.updateTable("oauth_transactions").set({
           provider_completion_status: "provider_completed", provider_completed_at: now,
           provider_evidence_at: evidenceAt, updated_at: now,
+        }).where("oauth_transaction_id", "=", input.transactionId).executeTakeFirstOrThrow();
+      });
+    },
+    async beginAppleLinkCompletion(input: { readonly transactionId: string; readonly payloadHash: string }) {
+      return db.transaction().execute(async (trx) => {
+        const now = (await sql<{ now: Date }>`select clock_timestamp() as now`.execute(trx)).rows[0]?.now;
+        if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
+          throw new DomainError("INTERNAL_ERROR", "OAuth database clock is unavailable");
+        }
+        const row = await trx.selectFrom("oauth_transactions").selectAll()
+          .where("oauth_transaction_id", "=", input.transactionId).forUpdate().executeTakeFirst();
+        if (row === undefined || row.flow_kind !== "apple_link" || row.status !== "pending"
+          || row.expires_at.getTime() <= now.getTime()) {
+          throw new DomainError("UNAUTHENTICATED", "Apple link authority is invalid");
+        }
+        if (row.provider_completion_status === "provider_started") {
+          if (row.provider_completion_payload_hash !== input.payloadHash) {
+            throw new DomainError("IDEMPOTENCY_CONFLICT", "Apple link callback payload conflicts");
+          }
+          return { kind: "existing" as const };
+        }
+        if (row.provider_completion_status !== "pending") {
+          throw new DomainError("IDEMPOTENCY_CONFLICT", "Apple link callback changed");
+        }
+        await trx.updateTable("oauth_transactions").set({
+          provider_completion_status: "provider_started",
+          provider_completion_started_at: now,
+          provider_completion_payload_hash: input.payloadHash,
+          provider_settlement_expires_at: row.expires_at,
+          updated_at: now,
+        }).where("oauth_transaction_id", "=", input.transactionId).executeTakeFirstOrThrow();
+        return { kind: "acquired" as const };
+      });
+    },
+    async checkpointAppleLinkCompletion(input: {
+      readonly transactionId: string; readonly providerSubjectCiphertext: Uint8Array;
+    }) {
+      await db.transaction().execute(async (trx) => {
+        const now = (await sql<{ now: Date }>`select clock_timestamp() as now`.execute(trx)).rows[0]?.now;
+        if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
+          throw new DomainError("INTERNAL_ERROR", "OAuth database clock is unavailable");
+        }
+        const row = await trx.selectFrom("oauth_transactions").selectAll()
+          .where("oauth_transaction_id", "=", input.transactionId).forUpdate().executeTakeFirst();
+        if (row === undefined || row.flow_kind !== "apple_link" || row.status !== "pending"
+          || row.provider_completion_status !== "provider_started"
+          || row.provider_completion_started_at === null || row.provider_completion_payload_hash === null
+          || row.provider_settlement_expires_at === null || row.provider_settlement_expires_at.getTime() <= now.getTime()) {
+          throw new DomainError("UNAUTHENTICATED", "Apple link checkpoint is invalid");
+        }
+        await trx.updateTable("oauth_transactions").set({
+          provider_completion_status: "provider_completed",
+          provider_subject_ciphertext: input.providerSubjectCiphertext,
+          provider_completed_at: now,
+          provider_evidence_at: now,
+          updated_at: now,
         }).where("oauth_transaction_id", "=", input.transactionId).executeTakeFirstOrThrow();
       });
     },
@@ -748,6 +799,11 @@ function productionOperations(
           return response;
         }, { isolationLevel: "serializable" });
       }
+      if (input.kind === "invitation_rate_identity") {
+        const payload = input.payload as { invitation_secret: string };
+        const invitation = await db.transaction().execute((trx) => readInvitationBySecret(trx, payload.invitation_secret));
+        return { invitation_id: invitation.invitationId };
+      }
       if (input.kind === "invitation_inspect") {
         const payload = input.payload as { invitation_secret: string };
         const inspected = await inspectInvitation({ db }, payload.invitation_secret);
@@ -755,7 +811,8 @@ function productionOperations(
           .where("invitation_id", "=", inspected.invitation_id).executeTakeFirstOrThrow();
         return { schema_version: 1, invitation_id: inspected.invitation_id, tenant_id: inspected.tenant_id, role: inspected.role, status: "pending", expires_at: inspected.expires_at, resource_version: Number(version.resource_version) };
       }
-      if (input.kind === "invitation_accept" && input.verifiedSubject !== undefined) {
+      if (input.kind === "invitation_accept"
+        && (input.verifiedSubject !== undefined || input.authority !== undefined)) {
         const payload = input.payload as {
           schema_version: 1;
           idempotency_key: string;
@@ -767,15 +824,39 @@ function productionOperations(
         };
         const inspected = await db.transaction().execute((trx) => readInvitationBySecret(trx, payload.invitation_secret));
         return withDatabaseTransactionRetry(db, async (trx) => {
-          let subject = await trx.selectFrom("auth_subjects").select(["actor_id", "auth_subject_id"])
-            .where("provider", "=", input.verifiedSubject!.provider)
-            .where("provider_subject", "=", input.verifiedSubject!.providerSubject)
-            .where("status", "=", "active").executeTakeFirst();
+          let sessionSubject = input.verifiedSubject;
+          let subject = input.authority === undefined
+            ? await trx.selectFrom("auth_subjects").select(["actor_id", "auth_subject_id", "provider", "provider_subject", "provider_identity_kind", "verified_at"])
+              .where("provider", "=", input.verifiedSubject!.provider)
+              .where("provider_subject", "=", input.verifiedSubject!.providerSubject)
+              .where("status", "=", "active").executeTakeFirst()
+            : await trx.selectFrom("auth_subjects")
+              .select(["actor_id", "auth_subject_id", "provider", "provider_subject", "provider_identity_kind", "verified_at"])
+              .where("auth_subject_id", "=", input.authority.authSubjectId)
+              .where("actor_id", "=", input.authority.actorId)
+              .where("status", "=", "active").forUpdate().executeTakeFirst();
+          let subjectReference = subject === undefined
+            ? undefined
+            : { actor_id: subject.actor_id, auth_subject_id: subject.auth_subject_id };
+          if (input.authority !== undefined) {
+            if (subject === undefined) throw new DomainError("UNAUTHENTICATED", "Session subject is unavailable");
+            const pii = await trx.selectFrom("private_identity_pii").select("encrypted_email")
+              .where("actor_id", "=", input.authority.actorId).executeTakeFirst();
+            if (pii === undefined) throw new DomainError("UNAUTHENTICATED", "Private identity projection is unavailable");
+            const normalizedEmail = Buffer.from(await piiProtector.decrypt(pii.encrypted_email)).toString("utf8");
+            sessionSubject = Object.freeze({
+              provider: subject.provider as "supabase",
+              providerSubject: subject.provider_subject,
+              identityKind: subject.provider_identity_kind === "apple" ? "apple" as const : "email_password" as const,
+              normalizedEmail,
+              verifiedAt: subject.verified_at.toISOString(),
+            });
+          }
           let verifiedInvitationBinding: {
             invitationId: string; secretDigest: Buffer; tenantId: string;
             expectedResourceVersion: number; role: "admin" | "consultant";
           } | undefined;
-          if (subject === undefined) {
+          if (subject === undefined && input.authority === undefined) {
             const tenant = await trx.selectFrom("tenants").select(["tenant_mode", "status"])
               .where("tenant_id", "=", inspected.tenantId).forUpdate().executeTakeFirst();
             if (tenant?.tenant_mode !== "b2b" || tenant.status !== "active") {
@@ -797,7 +878,7 @@ function productionOperations(
               schema_version: 1 as const,
               idempotency_key: derivedId("idem_apple_invited_registration", payload.idempotency_key),
               tenant_id: invitation.tenantId,
-              auth_subject: input.verifiedSubject!,
+              auth_subject: sessionSubject!,
               display_name: "Apple 受邀用户",
             };
             try {
@@ -811,13 +892,15 @@ function productionOperations(
               }, { requestId: `request_${randomUUID()}`, traceId: `trace_${randomUUID()}` }, {
                 ...registrationPayload, payload_hash: canonicalPayloadHash(registrationPayload),
               });
-              subject = { actor_id: registered.actor_id, auth_subject_id: registered.auth_subject_id };
+              subjectReference = { actor_id: registered.actor_id, auth_subject_id: registered.auth_subject_id };
             } catch (error) {
               secretDigest.fill(0);
               throw error;
             }
           }
-          if (subject === undefined) throw new DomainError("UNAUTHENTICATED", "Invitation subject is not registered");
+          if (subjectReference === undefined || sessionSubject === undefined) {
+            throw new DomainError("UNAUTHENTICATED", "Invitation subject is not registered");
+          }
           try {
             const acceptCommand = internalCommand({
               schema_version: 1 as const,
@@ -830,16 +913,16 @@ function productionOperations(
               db, transaction: trx, emailHmacKey: piiKey,
               consultantProfile: { providerConfigId: "identity-default", modelId: "identity-default" },
               ...(verifiedInvitationBinding === undefined ? {} : { verifiedInvitationBinding }),
-            }, { ...commandContext(subject.actor_id), normalizedEmail: input.verifiedSubject!.normalizedEmail }, acceptCommand);
+            }, { ...commandContext(subjectReference.actor_id), normalizedEmail: sessionSubject.normalizedEmail }, acceptCommand);
             const sessionPayload = {
               schema_version: 1 as const,
-              actor_id: subject.actor_id,
+              actor_id: subjectReference.actor_id,
               client_kind: payload.client_kind,
               invitation_id: accepted.invitation_id,
               ...(payload.device_label === undefined ? {} : { device_label: payload.device_label }),
             };
             const issuedSession = await issueSessionInTransaction(
-              trx, input.verifiedSubject!, payload.client_kind, payload.device_label,
+              trx, sessionSubject, payload.client_kind, payload.device_label,
               {
                 idempotencyKey: derivedId("idem_invitation_session", payload.idempotency_key),
                 payloadHash: canonicalPayloadHash(sessionPayload),
@@ -893,6 +976,34 @@ function productionOperations(
           if (observation === undefined || observation.kind !== "password_reset_provider_observation") {
             return { kind: "terminal" as const };
           }
+          if (observation.outcome === "ambiguous") {
+            let durableSubject: VerifiedProviderSubject;
+            try {
+              durableSubject = await readProtectedPasswordResetSubject(
+                oauthProtector,
+                transaction.provider_subject_ciphertext,
+              );
+            } catch {
+              return { kind: "terminal" as const };
+            }
+            const subject = await trx.selectFrom("auth_subjects").select("actor_id")
+              .where("provider", "=", durableSubject.provider)
+              .where("provider_subject", "=", durableSubject.providerSubject)
+              .where("status", "=", "active").forUpdate().executeTakeFirst();
+            if (subject === undefined) return { kind: "terminal" as const };
+            await revokeCoreSessionsInTransaction({ db }, trx, {
+              actorId: subject.actor_id,
+              reason: "password_reset",
+            });
+            await trx.updateTable("oauth_transactions").set({
+              status: "expired", pkce_verifier_ciphertext: Buffer.from([0]),
+              provider_completion_status: "pending", provider_completion_started_at: null,
+              expected_provider_subject_ciphertext: null, provider_subject_ciphertext: null,
+              provider_completion_payload_hash: null, provider_settlement_expires_at: null,
+              provider_completed_at: null, provider_evidence_at: null, updated_at: now,
+            }).where("oauth_transaction_id", "=", payload.transaction_id).executeTakeFirstOrThrow();
+            return { kind: "recovery_required" as const };
+          }
           if (observation.outcome === "invalid") {
             if (observation.reason !== "provider_subject_mismatch"
               && observation.reason !== "provider_email_mismatch"
@@ -901,7 +1012,7 @@ function productionOperations(
             }
             return { kind: "terminal" as const };
           }
-          const evidenceTimestamp = strictUtcMilliseconds(observation.providerEvidenceAt);
+          const evidenceTimestamp = strictUtcTimestampMilliseconds(observation.providerEvidenceAt);
           if (evidenceTimestamp === undefined || evidenceTimestamp > now.getTime()) {
             return { kind: "terminal" as const };
           }
@@ -1190,12 +1301,35 @@ function productionOperations(
         if (input.kind === "apple_identity_link" && input.verifiedSubject !== undefined) {
           const idempotencyKey = String(payload.idempotency_key);
           const payloadHash = String(payload.payload_hash);
+          const transactionId = String(payload.transaction_id);
           const tenant = await trx.selectFrom("memberships").select("tenant_id")
             .where("actor_id", "=", input.authority.actorId).where("status", "=", "active")
             .orderBy("tenant_id").executeTakeFirst();
           if (tenant === undefined) throw new DomainError("UNAUTHENTICATED", "Active identity-link tenant authority is unavailable");
           const now = (await sql<{ now: Date }>`select clock_timestamp() as now`.execute(trx)).rows[0]?.now;
           if (!(now instanceof Date) || !Number.isFinite(now.getTime())) throw new DomainError("INTERNAL_ERROR", "Identity-link database clock is unavailable");
+          const transaction = await trx.selectFrom("oauth_transactions").selectAll()
+            .where("oauth_transaction_id", "=", transactionId).forUpdate().executeTakeFirst();
+          if (transaction === undefined || transaction.flow_kind !== "apple_link"
+            || transaction.actor_id !== input.authority.actorId || transaction.status !== "pending"
+            || transaction.provider_completion_status !== "provider_completed"
+            || transaction.provider_completion_payload_hash !== payloadHash
+            || transaction.provider_subject_ciphertext === null || transaction.expires_at.getTime() <= now.getTime()) {
+            throw new DomainError("UNAUTHENTICATED", "Apple link checkpoint is invalid");
+          }
+          let durableSubject: VerifiedProviderSubject;
+          try {
+            durableSubject = await readProtectedAppleLinkSubject(oauthProtector, transaction.provider_subject_ciphertext);
+          } catch {
+            throw new DomainError("UNAUTHENTICATED", "Apple link checkpoint is invalid");
+          }
+          if (durableSubject.provider !== input.verifiedSubject.provider
+            || durableSubject.providerSubject !== input.verifiedSubject.providerSubject
+            || durableSubject.identityKind !== input.verifiedSubject.identityKind
+            || durableSubject.normalizedEmail !== input.verifiedSubject.normalizedEmail
+            || durableSubject.verifiedAt !== input.verifiedSubject.verifiedAt) {
+            throw new DomainError("UNAUTHENTICATED", "Apple link checkpoint is invalid");
+          }
           const context = { tenantId: tenant.tenant_id, trx };
           const operation = "identity.apple-link";
           const admission = await beginIdempotentCommand<{ schema_version: 1; auth_subject_id: string; linked: true }>(context, {
@@ -1238,6 +1372,10 @@ function productionOperations(
           await completeIdempotentCommand(context, {
             key: idempotencyKey, payloadHash, operation, resultRef: linked.auth_subject_id, response, updatedAt: now,
           });
+          await trx.updateTable("oauth_transactions").set({
+            status: "consumed", consumed_at: now, updated_at: now,
+          }).where("oauth_transaction_id", "=", transactionId)
+            .where("status", "=", "pending").executeTakeFirstOrThrow();
           return response;
         }
         if (input.kind === "account_deletion_request" || input.kind === "account_deletion_cancel") return unavailable();

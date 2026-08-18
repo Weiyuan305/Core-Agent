@@ -46,18 +46,14 @@ function emailVerificationRequest(facts: {
 function invitationAcceptanceHash(facts: {
   readonly schema_version: 1; readonly idempotency_key: string; readonly expected_resource_version: number;
   readonly invitation_secret: string; readonly device_label?: string;
-  readonly authentication_proof: { readonly kind: "email_password"; readonly client_kind: "web"; readonly verification_proof: string };
+  readonly client_kind: "web" | "iphone" | "macos";
 }): string {
   return canonicalPayloadHash({
     schema_version: facts.schema_version,
     idempotency_key: facts.idempotency_key,
     expected_resource_version: facts.expected_resource_version,
     invitation_digest: sensitiveDigest(facts.invitation_secret),
-    authentication_proof: {
-      kind: facts.authentication_proof.kind,
-      client_kind: facts.authentication_proof.client_kind,
-      verification_proof_digest: sensitiveDigest(facts.authentication_proof.verification_proof),
-    },
+    authentication: { kind: "core_session", client_kind: facts.client_kind },
     ...(facts.device_label === undefined ? {} : { device_label: facts.device_label }),
   });
 }
@@ -74,7 +70,7 @@ function appleInvitationAcceptancePayload<T extends {
       idempotency_key: facts.idempotency_key,
       expected_resource_version: facts.expected_resource_version,
       invitation_digest: sensitiveDigest(facts.invitation_secret),
-      authentication_proof: {
+      authentication: {
         kind: facts.authentication_proof.kind,
         client_kind: facts.authentication_proof.client_kind,
         callback_proof_digest: sensitiveDigest(JSON.stringify(facts.authentication_proof)),
@@ -82,6 +78,35 @@ function appleInvitationAcceptancePayload<T extends {
       ...(facts.device_label === undefined ? {} : { device_label: facts.device_label }),
     }),
   };
+}
+
+function appleCallbackPayload<T extends {
+  readonly schema_version: 1; readonly idempotency_key: string;
+  readonly client_kind: "web" | "iphone" | "macos"; readonly transaction_id: string;
+  readonly authorization_code: string; readonly state: string;
+  readonly nonce?: string; readonly pkce_code_verifier?: string;
+}>(flowKind: "apple_sign_in" | "apple_link", facts: T): T & { readonly payload_hash: string } {
+  return { ...facts, payload_hash: canonicalPayloadHash({
+    schema_version: facts.schema_version, flow_kind: flowKind,
+    idempotency_key: facts.idempotency_key, client_kind: facts.client_kind,
+    transaction_id: facts.transaction_id,
+    code_proof_digest: sensitiveDigest(facts.authorization_code),
+    state_proof_digest: sensitiveDigest(facts.state),
+    ...(facts.nonce === undefined ? {} : { nonce_proof_digest: sensitiveDigest(facts.nonce) }),
+    ...(facts.pkce_code_verifier === undefined ? {} : { pkce_proof_digest: sensitiveDigest(facts.pkce_code_verifier) }),
+  }) };
+}
+
+function emailSignInPayload<T extends {
+  readonly schema_version: 1; readonly idempotency_key: string; readonly email: string;
+  readonly password: string; readonly client_kind: "web" | "iphone" | "macos"; readonly device_label?: string;
+}>(facts: T): T & { readonly payload_hash: string } {
+  return { ...facts, payload_hash: canonicalPayloadHash({
+    schema_version: facts.schema_version, idempotency_key: facts.idempotency_key,
+    normalized_email: facts.email.toLowerCase(), sign_in_proof_digest: sensitiveDigest(facts.password),
+    client_kind: facts.client_kind,
+    ...(facts.device_label === undefined ? {} : { device_label: facts.device_label }),
+  }) };
 }
 
 function reauthenticationRequest(facts: {
@@ -189,6 +214,7 @@ test("production composition atomically verifies email, registers Task 3, issues
 
     let nativePasswordCalls = 0;
     let nativeLinkStartCalls = 0;
+    let nativeLinkProviderEffects = 0;
     let existingAppleStarts = 0;
     const nativeProvider: AuthProviderAdapter = {
       async reauthenticatePassword(input) {
@@ -199,9 +225,21 @@ test("production composition atomically verifies email, registers Task 3, issues
       },
       async reauthenticateAndBeginAppleLink(input) {
         nativeLinkStartCalls += 1;
+        const transactionId = `native-link-${input.client_kind}`;
+        const state = `native-link-state-${input.client_kind}`;
+        const record = {
+          oauth_transaction_id: transactionId, provider: "supabase" as const,
+          flow_kind: "apple_link" as const, actor_id: input.authenticatedActorId,
+          client_kind: input.client_kind, state_digest: createHash("sha256").update(state).digest(),
+          nonce_digest: createHash("sha256").update((input as { nonce?: string }).nonce ?? "").digest(),
+          pkce_verifier_ciphertext: Buffer.alloc(33, 0x45), redirect_uri: input.redirect_uri,
+          status: "pending" as const, expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
+        };
+        await providerStarts.reserveStart!(record);
+        await providerStarts.completeStart!(record);
         return {
-          transaction_id: `native-link-${input.client_kind}`,
-          authorization_url: `https://provider.example.test/auth/v1/authorize?state=native-link-state&redirect_to=${encodeURIComponent(input.redirect_uri)}`,
+          transaction_id: transactionId,
+          authorization_url: `https://provider.example.test/auth/v1/authorize?state=${state}&redirect_to=${encodeURIComponent(input.redirect_uri)}`,
           expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
         };
       },
@@ -223,7 +261,22 @@ test("production composition atomically verifies email, registers Task 3, issues
       completePasswordReset: async () => { throw new Error("unused provider method"); },
       async linkApple(input) {
         assert.equal(input.authenticatedActorId, registered.actorId);
-        return { ...verifiedSubject, identityKind: "apple" };
+        const subject = { ...verifiedSubject, identityKind: "apple" as const };
+        const durable = await providerStarts.loadStart!(input.transaction_id);
+        if (durable?.provider_completion_status === "provider_completed") return subject;
+        const admission = await providerStarts.beginAppleLinkCompletion!({
+          transactionId: input.transaction_id, payloadHash: input.payload_hash,
+        });
+        assert.equal(admission.kind, "acquired");
+        nativeLinkProviderEffects += 1;
+        const ciphertext = await oauthProtector.encrypt(Buffer.from(JSON.stringify({
+          kind: "apple_link_subject", ...subject,
+        }), "utf8"));
+        await providerStarts.checkpointAppleLinkCompletion!({
+          transactionId: input.transaction_id, providerSubjectCiphertext: ciphertext,
+        });
+        ciphertext.fill(0);
+        return subject;
       },
       revokeCurrentProviderSession: async () => { throw new Error("unused provider method"); },
       deleteProviderSubject: async () => { throw new Error("unused provider method"); },
@@ -256,11 +309,11 @@ test("production composition atomically verifies email, registers Task 3, issues
       return nativeApp.inject({
         method: "POST", url: "/auth/v1/apple/callback",
         headers: { host: "identity.example.test", origin: "https://app.example.test", "content-type": "application/json", cookie },
-        payload: {
-          schema_version: 1, idempotency_key: `${idempotencyKey}-callback`, payload_hash: `sha256:${"2".repeat(64)}`,
+        payload: appleCallbackPayload("apple_sign_in", {
+          schema_version: 1, idempotency_key: `${idempotencyKey}-callback`,
           client_kind: "web", transaction_id: `composition-existing-apple-${existingAppleStarts}`,
           authorization_code: "composition-existing-apple-code", state: "composition-existing-apple-state",
-        },
+        }),
       });
     };
     const appleBeforeLink = await appleSignIn("composition-apple-before-link");
@@ -352,13 +405,13 @@ test("production composition atomically verifies email, registers Task 3, issues
             host: "identity.example.test", authorization: `Bearer ${nativeSession.sessionSecret}`,
             "content-type": "application/json",
           },
-          payload: {
+          payload: appleCallbackPayload("apple_link", {
             schema_version: 1, idempotency_key: "composition-native-link-callback-iphone",
-            payload_hash: `sha256:${"a".repeat(64)}`, client_kind: "iphone",
+            client_kind: "iphone",
             transaction_id: "native-link-iphone", authorization_code: "composition-link-code",
-            state: "native-link-state", nonce: "composition-link-nonce",
+            state: "native-link-state-iphone", nonce: "composition-link-nonce",
             pkce_code_verifier: "x".repeat(43),
-          },
+          }),
         });
         assert.equal(callback.statusCode, 200, callback.body);
         assert.equal(callback.json().auth_subject_id, registered.authSubjectId);
@@ -370,13 +423,80 @@ test("production composition atomically verifies email, registers Task 3, issues
     }
     const appleAfterLink = await appleSignIn("composition-apple-after-link");
     assert.equal(appleAfterLink.statusCode, 200, appleAfterLink.body);
+
+    const crashLinkSession = await issueCoreSession({ db }, {
+      sessionId: "session_composition_web_link_crash", actorId: registered.actorId,
+      authSubjectId: registered.authSubjectId, clientKind: "web",
+    });
+    await pool.query("update core_sessions set reauthenticated_at = clock_timestamp(), updated_at = clock_timestamp() where session_id = $1", [crashLinkSession.session.session_id]);
+    let failLinkCoreOnce = true;
+    const crashLinkApp = await buildIdentityGatewayApp({
+      config: {
+        publicOrigins: new Set(["https://app.example.test"]), cookieHost: "identity.example.test",
+        publicBaseUrl: "https://identity.example.test", providerUrl: "https://provider.example.test",
+        appleWebRedirectUris: new Set(["https://app.example.test/auth/apple/callback"]),
+        appleNativeRedirectUris: new Set(["coreagent://auth/apple/callback"]),
+        passwordResetRedirectUri: "https://app.example.test/auth/password/reset/callback", publicAuthEnabled: true,
+      },
+      flowCookieKey: key, provider: nativeProvider,
+      operations: {
+        ...operations,
+        async executeProtectedAuthorityCommand(input) {
+          if (input.kind === "apple_identity_link" && failLinkCoreOnce) {
+            failLinkCoreOnce = false;
+            throw new Error("forced post-provider Apple-link Core rollback");
+          }
+          return operations.executeProtectedAuthorityCommand(input);
+        },
+      },
+    });
+    const crashHeaders = {
+      host: "identity.example.test", origin: "https://app.example.test", "content-type": "application/json",
+      cookie: `core_agent_session=${crashLinkSession.sessionSecret}; core_agent_csrf=${crashLinkSession.csrfSecret!}`,
+      "x-core-agent-csrf": crashLinkSession.csrfSecret!,
+    };
+    const crashStart = await crashLinkApp.inject({
+      method: "POST", url: "/auth/v1/apple/link/start", headers: crashHeaders,
+      payload: {
+        schema_version: 1, idempotency_key: "composition-web-link-crash-start",
+        payload_hash: `sha256:${"4".repeat(64)}`, client_kind: "web",
+        redirect_uri: "https://app.example.test/auth/apple/callback", password: "native-current-password",
+      },
+    });
+    assert.equal(crashStart.statusCode, 200, crashStart.body);
+    const crashFlowCookie = ([] as string[]).concat(crashStart.headers["set-cookie"] ?? [])
+      .find((value) => value.startsWith("core_agent_apple_flow="))!.split(";", 1)[0]!;
+    const crashCallback = appleCallbackPayload("apple_link", {
+      schema_version: 1, idempotency_key: "composition-web-link-crash-callback", client_kind: "web",
+      transaction_id: "native-link-web", authorization_code: "composition-web-link-code",
+      state: "native-link-state-web",
+    });
+    const failedLink = await crashLinkApp.inject({
+      method: "POST", url: "/auth/v1/apple/link/callback",
+      headers: { ...crashHeaders, cookie: `${crashHeaders.cookie}; ${crashFlowCookie}` }, payload: crashCallback,
+    });
+    assert.equal(failedLink.statusCode, 500, failedLink.body);
+    assert.doesNotMatch(String(failedLink.headers["set-cookie"] ?? ""), /core_agent_apple_flow=;[^\n]*Max-Age=0/u);
+    assert.deepEqual((await pool.query(`select status, provider_completion_status from oauth_transactions
+      where oauth_transaction_id = 'native-link-web'`)).rows[0], {
+      status: "pending", provider_completion_status: "provider_completed",
+    });
+    const retriedLink = await crashLinkApp.inject({
+      method: "POST", url: "/auth/v1/apple/link/callback",
+      headers: { ...crashHeaders, cookie: `${crashHeaders.cookie}; ${crashFlowCookie}` }, payload: crashCallback,
+    });
+    assert.equal(retriedLink.statusCode, 200, retriedLink.body);
+    assert.match(String(retriedLink.headers["set-cookie"] ?? ""), /core_agent_apple_flow=;[^\n]*Max-Age=0/u);
+    assert.equal((await pool.query("select status from oauth_transactions where oauth_transaction_id = 'native-link-web'")).rows[0]?.status, "consumed");
+    assert.equal(nativeLinkProviderEffects, 2, "one native and one Web provider link effect; Web retry must not repeat it");
+    await crashLinkApp.close();
     const passwordAfterLink = await nativeApp.inject({
       method: "POST", url: "/auth/v1/email/sign-in",
       headers: { host: "identity.example.test", origin: "https://app.example.test", "content-type": "application/json" },
-      payload: {
-        schema_version: 1, idempotency_key: "composition-password-after-link", payload_hash: `sha256:${"3".repeat(64)}`,
+      payload: emailSignInPayload({
+        schema_version: 1, idempotency_key: "composition-password-after-link",
         email: verifiedSubject.normalizedEmail, password: "composition-password", client_kind: "web",
-      },
+      }),
     });
     assert.equal(passwordAfterLink.statusCode, 200, passwordAfterLink.body);
     await nativeApp.close();
@@ -483,17 +603,38 @@ test("production composition atomically verifies email, registers Task 3, issues
     ]);
     assert.deepEqual(concurrentRevocations[1], concurrentRevocations[0]);
 
+    const directLinkTransactionId = "oauth_composition_direct_apple_link";
+    const directLinkPayloadHash = `sha256:${"d".repeat(64)}`;
+    const directLinkRecord = {
+      oauth_transaction_id: directLinkTransactionId, provider: "supabase" as const,
+      flow_kind: "apple_link" as const, actor_id: refreshed.actorId, client_kind: "web" as const,
+      state_digest: createHash("sha256").update("composition-direct-link-state").digest(),
+      nonce_digest: Buffer.alloc(32, 0x71), pkce_verifier_ciphertext: Buffer.alloc(33, 0x72),
+      redirect_uri: "https://app.example.test/auth/apple/callback", status: "pending" as const,
+      expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
+    };
+    await providerStarts.save(directLinkRecord);
+    await providerStarts.beginAppleLinkCompletion!({ transactionId: directLinkTransactionId, payloadHash: directLinkPayloadHash });
+    const directLinkSubject = { ...verifiedSubject, identityKind: "apple" as const };
+    const directLinkCiphertext = await oauthProtector.encrypt(Buffer.from(JSON.stringify({
+      kind: "apple_link_subject", ...directLinkSubject,
+    }), "utf8"));
+    await providerStarts.checkpointAppleLinkCompletion!({
+      transactionId: directLinkTransactionId, providerSubjectCiphertext: directLinkCiphertext,
+    });
+    directLinkCiphertext.fill(0);
     const appleLinkPayload = {
-      schema_version: 1, idempotency_key: "composition-apple-link", payload_hash: `sha256:${"d".repeat(64)}`,
+      schema_version: 1, idempotency_key: "composition-apple-link", payload_hash: directLinkPayloadHash,
+      transaction_id: directLinkTransactionId,
     };
     await operations.executeProtectedAuthorityCommand({
       kind: "apple_identity_link", authority: refreshed, payload: appleLinkPayload,
-      verifiedSubject: { ...verifiedSubject, identityKind: "apple" },
+      verifiedSubject: directLinkSubject,
     });
     await assert.rejects(operations.executeProtectedAuthorityCommand({
       kind: "apple_identity_link", authority: refreshed, payload: appleLinkPayload,
       verifiedSubject: { ...verifiedSubject, providerSubject: "composition-other-apple-subject", identityKind: "apple" },
-    }), /IDEMPOTENCY_CONFLICT/u);
+    }), /UNAUTHENTICATED/u);
     assert.deepEqual((await pool.query(
       "select count(*)::int as count, min(provider_identity_kind) as provider_identity_kind from auth_subjects where actor_id = $1",
       [registered.actorId],
@@ -530,9 +671,9 @@ test("production composition atomically verifies email, registers Task 3, issues
     const inviteeEmail = "company-invitee@example.test";
     const lockInviteeEmail = "company-lock-invitee@example.test";
     await db.insertInto("private_identity_pii").values([
-      { actor_id: "actor_composition_admin", normalized_email_hmac: createHmac("sha256", key).update(adminEmail).digest(), encrypted_email: Buffer.from("encrypted-admin"), encryption_key_ref: "composition", created_at: timestamp, updated_at: timestamp },
-      { actor_id: "actor_composition_invitee", normalized_email_hmac: createHmac("sha256", key).update(inviteeEmail).digest(), encrypted_email: Buffer.from("encrypted-invitee"), encryption_key_ref: "composition", created_at: timestamp, updated_at: timestamp },
-      { actor_id: "actor_composition_lock_invitee", normalized_email_hmac: createHmac("sha256", key).update(lockInviteeEmail).digest(), encrypted_email: Buffer.from("encrypted-lock-invitee"), encryption_key_ref: "composition", created_at: timestamp, updated_at: timestamp },
+      { actor_id: "actor_composition_admin", normalized_email_hmac: createHmac("sha256", key).update(adminEmail).digest(), encrypted_email: await protector.encrypt(Buffer.from(adminEmail)), encryption_key_ref: "composition", created_at: timestamp, updated_at: timestamp },
+      { actor_id: "actor_composition_invitee", normalized_email_hmac: createHmac("sha256", key).update(inviteeEmail).digest(), encrypted_email: await protector.encrypt(Buffer.from(inviteeEmail)), encryption_key_ref: "composition", created_at: timestamp, updated_at: timestamp },
+      { actor_id: "actor_composition_lock_invitee", normalized_email_hmac: createHmac("sha256", key).update(lockInviteeEmail).digest(), encrypted_email: await protector.encrypt(Buffer.from(lockInviteeEmail)), encryption_key_ref: "composition", created_at: timestamp, updated_at: timestamp },
     ]).execute();
     await db.insertInto("memberships").values({
       tenant_id: company.tenant_id, membership_id: "membership_composition_admin", actor_id: "actor_composition_admin",
@@ -543,6 +684,24 @@ test("production composition atomically verifies email, registers Task 3, issues
       sessionId: "session_composition_admin", actorId: "actor_composition_admin",
       authSubjectId: "auth_composition_admin", clientKind: "web",
     });
+    const inviteeIssued = await issueCoreSession({ db }, {
+      sessionId: "session_composition_invitee", actorId: "actor_composition_invitee",
+      authSubjectId: "auth_composition_invitee", clientKind: "web",
+    });
+    const lockInviteeIssued = await issueCoreSession({ db }, {
+      sessionId: "session_composition_lock_invitee", actorId: "actor_composition_lock_invitee",
+      authSubjectId: "auth_composition_lock_invitee", clientKind: "web",
+    });
+    const inviteeHeaders = {
+      host: "identity.example.test", origin: "https://app.example.test", "content-type": "application/json",
+      cookie: `core_agent_session=${inviteeIssued.sessionSecret}; core_agent_csrf=${inviteeIssued.csrfSecret!}`,
+      "x-core-agent-csrf": inviteeIssued.csrfSecret!,
+    };
+    const lockInviteeHeaders = {
+      host: "identity.example.test", origin: "https://app.example.test", "content-type": "application/json",
+      cookie: `core_agent_session=${lockInviteeIssued.sessionSecret}; core_agent_csrf=${lockInviteeIssued.csrfSecret!}`,
+      "x-core-agent-csrf": lockInviteeIssued.csrfSecret!,
+    };
     await pool.query("update core_sessions set reauthenticated_at = now(), updated_at = now() where session_id = $1", [adminIssued.session.session_id]);
     const adminAuthority = await operations.authenticateSession({ sessionSecret: adminIssued.sessionSecret, csrfSecret: adminIssued.csrfSecret!, requireCsrf: true });
     const invitation = await operations.executeProtectedAuthorityCommand({
@@ -798,22 +957,21 @@ test("production composition atomically verifies email, registers Task 3, issues
     const webB2c = await onboardingApp.inject({
       method: "POST", url: "/auth/v1/apple/callback",
       headers: { ...publicHeaders, cookie: webB2cCookie },
-      payload: {
-        schema_version: 1, idempotency_key: "composition-apple-b2c-web-complete",
-        payload_hash: `sha256:${"6".repeat(64)}`, client_kind: "web",
+      payload: appleCallbackPayload("apple_sign_in", {
+        schema_version: 1, idempotency_key: "composition-apple-b2c-web-complete", client_kind: "web",
         transaction_id: `oauth_composition_apple_${webB2cSuffix}`,
         authorization_code: "apple-b2c-web-code", state: webB2cState,
-      },
+      }),
     });
     assert.equal(webB2c.statusCode, 200, webB2c.body);
     assert.equal(webB2c.json().transport, "web_cookie");
     const passwordAgainstAppleOnly = await onboardingApp.inject({
       method: "POST", url: "/auth/v1/email/sign-in", headers: publicHeaders,
-      payload: {
+      payload: emailSignInPayload({
         schema_version: 1, idempotency_key: "composition-password-against-apple-only",
-        payload_hash: `sha256:${"7".repeat(64)}`, email: "apple-b2c-web@example.test",
+        email: "apple-b2c-web@example.test",
         password: "composition-password", client_kind: "web",
-      },
+      }),
     });
     assert.equal(passwordAgainstAppleOnly.statusCode, 401, passwordAgainstAppleOnly.body);
 
@@ -821,14 +979,13 @@ test("production composition atomically verifies email, registers Task 3, issues
     const nativeB2c = await onboardingApp.inject({
       method: "POST", url: "/auth/v1/apple/callback",
       headers: { host: "identity.example.test", "content-type": "application/json" },
-      payload: {
-        schema_version: 1, idempotency_key: "composition-apple-b2c-native-complete",
-        payload_hash: `sha256:${"7".repeat(64)}`, client_kind: "iphone",
+      payload: appleCallbackPayload("apple_sign_in", {
+        schema_version: 1, idempotency_key: "composition-apple-b2c-native-complete", client_kind: "iphone",
         transaction_id: nativeB2cStart.json().transaction_id,
         authorization_code: "apple-b2c-native-code",
-        state: new URL(nativeB2cStart.json().authorization_url).searchParams.get("state"),
+        state: new URL(nativeB2cStart.json().authorization_url).searchParams.get("state")!,
         nonce: "composition-Apple B2C Native-nonce", pkce_code_verifier: "v".repeat(43),
-      },
+      }),
     });
     assert.equal(nativeB2c.statusCode, 200, nativeB2c.body);
     assert.equal(nativeB2c.json().transport, "native");
@@ -850,14 +1007,13 @@ test("production composition atomically verifies email, registers Task 3, issues
     const retryB2c = await onboardingApp.inject({
       method: "POST", url: "/auth/v1/apple/callback",
       headers: { host: "identity.example.test", "content-type": "application/json" },
-      payload: {
-        schema_version: 1, idempotency_key: "composition-apple-b2c-retry-complete",
-        payload_hash: `sha256:${"c".repeat(64)}`, client_kind: "iphone",
+      payload: appleCallbackPayload("apple_sign_in", {
+        schema_version: 1, idempotency_key: "composition-apple-b2c-retry-complete", client_kind: "iphone",
         transaction_id: retryB2cStart.json().transaction_id,
         authorization_code: "apple-b2c-retry-code",
-        state: new URL(retryB2cStart.json().authorization_url).searchParams.get("state"),
+        state: new URL(retryB2cStart.json().authorization_url).searchParams.get("state")!,
         nonce: "composition-Apple B2C Retry-nonce", pkce_code_verifier: "y".repeat(43),
-      },
+      }),
     });
     assert.equal(retryB2c.statusCode, 200, retryB2c.body);
     assert.equal(appleCompletionCalls.get("apple-b2c-retry-code"), 1, "provider effect must remain outside the retried DB phase");
@@ -1374,7 +1530,7 @@ test("production composition atomically verifies email, registers Task 3, issues
     ]);
     const concurrentFirstStatuses = concurrentFirstStarts.map(({ statusCode }) => statusCode);
     assert.equal(concurrentFirstStatuses.includes(202), true);
-    assert.equal(concurrentFirstStatuses.every((statusCode) => statusCode === 202 || statusCode === 409), true);
+    assert.equal(concurrentFirstStatuses.every((statusCode) => statusCode === 202 || statusCode === 503), true);
     assert.equal(signUpCalls, startsBeforeConcurrentFirst + 1, "concurrent first start must invoke provider once");
     assert.equal((await pool.query(
       "select count(*)::int as count from email_verification_transactions where start_idempotency_key = $1",
@@ -1479,7 +1635,8 @@ test("production composition atomically verifies email, registers Task 3, issues
       const invitationDigest = createHash("sha256")
         .update(Buffer.from(invitation.invitation_secret, "base64url")).digest("base64url");
       const lateStart = await onboardingApp.inject({
-        method: "POST", url: "/auth/v1/invitations/register", headers: publicHeaders,
+        method: "POST", url: "/auth/v1/invitations/register",
+        remoteAddress: `198.51.100.${110 + lateInvalidStatuses.indexOf(status)}`, headers: publicHeaders,
         payload: {
           schema_version: 1, idempotency_key: idempotencyKey,
           payload_hash: canonicalEmailVerificationStartPayloadHash({
@@ -1533,10 +1690,7 @@ test("production composition atomically verifies email, registers Task 3, issues
       schema_version: 1 as const, idempotency_key: "composition-existing-accept-lock-order",
       invitation_secret: lockOrderInvitation.invitation_secret,
       expected_resource_version: 1, device_label: "Lock Order Browser",
-      authentication_proof: {
-        kind: "email_password" as const, client_kind: "web" as const,
-        verification_proof: "opaque-lock-order-proof",
-      },
+      client_kind: "web" as const,
     };
     const actorLock = await pool.connect();
     let lockOrderAcceptance: Promise<{ readonly statusCode: number; readonly body: string }> | undefined;
@@ -1544,7 +1698,7 @@ test("production composition atomically verifies email, registers Task 3, issues
       await actorLock.query("begin");
       await actorLock.query("select actor_id from actors where actor_id = $1 for update", ["actor_composition_lock_invitee"]);
       lockOrderAcceptance = onboardingApp.inject({
-        method: "POST", url: "/auth/v1/invitations/accept", headers: publicHeaders,
+        method: "POST", url: "/auth/v1/invitations/accept", headers: lockInviteeHeaders,
         payload: { ...lockOrderFacts, payload_hash: invitationAcceptanceHash(lockOrderFacts) },
       });
       await waitForBlockedLocks(pool, 1);
@@ -1572,24 +1726,22 @@ test("production composition atomically verifies email, registers Task 3, issues
       schema_version: 1 as const, idempotency_key: "composition-invitation-accept",
       invitation_secret: invitation.invitation_secret,
       expected_resource_version: 1, device_label: "Existing Invitation Browser",
-      authentication_proof: {
-        kind: "email_password" as const, client_kind: "web" as const, verification_proof: "opaque-existing-proof",
-      },
+      client_kind: "web" as const,
     };
     const acceptancePayload = { ...acceptanceFacts, payload_hash: invitationAcceptanceHash(acceptanceFacts) };
     const accepted = await onboardingApp.inject({
-      method: "POST", url: "/auth/v1/invitations/accept", headers: publicHeaders, payload: acceptancePayload,
+      method: "POST", url: "/auth/v1/invitations/accept", headers: inviteeHeaders, payload: acceptancePayload,
     });
     assert.equal(accepted.statusCode, 200, accepted.body);
     assert.equal(accepted.json().membership_id, invitation.membership_id);
     assert.equal(accepted.json().role, "consultant");
     const acceptanceReplay = await onboardingApp.inject({
-      method: "POST", url: "/auth/v1/invitations/accept", headers: publicHeaders, payload: acceptancePayload,
+      method: "POST", url: "/auth/v1/invitations/accept", headers: inviteeHeaders, payload: acceptancePayload,
     });
     assert.equal(acceptanceReplay.statusCode, 409, acceptanceReplay.body);
     assert.equal((await pool.query(
       "select count(*)::int as count from core_sessions where actor_id = 'actor_composition_invitee'",
-    )).rows[0]?.count, 1);
+    )).rows[0]?.count, 2);
     const activityBefore = (await pool.query<{ resource_version: string; absolute_expires_at: Date }>(
       `update core_sessions set last_seen_at = clock_timestamp() - interval '10 minutes',
         idle_expires_at = clock_timestamp() + interval '20 minutes', updated_at = clock_timestamp()
@@ -1995,7 +2147,7 @@ test("production composition atomically verifies email, registers Task 3, issues
   }
 });
 
-test("production Fastify and Supabase adapter defer provider-started reset settlement to the PostgreSQL clock", async () => {
+test("production Fastify and Supabase adapter fail closed on ambiguous reset recovery using the PostgreSQL clock", async () => {
   const pool = new Pool({ connectionString: databaseUrl });
   const db = createRuntimeDatabase(pool);
   await pool.query("drop schema public cascade; create schema public");
@@ -2200,24 +2352,72 @@ test("production Fastify and Supabase adapter defer provider-started reset settl
       method: "POST", url: "/auth/v1/password/reset/complete",
       headers: { ...headers, cookie: concurrentStart.cookie }, payload: concurrentPayload,
     });
-    assert.equal(loser.statusCode, 503, loser.body);
-    assert.doesNotMatch(String(loser.headers["set-cookie"] ?? ""), /core_agent_recovery=;[^\n]*Max-Age=0/u);
+    assert.equal(loser.statusCode, 401, loser.body);
+    assert.match(String(loser.headers["set-cookie"] ?? ""), /core_agent_recovery=;[^\n]*Max-Age=0/u);
     assert.equal(providerUpdates, 0);
+    assert.equal((await pool.query("select status from core_sessions where session_id = $1", [concurrentSession.session.session_id])).rows[0]?.status, "revoked");
+    assert.deepEqual((await pool.query(`select status, provider_completion_status,
+      provider_completion_started_at, expected_provider_subject_ciphertext, provider_subject_ciphertext,
+      provider_completion_payload_hash, provider_settlement_expires_at, provider_completed_at, provider_evidence_at
+      from oauth_transactions where oauth_transaction_id = $1`, [concurrentStart.binding.transaction_id])).rows[0], {
+      status: "expired", provider_completion_status: "pending", provider_completion_started_at: null,
+      expected_provider_subject_ciphertext: null, provider_subject_ciphertext: null,
+      provider_completion_payload_hash: null, provider_settlement_expires_at: null,
+      provider_completed_at: null, provider_evidence_at: null,
+    });
     releaseExchange();
     const winner = await winnerRequest;
-    assert.equal(winner.statusCode, 500, winner.body);
+    assert.equal(winner.statusCode, 503, winner.body);
     assert.doesNotMatch(String(winner.headers["set-cookie"] ?? ""), /core_agent_recovery=;[^\n]*Max-Age=0/u);
     assert.equal(providerExchanges, 1);
     assert.equal(providerUpdates, 1);
-    assert.equal((await pool.query("select status from core_sessions where session_id = $1", [concurrentSession.session.session_id])).rows[0]?.status, "active");
-    const loserRetry = await concurrentApp.inject({
-      method: "POST", url: "/auth/v1/password/reset/complete",
-      headers: { ...headers, cookie: concurrentStart.cookie }, payload: concurrentPayload,
+    const checkpointFailureSession = await issueCoreSession({ db }, {
+      sessionId: "session_round_thirteen_checkpoint_failure", actorId: registered.actorId,
+      authSubjectId: registered.authSubjectId, clientKind: "web",
     });
-    assert.equal(loserRetry.statusCode, 200, loserRetry.body);
-    assert.equal(providerExchanges, 1);
-    assert.equal(providerUpdates, 1);
-    assert.equal((await pool.query("select status from core_sessions where session_id = $1", [concurrentSession.session.session_id])).rows[0]?.status, "revoked");
+    const checkpointFailureStart = await startProviderReset("round-thirteen-checkpoint-failure-start");
+    const checkpointFailurePayload = completionPayload("round-thirteen-checkpoint-failure-completion");
+    failResetCheckpointOnce = true;
+    const checkpointFailureApp = await buildIdentityGatewayApp({
+      config, provider, operations, flowCookieKey, now: () => new Date(gatewayNow),
+    });
+    const checkpointFailure = await checkpointFailureApp.inject({
+      method: "POST", url: "/auth/v1/password/reset/complete", remoteAddress: "198.51.100.44",
+      headers: { ...headers, cookie: checkpointFailureStart.cookie }, payload: checkpointFailurePayload,
+    });
+    assert.equal(checkpointFailure.statusCode, 503, checkpointFailure.body);
+    assert.doesNotMatch(String(checkpointFailure.headers["set-cookie"] ?? ""), /core_agent_recovery=;[^\n]*Max-Age=0/u);
+    assert.equal((await pool.query("select status from core_sessions where session_id = $1", [checkpointFailureSession.session.session_id])).rows[0]?.status, "active");
+    const checkpointRecovery = await checkpointFailureApp.inject({
+      method: "POST", url: "/auth/v1/password/reset/complete", remoteAddress: "198.51.100.44",
+      headers: { ...headers, cookie: checkpointFailureStart.cookie }, payload: checkpointFailurePayload,
+    });
+    assert.equal(checkpointRecovery.statusCode, 401, checkpointRecovery.body);
+    assert.match(String(checkpointRecovery.headers["set-cookie"] ?? ""), /core_agent_recovery=;[^\n]*Max-Age=0/u);
+    assert.equal((await pool.query("select status from core_sessions where session_id = $1", [checkpointFailureSession.session.session_id])).rows[0]?.status, "revoked");
+    assert.deepEqual((await pool.query(`select status, provider_completion_status, provider_subject_ciphertext,
+      provider_completion_payload_hash, provider_settlement_expires_at from oauth_transactions
+      where oauth_transaction_id = $1`, [checkpointFailureStart.binding.transaction_id])).rows[0], {
+      status: "expired", provider_completion_status: "pending", provider_subject_ciphertext: null,
+      provider_completion_payload_hash: null, provider_settlement_expires_at: null,
+    });
+    assert.equal(providerExchanges, 2);
+    assert.equal(providerUpdates, 2);
+    await checkpointFailureApp.close();
+    const replacement = await concurrentApp.inject({
+      method: "POST", url: "/auth/v1/password/reset/start", remoteAddress: "198.51.100.43",
+      headers, payload: {
+        schema_version: 1, idempotency_key: "round-thirteen-reset-replacement",
+        payload_hash: canonicalProviderStartPayloadHash({
+          flowKind: "password_reset", idempotencyKey: "round-thirteen-reset-replacement", normalizedEmail,
+        }), email: normalizedEmail,
+      },
+    });
+    assert.equal(replacement.statusCode, 202, replacement.body);
+    assert.notEqual(String(replacement.json().transaction_id), concurrentStart.binding.transaction_id);
+    assert.equal(providerInspections, 0, "generic provider updated_at must never be used for reset recovery");
+    await concurrentApp.close();
+    return;
     assert.equal((await pool.query("select status from oauth_transactions where oauth_transaction_id = $1", [concurrentStart.binding.transaction_id])).rows[0]?.status, "consumed");
     assert.equal(providerInspections >= 1, true);
     await concurrentApp.close();

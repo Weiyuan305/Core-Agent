@@ -33,6 +33,7 @@ create table email_verification_transactions (
   provider_start_attempt integer not null default 1
     constraint email_verification_provider_start_attempt_check
     check (provider_start_attempt between 1 and 100),
+  provider_start_reserved_at timestamptz not null,
   provider_start_finalized_at timestamptz,
   provider_start_failed_at timestamptz,
   status text not null check (status in ('pending', 'consumed', 'expired')),
@@ -41,6 +42,8 @@ create table email_verification_transactions (
   created_at timestamptz not null,
   updated_at timestamptz not null,
   check (expires_at > created_at),
+  constraint email_verification_provider_start_reserved_at_check
+    check (provider_start_reserved_at >= created_at and provider_start_reserved_at < expires_at),
   constraint email_verification_provider_start_state_check check (
     (provider_start_status = 'reserved' and provider_start_finalized_at is null and provider_start_failed_at is null
       and expected_provider_subject_hmac is null and expected_provider_subject_ciphertext is null)
@@ -134,6 +137,18 @@ alter table oauth_transactions
       and provider_completion_payload_hash is null
       and provider_settlement_expires_at is null
       and provider_completed_at is null and provider_evidence_at is null)
+    or (flow_kind = 'apple_link' and status = 'pending' and provider_completion_status = 'provider_started'
+      and provider_completion_started_at is not null and expected_provider_subject_ciphertext is null
+      and provider_subject_ciphertext is null and provider_completion_payload_hash is not null
+      and provider_settlement_expires_at = expires_at
+      and provider_completed_at is null and provider_evidence_at is null)
+    or (flow_kind = 'apple_link' and status in ('pending', 'consumed') and provider_completion_status = 'provider_completed'
+      and provider_completion_started_at is not null and expected_provider_subject_ciphertext is null
+      and provider_subject_ciphertext is not null and provider_completion_payload_hash is not null
+      and provider_settlement_expires_at = expires_at
+      and provider_completed_at is not null and provider_evidence_at = provider_completed_at
+      and provider_completed_at >= provider_completion_started_at
+      and provider_completed_at <= provider_settlement_expires_at)
     or (flow_kind = 'password_reset' and status = 'pending' and provider_completion_status = 'pending'
       and provider_completion_started_at is null and expected_provider_subject_ciphertext is not null
       and provider_subject_ciphertext is null

@@ -162,6 +162,32 @@ class MemoryTransactionStore implements OAuthTransactionStore {
       provider_completed_at: fixedNow.toISOString(), provider_evidence_at: input.providerEvidenceAt,
     });
   }
+
+  async beginAppleLinkCompletion(input: { transactionId: string; payloadHash: string }): Promise<{ kind: "acquired" | "existing" }> {
+    const record = this.records.get(input.transactionId);
+    assert.equal(record?.flow_kind, "apple_link");
+    if (record?.provider_completion_status === "provider_started") {
+      assert.equal(record.provider_completion_payload_hash, input.payloadHash);
+      return { kind: "existing" };
+    }
+    this.records.set(input.transactionId, {
+      ...record!, provider_completion_status: "provider_started",
+      provider_completion_started_at: fixedNow.toISOString(),
+      provider_completion_payload_hash: input.payloadHash,
+      provider_settlement_expires_at: record!.expires_at,
+    });
+    return { kind: "acquired" };
+  }
+
+  async checkpointAppleLinkCompletion(input: { transactionId: string; providerSubjectCiphertext: Uint8Array }): Promise<void> {
+    const record = this.records.get(input.transactionId);
+    assert.equal(record?.provider_completion_status, "provider_started");
+    this.records.set(input.transactionId, {
+      ...record!, provider_completion_status: "provider_completed",
+      provider_subject_ciphertext: Uint8Array.from(input.providerSubjectCiphertext),
+      provider_completed_at: fixedNow.toISOString(), provider_evidence_at: fixedNow.toISOString(),
+    });
+  }
 }
 
 const protector: TransactionProtector = {
@@ -222,6 +248,7 @@ function createHarness(input: {
   readonly adminUpdateData?: unknown;
   readonly exchangedProviderSubject?: string;
   readonly adminUser?: unknown;
+  readonly providerUser?: unknown;
   readonly verifyOtpError?: unknown;
   readonly failResetCheckpointOnce?: boolean;
 } = {}): Harness {
@@ -275,7 +302,7 @@ function createHarness(input: {
         }));
         return {
           data: {
-            user: user(),
+            user: input.providerUser ?? user(),
             session: { access_token: providerAccessToken, refresh_token: providerRefreshToken },
           },
           error: null,
@@ -678,6 +705,37 @@ test("Supabase copies only allowlisted own user facts and validates confirmed em
     createClient: unverifiedFactory,
   });
   await expectFailure(() => unverified.signInEmail(credential), "AUTH_EMAIL_UNVERIFIED");
+});
+
+test("Supabase accepts strict UTC confirmation evidence at zero through nine fractional digits", async () => {
+  for (const [confirmedAt, resetEvidenceAt] of [
+    ["2026-08-01T00:00:00Z", "2026-08-17T02:00:00Z"],
+    ["2026-08-01T00:00:00.123456789Z", "2026-08-17T02:00:00.000000000Z"],
+  ] as const) {
+    const signIn = createHarness({ providerUser: user("email", "provider-subject-1", "user@example.test", confirmedAt) });
+    const subject = await signIn.provider.signInEmail({ email: "user@example.test", password: "correct-horse" });
+    assert.equal(subject.verifiedAt, confirmedAt === "2026-08-01T00:00:00Z"
+      ? "2026-08-01T00:00:00.000Z" : "2026-08-01T00:00:00.123Z");
+
+    const reset = createHarness({ adminUpdateData: { user: user("email", "provider-subject-1", "user@example.test", undefined, resetEvidenceAt) } });
+    const binding = await reset.provider.beginPasswordReset(passwordResetStartInput(`idem_reset_timestamp_${confirmedAt.length}`));
+    const completed = await reset.provider.completePasswordReset({
+      binding: passwordResetCompletionBinding(binding), authorization_code: "one-time-recovery-code",
+      new_password: "new correct horse battery staple", payloadHash: resetCompletionPayloadHash,
+    });
+    assert.equal(requireVerifiedResetSubject(completed).providerSubject, "provider-subject-1");
+  }
+
+  const invalid = createHarness({ providerUser: user("email", "provider-subject-1", "user@example.test", "2026-02-30T00:00:00Z") });
+  await expectFailure(() => invalid.provider.signInEmail({ email: "user@example.test", password: "correct-horse" }), "AUTH_EMAIL_UNVERIFIED");
+  const invalidReset = createHarness({
+    adminUpdateData: { user: user("email", "provider-subject-1", "user@example.test", undefined, "2026-02-30T02:00:00Z") },
+  });
+  const invalidBinding = await invalidReset.provider.beginPasswordReset(passwordResetStartInput("idem_reset_invalid_timestamp"));
+  await expectFailure(() => invalidReset.provider.completePasswordReset({
+    binding: passwordResetCompletionBinding(invalidBinding), authorization_code: "one-time-recovery-code",
+    new_password: "new correct horse battery staple", payloadHash: resetCompletionPayloadHash,
+  }), "AUTH_PROVIDER_UNAVAILABLE");
 });
 
 test("Supabase maps only status/code and never reads or exposes provider bodies", async () => {
@@ -1310,6 +1368,22 @@ test("Supabase Apple link reauthenticates and starts on one transient client wit
   }), "AUTH_CONFLICT");
 });
 
+test("Supabase Apple link checkpoints provider success and replay skips the one-time exchange", async () => {
+  const harness = createHarness();
+  const start = await harness.provider.reauthenticateAndBeginAppleLink({
+    ...webAppleLinkStart(), authenticatedActorId: "actor-1", ...credential,
+  });
+  const callback = callbackFromStart(start);
+  const first = await harness.provider.linkApple({ ...callback, authenticatedActorId: "actor-1" });
+  const checkpoint = harness.store.records.get(start.transaction_id);
+  assert.equal(checkpoint?.provider_completion_status, "provider_completed");
+  assert(checkpoint?.provider_subject_ciphertext instanceof Uint8Array);
+
+  const replay = await harness.provider.linkApple({ ...callback, authenticatedActorId: "actor-1" });
+  assert.deepEqual(replay, first);
+  assert.equal(harness.methodCalls.filter((call) => call.name === "exchangeCodeForSession").length, 1);
+});
+
 test("installed Supabase 2.112.2 Apple link uses only its operation-local password session", async () => {
   const runtimePackage = createRequire(import.meta.url)("@supabase/supabase-js/package.json") as {
     readonly version?: unknown;
@@ -1559,7 +1633,7 @@ test("Supabase password recovery uses the fresh admin atomic password-and-sessio
   }
 });
 
-test("Supabase password recovery checkpoint failure restarts from exact causal provider evidence", async () => {
+test("Supabase password recovery checkpoint failure restarts with a fail-closed ambiguous observation", async () => {
   let now = new Date(fixedNow);
   const harness = createHarness({ failResetCheckpointOnce: true, now: () => new Date(now) });
   const binding = await harness.provider.beginPasswordReset(passwordResetStartInput());
@@ -1577,7 +1651,7 @@ test("Supabase password recovery checkpoint failure restarts from exact causal p
     binding: passwordResetCompletionBinding(binding), authorization_code: "already-used-code", new_password: "new correct horse battery staple",
     payloadHash: resetCompletionPayloadHash,
   });
-  assert.deepEqual(recovered, exactResetObservation(fixedNow.toISOString()));
+  assert.deepEqual(recovered, { kind: "password_reset_provider_observation", outcome: "ambiguous" });
   assert.equal(harness.store.records.get(binding.transaction_id)?.provider_completion_status, "provider_started");
   assert.deepEqual(
     harness.methodCalls.filter((call) => ["exchangeCodeForSession", "updateUserById"].includes(call.name)).map((call) => call.name),
@@ -1602,11 +1676,43 @@ test("Supabase password recovery checkpoint failure restarts from exact causal p
       new_password: "new correct horse battery staple", payloadHash: resetCompletionPayloadHash,
     });
     if (evidence === "not-a-timestamp") {
-      assert.deepEqual(await retry(), invalidResetObservation("provider_evidence_malformed"));
+      assert.deepEqual(await retry(), { kind: "password_reset_provider_observation", outcome: "ambiguous" });
     } else {
-      assert.deepEqual(await retry(), exactResetObservation(evidence));
+      assert.deepEqual(await retry(), { kind: "password_reset_provider_observation", outcome: "ambiguous" });
     }
   }
+});
+
+test("Supabase reset restart never treats generic user updated_at as password-update evidence", async () => {
+  const harness = createHarness({
+    failResetCheckpointOnce: true,
+    adminUser: user(
+      "email",
+      resetExpectedSubject.providerSubject,
+      resetExpectedSubject.normalizedEmail,
+      resetExpectedSubject.verifiedAt,
+      fixedNow.toISOString(),
+    ),
+  });
+  const binding = await harness.provider.beginPasswordReset(passwordResetStartInput("idem_reset_ambiguous_restart"));
+  await expectFailure(() => harness.provider.completePasswordReset({
+    binding: passwordResetCompletionBinding(binding),
+    authorization_code: "one-time-recovery-code",
+    new_password: "new correct horse battery staple",
+    payloadHash: resetCompletionPayloadHash,
+  }), "AUTH_PROVIDER_UNAVAILABLE");
+
+  assert.deepEqual(await harness.provider.completePasswordReset({
+    binding: passwordResetCompletionBinding(binding),
+    authorization_code: "already-used-code",
+    new_password: "new correct horse battery staple",
+    payloadHash: resetCompletionPayloadHash,
+  }), {
+    kind: "password_reset_provider_observation",
+    outcome: "ambiguous",
+  });
+  assert.equal(harness.methodCalls.filter((call) => call.name === "getUserById").length, 0);
+  assert.equal(harness.methodCalls.filter((call) => call.name === "updateUserById").length, 1);
 });
 
 test("Supabase password recovery leaves its bounded settlement deadline to the Core database clock", async () => {
@@ -1626,12 +1732,12 @@ test("Supabase password recovery leaves its bounded settlement deadline to the C
       binding: passwordResetCompletionBinding(binding), authorization_code: "already-used-code",
       new_password: "new correct horse battery staple", payloadHash: resetCompletionPayloadHash,
     });
-    assert.deepEqual(await retry(), exactResetObservation(fixedNow.toISOString()));
+    assert.deepEqual(await retry(), { kind: "password_reset_provider_observation", outcome: "ambiguous" });
     assert.equal(harness.methodCalls.filter((call) => call.name === "updateUserById").length, 1);
   }
 });
 
-test("Supabase returns a provider-started observation after an arbitrary adapter delay while evidence is still old", async () => {
+test("Supabase returns a fail-closed ambiguous observation after an arbitrary adapter delay", async () => {
   let now = new Date(fixedNow);
   const harness = createHarness({
     now: () => new Date(now),
@@ -1649,12 +1755,12 @@ test("Supabase returns a provider-started observation after an arbitrary adapter
   assert.deepEqual(await harness.provider.completePasswordReset({
     binding: passwordResetCompletionBinding(binding), authorization_code: "already-used-code",
     new_password: "new correct horse battery staple", payloadHash: resetCompletionPayloadHash,
-  }), exactResetObservation("2026-08-17T01:59:59.999Z"));
+  }), { kind: "password_reset_provider_observation", outcome: "ambiguous" });
 
   assert.deepEqual(
     harness.methodCalls.filter((call) => ["exchangeCodeForSession", "updateUserById", "getUserById"].includes(call.name))
       .map((call) => call.name),
-    ["getUserById"],
+    [],
   );
 });
 
@@ -1716,14 +1822,14 @@ test("Supabase password recovery crash before admin update is not falsely recove
   assert.deepEqual(await harness.provider.completePasswordReset({
     binding: passwordResetCompletionBinding(binding), authorization_code: "already-used-code",
     new_password: "new correct horse battery staple", payloadHash: resetCompletionPayloadHash,
-  }), exactResetObservation("2026-08-17T01:59:59.999Z"));
+  }), { kind: "password_reset_provider_observation", outcome: "ambiguous" });
   assert.equal(harness.store.records.get(binding.transaction_id)?.provider_completion_status, "provider_started");
   const replacement = await harness.provider.beginPasswordReset(passwordResetStartInput("idem_password_reset_replacement"));
   assert.notEqual(replacement.transaction_id, binding.transaction_id);
   assert.equal(harness.methodCalls.filter((call) => call.name === "updateUserById").length, 1);
 });
 
-test("Supabase provider-started recovery returns closed identity mismatch observations without raw provider facts", async () => {
+test("Supabase provider-started recovery does not inspect generic identity metadata", async () => {
   for (const testCase of [
     {
       adminUser: user("email", "different-provider-subject", resetExpectedSubject.normalizedEmail,
@@ -1751,8 +1857,9 @@ test("Supabase provider-started recovery returns closed identity mismatch observ
       new_password: "new correct horse battery staple", payloadHash: resetCompletionPayloadHash,
     });
 
-    assert.deepEqual(observation, invalidResetObservation(testCase.reason));
+    assert.deepEqual(observation, { kind: "password_reset_provider_observation", outcome: "ambiguous" });
     assert.equal(JSON.stringify(observation).includes(testCase.forbidden), false);
+    assert.equal(harness.methodCalls.some((call) => call.name === "getUserById"), false);
   }
 });
 

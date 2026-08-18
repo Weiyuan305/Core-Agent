@@ -136,6 +136,22 @@
         }
       ]
     },
+    "client_kind": {
+      "anyOf": [
+        {
+          "const": "web",
+          "type": "string"
+        },
+        {
+          "const": "iphone",
+          "type": "string"
+        },
+        {
+          "const": "macos",
+          "type": "string"
+        }
+      ]
+    },
     "device_label": {
       "maxLength": 80,
       "minLength": 1,
@@ -169,8 +185,7 @@
     "idempotency_key",
     "payload_hash",
     "expected_resource_version",
-    "invitation_secret",
-    "authentication_proof"
+    "invitation_secret"
   ],
   "type": "object"
 }

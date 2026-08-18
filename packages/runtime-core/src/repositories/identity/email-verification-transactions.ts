@@ -4,6 +4,7 @@ import { sql, type Kysely, type Transaction } from "kysely";
 
 import type { RuntimeDatabase } from "../../db/database.js";
 import { canonicalPayloadHash, DomainError } from "../../domain/idempotency.js";
+import { strictUtcTimestampMilliseconds } from "../../domain/utc-timestamp.js";
 import type { VerifiedAuthSubjectInput } from "../../services/identity/register-b2c.js";
 
 export interface EmailVerificationProtector {
@@ -18,6 +19,7 @@ export interface EmailVerificationTransactionDependencies {
   readonly hmacKey: Uint8Array;
   readonly protector: EmailVerificationProtector;
   readonly ttlMs?: number;
+  readonly providerStartLeaseMs?: number;
   readonly verificationAttemptLeaseMs?: number;
   readonly randomBytes?: (length: number) => Uint8Array;
   readonly databaseNow?: (trx: Transaction<RuntimeDatabase>) => Promise<Date>;
@@ -95,6 +97,7 @@ export interface ExpiredEmailVerificationTransaction {
 const payloadHashPattern = /^sha256:[a-f0-9]{64}$/u;
 const emailPattern = /^[^\s@]+@[^\s@]+$/u;
 const defaultTtlMs = 10 * 60 * 1_000;
+const defaultProviderStartLeaseMs = 30 * 1_000;
 const defaultVerificationAttemptLeaseMs = 30 * 1_000;
 
 function invalidInput(): never {
@@ -125,6 +128,7 @@ async function databaseNow(
 function assertDependencies(dependencies: EmailVerificationTransactionDependencies): number {
   const ttlMs = dependencies.ttlMs ?? defaultTtlMs;
   const attemptLeaseMs = dependencies.verificationAttemptLeaseMs ?? defaultVerificationAttemptLeaseMs;
+  const startLeaseMs = dependencies.providerStartLeaseMs ?? defaultProviderStartLeaseMs;
   if (
     !(dependencies.hmacKey instanceof Uint8Array)
     || dependencies.hmacKey.byteLength < 32
@@ -133,11 +137,19 @@ function assertDependencies(dependencies: EmailVerificationTransactionDependenci
     || !Number.isSafeInteger(ttlMs)
     || ttlMs < 60_000
     || ttlMs > 24 * 60 * 60 * 1_000
+    || !Number.isSafeInteger(startLeaseMs)
+    || startLeaseMs < 1_000
+    || startLeaseMs > 5 * 60 * 1_000
     || !Number.isSafeInteger(attemptLeaseMs)
     || attemptLeaseMs < 1_000
     || attemptLeaseMs > 5 * 60 * 1_000
   ) throw new DomainError("INTERNAL_ERROR", "Email verification transaction configuration is invalid");
   return ttlMs;
+}
+
+function providerStartLeaseMs(dependencies: EmailVerificationTransactionDependencies): number {
+  assertDependencies(dependencies);
+  return dependencies.providerStartLeaseMs ?? defaultProviderStartLeaseMs;
 }
 
 function verificationAttemptLeaseMs(dependencies: EmailVerificationTransactionDependencies): number {
@@ -300,8 +312,7 @@ function assertVerifiedSubject(value: unknown): asserts value is VerifiedAuthSub
     || subject.providerSubject.length > 1_024 || typeof subject.normalizedEmail !== "string"
     || subject.normalizedEmail !== subject.normalizedEmail.trim().toLowerCase()
     || !emailPattern.test(subject.normalizedEmail) || typeof subject.verifiedAt !== "string"
-    || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(subject.verifiedAt)
-    || !Number.isFinite(Date.parse(subject.verifiedAt))) invalidAuthority();
+    || strictUtcTimestampMilliseconds(subject.verifiedAt) === undefined) invalidAuthority();
 }
 
 function subjectPlaintext(subject: VerifiedAuthSubjectInput): Buffer {
@@ -359,6 +370,7 @@ export async function beginEmailVerificationTransaction(
   input: BeginEmailVerificationTransactionInput,
 ): Promise<BegunEmailVerificationTransaction | ExpiredEmailVerificationTransaction> {
   const ttlMs = assertDependencies(dependencies);
+  const startLeaseMs = providerStartLeaseMs(dependencies);
   assertBeginInput(input);
   const execute = async (trx: Transaction<RuntimeDatabase>): Promise<BegunEmailVerificationTransaction | ExpiredEmailVerificationTransaction> => {
     const now = await databaseNow(dependencies, trx);
@@ -391,6 +403,7 @@ export async function beginEmailVerificationTransaction(
         provider_verified_at: null,
         provider_start_status: "reserved",
         provider_start_attempt: 1,
+        provider_start_reserved_at: now,
         provider_start_finalized_at: null,
         provider_start_failed_at: null,
         status: "pending",
@@ -413,7 +426,7 @@ export async function beginEmailVerificationTransaction(
       });
     }
     const existing = await trx.selectFrom("email_verification_transactions")
-      .select(["email_verification_transaction_id", "start_payload_hash", "provider_start_status", "provider_start_attempt", "status", "expires_at"])
+      .select(["email_verification_transaction_id", "start_payload_hash", "provider_start_status", "provider_start_attempt", "provider_start_reserved_at", "status", "expires_at"])
       .where("start_idempotency_key", "=", input.idempotencyKey)
       .forUpdate()
       .executeTakeFirst();
@@ -435,6 +448,7 @@ export async function beginEmailVerificationTransaction(
         await trx.updateTable("email_verification_transactions").set({
           provider_start_status: "reserved",
           provider_start_attempt: existing.provider_start_attempt + 1,
+          provider_start_reserved_at: now,
           provider_start_finalized_at: null,
           provider_start_failed_at: null,
           expires_at: expiresAt,
@@ -446,6 +460,21 @@ export async function beginEmailVerificationTransaction(
           kind: "reserved" as const,
           verificationId: existing.email_verification_transaction_id,
           expiresAt: expiresAt.toISOString(),
+        });
+      }
+      if (existing.provider_start_status === "reserved"
+        && now.getTime() >= existing.provider_start_reserved_at.getTime() + startLeaseMs) {
+        await trx.updateTable("email_verification_transactions").set({
+          provider_start_attempt: existing.provider_start_attempt + 1,
+          provider_start_reserved_at: now,
+          updated_at: now,
+        }).where("email_verification_transaction_id", "=", existing.email_verification_transaction_id)
+          .where("provider_start_status", "=", "reserved")
+          .executeTakeFirstOrThrow();
+        return Object.freeze({
+          kind: "reserved" as const,
+          verificationId: existing.email_verification_transaction_id,
+          expiresAt: existing.expires_at.toISOString(),
         });
       }
       return Object.freeze({

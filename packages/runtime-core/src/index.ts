@@ -137,6 +137,7 @@ export {
 export { classifyDependencyFailure, retryDecision, type RetryDecision } from "./domain/jobs.js";
 export { createRedactor, redactSummary, type Redactor } from "./domain/redaction.js";
 export { validateAuditEvent, validateProductEvent } from "./domain/events.js";
+export { strictUtcTimestampMilliseconds } from "./domain/utc-timestamp.js";
 export {
   assertAgentRunTransition,
   assertRuntimeObservedTransition,

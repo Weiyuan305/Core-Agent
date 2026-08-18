@@ -273,11 +273,6 @@ export const InvitationEmailRegistrationResponseSchema = response("invitation-em
   status: Type.Literal("verification_pending"),
 });
 
-const InvitationEmailPasswordProofSchema = Type.Object({
-  kind: Type.Literal("email_password"),
-  client_kind: CoreSessionClientKindSchema,
-  verification_proof: OAuthProofSchema,
-}, { additionalProperties: false });
 const InvitationAppleWebProofSchema = Type.Object({
   kind: Type.Literal("apple"),
   ...WebAppleCallbackFields,
@@ -286,18 +281,33 @@ const InvitationAppleNativeProofSchema = Type.Object({
   kind: Type.Literal("apple"),
   ...NativeAppleCallbackFields,
 }, { additionalProperties: false });
+// Kept solely for wire compatibility with the immutable 0.5 release. The
+// Identity Gateway rejects this legacy provider-proof branch before any
+// authentication or provider effect; existing identities use Core Sessions.
+const LegacyInvitationEmailPasswordProofSchema = Type.Object({
+  kind: Type.Literal("email_password"),
+  client_kind: CoreSessionClientKindSchema,
+  verification_proof: OAuthProofSchema,
+}, { additionalProperties: false });
 export const InvitationAuthenticationProofSchema = Type.Union([
-  InvitationEmailPasswordProofSchema,
+  LegacyInvitationEmailPasswordProofSchema,
   InvitationAppleWebProofSchema,
   InvitationAppleNativeProofSchema,
 ]);
 
-export const InvitationAcceptanceRequestSchema = request("invitation-acceptance-request", {
+const InvitationAcceptanceBaseFields = {
   ...VersionedWriteProperties,
   invitation_secret: InvitationSecretSchema,
-  authentication_proof: InvitationAuthenticationProofSchema,
   device_label: Type.Optional(DeviceLabelSchema),
-});
+} as const;
+// The immutable 0.5 contract required authentication_proof. Making it
+// optional and adding optional client_kind is the additive wire evolution;
+// the Gateway enforces their exact XOR before any rate/auth/provider effect.
+export const InvitationAcceptanceRequestSchema = Type.Object({
+  ...InvitationAcceptanceBaseFields,
+  authentication_proof: Type.Optional(InvitationAuthenticationProofSchema),
+  client_kind: Type.Optional(CoreSessionClientKindSchema),
+}, { additionalProperties: false, $id: "core-agent://v1/invitation-acceptance-request" });
 const InvitationAcceptanceCommonFields = {
   tenant_id: OpaqueIdSchema,
   invitation_resource_version: ResourceVersionSchema,

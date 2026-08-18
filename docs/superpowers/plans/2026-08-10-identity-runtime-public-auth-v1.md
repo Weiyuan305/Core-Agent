@@ -642,8 +642,11 @@ provider-started/provider-completed checkpoint. The provider effect precedes the
 serializable Core revocation transaction; retry after Core rollback reuses the exact
 encrypted provider-subject checkpoint only for the same server-validated completion
 payload hash and cannot repeat the password mutation. Exact
-causal provider evidence is required to recover the narrow post-provider/pre-checkpoint
-window. Email verification and reset completion also consume independent stable route
+operation-specific causal provider evidence would be required to recover the narrow
+post-provider/pre-checkpoint window; pinned Supabase 2.112.2 has no such primitive, so
+an uncheckpointed restart revokes the exact subject's Core Sessions, expires and scrubs
+the transaction, returns recovery-required, and allows a new reset without claiming
+success from generic user metadata. Email verification and reset completion consume independent stable route
 buckets, and invalid OTP attempts are durably bounded.
 
 - [ ] **Step 2: Implement issue/authenticate with constant-time digest handling**
@@ -776,8 +779,9 @@ Apple Web start stores `transaction_id`, expiry, and the Core callback state in
 the dedicated Apple-flow HttpOnly Cookie and returns only the provider
 authorization URL. Apple Web callback reconstructs the adapter's Core
 transaction/state binding from that Cookie (request fields are never authority),
-requires exact agreement before provider exchange, and clears the Cookie on
-success and every bounded failure. Native start/callback has no Apple-flow
+  requires exact agreement before provider exchange, and clears the Cookie on
+  success or terminal non-retryable failure while preserving it on retryable
+  429/5xx settlement failures. Native start/callback has no Apple-flow
 Cookie; the native app must bind `transaction_id` to the same local nonce/PKCE
 context and present that exact binding on callback. The password-reset recovery
 Cookie remains a separate transport and cannot satisfy an Apple callback.

@@ -1,6 +1,8 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { types as utilTypes } from "node:util";
 
+import { strictUtcTimestampMilliseconds } from "@core-agent/runtime-core";
+
 import type {
   AppleAuthorizationCallback,
   AppleAuthorizationInput,
@@ -95,12 +97,6 @@ function normalizeEmail(email: string): string {
 
 function validEmail(email: string): boolean {
   return email.length >= 3 && email.length <= 320 && /^[^@\s]+@[^@\s]+$/u.test(email);
-}
-
-function strictUtcMilliseconds(value: string): number | undefined {
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)) return undefined;
-  const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value ? timestamp : undefined;
 }
 
 function readCredential(input: unknown): EmailCredentialInput {
@@ -277,8 +273,8 @@ export class FakeAuthProvider implements AuthProviderAdapter {
     const expectedNormalizedEmail = ownString(input, "expectedNormalizedEmail");
     const verificationStartedAt = ownString(input, "verificationStartedAt");
     const recoveryNotAfter = ownString(input, "recoveryNotAfter");
-    const started = verificationStartedAt === undefined ? undefined : strictUtcMilliseconds(verificationStartedAt);
-    const notAfter = recoveryNotAfter === undefined ? undefined : strictUtcMilliseconds(recoveryNotAfter);
+    const started = verificationStartedAt === undefined ? undefined : strictUtcTimestampMilliseconds(verificationStartedAt);
+    const notAfter = recoveryNotAfter === undefined ? undefined : strictUtcTimestampMilliseconds(recoveryNotAfter);
     if (expectedProviderSubject === undefined || expectedProviderSubject.length < 1
       || expectedProviderSubject.length > 1_024 || expectedNormalizedEmail === undefined
       || expectedNormalizedEmail !== normalizeEmail(expectedNormalizedEmail) || !validEmail(expectedNormalizedEmail)
@@ -287,7 +283,7 @@ export class FakeAuthProvider implements AuthProviderAdapter {
     }
     const subject = this.#verifiedEmailSubjects.get(expectedProviderSubject);
     if (subject === undefined) throw new ProviderFailure("AUTH_EMAIL_UNVERIFIED");
-    const confirmedAt = strictUtcMilliseconds(subject.verifiedAt);
+    const confirmedAt = strictUtcTimestampMilliseconds(subject.verifiedAt);
     if (subject.normalizedEmail !== expectedNormalizedEmail || confirmedAt === undefined
       || confirmedAt < started || confirmedAt > notAfter) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
     return copySubject(subject);

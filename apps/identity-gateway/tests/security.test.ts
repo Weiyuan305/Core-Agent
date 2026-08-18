@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
+import { canonicalPayloadHash } from "@core-agent/runtime-core";
 import Fastify, { type FastifyInstance } from "fastify";
 
 import { readRecoveryCookie, sealRecoveryCookie } from "../src/security.js";
@@ -113,6 +115,31 @@ async function buildApp(overrides: Record<string, unknown> = {}): Promise<Fastif
 }
 
 const idem = { schema_version: 1, idempotency_key: "idem_01", payload_hash: `sha256:${"a".repeat(64)}` };
+
+function digest(value: string): string {
+  return `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}`;
+}
+
+function emailSignInPayload() {
+  const facts = { schema_version: 1 as const, idempotency_key: idem.idempotency_key, email: "student@example.test", password: "correct-horse", client_kind: "web" as const };
+  return { ...facts, payload_hash: canonicalPayloadHash({
+    schema_version: facts.schema_version, idempotency_key: facts.idempotency_key,
+    normalized_email: facts.email, sign_in_proof_digest: digest(facts.password), client_kind: facts.client_kind,
+  }) };
+}
+
+function appleCallbackPayload<T extends {
+  schema_version: 1; idempotency_key: string; client_kind: "web" | "iphone" | "macos";
+  transaction_id: string; authorization_code: string; state: string; nonce?: string; pkce_code_verifier?: string;
+}>(facts: T): T & { payload_hash: string } {
+  return { ...facts, payload_hash: canonicalPayloadHash({
+    schema_version: facts.schema_version, flow_kind: "apple_sign_in", idempotency_key: facts.idempotency_key,
+    client_kind: facts.client_kind, transaction_id: facts.transaction_id,
+    code_proof_digest: digest(facts.authorization_code), state_proof_digest: digest(facts.state),
+    ...(facts.nonce === undefined ? {} : { nonce_proof_digest: digest(facts.nonce) }),
+    ...(facts.pkce_code_verifier === undefined ? {} : { pkce_proof_digest: digest(facts.pkce_code_verifier) }),
+  }) };
+}
 const jsonHeaders = { host, origin, "content-type": "application/json" };
 
 test("security rejects non-exact host/origin and duplicate sensitive headers", async () => {
@@ -162,7 +189,7 @@ test("cookie security issues separate exact Core Session and readable CSRF cooki
   const app = await buildApp();
   const response = await app.inject({
     method: "POST", url: "/auth/v1/email/sign-in", headers: jsonHeaders,
-    payload: { ...idem, email: "student@example.test", password: "correct-horse", client_kind: "web" },
+    payload: emailSignInPayload(),
   });
   assert.equal(response.statusCode, 200);
   const cookies = response.headers["set-cookie"] as string[];
@@ -336,15 +363,15 @@ test("Apple Web flow uses a distinct short-lived cookie and clears every termina
   assert.doesNotMatch(appleCookie ?? "", /core_agent_recovery/u);
 
   const cookiePair = appleCookie?.split(";", 1)[0] ?? "";
-  const success = await app.inject({ method: "POST", url: "/auth/v1/apple/callback", headers: { ...jsonHeaders, cookie: cookiePair }, payload: { ...idem, client_kind: "web", transaction_id: "oauth_01", authorization_code: "opaque_code", state: "oauth_state_01" } });
+  const success = await app.inject({ method: "POST", url: "/auth/v1/apple/callback", headers: { ...jsonHeaders, cookie: cookiePair }, payload: appleCallbackPayload({ schema_version: 1, idempotency_key: idem.idempotency_key, client_kind: "web", transaction_id: "oauth_01", authorization_code: "opaque_code", state: "oauth_state_01" }) });
   assert.equal(success.statusCode, 200);
   assert.match(String(success.headers["set-cookie"]), /core_agent_apple_flow=;[^\n]*Max-Age=0/u);
 
-  const mismatch = await app.inject({ method: "POST", url: "/auth/v1/apple/callback", headers: { ...jsonHeaders, cookie: cookiePair }, payload: { ...idem, client_kind: "web", transaction_id: "oauth_other", authorization_code: "opaque_code", state: "oauth_state_01" } });
+  const mismatch = await app.inject({ method: "POST", url: "/auth/v1/apple/callback", headers: { ...jsonHeaders, cookie: cookiePair }, payload: appleCallbackPayload({ schema_version: 1, idempotency_key: idem.idempotency_key, client_kind: "web", transaction_id: "oauth_other", authorization_code: "opaque_code", state: "oauth_state_01" }) });
   assert.equal(mismatch.statusCode, 401);
   assert.match(String(mismatch.headers["set-cookie"]), /core_agent_apple_flow=;[^\n]*Max-Age=0/u);
 
-  const recovery = await app.inject({ method: "POST", url: "/auth/v1/apple/callback", headers: { ...jsonHeaders, cookie: "core_agent_recovery=opaque" }, payload: { ...idem, client_kind: "web", transaction_id: "oauth_01", authorization_code: "opaque_code", state: "oauth_state_01" } });
+  const recovery = await app.inject({ method: "POST", url: "/auth/v1/apple/callback", headers: { ...jsonHeaders, cookie: "core_agent_recovery=opaque" }, payload: appleCallbackPayload({ schema_version: 1, idempotency_key: idem.idempotency_key, client_kind: "web", transaction_id: "oauth_01", authorization_code: "opaque_code", state: "oauth_state_01" }) });
   assert.equal(recovery.statusCode, 401);
   await app.close();
 });
@@ -360,7 +387,7 @@ test("native Apple delivery returns the opaque secret once without any cookie", 
   assert.equal(start.headers["set-cookie"], undefined);
   const callback = await app.inject({
     method: "POST", url: "/auth/v1/apple/callback", headers: { host, "content-type": "application/json" },
-    payload: { ...idem, client_kind: "iphone", transaction_id: "oauth_01", authorization_code: "opaque_code", state: "oauth_state_01", nonce: "native_nonce_01", pkce_code_verifier: verifier },
+    payload: appleCallbackPayload({ schema_version: 1, idempotency_key: idem.idempotency_key, client_kind: "iphone", transaction_id: "oauth_01", authorization_code: "opaque_code", state: "oauth_state_01", nonce: "native_nonce_01", pkce_code_verifier: verifier }),
   });
   assert.equal(callback.statusCode, 200);
   assert.equal(callback.headers["set-cookie"], undefined);
@@ -375,7 +402,7 @@ test("native Apple callback failures never emit Set-Cookie", async () => {
   const app = await buildApp({ provider: failingProvider });
   const response = await app.inject({
     method: "POST", url: "/auth/v1/apple/callback", headers: { host, "content-type": "application/json" },
-    payload: { ...idem, client_kind: "iphone", transaction_id: "oauth_missing", authorization_code: "opaque_code", state: "wrong_state", nonce: "native_nonce_01", pkce_code_verifier: "v".repeat(43) },
+    payload: appleCallbackPayload({ schema_version: 1, idempotency_key: idem.idempotency_key, client_kind: "iphone", transaction_id: "oauth_missing", authorization_code: "opaque_code", state: "wrong_state", nonce: "native_nonce_01", pkce_code_verifier: "v".repeat(43) }),
   });
   assert.equal(response.statusCode, 401);
   assert.equal(response.headers["set-cookie"], undefined);
@@ -413,12 +440,17 @@ test("security config rejects dynamic recovery redirects and unsafe production b
     IDENTITY_PUBLIC_AUTH_ENABLED: "1",
   } satisfies NodeJS.ProcessEnv;
   assert.equal(loadIdentityGatewayConfig(valid).host, "127.0.0.1");
+  assert.deepEqual([...loadIdentityGatewayConfig({
+    ...valid, IDENTITY_TRUSTED_PROXY_ADDRESSES: "127.0.0.1,2001:db8::1",
+  }).trustedProxyAddresses], ["127.0.0.1", "2001:db8::1"]);
   for (const environment of [
     { ...valid, IDENTITY_PASSWORD_RESET_REDIRECT_URI: `${valid.IDENTITY_PASSWORD_RESET_REDIRECT_URI}?transaction=forged` },
     { ...valid, IDENTITY_EMAIL_VERIFICATION_REDIRECT_URI: `${origin}/auth/v1/email/verification` },
     { ...valid, IDENTITY_PUBLIC_ORIGINS: "http://app.example.test" },
     { ...valid, IDENTITY_GATEWAY_HOST: "0.0.0.0" },
     { ...valid, IDENTITY_GATEWAY_HOST: "0.0.0.0", IDENTITY_GATEWAY_CONTAINER_BIND: "0" },
+    { ...valid, IDENTITY_TRUSTED_PROXY_ADDRESSES: "127.0.0.1, attacker.example.test" },
+    { ...valid, IDENTITY_TRUSTED_PROXY_ADDRESSES: "127.0.0.1,127.0.0.1" },
     { ...valid, IDENTITY_UNPLANNED_SETTING: "1" },
   ]) assert.throws(() => loadIdentityGatewayConfig(environment), /configuration is invalid/u);
   const container = loadIdentityGatewayConfig({ ...valid, IDENTITY_GATEWAY_HOST: "0.0.0.0", IDENTITY_GATEWAY_CONTAINER_BIND: "1" });

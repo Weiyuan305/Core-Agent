@@ -114,6 +114,7 @@ export interface IdentityGatewayOperations {
     readonly bucketKind: "signup" | "login" | "reset" | "email_verification" | "reset_complete" | "apple_start" | "apple_link" | "apple_callback" | "invitation_accept" | "reauthenticate";
     readonly accountIdentifier: string;
     readonly clientIdentifier: string;
+    readonly dimensions?: "both" | "account" | "client";
   }) => Promise<number | null>;
   readonly preparePasswordReset: (normalizedEmail: string) => Promise<VerifiedProviderSubject>;
   readonly issueSession: (
@@ -162,7 +163,7 @@ export interface BuildIdentityGatewayAppDependencies {
     | "appleNativeRedirectUris"
     | "passwordResetRedirectUri"
     | "publicAuthEnabled"
-  >;
+  > & { readonly trustedProxyAddresses?: ReadonlySet<string> };
   readonly provider: AuthProviderAdapter;
   readonly operations: IdentityGatewayOperations;
   readonly flowCookieKey: Uint8Array;
@@ -182,13 +183,12 @@ declare module "fastify" {
 }
 
 function clientIdentifier(request: FastifyRequest): string {
-  const forwarded = request.headers["x-forwarded-for"];
-  if (forwarded !== undefined) return "untrusted-forwarded-address";
   const address = request.ip;
   return typeof address === "string" && address.length > 0 && address.length <= 128 ? address : "unknown-client";
 }
 
 export async function buildIdentityGatewayApp(dependencies: BuildIdentityGatewayAppDependencies): Promise<FastifyInstance> {
+  const trustedProxyAddresses = dependencies.config.trustedProxyAddresses ?? new Set<string>();
   const app = Fastify({
     logger: false,
     bodyLimit: MAX_IDENTITY_BODY_BYTES,
@@ -197,6 +197,7 @@ export async function buildIdentityGatewayApp(dependencies: BuildIdentityGateway
     onProtoPoisoning: "error",
     onConstructorPoisoning: "error",
     ajv: { customOptions: { coerceTypes: false, removeAdditional: false, useDefaults: false } },
+    trustProxy: (address) => trustedProxyAddresses.has(address),
   });
   await app.register(cookie);
   app.decorateRequest("identityContext");
@@ -225,9 +226,10 @@ export async function buildIdentityGatewayApp(dependencies: BuildIdentityGateway
       traceId: `trace_${randomUUID()}`,
     };
     const path = request.url.split("?", 1)[0];
-    if ((path === "/auth/v1/apple/callback" || path === "/auth/v1/apple/link/callback" || path === "/auth/v1/invitations/accept")
-      && request.cookies?.core_agent_apple_flow !== undefined) clearAppleFlowCookie(reply);
     const mapped = mapIdentityGatewayError(error, identifiers);
+    if ((path === "/auth/v1/apple/callback" || path === "/auth/v1/apple/link/callback" || path === "/auth/v1/invitations/accept")
+      && request.cookies?.core_agent_apple_flow !== undefined
+      && mapped.statusCode < 500 && mapped.statusCode !== 429) clearAppleFlowCookie(reply);
     if (path === "/auth/v1/password/reset/complete" && request.cookies?.core_agent_recovery !== undefined
       && mapped.statusCode < 500 && mapped.statusCode !== 429) clearRecoveryCookie(reply);
     void reply.code(mapped.statusCode).type("application/json").send(mapped.envelope);

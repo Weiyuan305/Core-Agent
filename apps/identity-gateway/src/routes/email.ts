@@ -19,6 +19,7 @@ import { ProviderFailure } from "../providers/provider-errors.js";
 import type { VerifiedProviderSubject } from "../providers/auth-provider.js";
 import {
   assertClientTransport,
+  assertEmailSignInPayloadHash,
   assertEmailVerificationPayloadHash,
   issueRecoveryCookie,
   issueWebSessionCookies,
@@ -84,7 +85,7 @@ export async function registerEmailRoutes(app: FastifyInstance, dependencies: Id
       clientKind: body.client_kind,
       ...(idempotency.device_label === undefined ? {} : { deviceLabel: idempotency.device_label }),
     });
-    if (binding.kind === "in_progress") throw new IdentityGatewayFailure("AUTH_CONFLICT");
+    if (binding.kind === "in_progress") throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
     if (binding.kind === "reserved") {
       await completeReservedEmailProviderStart(dependencies, binding, { email: normalizedEmail, password: body.password });
     }
@@ -94,6 +95,7 @@ export async function registerEmailRoutes(app: FastifyInstance, dependencies: Id
   app.post("/auth/v1/email/sign-in", { schema: { body: EmailSignInRequestSchema, response: { 200: EmailSignInResponseSchema } } }, async (request, reply) => {
     const body = request.body as { email: string; password: string; client_kind: "web" | "iphone" | "macos"; device_label?: string };
     assertClientTransport(request, body.client_kind, dependencies.config);
+    assertEmailSignInPayloadHash(request.body as never);
     const normalizedEmail = body.email.toLowerCase();
     rateLimitFailure(await dependencies.operations.consumeRateLimit({ bucketKind: "login", accountIdentifier: normalizedEmail, clientIdentifier: request.identityContext.clientIdentifier }));
     const subject = await dependencies.provider.signInEmail({ email: normalizedEmail, password: body.password });
@@ -112,11 +114,17 @@ export async function registerEmailRoutes(app: FastifyInstance, dependencies: Id
       verification_id: string; verification_code: string;
     };
     assertEmailVerificationPayloadHash(body);
-    const binding = await dependencies.operations.prepareEmailVerification({ verificationId: body.verification_id });
-    assertClientTransport(request, binding.clientKind, dependencies.config);
     rateLimitFailure(await dependencies.operations.consumeRateLimit({
       bucketKind: "email_verification", accountIdentifier: "route:email_verification",
       clientIdentifier: request.identityContext.clientIdentifier,
+      dimensions: "client",
+    }));
+    const binding = await dependencies.operations.prepareEmailVerification({ verificationId: body.verification_id });
+    assertClientTransport(request, binding.clientKind, dependencies.config);
+    rateLimitFailure(await dependencies.operations.consumeRateLimit({
+      bucketKind: "email_verification", accountIdentifier: body.verification_id,
+      clientIdentifier: request.identityContext.clientIdentifier,
+      dimensions: "account",
     }));
     const providerVerification = binding.providerVerification;
     let subject: VerifiedProviderSubject;
@@ -238,6 +246,7 @@ export async function registerEmailRoutes(app: FastifyInstance, dependencies: Id
         },
         passwordResetObservation: completion,
       }) as { readonly kind?: unknown; readonly verifiedSubject?: unknown };
+      if (observation.kind === "recovery_required") throw new IdentityGatewayFailure("AUTH_INVALID");
       if (observation.kind === "in_progress") throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
       if (observation.kind !== "completed" || observation.verifiedSubject === undefined) {
         throw new IdentityGatewayFailure("INTERNAL_ERROR");

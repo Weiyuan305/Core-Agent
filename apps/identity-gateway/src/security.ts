@@ -264,6 +264,51 @@ export function assertEmailVerificationPayloadHash(body: {
   });
 }
 
+export function assertEmailSignInPayloadHash(body: {
+  readonly schema_version: 1;
+  readonly idempotency_key: string;
+  readonly payload_hash: string;
+  readonly email: string;
+  readonly password: string;
+  readonly client_kind: "web" | "iphone" | "macos";
+  readonly device_label?: string;
+}): void {
+  assertCanonicalHash(body.payload_hash, {
+    schema_version: body.schema_version,
+    idempotency_key: body.idempotency_key,
+    normalized_email: body.email.toLowerCase(),
+    sign_in_proof_digest: sensitiveFactDigest(body.password),
+    client_kind: body.client_kind,
+    ...(body.device_label === undefined ? {} : { device_label: body.device_label }),
+  });
+}
+
+export function assertAppleCallbackPayloadHash(body: {
+  readonly schema_version: 1;
+  readonly idempotency_key: string;
+  readonly payload_hash: string;
+  readonly client_kind: "web" | "iphone" | "macos";
+  readonly transaction_id: string;
+  readonly authorization_code: string;
+  readonly state: string;
+  readonly nonce?: string;
+  readonly pkce_code_verifier?: string;
+}, flowKind: "apple_sign_in" | "apple_link"): void {
+  assertCanonicalHash(body.payload_hash, {
+    schema_version: body.schema_version,
+    flow_kind: flowKind,
+    idempotency_key: body.idempotency_key,
+    client_kind: body.client_kind,
+    transaction_id: body.transaction_id,
+    code_proof_digest: sensitiveFactDigest(body.authorization_code),
+    state_proof_digest: sensitiveFactDigest(body.state),
+    ...(body.nonce === undefined ? {} : { nonce_proof_digest: sensitiveFactDigest(body.nonce) }),
+    ...(body.pkce_code_verifier === undefined ? {} : {
+      pkce_proof_digest: sensitiveFactDigest(body.pkce_code_verifier),
+    }),
+  });
+}
+
 export function assertReauthenticationPayloadHash(body: {
   readonly schema_version: 1;
   readonly idempotency_key: string;
@@ -303,31 +348,32 @@ export function assertInvitationAcceptancePayloadHash(body: {
   readonly payload_hash: string;
   readonly expected_resource_version: number;
   readonly invitation_secret: string;
-  readonly authentication_proof: Readonly<Record<string, unknown>>;
+  readonly client_kind?: "web" | "iphone" | "macos";
+  readonly authentication_proof?: Readonly<Record<string, unknown>>;
   readonly device_label?: string;
 }): void {
   const proof = body.authentication_proof;
   let canonicalProof: Readonly<Record<string, unknown>>;
-  if (proof.kind === "email_password" && typeof proof.client_kind === "string"
-    && typeof proof.verification_proof === "string") {
+  if (proof === undefined && body.client_kind !== undefined) {
     canonicalProof = {
-      kind: proof.kind,
-      client_kind: proof.client_kind,
-      verification_proof_digest: sensitiveFactDigest(proof.verification_proof),
+      kind: "core_session",
+      client_kind: body.client_kind,
     };
-  } else {
+  } else if (proof !== undefined) {
     canonicalProof = {
       kind: proof.kind,
       client_kind: proof.client_kind,
       callback_proof_digest: sensitiveFactDigest(JSON.stringify(proof)),
     };
+  } else {
+    invalidRequest();
   }
   assertCanonicalHash(body.payload_hash, {
     schema_version: body.schema_version,
     idempotency_key: body.idempotency_key,
     expected_resource_version: body.expected_resource_version,
     invitation_digest: sensitiveFactDigest(body.invitation_secret),
-    authentication_proof: canonicalProof,
+    authentication: canonicalProof,
     ...(body.device_label === undefined ? {} : { device_label: body.device_label }),
   });
 }

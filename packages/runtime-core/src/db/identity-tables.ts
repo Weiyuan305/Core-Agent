@@ -97,6 +97,7 @@ export interface EmailVerificationTransactionTable {
   provider_verified_at: Date | null;
   provider_start_status: "reserved" | "finalized" | "failed";
   provider_start_attempt: number;
+  provider_start_reserved_at: Date;
   provider_start_finalized_at: Date | null;
   provider_start_failed_at: Date | null;
   status: "pending" | "consumed" | "expired";

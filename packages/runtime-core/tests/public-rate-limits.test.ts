@@ -115,7 +115,7 @@ test.after(async () => {
   await administratorPool.end();
 });
 
-test("public fixed-window rate limits persist only account and IP-device HMACs in eight separate buckets", async () => {
+test("public fixed-window rate limits persist independent account and IP-device HMAC dimensions", async () => {
   const consumePublicRateLimit = requiredFunction<ConsumePublicRateLimit>("consumePublicRateLimit");
   const buckets: BucketKind[] = [
     "signup", "login", "reset", "apple_start", "apple_link", "apple_callback", "invitation_accept", "reauthenticate",
@@ -129,18 +129,17 @@ test("public fixed-window rate limits persist only account and IP-device HMACs i
     client_identifier_hmac: Buffer;
   }>(`select bucket_kind, account_identifier_hmac, client_identifier_hmac
       from public_rate_limits order by bucket_kind`);
-  assert.deepEqual(rows.rows.map((row) => row.bucket_kind), [...buckets].sort());
+  assert.deepEqual(rows.rows.map((row) => row.bucket_kind), [...buckets, ...buckets].sort());
+  const account = createHmac("sha256", hmacKey).update("account:person@example.test", "utf8").digest();
+  const client = createHmac("sha256", hmacKey).update("client:203.0.113.41|device-opaque-41", "utf8").digest();
+  const anyAccount = createHmac("sha256", hmacKey).update("account:*", "utf8").digest();
+  const anyClient = createHmac("sha256", hmacKey).update("client:*", "utf8").digest();
   for (const row of rows.rows) {
     assert.equal(row.account_identifier_hmac.length, 32);
     assert.equal(row.client_identifier_hmac.length, 32);
-    assert.deepEqual(
-      row.account_identifier_hmac,
-      createHmac("sha256", hmacKey).update("person@example.test", "utf8").digest(),
-    );
-    assert.deepEqual(
-      row.client_identifier_hmac,
-      createHmac("sha256", hmacKey).update("203.0.113.41|device-opaque-41", "utf8").digest(),
-    );
+    const accountDimension = row.account_identifier_hmac.equals(account) && row.client_identifier_hmac.equals(anyClient);
+    const clientDimension = row.account_identifier_hmac.equals(anyAccount) && row.client_identifier_hmac.equals(client);
+    assert.equal(accountDimension || clientDimension, true);
   }
   assert.equal(JSON.stringify(rows.rows).includes("person@example.test"), false);
   assert.equal(JSON.stringify(rows.rows).includes("203.0.113.41"), false);
@@ -172,6 +171,18 @@ test("fixed-window exhaustion returns only database-bounded retry-after millisec
   });
 });
 
+test("account and client rate-limit dimensions exhaust independently", async () => {
+  const consumePublicRateLimit = requiredFunction<ConsumePublicRateLimit>("consumePublicRateLimit");
+  const consume = (overrides: Partial<ConsumeInput>) => consumePublicRateLimit(
+    { db: identityDb, hmacKey },
+    input({ limit: 1, ...overrides }),
+  );
+  assert.equal(await consume({ bucketKind: "signup", accountIdentifier: "same@example.test", clientIdentifier: "client-a" }), null);
+  assert.equal(typeof await consume({ bucketKind: "signup", accountIdentifier: "same@example.test", clientIdentifier: "client-b" }), "number");
+  assert.equal(await consume({ bucketKind: "login", accountIdentifier: "first@example.test", clientIdentifier: "same-client" }), null);
+  assert.equal(typeof await consume({ bucketKind: "login", accountIdentifier: "second@example.test", clientIdentifier: "same-client" }), "number");
+});
+
 test("concurrent public attempts share one atomic PostgreSQL counter", async () => {
   const consumePublicRateLimit = requiredFunction<ConsumePublicRateLimit>("consumePublicRateLimit");
   const results = await Promise.all(Array.from({ length: 20 }, () => (
@@ -185,20 +196,23 @@ test("concurrent public attempts share one atomic PostgreSQL counter", async () 
   assert.equal(row.rows[0]?.request_count, 20);
 });
 
-test("rate-limit identity pairs and bucket kinds do not consume one another", async () => {
+test("rate-limit account and client dimensions cannot be bypassed independently", async () => {
   const consumePublicRateLimit = requiredFunction<ConsumePublicRateLimit>("consumePublicRateLimit");
   const consume = (overrides: Partial<ConsumeInput> = {}) => (
     consumePublicRateLimit({ db: identityDb, hmacKey }, input({ limit: 1, ...overrides }))
   );
   assert.equal(await consume(), null);
   assert.equal(typeof await consume(), "number");
-  assert.equal(await consume({ accountIdentifier: "another@example.test" }), null);
-  assert.equal(await consume({ clientIdentifier: "198.51.100.2|another-device" }), null);
+  assert.equal(typeof await consume({ accountIdentifier: "another@example.test" }), "number");
+  assert.equal(typeof await consume({ clientIdentifier: "198.51.100.2|another-device" }), "number");
+  assert.equal(await consume({
+    accountIdentifier: "third@example.test", clientIdentifier: "198.51.100.3|third-device",
+  }), null);
   assert.equal(await consume({ bucketKind: "reset" }), null);
   const count = await administratorPool.query<{ count: number }>(
     "select count(*)::int as count from public_rate_limits",
   );
-  assert.equal(count.rows[0]?.count, 4);
+  assert.equal(count.rows[0]?.count, 8);
 });
 
 test("invalid rate-limit policy and protection key fail without reflecting account IP or device identifiers", async () => {
@@ -240,7 +254,7 @@ test("formal PostgreSQL registration includes both Task 6 suites exactly once an
   assert.match(ciEquivalent, /a normally issued Apple Session becomes eligible after verified password reauthentication/u);
   assert.match(ciEquivalent, /protected reauthenticated mutations serialize behind disable unlink and revoke/u);
   assert.match(ciEquivalent, /transaction-scoped guard retains canonical locks through a real protected Session command/u);
-  assert.match(ciEquivalent, /public fixed-window rate limits persist only account and IP-device HMACs/u);
+  assert.match(ciEquivalent, /public fixed-window rate limits persist independent account and IP-device HMAC dimensions/u);
   const repositorySource = await readFile(
     join(repositoryRoot, "packages", "runtime-core", "src", "repositories", "identity", "public-rate-limits.ts"),
     "utf8",

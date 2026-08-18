@@ -28,6 +28,7 @@ export interface ConsumePublicRateLimitInput {
   readonly clientIdentifier: string;
   readonly limit: number;
   readonly windowMs: number;
+  readonly dimensions?: "both" | "account" | "client";
 }
 
 const bucketKinds = new Set<PublicRateLimitBucketKind>([
@@ -61,6 +62,8 @@ function assertInput(
     || !Number.isSafeInteger(input.windowMs)
     || input.windowMs < 1_000
     || input.windowMs > 30 * 24 * 60 * 60 * 1_000
+    || input.dimensions !== undefined && input.dimensions !== "both"
+      && input.dimensions !== "account" && input.dimensions !== "client"
   ) invalidInput();
 }
 
@@ -83,11 +86,23 @@ export async function consumePublicRateLimit(
 ): Promise<number | null> {
   assertInput(dependencies, input);
   const accountIdentifierHmac = createHmac("sha256", dependencies.hmacKey)
-    .update(input.accountIdentifier, "utf8")
+    .update(`account:${input.accountIdentifier}`, "utf8")
     .digest();
   const clientIdentifierHmac = createHmac("sha256", dependencies.hmacKey)
-    .update(input.clientIdentifier, "utf8")
+    .update(`client:${input.clientIdentifier}`, "utf8")
     .digest();
+  const anyAccountHmac = createHmac("sha256", dependencies.hmacKey)
+    .update("account:*", "utf8").digest();
+  const anyClientHmac = createHmac("sha256", dependencies.hmacKey)
+    .update("client:*", "utf8").digest();
+  const dimensions = input.dimensions ?? "both";
+  const dimensionRows = dimensions === "account"
+    ? sql`(${accountIdentifierHmac}::bytea, ${anyClientHmac}::bytea)`
+    : dimensions === "client"
+      ? sql`(${anyAccountHmac}::bytea, ${clientIdentifierHmac}::bytea)`
+      : sql`(${accountIdentifierHmac}::bytea, ${anyClientHmac}::bytea),
+          (${anyAccountHmac}::bytea, ${clientIdentifierHmac}::bytea)`;
+  const expectedRowCount = dimensions === "both" ? 2 : 1;
   try {
     const result = await sql<{ request_count: number; retry_after_ms: string }>`
       with boundary as materialized (
@@ -105,12 +120,12 @@ export async function consumePublicRateLimit(
           bucket_kind, account_identifier_hmac, client_identifier_hmac,
           window_started_at, request_count, expires_at, updated_at
         )
-        select
-          ${input.bucketKind}, ${accountIdentifierHmac}, ${clientIdentifierHmac},
-          window_started_at, 1,
-          window_started_at + ${input.windowMs} * interval '1 millisecond',
-          now
+        select ${input.bucketKind}, dimension.account_hmac, dimension.client_hmac,
+          fixed_window.window_started_at, 1,
+          fixed_window.window_started_at + ${input.windowMs} * interval '1 millisecond',
+          fixed_window.now
         from fixed_window
+        cross join (values ${dimensionRows}) as dimension(account_hmac, client_hmac)
         on conflict (
           bucket_kind, account_identifier_hmac, client_identifier_hmac, window_started_at
         ) do update set
@@ -126,13 +141,17 @@ export async function consumePublicRateLimit(
         )::bigint::text as retry_after_ms
       from consumed
     `.execute(dependencies.db);
-    const row = result.rows[0];
-    if (row === undefined || !Number.isSafeInteger(row.request_count) || row.request_count < 1) {
+    if (result.rows.length !== expectedRowCount || result.rows.some((row) => (
+      !Number.isSafeInteger(row.request_count) || row.request_count < 1
+    ))) {
       throw new DomainError("INTERNAL_ERROR", "Public rate-limit result is invalid");
     }
-    return row.request_count <= input.limit ? null : safeRetryAfter(row.retry_after_ms);
+    const exhausted = result.rows.filter((row) => row.request_count > input.limit);
+    return exhausted.length === 0 ? null : Math.max(...exhausted.map((row) => safeRetryAfter(row.retry_after_ms)));
   } finally {
     accountIdentifierHmac.fill(0);
     clientIdentifierHmac.fill(0);
+    anyAccountHmac.fill(0);
+    anyClientHmac.fill(0);
   }
 }

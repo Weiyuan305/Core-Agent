@@ -12,13 +12,28 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 
 import type { GatewayAuthenticatedSession, GatewayIssuedSession, IdentityGatewayRouteDependencies } from "../app.js";
 import { IdentityGatewayFailure } from "../errors.js";
-import { assertClientTransport, assertInvitationAcceptancePayloadHash, requireMutationCredentials } from "../security.js";
+import { ProviderFailure } from "../providers/provider-errors.js";
+import { assertClientTransport, assertInvitationAcceptancePayloadHash, clearAppleFlowCookie, requireMutationCredentials, requireNativeSessionCredential } from "../security.js";
 import { canonicalWebAppleCallback } from "./apple.js";
 import { completeReservedEmailProviderStart, deliverSession } from "./email.js";
 
 async function authenticateMutation(request: FastifyRequest, dependencies: IdentityGatewayRouteDependencies): Promise<GatewayAuthenticatedSession> {
   const credential = requireMutationCredentials(request);
   return dependencies.operations.authenticateSession({ sessionSecret: credential.sessionSecret, csrfSecret: credential.csrfSecret, requireCsrf: true });
+}
+
+async function authenticateClientMutation(
+  request: FastifyRequest,
+  dependencies: IdentityGatewayRouteDependencies,
+  clientKind: "web" | "iphone" | "macos",
+): Promise<GatewayAuthenticatedSession> {
+  const authority = clientKind === "web"
+    ? await authenticateMutation(request, dependencies)
+    : await dependencies.operations.authenticateSession({
+      sessionSecret: requireNativeSessionCredential(request), requireCsrf: false,
+    });
+  if (authority.session.client_kind !== clientKind) throw new IdentityGatewayFailure("AUTH_INVALID");
+  return authority;
 }
 
 export async function registerInvitationRoutes(app: FastifyInstance, dependencies: IdentityGatewayRouteDependencies): Promise<void> {
@@ -38,8 +53,20 @@ export async function registerInvitationRoutes(app: FastifyInstance, dependencie
     } & Record<string, unknown>;
     assertClientTransport(request, body.client_kind, dependencies.config);
     const normalizedEmail = body.email.toLowerCase();
-    const retryAfterMs = await dependencies.operations.consumeRateLimit({ bucketKind: "signup", accountIdentifier: normalizedEmail, clientIdentifier: request.identityContext.clientIdentifier });
+    const retryAfterMs = await dependencies.operations.consumeRateLimit({
+      bucketKind: "signup", accountIdentifier: "route:invitation_register",
+      clientIdentifier: request.identityContext.clientIdentifier, dimensions: "client",
+    });
     if (retryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", retryAfterMs);
+    const inspected = await dependencies.operations.executeAuthorityCommand({
+      kind: "invitation_rate_identity", payload: { invitation_secret: body.invitation_secret },
+    }) as { readonly invitation_id?: unknown };
+    if (typeof inspected.invitation_id !== "string") throw new IdentityGatewayFailure("AUTH_INVALID");
+    const accountRetryAfterMs = await dependencies.operations.consumeRateLimit({
+      bucketKind: "signup", accountIdentifier: inspected.invitation_id,
+      clientIdentifier: request.identityContext.clientIdentifier, dimensions: "account",
+    });
+    if (accountRetryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", accountRetryAfterMs);
     const binding = await dependencies.operations.beginEmailVerification({
       idempotencyKey: body.idempotency_key,
       payloadHash: body.payload_hash,
@@ -48,7 +75,7 @@ export async function registerInvitationRoutes(app: FastifyInstance, dependencie
       ...(body.device_label === undefined ? {} : { deviceLabel: body.device_label }),
       invitationSecret: String(body.invitation_secret),
     });
-    if (binding.kind === "in_progress") throw new IdentityGatewayFailure("AUTH_CONFLICT");
+    if (binding.kind === "in_progress") throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
     if (binding.kind === "reserved") {
       await completeReservedEmailProviderStart(dependencies, binding, { email: normalizedEmail, password: body.password });
     }
@@ -56,12 +83,33 @@ export async function registerInvitationRoutes(app: FastifyInstance, dependencie
   });
 
   app.post("/auth/v1/invitations/accept", { schema: { body: InvitationAcceptanceRequestSchema, response: { 200: InvitationAcceptanceResponseSchema } } }, async (request, reply) => {
-    const body = request.body as { invitation_secret: string; authentication_proof: { kind: "email_password" | "apple"; client_kind: "web" | "iphone" | "macos"; verification_proof?: string }; device_label?: string } & Record<string, unknown>;
+    const body = request.body as {
+      invitation_secret: string;
+      client_kind?: "web" | "iphone" | "macos";
+      authentication_proof?: {
+        kind: "apple" | "email_password";
+        client_kind: "web" | "iphone" | "macos";
+      };
+      device_label?: string;
+    } & Record<string, unknown>;
     assertInvitationAcceptancePayloadHash(body as never);
-    assertClientTransport(request, body.authentication_proof.client_kind, dependencies.config);
-    const retryAfterMs = await dependencies.operations.consumeRateLimit({ bucketKind: "invitation_accept", accountIdentifier: body.invitation_secret, clientIdentifier: request.identityContext.clientIdentifier });
+    if ((body.client_kind === undefined) === (body.authentication_proof === undefined)) {
+      throw new IdentityGatewayFailure("INVALID_REQUEST");
+    }
+    // The 0.5 provider-proof shape remains parseable for additive wire
+    // compatibility, but it is never authentication authority in the Gateway.
+    if (body.authentication_proof?.kind === "email_password") {
+      throw new IdentityGatewayFailure("INVALID_REQUEST");
+    }
+    const expectedClientKind = body.client_kind ?? body.authentication_proof?.client_kind;
+    if (expectedClientKind === undefined) throw new IdentityGatewayFailure("INVALID_REQUEST");
+    assertClientTransport(request, expectedClientKind, dependencies.config);
+    const retryAfterMs = await dependencies.operations.consumeRateLimit({
+      bucketKind: "invitation_accept", accountIdentifier: "route:invitation_accept",
+      clientIdentifier: request.identityContext.clientIdentifier, dimensions: "client",
+    });
     if (retryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", retryAfterMs);
-    if (body.authentication_proof.kind === "apple") {
+    if (body.authentication_proof?.kind === "apple") {
       const appleRetryAfterMs = await dependencies.operations.consumeRateLimit({
         bucketKind: "apple_callback",
         accountIdentifier: "route:apple_invitation_callback",
@@ -69,8 +117,20 @@ export async function registerInvitationRoutes(app: FastifyInstance, dependencie
       });
       if (appleRetryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", appleRetryAfterMs);
     }
-    const subject = body.authentication_proof.kind === "email_password"
-      ? await dependencies.provider.verifyCurrentSubject({ accessToken: body.authentication_proof.verification_proof! })
+    const authority = body.authentication_proof === undefined
+      ? await authenticateClientMutation(request, dependencies, expectedClientKind)
+      : undefined;
+    const inspected = await dependencies.operations.executeAuthorityCommand({
+      kind: "invitation_rate_identity", payload: { invitation_secret: body.invitation_secret },
+    }) as { readonly invitation_id?: unknown };
+    if (typeof inspected.invitation_id !== "string") throw new IdentityGatewayFailure("AUTH_INVALID");
+    const accountRetryAfterMs = await dependencies.operations.consumeRateLimit({
+      bucketKind: "invitation_accept", accountIdentifier: inspected.invitation_id,
+      clientIdentifier: request.identityContext.clientIdentifier, dimensions: "account",
+    });
+    if (accountRetryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", accountRetryAfterMs);
+    const subject = body.authentication_proof === undefined
+      ? undefined
       : await dependencies.provider.completeApple(body.authentication_proof.client_kind === "web"
         ? canonicalWebAppleCallback(request, reply, dependencies, {
           ...(body.authentication_proof as unknown as Record<string, unknown>),
@@ -79,15 +139,17 @@ export async function registerInvitationRoutes(app: FastifyInstance, dependencie
           payload_hash: body.payload_hash as `sha256:${string}`,
         } as never, "sign_in")
         : body.authentication_proof as never);
-    const { authentication_proof: _authenticationProof, device_label: _deviceLabel, ...durablePayload } = body;
+    const { authentication_proof: _authenticationProof, client_kind: _clientKind, device_label: _deviceLabel, ...durablePayload } = body;
     const result = await dependencies.operations.executeAuthorityCommand({
       kind: "invitation_accept",
-      payload: { ...durablePayload, device_label: body.device_label, client_kind: body.authentication_proof.client_kind },
-      verifiedSubject: subject,
+      payload: { ...durablePayload, device_label: body.device_label, client_kind: expectedClientKind },
+      ...(authority === undefined ? {} : { authority }),
+      ...(subject === undefined ? {} : { verifiedSubject: subject }),
     }) as Record<string, unknown> & { issuedSession?: GatewayIssuedSession };
     if (result.issuedSession === undefined) throw new IdentityGatewayFailure("INTERNAL_ERROR");
     const { issuedSession, ...publicResult } = result;
-    const delivery = deliverSession(reply, issuedSession, body.authentication_proof.client_kind) as Record<string, unknown>;
+    const delivery = deliverSession(reply, issuedSession, expectedClientKind) as Record<string, unknown>;
+    if (body.authentication_proof?.kind === "apple" && expectedClientKind === "web") clearAppleFlowCookie(reply);
     return { ...publicResult, ...delivery };
   });
 

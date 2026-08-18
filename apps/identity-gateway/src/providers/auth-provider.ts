@@ -116,6 +116,10 @@ export interface PasswordResetCompletionInput {
 export type PasswordResetProviderObservation =
   | {
     readonly kind: "password_reset_provider_observation";
+    readonly outcome: "ambiguous";
+  }
+  | {
+    readonly kind: "password_reset_provider_observation";
     readonly outcome: "exact";
     readonly verifiedSubject: VerifiedProviderSubject;
     readonly providerEvidenceAt: string;
