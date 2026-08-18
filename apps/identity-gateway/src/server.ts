@@ -49,7 +49,13 @@ import { Pool } from "pg";
 import { buildIdentityGatewayApp, type GatewayAuthenticatedSession, type IdentityGatewayOperations } from "./app.js";
 import { assertManagedSecretFile, loadIdentityGatewayConfig } from "./config.js";
 import type { PasswordResetProviderObservation, VerifiedProviderSubject } from "./providers/auth-provider.js";
-import { SupabaseAuthProvider, type OAuthTransactionRecord, type OAuthTransactionStore, type TransactionProtector } from "./providers/supabase-auth-provider.js";
+import {
+  readProtectedPasswordResetSubject,
+  SupabaseAuthProvider,
+  type OAuthTransactionRecord,
+  type OAuthTransactionStore,
+  type TransactionProtector,
+} from "./providers/supabase-auth-provider.js";
 import { PASSWORD_RESET_SETTLEMENT_SECONDS } from "./security.js";
 
 export interface ProductionIdentityGatewayOptions {
@@ -331,7 +337,12 @@ function providerIdentityKindAccepts(
     : storedKind === "apple" || storedKind === "email_password_apple";
 }
 
-function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, piiProtector: TransactionProtector): IdentityGatewayOperations {
+function productionOperations(
+  db: Kysely<RuntimeDatabase>,
+  piiKey: Uint8Array,
+  piiProtector: TransactionProtector,
+  oauthProtector: TransactionProtector,
+): IdentityGatewayOperations {
   const verificationDependencies = { db, hmacKey: piiKey, protector: aesProtector(piiKey, "email-verification") };
   const unavailable = (): never => { throw new DomainError("DEPENDENCY_UNAVAILABLE", "Identity operation is unavailable", true); };
   const issueSessionInTransaction = async (
@@ -855,7 +866,8 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
             .where("oauth_transaction_id", "=", payload.transaction_id).forUpdate().executeTakeFirst();
           if (transaction === undefined || transaction.flow_kind !== "password_reset"
             || transaction.status !== "pending"
-            || transaction.provider_completion_status !== "provider_started"
+            || (transaction.provider_completion_status !== "provider_started"
+              && transaction.provider_completion_status !== "provider_completed")
             || transaction.provider_completion_started_at === null
             || transaction.provider_subject_ciphertext === null
             || transaction.provider_completion_payload_hash !== payload.payload_hash
@@ -896,13 +908,36 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
           if (evidenceTimestamp < transaction.provider_completion_started_at.getTime()) {
             return { kind: "in_progress" as const };
           }
+          let durableSubject: VerifiedProviderSubject;
+          try {
+            durableSubject = await readProtectedPasswordResetSubject(
+              oauthProtector,
+              transaction.provider_subject_ciphertext,
+            );
+          } catch {
+            return { kind: "terminal" as const };
+          }
+          if (durableSubject.provider !== observation.verifiedSubject.provider
+            || durableSubject.providerSubject !== observation.verifiedSubject.providerSubject
+            || durableSubject.identityKind !== observation.verifiedSubject.identityKind
+            || durableSubject.normalizedEmail !== observation.verifiedSubject.normalizedEmail
+            || durableSubject.verifiedAt !== observation.verifiedSubject.verifiedAt) {
+            return { kind: "terminal" as const };
+          }
+          if (transaction.provider_completion_status === "provider_completed") {
+            if (transaction.provider_completed_at === null || transaction.provider_evidence_at === null
+              || transaction.provider_evidence_at.getTime() !== evidenceTimestamp) {
+              return { kind: "terminal" as const };
+            }
+            return { kind: "completed" as const, verifiedSubject: durableSubject };
+          }
           await trx.updateTable("oauth_transactions").set({
             provider_completion_status: "provider_completed",
             provider_completed_at: now,
             provider_evidence_at: new Date(evidenceTimestamp),
             updated_at: now,
           }).where("oauth_transaction_id", "=", payload.transaction_id).executeTakeFirstOrThrow();
-          return { kind: "completed" as const, verifiedSubject: observation.verifiedSubject };
+          return { kind: "completed" as const, verifiedSubject: durableSubject };
         }, { isolationLevel: "serializable" });
         if (settlement.kind === "expired") {
           throw new DomainError("UNAUTHENTICATED", "Password-reset settlement authority expired");
@@ -1226,13 +1261,17 @@ export async function buildProductionIdentityGateway(options: ProductionIdentity
     await assertSchemaVersion(db);
     const piiKey = deriveKey(piiMaterial, "pii-hmac");
     const piiProtector = aesProtector(piiMaterial, "private-pii");
+    const oauthProtector = aesProtector(signingMaterial, "oauth-transaction");
     const provider = new SupabaseAuthProvider({
       supabaseUrl: config.providerUrl, publishableKey: publishableKey.toString("utf8"), serviceRoleKey: serviceRoleKey.toString("utf8"),
       appleRedirectUris: [...config.appleWebRedirectUris, ...config.appleNativeRedirectUris],
       passwordResetRedirectUri: config.passwordResetRedirectUri, emailVerificationRedirectUri: config.emailVerificationRedirectUri,
-      transactionStore: oauthStore(db), transactionProtector: aesProtector(signingMaterial, "oauth-transaction"),
+      transactionStore: oauthStore(db), transactionProtector: oauthProtector,
     });
-    const app = await buildIdentityGatewayApp({ config, provider, operations: productionOperations(db, piiKey, piiProtector), flowCookieKey: deriveKey(sessionMaterial, "flow-cookie") });
+    const app = await buildIdentityGatewayApp({
+      config, provider, operations: productionOperations(db, piiKey, piiProtector, oauthProtector),
+      flowCookieKey: deriveKey(sessionMaterial, "flow-cookie"),
+    });
     app.addHook("onClose", async () => { await db.destroy(); });
     return app;
   } catch (error) {

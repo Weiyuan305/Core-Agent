@@ -358,6 +358,36 @@ function strictUtcMilliseconds(value: string): number | undefined {
   return timestamp;
 }
 
+/** Internal durable reset-subject decoder shared with the Core settlement phase. */
+export async function readProtectedPasswordResetSubject(
+  protector: TransactionProtector,
+  ciphertext: Uint8Array,
+): Promise<VerifiedProviderSubject> {
+  let plaintext: Uint8Array | undefined;
+  try {
+    plaintext = copyBytes(await protector.decrypt(ciphertext), 1, 65_536);
+    if (plaintext === undefined) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+    const parsed: unknown = JSON.parse(utf8Decoder.decode(plaintext));
+    const provider = ownString(parsed, "provider");
+    const providerSubject = ownString(parsed, "providerSubject");
+    const identityKind = ownString(parsed, "identityKind");
+    const normalizedEmail = ownString(parsed, "normalizedEmail");
+    const verifiedAt = ownString(parsed, "verifiedAt");
+    if (ownString(parsed, "kind") !== "password_reset_subject" || provider !== "supabase"
+      || providerSubject === undefined || providerSubject.length < 1 || providerSubject.length > 1_024
+      || identityKind !== "email_password" || normalizedEmail === undefined
+      || !validEmail(normalizedEmail) || normalizedEmail !== normalizeEmail(normalizedEmail)
+      || verifiedAt === undefined || strictUtcMilliseconds(verifiedAt) === undefined) {
+      throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+    }
+    return Object.freeze({ provider, providerSubject, identityKind, normalizedEmail, verifiedAt });
+  } catch (error) {
+    throw mapProviderFailure(error, "AUTH_CALLBACK_INVALID");
+  } finally {
+    plaintext?.fill(0);
+  }
+}
+
 function readCredential(input: unknown): EmailCredentialInput {
   const email = ownString(input, "email");
   const password = ownString(input, "password");
@@ -816,29 +846,7 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
   }
 
   async #readPasswordResetSubject(ciphertext: Uint8Array): Promise<VerifiedProviderSubject> {
-    let plaintext: Uint8Array | undefined;
-    try {
-      plaintext = copyBytes(await this.#transactionProtector.decrypt(ciphertext), 1, 65_536);
-      if (plaintext === undefined) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
-      const parsed: unknown = JSON.parse(utf8Decoder.decode(plaintext));
-      const provider = ownString(parsed, "provider");
-      const providerSubject = ownString(parsed, "providerSubject");
-      const identityKind = ownString(parsed, "identityKind");
-      const normalizedEmail = ownString(parsed, "normalizedEmail");
-      const verifiedAt = ownString(parsed, "verifiedAt");
-      if (ownString(parsed, "kind") !== "password_reset_subject" || provider !== "supabase"
-        || providerSubject === undefined || providerSubject.length < 1 || providerSubject.length > 1_024
-        || identityKind !== "email_password" || normalizedEmail === undefined
-        || !validEmail(normalizedEmail) || normalizedEmail !== normalizeEmail(normalizedEmail)
-        || verifiedAt === undefined || strictUtcMilliseconds(verifiedAt) === undefined) {
-        throw new ProviderFailure("AUTH_CALLBACK_INVALID");
-      }
-      return Object.freeze({ provider, providerSubject, identityKind, normalizedEmail, verifiedAt });
-    } catch (error) {
-      throw mapProviderFailure(error, "AUTH_CALLBACK_INVALID");
-    } finally {
-      plaintext?.fill(0);
-    }
+    return readProtectedPasswordResetSubject(this.#transactionProtector, ciphertext);
   }
 
   async #startMetadata(ciphertext: Uint8Array): Promise<ProviderStartMetadata> {

@@ -120,7 +120,8 @@ test("production composition atomically verifies email, registers Task 3, issues
   await applyMigrations(pool, migrations);
   const key = Buffer.alloc(32, 0x5a);
   const protector = identityGatewayServerTestInternals.aesProtector(key, "composition-private-pii");
-  const operations = identityGatewayServerTestInternals.productionOperations(db, key, protector);
+  const oauthProtector = identityGatewayServerTestInternals.aesProtector(key, "composition-oauth-transaction");
+  const operations = identityGatewayServerTestInternals.productionOperations(db, key, protector, oauthProtector);
   try {
     const providerStarts = identityGatewayServerTestInternals.oauthStore(db);
     const providerStartRecord = {
@@ -2001,9 +2002,9 @@ test("production Fastify and Supabase adapter defer provider-started reset settl
   await applyMigrations(pool, migrations);
   const key = Buffer.alloc(32, 0x7a);
   const piiProtector = identityGatewayServerTestInternals.aesProtector(key, "round-nine-private-pii");
-  const operations = identityGatewayServerTestInternals.productionOperations(db, key, piiProtector);
   const providerStore = identityGatewayServerTestInternals.oauthStore(db);
   const providerProtector = identityGatewayServerTestInternals.aesProtector(Buffer.alloc(32, 0x7b), "oauth-transaction");
+  const operations = identityGatewayServerTestInternals.productionOperations(db, key, piiProtector, providerProtector);
   const flowCookieKey = Buffer.alloc(32, 0x7c);
   const normalizedEmail = "round-nine-reset@example.test";
   const providerSubject = "provider_round_nine_reset";
@@ -2014,6 +2015,8 @@ test("production Fastify and Supabase adapter defer provider-started reset settl
   let providerUpdates = 0;
   let providerInspections = 0;
   let providerExchanges = 0;
+  let failResetCheckpointOnce = false;
+  let inspectionOverrides: Array<{ readonly providerSubject?: string; readonly normalizedEmail?: string; readonly updatedAt?: unknown }> = [];
   let blockExchange = false;
   let releaseExchange!: () => void;
   let signalExchangeStarted!: () => void;
@@ -2071,10 +2074,25 @@ test("production Fastify and Supabase adapter defer provider-started reset settl
         },
         async getUserById() {
           providerInspections += 1;
-          return { data: { user: providerUser(providerEvidenceAt) }, error: null };
+          const override = inspectionOverrides.shift();
+          return { data: { user: {
+            ...providerUser(override?.updatedAt ?? providerEvidenceAt),
+            ...(override?.providerSubject === undefined ? {} : { id: override.providerSubject }),
+            ...(override?.normalizedEmail === undefined ? {} : { email: override.normalizedEmail }),
+          } }, error: null };
         },
       },
     } } as never;
+  };
+  const providerTransactionStore = {
+    ...providerStore,
+    async checkpointPasswordResetCompletion(input: { readonly transactionId: string; readonly providerEvidenceAt: string }) {
+      if (failResetCheckpointOnce) {
+        failResetCheckpointOnce = false;
+        throw new Error("forced provider checkpoint failure");
+      }
+      return providerStore.checkpointPasswordResetCompletion!(input);
+    },
   };
   const provider = new SupabaseAuthProvider({
     supabaseUrl: "https://provider.example.test",
@@ -2083,7 +2101,7 @@ test("production Fastify and Supabase adapter defer provider-started reset settl
     appleRedirectUris: ["https://app.example.test/auth/apple/callback", "coreagent://auth/apple/callback"],
     passwordResetRedirectUri: "https://app.example.test/auth/password/reset/callback",
     emailVerificationRedirectUri: "https://identity.example.test/auth/v1/email/verification",
-    transactionStore: providerStore,
+    transactionStore: providerTransactionStore,
     transactionProtector: providerProtector,
     createClient: clientFactory,
     now: () => new Date(gatewayNow),
@@ -2203,6 +2221,151 @@ test("production Fastify and Supabase adapter defer provider-started reset settl
     assert.equal((await pool.query("select status from oauth_transactions where oauth_transaction_id = $1", [concurrentStart.binding.transaction_id])).rows[0]?.status, "consumed");
     assert.equal(providerInspections >= 1, true);
     await concurrentApp.close();
+
+    const exactRaceSession = await issueCoreSession({ db }, {
+      sessionId: "session_round_twelve_exact_race", actorId: registered.actorId,
+      authSubjectId: registered.authSubjectId, clientKind: "iphone",
+    });
+    gatewayNow = (await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now;
+    const exactRacePayload = completionPayload("round-twelve-exact-race-completion");
+    const exactRaceStart = await startProviderReset("round-twelve-exact-race-start");
+    const exactEffectsBefore = { exchanges: providerExchanges, updates: providerUpdates };
+    failResetCheckpointOnce = true;
+    const exactPrimeApp = await buildIdentityGatewayApp({ config, provider, operations, flowCookieKey, now: () => new Date(gatewayNow) });
+    const exactPrime = await exactPrimeApp.inject({
+      method: "POST", url: "/auth/v1/password/reset/complete", remoteAddress: "198.51.100.41",
+      headers: { ...headers, cookie: exactRaceStart.cookie }, payload: exactRacePayload,
+    });
+    assert.equal(exactPrime.statusCode, 503, exactPrime.body);
+    assert.doesNotMatch(String(exactPrime.headers["set-cookie"] ?? ""), /core_agent_recovery=;[^\n]*Max-Age=0/u);
+    assert.equal(providerExchanges, exactEffectsBefore.exchanges + 1);
+    assert.equal(providerUpdates, exactEffectsBefore.updates + 1);
+    assert.equal((await pool.query(
+      "select provider_completion_status from oauth_transactions where oauth_transaction_id = $1",
+      [exactRaceStart.binding.transaction_id],
+    )).rows[0]?.provider_completion_status, "provider_started");
+    await exactPrimeApp.close();
+
+    let exactObservationArrivals = 0;
+    let releaseFirstExactObservation!: () => void;
+    const bothExactObservations = new Promise<void>((resolve) => { releaseFirstExactObservation = resolve; });
+    let releaseExactLoser!: () => void;
+    const exactWinnerCoreFailed = new Promise<void>((resolve) => { releaseExactLoser = resolve; });
+    let failExactWinnerCore = true;
+    const exactRaceApp = await buildIdentityGatewayApp({
+      config, provider, flowCookieKey, now: () => new Date(gatewayNow),
+      operations: {
+        ...operations,
+        async executeAuthorityCommand(input) {
+          if (input.kind === "password_reset_provider_observation") {
+            exactObservationArrivals += 1;
+            if (exactObservationArrivals === 1) {
+              await bothExactObservations;
+              return operations.executeAuthorityCommand(input);
+            }
+            releaseFirstExactObservation();
+            await exactWinnerCoreFailed;
+            return operations.executeAuthorityCommand(input);
+          }
+          if (input.kind === "password_reset_completed" && failExactWinnerCore) {
+            failExactWinnerCore = false;
+            releaseExactLoser();
+            throw new Error("forced round-twelve exact winner Core rollback");
+          }
+          return operations.executeAuthorityCommand(input);
+        },
+      },
+    });
+    const exactRaceResponses = await Promise.all([
+      exactRaceApp.inject({
+        method: "POST", url: "/auth/v1/password/reset/complete", remoteAddress: "198.51.100.41",
+        headers: { ...headers, cookie: exactRaceStart.cookie }, payload: exactRacePayload,
+      }),
+      exactRaceApp.inject({
+        method: "POST", url: "/auth/v1/password/reset/complete", remoteAddress: "198.51.100.41",
+        headers: { ...headers, cookie: exactRaceStart.cookie }, payload: exactRacePayload,
+      }),
+    ]);
+    assert.deepEqual(exactRaceResponses.map((response) => response.statusCode).sort(), [200, 500]);
+    const exactWinner = exactRaceResponses.find((response) => response.statusCode === 500)!;
+    const exactLoser = exactRaceResponses.find((response) => response.statusCode === 200)!;
+    assert.doesNotMatch(String(exactWinner.headers["set-cookie"] ?? ""), /core_agent_recovery=;[^\n]*Max-Age=0/u);
+    assert.match(String(exactLoser.headers["set-cookie"]), /core_agent_recovery=;[^\n]*Max-Age=0/u);
+    assert.equal(providerExchanges, exactEffectsBefore.exchanges + 1);
+    assert.equal(providerUpdates, exactEffectsBefore.updates + 1);
+    assert.equal((await pool.query("select status from core_sessions where session_id = $1", [exactRaceSession.session.session_id])).rows[0]?.status, "revoked");
+    assert.equal((await pool.query("select status from oauth_transactions where oauth_transaction_id = $1", [exactRaceStart.binding.transaction_id])).rows[0]?.status, "consumed");
+    await exactRaceApp.close();
+
+    const invalidRaceSession = await issueCoreSession({ db }, {
+      sessionId: "session_round_twelve_invalid_race", actorId: registered.actorId,
+      authSubjectId: registered.authSubjectId, clientKind: "iphone",
+    });
+    gatewayNow = (await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now;
+    const invalidRacePayload = completionPayload("round-twelve-invalid-race-completion");
+    const invalidRaceStart = await startProviderReset("round-twelve-invalid-race-start");
+    const invalidEffectsBefore = { exchanges: providerExchanges, updates: providerUpdates };
+    failResetCheckpointOnce = true;
+    const invalidPrimeApp = await buildIdentityGatewayApp({ config, provider, operations, flowCookieKey, now: () => new Date(gatewayNow) });
+    const invalidPrime = await invalidPrimeApp.inject({
+      method: "POST", url: "/auth/v1/password/reset/complete", remoteAddress: "198.51.100.42",
+      headers: { ...headers, cookie: invalidRaceStart.cookie }, payload: invalidRacePayload,
+    });
+    assert.equal(invalidPrime.statusCode, 503, invalidPrime.body);
+    assert.equal(providerExchanges, invalidEffectsBefore.exchanges + 1);
+    assert.equal(providerUpdates, invalidEffectsBefore.updates + 1);
+    await invalidPrimeApp.close();
+
+    inspectionOverrides = [{}, { providerSubject: "mismatched-concurrent-provider-subject" }];
+    let invalidObservationArrived!: () => void;
+    const waitForInvalidObservation = new Promise<void>((resolve) => { invalidObservationArrived = resolve; });
+    let releaseInvalidObservation!: () => void;
+    const invalidWinnerCoreFailed = new Promise<void>((resolve) => { releaseInvalidObservation = resolve; });
+    let failInvalidWinnerCore = true;
+    const invalidRaceApp = await buildIdentityGatewayApp({
+      config, provider, flowCookieKey, now: () => new Date(gatewayNow),
+      operations: {
+        ...operations,
+        async executeAuthorityCommand(input) {
+          if (input.kind === "password_reset_provider_observation" && input.passwordResetObservation?.outcome === "exact") {
+            await waitForInvalidObservation;
+            return operations.executeAuthorityCommand(input);
+          }
+          if (input.kind === "password_reset_provider_observation" && input.passwordResetObservation?.outcome === "invalid") {
+            invalidObservationArrived();
+            await invalidWinnerCoreFailed;
+            return operations.executeAuthorityCommand(input);
+          }
+          if (input.kind === "password_reset_completed" && failInvalidWinnerCore) {
+            failInvalidWinnerCore = false;
+            releaseInvalidObservation();
+            throw new Error("forced round-twelve invalid winner Core rollback");
+          }
+          return operations.executeAuthorityCommand(input);
+        },
+      },
+    });
+    const invalidRaceResponses = await Promise.all([
+      invalidRaceApp.inject({
+        method: "POST", url: "/auth/v1/password/reset/complete", remoteAddress: "198.51.100.42",
+        headers: { ...headers, cookie: invalidRaceStart.cookie }, payload: invalidRacePayload,
+      }),
+      invalidRaceApp.inject({
+        method: "POST", url: "/auth/v1/password/reset/complete", remoteAddress: "198.51.100.42",
+        headers: { ...headers, cookie: invalidRaceStart.cookie }, payload: invalidRacePayload,
+      }),
+    ]);
+    assert.deepEqual(invalidRaceResponses.map((response) => response.statusCode).sort(), [401, 500]);
+    assert.match(String(invalidRaceResponses.find((response) => response.statusCode === 401)!.headers["set-cookie"]), /core_agent_recovery=;[^\n]*Max-Age=0/u);
+    assert.doesNotMatch(String(invalidRaceResponses.find((response) => response.statusCode === 500)!.headers["set-cookie"] ?? ""), /core_agent_recovery=;[^\n]*Max-Age=0/u);
+    assert.equal(providerExchanges, invalidEffectsBefore.exchanges + 1);
+    assert.equal(providerUpdates, invalidEffectsBefore.updates + 1);
+    assert.equal((await pool.query("select status from core_sessions where session_id = $1", [invalidRaceSession.session.session_id])).rows[0]?.status, "active");
+    assert.deepEqual((await pool.query(
+      "select status, provider_completion_status from oauth_transactions where oauth_transaction_id = $1",
+      [invalidRaceStart.binding.transaction_id],
+    )).rows[0], { status: "pending", provider_completion_status: "provider_completed" });
+    await invalidRaceApp.close();
 
     const observationCases = [
       { name: "valid", expired: false, observation: "valid", statusCode: 200, rowStatus: "consumed" },
