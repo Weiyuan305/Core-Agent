@@ -64,7 +64,7 @@ export async function registerInvitationRoutes(app: FastifyInstance, dependencie
     if (body.authentication_proof.kind === "apple") {
       const appleRetryAfterMs = await dependencies.operations.consumeRateLimit({
         bucketKind: "apple_callback",
-        accountIdentifier: String((body.authentication_proof as Record<string, unknown>).transaction_id),
+        accountIdentifier: "route:apple_invitation_callback",
         clientIdentifier: request.identityContext.clientIdentifier,
       });
       if (appleRetryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", appleRetryAfterMs);

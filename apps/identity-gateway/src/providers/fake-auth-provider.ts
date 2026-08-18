@@ -265,9 +265,10 @@ export class FakeAuthProvider implements AuthProviderAdapter {
       || !constantTimeEqual(expectedProviderSubject, subject.providerSubject)) {
       throw new ProviderFailure("AUTH_CALLBACK_INVALID");
     }
+    const verifiedSubject = copySubject({ ...subject, verifiedAt: this.#now().toISOString() });
     this.#emailVerifications.delete(verificationCode);
-    this.#verifiedEmailSubjects.set(subject.providerSubject, subject);
-    return copySubject(subject);
+    this.#verifiedEmailSubjects.set(subject.providerSubject, verifiedSubject);
+    return verifiedSubject;
   }
 
   async recoverVerifiedEmailSubject(input: EmailVerificationRecoveryInput): Promise<VerifiedProviderSubject> {

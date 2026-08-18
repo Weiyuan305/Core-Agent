@@ -6,6 +6,7 @@ import test from "node:test";
 
 const repositoryDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "repositories");
 const runtimeCommandMigration = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations", "004_runtime_command_intent.sql");
+const identityTables = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "db", "identity-tables.ts");
 const tenantOwnedTables = new Set([
   "tenants", "memberships", "profiles", "runtime_containers", "conversations", "sessions", "agent_runs", "messages",
   "idempotency_records", "worker_jobs", "product_events", "audit_events", "outbox", "stream_sequences", "stream_cursors", "secret_references",
@@ -310,4 +311,11 @@ test("runtime command migration never fabricates ambiguous legacy intent", async
   assert.doesNotMatch(migration, /desired_state/);
   assert.match(migration, /where job_kind = 'reconcile_runtime'\s+and status in \('queued', 'running', 'retrying'\);/);
   assert.match(migration, /status in \('succeeded', 'failed', 'cancelled'\)/);
+});
+
+test("public rate-limit table type includes every schema-12 Apple bucket", async () => {
+  const source = await readFile(identityTables, "utf8");
+  const table = source.slice(source.indexOf("export interface PublicRateLimitTable"), source.indexOf("export interface IdentityAuthorityTables"));
+  assert.match(table, /bucket_kind:[^;]*"apple_start"/);
+  assert.match(table, /bucket_kind:[^;]*"apple_link"/);
 });

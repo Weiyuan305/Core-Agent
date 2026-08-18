@@ -130,7 +130,7 @@ export interface AccountDeletionTable {
 }
 
 export interface PublicRateLimitTable {
-  bucket_kind: "signup" | "login" | "reset" | "apple_callback" | "invitation_accept" | "reauthenticate";
+  bucket_kind: "signup" | "login" | "reset" | "apple_start" | "apple_link" | "apple_callback" | "invitation_accept" | "reauthenticate";
   account_identifier_hmac: Digest;
   client_identifier_hmac: Digest;
   window_started_at: Date;

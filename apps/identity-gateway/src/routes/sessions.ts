@@ -29,31 +29,41 @@ async function authenticateMutation(request: FastifyRequest, dependencies: Ident
   return dependencies.operations.authenticateSession({ sessionSecret: credential.sessionSecret, csrfSecret: credential.csrfSecret, requireCsrf: true });
 }
 
-async function authenticateAnyMutation(
+type ValidatedMutationCredential =
+  | { readonly clientKind: "web"; readonly sessionSecret: string; readonly csrfSecret: string }
+  | { readonly clientKind: "iphone" | "macos"; readonly sessionSecret: string };
+
+function validateAnyMutationTransport(
   request: FastifyRequest,
   dependencies: IdentityGatewayRouteDependencies,
   requestedClientKind: "web" | "iphone" | "macos" | undefined,
-): Promise<GatewayAuthenticatedSession> {
+): ValidatedMutationCredential {
   if (rawHeaderValues(request, "authorization").length === 1) {
     const sessionSecret = requireNativeSessionCredential(request);
     assertClientTransport(request, requestedClientKind === "macos" ? "macos" : "iphone", dependencies.config);
     if (requestedClientKind !== "iphone" && requestedClientKind !== "macos") {
       throw new IdentityGatewayFailure("AUTH_INVALID");
     }
-    const authority = await dependencies.operations.authenticateSession({
-      sessionSecret, requireCsrf: false,
-    });
-    if (authority.session.client_kind !== requestedClientKind) {
-      throw new IdentityGatewayFailure("AUTH_INVALID");
-    }
-    return authority;
+    return { clientKind: requestedClientKind, sessionSecret };
   }
   if (requestedClientKind !== undefined && requestedClientKind !== "web") {
     throw new IdentityGatewayFailure("AUTH_INVALID");
   }
   assertClientTransport(request, "web", dependencies.config);
-  const authority = await authenticateMutation(request, dependencies);
-  if (authority.session.client_kind !== "web") throw new IdentityGatewayFailure("AUTH_INVALID");
+  const credential = requireMutationCredentials(request);
+  return { clientKind: "web", sessionSecret: credential.sessionSecret, csrfSecret: credential.csrfSecret };
+}
+
+async function authenticateValidatedMutation(
+  credential: ValidatedMutationCredential,
+  dependencies: IdentityGatewayRouteDependencies,
+): Promise<GatewayAuthenticatedSession> {
+  const authority = credential.clientKind === "web"
+    ? await dependencies.operations.authenticateSession({
+      sessionSecret: credential.sessionSecret, csrfSecret: credential.csrfSecret, requireCsrf: true,
+    })
+    : await dependencies.operations.authenticateSession({ sessionSecret: credential.sessionSecret, requireCsrf: false });
+  if (authority.session.client_kind !== credential.clientKind) throw new IdentityGatewayFailure("AUTH_INVALID");
   return authority;
 }
 
@@ -90,13 +100,14 @@ export async function registerSessionRoutes(app: FastifyInstance, dependencies: 
       expected_resource_version: number; password: string; client_kind?: "web" | "iphone" | "macos";
     };
     assertReauthenticationPayloadHash(body);
+    const credential = validateAnyMutationTransport(request, dependencies, body.client_kind);
     const preAuthRetryAfterMs = await dependencies.operations.consumeRateLimit({
       bucketKind: "reauthenticate",
       accountIdentifier: `route:reauthenticate:${body.client_kind ?? "web"}`,
       clientIdentifier: request.identityContext.clientIdentifier,
     });
     if (preAuthRetryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", preAuthRetryAfterMs);
-    const authority = await authenticateAnyMutation(request, dependencies, body.client_kind);
+    const authority = await authenticateValidatedMutation(credential, dependencies);
     const retryAfterMs = await dependencies.operations.consumeRateLimit({ bucketKind: "reauthenticate", accountIdentifier: authority.actorId, clientIdentifier: request.identityContext.clientIdentifier });
     if (retryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", retryAfterMs);
     const email = await dependencies.operations.loadNormalizedEmail(authority);

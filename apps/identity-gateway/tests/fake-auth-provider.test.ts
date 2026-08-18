@@ -135,6 +135,34 @@ test("deterministic fake implements the closed adapter and returns only verified
   await expectFailure(() => provider.verifyCurrentSubject(providerProof), "AUTH_INVALID");
 });
 
+test("deterministic fake timestamps email verification at successful OTP consumption", async () => {
+  let now = new Date("2026-08-17T01:02:03.000Z");
+  const provider = new FakeAuthProvider({
+    now: () => new Date(now),
+    subjects: [],
+    appleSubject: {
+      provider: "supabase", providerSubject: "apple-subject", identityKind: "apple",
+      normalizedEmail: "apple@example.test", verifiedAt: "2026-08-01T00:00:00.000Z",
+    },
+  });
+  const signup = await provider.signUpEmail({
+    email: "new-user@example.test", password: "a sufficiently long password",
+  });
+  const attemptStartedAt = "2026-08-17T01:03:00.000Z";
+  now = new Date("2026-08-17T01:03:01.000Z");
+  const verified = await provider.verifyEmail({
+    verificationCode: "fake-email-verification-code",
+    expectedProviderSubject: signup.expectedProviderSubject,
+  });
+  assert.equal(verified.verifiedAt, now.toISOString());
+  assert.equal((await provider.recoverVerifiedEmailSubject({
+    expectedProviderSubject: signup.expectedProviderSubject,
+    expectedNormalizedEmail: "new-user@example.test",
+    verificationStartedAt: attemptStartedAt,
+    recoveryNotAfter: "2026-08-17T01:03:02.000Z",
+  })).verifiedAt, now.toISOString());
+});
+
 test("deterministic fake accepts inert own data properties without invoking getters or reflecting input", async () => {
   let getterCalls = 0;
   const target = Object.defineProperties({}, {

@@ -65,6 +65,11 @@ async function buildApp(
     readonly failFirstEmailCompletion?: boolean;
     readonly failAuthentication?: boolean;
     readonly rateLimitAfter?: number;
+    readonly rateLimit?: (input: {
+      readonly bucketKind?: unknown;
+      readonly accountIdentifier?: unknown;
+      readonly clientIdentifier?: unknown;
+    }) => number | null;
   } = {},
 ): Promise<FastifyInstance> {
   const path = "../src/app.ts";
@@ -112,6 +117,7 @@ async function buildApp(
     operations: {
       async consumeRateLimit(input: unknown) {
         calls.push({ name: "consumeRateLimit", input });
+        if (options.rateLimit !== undefined) return options.rateLimit(input as never);
         rateLimitCalls += 1;
         return options.rateLimitAfter !== undefined && rateLimitCalls > options.rateLimitAfter ? 60_000 : null;
       },
@@ -282,6 +288,119 @@ test("Apple sign-in start and callback consume route buckets before provider eff
   assert.equal(callback.statusCode, 200, callback.body);
   assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit", "completeApple", "issueSession"]);
   assert.equal((calls[0]?.input as { bucketKind?: unknown }).bucketKind, "apple_callback");
+  await app.close();
+});
+
+function callbackLimiter(after: number): (input: {
+  readonly bucketKind?: unknown;
+  readonly accountIdentifier?: unknown;
+  readonly clientIdentifier?: unknown;
+}) => number | null {
+  const counts = new Map<string, number>();
+  return (input) => {
+    if (input.bucketKind !== "apple_callback") return null;
+    const key = `${String(input.accountIdentifier)}\u0000${String(input.clientIdentifier)}`;
+    const count = (counts.get(key) ?? 0) + 1;
+    counts.set(key, count);
+    return count > after ? 60_000 : null;
+  };
+}
+
+test("rotating Apple Web callback transactions cannot bypass one stable client route bucket", async () => {
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const app = await buildApp(calls, { rateLimit: callbackLimiter(1) });
+  const callback = (transactionId: string, remoteAddress: string) => app.inject({
+    method: "POST" as const, url: "/auth/v1/apple/callback", remoteAddress,
+    headers: { host, origin, "content-type": "application/json" },
+    payload: {
+      ...idem, client_kind: "web", transaction_id: transactionId,
+      authorization_code: "opaque-code", state: "state-rotated",
+    },
+  });
+
+  const first = await callback("attacker-transaction-1", "203.0.113.10");
+  const limited = await callback("attacker-transaction-2", "203.0.113.10");
+  const independent = await callback("attacker-transaction-3", "203.0.113.11");
+  assert.equal(first.statusCode, 401, first.body);
+  assert.equal(limited.statusCode, 429, limited.body);
+  assert.equal(independent.statusCode, 401, independent.body);
+  assert.equal(calls.some(({ name }) => name === "completeApple"), false);
+  const rates = calls.filter(({ name }) => name === "consumeRateLimit").map(({ input }) => input as {
+    accountIdentifier: string; clientIdentifier: string;
+  });
+  assert.equal(rates.length, 3);
+  assert.equal(new Set(rates.map(({ accountIdentifier }) => accountIdentifier)).size, 1);
+  assert.notEqual(rates[0]?.clientIdentifier, rates[2]?.clientIdentifier);
+  await app.close();
+});
+
+test("native Apple sign-in and link callbacks use stable route buckets before provider or Session effects", async () => {
+  for (const route of ["/auth/v1/apple/callback", "/auth/v1/apple/link/callback"] as const) {
+    const calls: Array<{ name: string; input: unknown }> = [];
+    const app = await buildApp(calls, { rateLimit: callbackLimiter(1) });
+    const request = (transactionId: string, remoteAddress: string) => app.inject({
+      method: "POST" as const, url: route, remoteAddress,
+      headers: {
+        host, "content-type": "application/json",
+        ...(route.includes("/link/") ? { authorization: `Bearer ${secret}` } : {}),
+      },
+      payload: {
+        ...idem, client_kind: "iphone", transaction_id: transactionId,
+        authorization_code: "opaque-code", state: "state-native",
+        nonce: "native-nonce-12345678", pkce_code_verifier: "v".repeat(43),
+      },
+    });
+
+    const first = await request("attacker-native-1", "203.0.113.20");
+    const limited = await request("attacker-native-2", "203.0.113.20");
+    const independent = await request("attacker-native-3", "203.0.113.21");
+    assert.equal(first.statusCode, 200, `${route}: ${first.body}`);
+    assert.equal(limited.statusCode, 429, `${route}: ${limited.body}`);
+    assert.equal(independent.statusCode, 200, `${route}: ${independent.body}`);
+    const rates = calls.filter(({ name, input }) => name === "consumeRateLimit"
+      && (input as { bucketKind?: unknown }).bucketKind === "apple_callback")
+      .map(({ input }) => input as { accountIdentifier: string; clientIdentifier: string });
+    assert.equal(new Set(rates.map(({ accountIdentifier }) => accountIdentifier)).size, 1);
+    assert.notEqual(rates[0]?.clientIdentifier, rates[2]?.clientIdentifier);
+    const providerOrAuth = calls.filter(({ name }) => name === "completeApple" || name === "authenticateSession");
+    assert.equal(providerOrAuth.length, 2, route);
+    await app.close();
+  }
+});
+
+test("Apple invitation callback rotation hits one stable route bucket before provider", async () => {
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const app = await buildApp(calls, { rateLimit: callbackLimiter(1) });
+  const start = await app.inject({
+    method: "POST", url: "/auth/v1/apple/start",
+    headers: { host, origin, "content-type": "application/json" },
+    payload: { ...idem, client_kind: "web", redirect_uri: redirect },
+  });
+  const flowCookie = ([] as string[]).concat(start.headers["set-cookie"] ?? [])
+    .find((value) => value.startsWith("core_agent_apple_flow="))!.split(";", 1)[0]!;
+  const state = new URL(start.json().authorization_url).searchParams.get("state")!;
+  const request = (transactionId: string) => app.inject({
+    method: "POST" as const, url: "/auth/v1/invitations/accept",
+    headers: { host, origin, "content-type": "application/json", cookie: flowCookie },
+    payload: invitationAcceptancePayload({
+      schema_version: 1, idempotency_key: idem.idempotency_key,
+      expected_resource_version: 1, invitation_secret: "i".repeat(43),
+      authentication_proof: {
+        kind: "apple", client_kind: "web", transaction_id: transactionId,
+        authorization_code: "opaque-code", state,
+      },
+    }),
+  });
+
+  const first = await request("oauth_01");
+  const limited = await request("attacker-invitation-rotated");
+  assert.equal(first.statusCode, 200, first.body);
+  assert.equal(limited.statusCode, 429, limited.body);
+  assert.equal(calls.filter(({ name }) => name === "completeApple").length, 1);
+  const rates = calls.filter(({ name, input }) => name === "consumeRateLimit"
+    && (input as { bucketKind?: unknown }).bucketKind === "apple_callback")
+    .map(({ input }) => (input as { accountIdentifier: string }).accountIdentifier);
+  assert.equal(new Set(rates).size, 1);
   await app.close();
 });
 
@@ -674,7 +793,21 @@ test("reauthentication rejects changed password before authentication or provide
     payload: { ...original, payload_hash: payloadHash },
   });
   assert.equal(mixed.statusCode, 400);
-  assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit"]);
+  assert.deepEqual(calls, []);
+  const nativeWithOrigin = await app.inject({
+    method: "POST", url: "/auth/v1/reauthenticate",
+    headers: { host, origin, authorization: `Bearer ${"i".repeat(43)}`, "content-type": "application/json" },
+    payload: {
+      schema_version: 1, idempotency_key: "idem_native_origin_reauth", expected_resource_version: 1,
+      password: "correct-horse", client_kind: "iphone",
+      payload_hash: canonicalPayloadHash({
+        schema_version: 1, idempotency_key: "idem_native_origin_reauth", expected_resource_version: 1,
+        client_kind: "iphone", reauthentication_proof_digest: digest("correct-horse"),
+      }),
+    },
+  });
+  assert.equal(nativeWithOrigin.statusCode, 400);
+  assert.deepEqual(calls, []);
   await app.close();
 });
 

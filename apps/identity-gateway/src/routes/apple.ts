@@ -154,7 +154,7 @@ export async function registerAppleRoutes(app: FastifyInstance, dependencies: Id
   app.post("/auth/v1/apple/callback", { schema: { body: AppleAuthorizationCallbackRequestSchema, response: { 200: AppleAuthorizationCallbackResponseSchema } } }, async (request, reply) => {
     const body = request.body as AppleCallbackBody;
     assertClientTransport(request, body.client_kind, dependencies.config);
-    await consumePreAuthRateLimit(request, dependencies, "apple_callback", body.transaction_id);
+    await consumePreAuthRateLimit(request, dependencies, "apple_callback", "route:apple_sign_in_callback");
     const callback = body.client_kind === "web"
       ? canonicalWebAppleCallback(request, reply, dependencies, body, "sign_in")
       : body;
@@ -193,7 +193,7 @@ export async function registerAppleRoutes(app: FastifyInstance, dependencies: Id
   app.post("/auth/v1/apple/link/callback", { schema: { body: AppleIdentityLinkRequestSchema, response: { 200: AppleIdentityLinkResponseSchema } } }, async (request, reply) => {
     const body = request.body as AppleCallbackBody;
     assertClientTransport(request, body.client_kind, dependencies.config);
-    await consumePreAuthRateLimit(request, dependencies, "apple_callback", body.transaction_id);
+    await consumePreAuthRateLimit(request, dependencies, "apple_callback", "route:apple_link_callback");
     const authority = await authenticateClientMutation(request, dependencies, body.client_kind);
     await dependencies.operations.requireRecentReauthentication(authority);
     const callback = body.client_kind === "web"
