@@ -8,6 +8,85 @@
 - Original implementation commit: `2240a1bb0645e50a22204783f7cac5362924d906`
 - No merge or push was performed.
 
+## Round 11 review fixes (2026-08-18)
+
+Status: `DONE_WITH_CONCERNS`. The final Provider-started observation finding is
+fixed through the real pinned Supabase adapter and production Fastify/PostgreSQL
+composition. All Task 7 behavior gates, including the official protected database
+CI-equivalent, pass. The only concern remains the unchanged Control Plane Worker
+compile defect that also stops the separate auth-topology image build.
+
+### Delivered Round 11 correction
+
+- A loaded `provider_started` reset no longer lets the Supabase adapter classify
+  expiry, future evidence, or causality with its Node process clock. The adapter
+  validates the durable binding, performs the exact service-role inspection, and
+  returns one closed internal observation: exact evidence with only the expected
+  bound subject, or a non-sensitive typed subject/email/malformed reason. It does
+  not expose the observed mismatched Provider facts and does not checkpoint Core.
+- Every exact, old, future, malformed, subject-mismatch, and email-mismatch
+  observation reaches the production caller-owned serializable transaction. It
+  locks the exact OAuth row, reads PostgreSQL `clock_timestamp()` once, and checks
+  settlement expiry first. An expired row commits `expired` and scrubs PKCE,
+  expected/completed subject ciphertext, canonical hash, start/completion/evidence
+  timestamps, and settlement deadline before the terminal public 401.
+- Before expiry, exact causal evidence durably advances to `provider_completed`;
+  old evidence returns stable retryable 503 with the recovery Cookie retained;
+  future/malformed/subject/email mismatch remains terminal 401 with Cookie clear.
+  The later Core Session revocation/consume phase remains a separate serializable
+  transaction, so no Provider effect is placed inside an automatic DB retry.
+- The production matrix deliberately places the Gateway clock one hour behind the
+  database. It proves valid evidence still completes, and that all six expired
+  observations scrub durably even when the application clock would consider the
+  settlement live. No migration, public Contract, or formal PostgreSQL count
+  changed in this round.
+
+### Round 11 RED evidence
+
+- From `apps/identity-gateway`,
+  `node --import tsx --test --test-name-pattern='checkpoint failure restarts|bounded post-provider deadline|arbitrary adapter delay|crash before admin update|closed identity mismatch observations' tests/supabase-auth-provider.test.ts`
+  — RED 5 total / 0 pass / 5 fail. Loaded old/deadline observations still returned
+  the former checkpoint shape, while subject/email mismatch terminated inside the
+  adapter rather than entering the database-clock classification.
+- With disposable PostgreSQL on localhost, the focused production command
+  `CONTROL_PLANE_TEST_DATABASE_URL=postgresql://core_agent_ci@127.0.0.1:55447/core_agent_runtime node --import tsx --test --test-concurrency=1 --test-name-pattern='defer provider-started reset settlement' tests/postgres/production-composition.test.ts`
+  — behavioral RED 1 total / 0 pass / 1 fail: the first DB-ahead/Gateway-behind
+  valid-evidence case expected 200 but received 401 before Core. The initial
+  sandbox-only localhost `EPERM` run is not counted as behavioral evidence.
+
+### Round 11 GREEN and final verification
+
+- The exact adapter focus is GREEN 5/5; the complete Gateway check is build plus
+  98/98. Contracts are 180/180 with 86 valid and 11 invalid fixtures; Runtime Core
+  is build plus 83/83. Root `test:unit` passes Runtime 192/192, Contracts 180/180,
+  Runtime Core 83/83, Gateway 98/98, and Web 129/129 across nine files.
+- The focused real Supabase/Fastify/PostgreSQL matrix is GREEN 1/1 across its 12
+  observation branches. The full formal Gateway PostgreSQL package is GREEN 2/2
+  in 3730.291791 ms, including the existing complete Tasks 3–6 production flow.
+- `npm run test:runtime:database-ci-equivalent` is GREEN 3/3 in
+  153833.880291 ms. Its fresh protected stage accepted the manifest's Runtime Core
+  PostgreSQL 340, Gateway PostgreSQL 2, API PostgreSQL 14, and integration 93;
+  injected-failure cleanup and output-leak redaction also passed. All labeled
+  containers, volumes, and networks and the owned Round 11 database were absent
+  after cleanup.
+- Contracts history compatibility against the Task 7 base, exact package pins,
+  sentinel secret scan, forbidden Gateway log/residual scan, `git diff --check`,
+  and base diffs for Contracts 0.5 plus migrations 010/011 pass. Exact pins remain
+  Fastify 5.11.2, Cookie 11.1.2, Supabase JS 2.112.2, and Contracts 0.6.0.
+- SHA-256 remains 010
+  `eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381`;
+  011 `fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393`;
+  unmerged 012
+  `42a2120802daa43b19f842e638e310c4285d927bc292186d996ff61af3d83767`.
+- Root `npm run check` again passes Contracts, Core, Gateway, and API, then stops
+  only at the unchanged Worker `project_platform_memberships` TS2345 diagnostics
+  at `src/main.ts:60` and `src/main.ts:129`. The Worker source has no diff from the
+  Task 7 base. `database-auth-topology` is 0/1 because its image build reaches the
+  same diagnostics before topology execution; exact resource cleanup is empty.
+- Round 11 implementation commit:
+  `5984028b3` (`fix(identity): classify reset evidence with database clock`).
+- No merge or push was performed.
+
 ## Round 10 review fixes (2026-08-18)
 
 Status: `DONE_WITH_CONCERNS`. Both remaining Provider-started settlement findings
