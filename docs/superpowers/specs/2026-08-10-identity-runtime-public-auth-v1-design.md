@@ -335,6 +335,19 @@ responses preserve it so a checkpointed flow can settle. This Cookie is distinct
 from both the Core Session Cookie and the password-reset recovery Cookie and
 cannot be used in either role.
 
+Manual Apple-link start signs both the five-minute authorization expiry and the
+exact authorization-expiry-plus-thirty-minutes settlement deadline into that
+initial Cookie; its `Max-Age` covers the settlement window. Before provider
+acquisition, the authorization deadline remains authoritative. Once the durable
+transaction is `provider_started` or `provider_completed`, the same original
+Cookie may resume only the bounded Core settlement phase. The caller-owned Core
+transaction locks the OAuth row and uses PostgreSQL time: an unexpired
+`provider_started` observation is retryable and preserves the Cookie, while the
+exact settlement boundary commits `expired`, scrubs the checkpoint, and returns a
+terminal error. Supabase's subject inspection proves only present account state,
+not causality for one Apple-link attempt, so it is not used to claim recovery of
+an ambiguous link effect.
+
 ### 7.3 Apple clients
 
 Future iPhone and macOS clients use native Sign in with Apple and PKCE. The Identity
@@ -374,6 +387,11 @@ Existing invited identities authenticate invitation acceptance with their opaque
 Session (Web Cookie+CSRF or exact native bearer and stored client kind). No browser or
 native client submits a provider access token. New invited identities use the durable
 email-verification or Apple onboarding transaction before atomic invitation acceptance.
+For an existing Session, the final serializable acceptance transaction applies the Task 6
+recent-reauthentication guard and locks/revalidates the exact Session, Actor, and
+AuthSubject before creating Membership/Profile or issuing the replacement Session. The
+ten-minute database-clock boundary is exclusive; verified-provider onboarding has no old
+Session and does not apply this guard.
 
 ## 8. Trusted Context issuance and verification
 

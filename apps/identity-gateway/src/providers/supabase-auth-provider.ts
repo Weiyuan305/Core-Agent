@@ -10,6 +10,7 @@ import { types as utilTypes } from "node:util";
 import { strictUtcTimestampMilliseconds } from "@core-agent/runtime-core";
 
 import type {
+  AppleLinkProviderObservation,
   AppleAuthorizationCallback,
   AppleAuthorizationInput,
   AppleAuthorizationStart,
@@ -1257,10 +1258,14 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
 
   async completeApple(input: AppleAuthorizationCallback): Promise<VerifiedProviderSubject> {
     const parsed = this.#parseAppleCallback(input);
-    return this.#completeAppleTransaction(parsed, "apple_sign_in", null);
+    const completed = await this.#completeAppleTransaction(parsed, "apple_sign_in", null);
+    if ("kind" in completed) {
+      throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+    }
+    return completed;
   }
 
-  async linkApple(input: AppleLinkInput): Promise<VerifiedProviderSubject> {
+  async linkApple(input: AppleLinkInput): Promise<VerifiedProviderSubject | AppleLinkProviderObservation> {
     const parsed = this.#parseAppleCallback(input);
     const actorId = ownString(input, "authenticatedActorId");
     if (actorId === undefined || actorId.length === 0) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
@@ -1542,7 +1547,7 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
     callback: ParsedAppleCallback,
     expectedFlowKind: OAuthTransactionRecord["flow_kind"],
     expectedActorId: string | null,
-  ): Promise<VerifiedProviderSubject> {
+  ): Promise<VerifiedProviderSubject | AppleLinkProviderObservation> {
     let transaction: ParsedOAuthTransaction;
     if (expectedFlowKind === "apple_link") {
       const load = this.#transactionStore.loadStart;
@@ -1586,7 +1591,12 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
         if (transaction.providerCompletionPayloadHash !== callback.payloadHash) {
           throw new ProviderFailure("AUTH_CONFLICT");
         }
-        throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+        return {
+          kind: "apple_link_provider_observation",
+          outcome: "in_progress",
+          transactionId: callback.transactionId,
+          payloadHash: callback.payloadHash,
+        };
       }
       const begin = this.#transactionStore.beginAppleLinkCompletion;
       if (begin === undefined) throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");

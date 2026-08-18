@@ -58,6 +58,17 @@
 - Production composition owns managed secret resolution, PostgreSQL, the pinned
   Supabase adapter, and every Task 3-6 operation consumed by the registered route
   families. Account deletion alone remains explicitly unavailable until Task 9.
+- Apple start consumes independent stable client and server-derived account
+  limits before provider or durable start effects. Invitation Apple callback
+  consumes its callback client and transaction-account limits before provider,
+  then only the invitation-account limit after lookup.
+- The initial Web Apple-link Cookie authenticates the authorization expiry plus
+  an exact thirty-minute settlement deadline and remains usable only for durable
+  `provider_started`/`provider_completed` reconciliation after authorization
+  expiry. PostgreSQL time terminalizes and scrubs at the settlement boundary.
+- Existing-Session invitation acceptance applies the Task 6 recent-reauth guard
+  and exact Session/Actor/AuthSubject locks in the same serializable transaction;
+  provider-verified onboarding does not require an old Session.
 - Real PostgreSQL coverage proves restart/replay/conflict/concurrent consumption,
   email verification -> Task 3 registration -> Task 6 Session issuance, and a
   Task 4 protected mutation with Task 6 authority rechecked in the caller-owned

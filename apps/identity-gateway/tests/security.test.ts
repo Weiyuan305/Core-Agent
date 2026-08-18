@@ -388,15 +388,23 @@ test("Apple link cookie authenticates separate authorization and settlement dead
   const settlement = sealAppleFlowCookie(flowKey, {
     transactionId: "oauth_link_deadline", state: "state_link_deadline",
     expiresAt: "2026-08-17T00:05:00.000Z", flowKind: "link",
-    settlementNotAfter: "2026-08-17T00:34:00.000Z",
+    settlementNotAfter: "2026-08-17T00:35:00.000Z",
   });
   assert.deepEqual(readAppleFlowCookie(
-    flowKey, settlement, new Date("2026-08-17T00:34:00.000Z"),
+    flowKey, settlement, new Date("2026-08-17T00:35:00.000Z"),
   ), {
     transactionId: "oauth_link_deadline", state: "state_link_deadline",
     expiresAt: "2026-08-17T00:05:00.000Z", flowKind: "link",
-    settlementNotAfter: "2026-08-17T00:34:00.000Z",
+    settlementNotAfter: "2026-08-17T00:35:00.000Z",
   });
+  const wrongSettlement = sealAppleFlowCookie(flowKey, {
+    transactionId: "oauth_link_deadline", state: "state_link_deadline",
+    expiresAt: "2026-08-17T00:05:00.000Z", flowKind: "link",
+    settlementNotAfter: "2026-08-17T00:34:59.999Z",
+  });
+  assert.throws(() => readAppleFlowCookie(
+    flowKey, wrongSettlement, new Date("2026-08-17T00:06:00.000Z"),
+  ), /AUTH_INVALID/u);
 });
 
 test("native Apple delivery returns the opaque secret once without any cookie", async () => {

@@ -134,6 +134,14 @@ export type PasswordResetProviderObservation =
     readonly reason: "provider_subject_mismatch" | "provider_email_mismatch" | "provider_evidence_malformed";
   };
 
+/** Closed observation; the Core PostgreSQL clock decides whether settlement remains open. */
+export interface AppleLinkProviderObservation {
+  readonly kind: "apple_link_provider_observation";
+  readonly outcome: "in_progress";
+  readonly transactionId: string;
+  readonly payloadHash: string;
+}
+
 export interface AuthProviderAdapter {
   signUpEmail(input: EmailCredentialInput): Promise<{
     readonly kind: "verification_pending";
@@ -149,7 +157,7 @@ export interface AuthProviderAdapter {
   reauthenticatePassword(input: EmailCredentialInput): Promise<VerifiedProviderSubject>;
   beginPasswordReset(input: PasswordResetStartInput): Promise<PasswordResetStart>;
   completePasswordReset(input: PasswordResetCompletionInput): Promise<VerifiedProviderSubject | PasswordResetProviderObservation>;
-  linkApple(input: AppleLinkInput): Promise<VerifiedProviderSubject>;
+  linkApple(input: AppleLinkInput): Promise<VerifiedProviderSubject | AppleLinkProviderObservation>;
   revokeCurrentProviderSession(input: ProviderProof): Promise<void>;
   deleteProviderSubject(providerSubject: string): Promise<void>;
 }

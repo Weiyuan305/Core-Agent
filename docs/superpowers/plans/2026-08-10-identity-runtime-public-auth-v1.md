@@ -588,6 +588,16 @@ Create a fresh server-side Supabase client per operation with persistence, auto-
 
 Apple flow must persist a one-time OAuth transaction digest containing state, nonce, PKCE verifier digest, exact redirect URI, client kind, expiry, and optional authenticated Actor for linking. Link start accepts the current email/password only inside `reauthenticateAndBeginAppleLink`, authenticates and starts linking on the same operation-local provider client, persists only a digest of the verified provider subject inside the authenticated-encrypted transaction envelope, and terminally clears that transient provider Session. Link callback accepts no password or provider proof; after code exchange it constant-time verifies the returned provider-subject digest. Callback validates all fields before exchanging the code. A callback failure creates no Core Actor, AuthSubject, or Core Session.
 
+The initial Web Apple-link Cookie authenticates the exact authorization expiry and
+an exact settlement deadline thirty minutes later; its `Max-Age` covers both. No
+new provider effect may begin after authorization expiry. A durable
+`provider_started`/`provider_completed` transaction may reconcile Core settlement
+with the original Cookie until the database-clock settlement deadline. An
+unexpired `provider_started` row returns a retryable response and preserves the
+Cookie; at the exact deadline the caller-owned transaction commits `expired` and
+scrubs provider material. Do not infer causal completion from general Supabase
+subject inspection.
+
 Password recovery sends the configured Supabase redirect URI unchanged. Its
 one-time transaction/state/expiry binding is adapter-internal transport state,
 contains no email or provider token, and is consumed by completion together
@@ -793,6 +803,13 @@ the private identity projection, invokes
 `reauthenticateAndBeginAppleLink` once, and never receives or forwards a
 Supabase access token. The link callback accepts neither password nor provider
 proof.
+
+Existing-identity invitation acceptance additionally invokes Task 6
+`requireRecentReauthentication` in the same caller-owned serializable transaction
+that locks and revalidates the exact Core Session, Actor, and AuthSubject, accepts
+the invitation, and issues the new Session. The ten-minute boundary uses the
+transaction's database clock. Provider-verified onboarding does not have an old
+Session and therefore does not apply this guard.
 
 - [ ] **Step 5: Verify and commit**
 

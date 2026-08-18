@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { canonicalPayloadHash } from "@core-agent/runtime-core";
 import Fastify, { type FastifyInstance } from "fastify";
 
+import { canonicalProviderStartPayloadHash } from "../src/providers/auth-provider.js";
 import { ProviderFailure } from "../src/providers/provider-errors.js";
 
 const host = "identity.example.test";
@@ -526,12 +527,16 @@ test("Apple sign-in start and callback consume route buckets before provider eff
     payload: { ...idem, client_kind: "web", redirect_uri: redirect },
   });
   assert.equal(start.statusCode, 200, start.body);
-  assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit", "beginApple", "consumeRateLimit"]);
+  assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit", "consumeRateLimit", "beginApple"]);
   assert.equal((calls[0]?.input as { bucketKind?: unknown }).bucketKind, "apple_start");
+  const expectedStartHash = canonicalProviderStartPayloadHash({
+    flowKind: "apple_sign_in", idempotencyKey: idem.idempotency_key,
+    clientKind: "web", redirectUri: redirect,
+  });
   assert.deepEqual(calls.filter(({ name }) => name === "consumeRateLimit").map(({ input }) => {
     const rate = input as { dimensions?: unknown; accountIdentifier?: unknown };
     return [rate.dimensions, rate.accountIdentifier];
-  }), [["client", "route:apple_start:web"], ["account", "oauth_01"]]);
+  }), [["client", "route:apple_start:web"], ["account", `apple_start:${expectedStartHash}`]]);
   calls.length = 0;
   const flowCookie = ([] as string[]).concat(start.headers["set-cookie"] ?? [])
     .find((value) => value.startsWith("core_agent_apple_flow="));
@@ -548,6 +553,25 @@ test("Apple sign-in start and callback consume route buckets before provider eff
     const rate = input as { dimensions?: unknown; accountIdentifier?: unknown };
     return [rate.dimensions, rate.accountIdentifier];
   }), [["client", "route:apple_sign_in_callback"], ["account", "oauth_01"]]);
+  await app.close();
+});
+
+test("Apple sign-in start account limiting precedes every provider and durable start effect", async () => {
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const app = await buildApp(calls, {
+    rateLimit(input) {
+      return input.bucketKind === "apple_start" && input.accountIdentifier !== "route:apple_start:web"
+        ? 60_000 : null;
+    },
+  });
+  const response = await app.inject({
+    method: "POST", url: "/auth/v1/apple/start",
+    headers: { host, origin, "content-type": "application/json" },
+    payload: { ...idem, client_kind: "web", redirect_uri: redirect },
+  });
+  assert.equal(response.statusCode, 429, response.body);
+  assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit", "consumeRateLimit"]);
+  assert.equal(calls.some(({ name }) => name === "beginApple"), false);
   await app.close();
 });
 
@@ -683,6 +707,7 @@ test("Apple invitation callback rotation hits one stable route bucket before pro
   const flowCookie = ([] as string[]).concat(start.headers["set-cookie"] ?? [])
     .find((value) => value.startsWith("core_agent_apple_flow="))!.split(";", 1)[0]!;
   const state = new URL(start.json().authorization_url).searchParams.get("state")!;
+  calls.length = 0;
   const request = (transactionId: string) => app.inject({
     method: "POST" as const, url: "/auth/v1/invitations/accept",
     headers: { host, origin, "content-type": "application/json", cookie: flowCookie },
@@ -701,10 +726,22 @@ test("Apple invitation callback rotation hits one stable route bucket before pro
   assert.equal(first.statusCode, 200, first.body);
   assert.equal(limited.statusCode, 429, limited.body);
   assert.equal(calls.filter(({ name }) => name === "completeApple").length, 1);
-  const rates = calls.filter(({ name, input }) => name === "consumeRateLimit"
-    && (input as { bucketKind?: unknown }).bucketKind === "apple_callback")
-    .map(({ input }) => (input as { accountIdentifier: string }).accountIdentifier);
-  assert.equal(new Set(rates).size, 1);
+  assert.deepEqual(calls.slice(0, 5).map(({ name }) => name), [
+    "consumeRateLimit", "consumeRateLimit", "executeAuthorityCommand", "consumeRateLimit", "completeApple",
+  ]);
+  const firstRates = calls.slice(0, 5).filter(({ name }) => name === "consumeRateLimit")
+    .map(({ input }) => {
+      const rate = input as { bucketKind: string; dimensions: string; accountIdentifier: string };
+      return [rate.bucketKind, rate.dimensions, rate.accountIdentifier];
+    });
+  assert.deepEqual(firstRates, [
+    ["apple_callback", "client", "route:apple_invitation_callback"],
+    ["apple_callback", "account", "oauth_01"],
+    ["invitation_accept", "account", "invitation_01"],
+  ]);
+  assert.equal(calls.filter(({ name, input }) => name === "consumeRateLimit"
+    && (input as { dimensions?: unknown }).dimensions === "client").length, 2,
+  "each request consumes exactly one stable client bucket");
   await app.close();
 });
 
@@ -1297,6 +1334,14 @@ test("Apple link start derives actor/email server-side after Session and recent 
   }), [["client", "route:apple_link:web"], ["account", "actor_server"]]);
   assert.equal("accessToken" in providerInput, false);
   assert.equal("provider_proof" in providerInput, false);
+  const flowCookie = ([] as string[]).concat(response.headers["set-cookie"] ?? [])
+    .find((value) => value.startsWith("core_agent_apple_flow="));
+  assert.match(flowCookie ?? "", /Max-Age=2100/u);
+  const { readAppleFlowCookie } = await import("../src/security.js");
+  assert.equal(readAppleFlowCookie(
+    Buffer.alloc(32, 0x34), flowCookie!.split(";", 1)[0]!.split("=", 2)[1]!,
+    new Date("2026-08-17T00:06:00.000Z"),
+  ).settlementNotAfter, "2026-08-17T00:35:00.000Z");
   await app.close();
 });
 

@@ -6,7 +6,7 @@ import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 
 import type { IdentityGatewayConfig } from "./config.js";
 import { mapIdentityGatewayError } from "./errors.js";
-import type { AuthProviderAdapter, PasswordResetProviderObservation, ProviderClientKind, VerifiedProviderSubject } from "./providers/auth-provider.js";
+import type { AppleLinkProviderObservation, AuthProviderAdapter, PasswordResetProviderObservation, ProviderClientKind, VerifiedProviderSubject } from "./providers/auth-provider.js";
 import { registerAccountRoutes } from "./routes/account.js";
 import { registerAppleRoutes } from "./routes/apple.js";
 import { registerCompanyRoutes } from "./routes/companies.js";
@@ -161,6 +161,7 @@ export interface IdentityGatewayOperations {
     readonly payload: unknown;
     readonly authority: GatewayAuthenticatedSession;
     readonly verifiedSubject?: VerifiedProviderSubject;
+    readonly appleLinkObservation?: AppleLinkProviderObservation;
   }) => Promise<unknown>;
 }
 

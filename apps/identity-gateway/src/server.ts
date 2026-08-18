@@ -278,7 +278,7 @@ function oauthStore(db: Kysely<RuntimeDatabase>): OAuthTransactionStore {
         if (row.expires_at.getTime() <= now.getTime()) {
           throw new DomainError("UNAUTHENTICATED", "Apple link authorization expired");
         }
-        const settlementExpiresAt = new Date(now.getTime() + APPLE_LINK_SETTLEMENT_SECONDS * 1_000);
+        const settlementExpiresAt = new Date(row.expires_at.getTime() + APPLE_LINK_SETTLEMENT_SECONDS * 1_000);
         await trx.updateTable("oauth_transactions").set({
           provider_completion_status: "provider_started",
           provider_completion_started_at: now,
@@ -872,6 +872,7 @@ function productionOperations(
         const inspected = await db.transaction().execute((trx) => readInvitationBySecret(trx, payload.invitation_secret));
         return withDatabaseTransactionRetry(db, async (trx) => {
           if (input.authority !== undefined) {
+            await requireRecentReauthentication({ trx }, authorityInput(input.authority));
             const sessionId = String(input.authority.session.session_id ?? "");
             const expectedSessionVersion = Number(input.authority.session.session_resource_version);
             const actor = await trx.selectFrom("actors").select("status")
@@ -1050,21 +1051,28 @@ function productionOperations(
             return { kind: "terminal" as const };
           }
           if (observation.outcome === "ambiguous") {
-            let actorId: string | undefined;
-            try {
-              const durableSubject = await readProtectedPasswordResetSubject(
-                oauthProtector,
-                transaction.provider_subject_ciphertext,
-              );
+            const durableSubjects: VerifiedProviderSubject[] = [];
+            for (const ciphertext of [
+              transaction.provider_subject_ciphertext,
+              transaction.expected_provider_subject_ciphertext,
+            ]) {
+              if (ciphertext === null) continue;
+              try {
+                durableSubjects.push(await readProtectedPasswordResetSubject(oauthProtector, ciphertext));
+              } catch {
+                // Each bounded binding is independent; one corrupt copy must not block the other.
+              }
+            }
+            durableSubjects.sort((left, right) => left.providerSubject.localeCompare(right.providerSubject));
+            const actorIds = new Set<string>();
+            for (const durableSubject of durableSubjects) {
               const subject = await trx.selectFrom("auth_subjects").select("actor_id")
                 .where("provider", "=", durableSubject.provider)
                 .where("provider_subject", "=", durableSubject.providerSubject)
-                .forUpdate().executeTakeFirst();
-              actorId = subject?.actor_id;
-            } catch {
-              actorId = undefined;
+                .executeTakeFirst();
+              if (subject !== undefined) actorIds.add(subject.actor_id);
             }
-            if (actorId !== undefined) {
+            for (const actorId of [...actorIds].sort()) {
               await revokeCoreSessionsInTransaction({ db }, trx, {
                 actorId,
                 reason: "password_reset",
@@ -1180,6 +1188,59 @@ function productionOperations(
     async executeProtectedAuthorityCommand(input) {
       const result = await withDatabaseTransactionRetry(db, async (trx) => {
         await requireRecentReauthentication({ trx }, authorityInput(input.authority));
+        if (input.kind === "apple_link_provider_observation") {
+          const payload = input.payload as {
+            schema_version: 1; payload_hash: string; transaction_id: string;
+          };
+          const observation = input.appleLinkObservation;
+          if (observation?.kind !== "apple_link_provider_observation"
+            || observation.outcome !== "in_progress"
+            || observation.transactionId !== payload.transaction_id
+            || observation.payloadHash !== payload.payload_hash) {
+            throw new DomainError("UNAUTHENTICATED", "Apple link provider observation is invalid");
+          }
+          const transaction = await trx.selectFrom("oauth_transactions").selectAll()
+            .where("oauth_transaction_id", "=", payload.transaction_id).forUpdate().executeTakeFirst();
+          const now = (await sql<{ now: Date }>`select clock_timestamp() as now`.execute(trx)).rows[0]?.now;
+          if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
+            throw new DomainError("INTERNAL_ERROR", "Apple link database clock is unavailable");
+          }
+          if (transaction === undefined || transaction.flow_kind !== "apple_link"
+            || transaction.actor_id !== input.authority.actorId || transaction.status !== "pending"
+            || transaction.provider_completion_payload_hash !== payload.payload_hash
+            || transaction.provider_completion_started_at === null
+            || transaction.provider_settlement_expires_at === null
+            || (transaction.provider_completion_status !== "provider_started"
+              && transaction.provider_completion_status !== "provider_completed")) {
+            throw new DomainError("UNAUTHENTICATED", "Apple link provider observation is invalid");
+          }
+          if (transaction.provider_settlement_expires_at.getTime() <= now.getTime()) {
+            await trx.updateTable("oauth_transactions").set({
+              status: "expired", pkce_verifier_ciphertext: Buffer.from([0]),
+              provider_completion_status: "pending", provider_completion_started_at: null,
+              expected_provider_subject_ciphertext: null, provider_subject_ciphertext: null,
+              provider_completion_payload_hash: null, provider_settlement_expires_at: null,
+              provider_completed_at: null, provider_evidence_at: null, updated_at: now,
+            }).where("oauth_transaction_id", "=", payload.transaction_id).executeTakeFirstOrThrow();
+            return expiredAppleLinkSettlement;
+          }
+          if (transaction.provider_completion_status === "provider_started") {
+            return { kind: "in_progress" as const };
+          }
+          if (transaction.provider_subject_ciphertext === null) {
+            throw new DomainError("UNAUTHENTICATED", "Apple link provider checkpoint is invalid");
+          }
+          let verifiedSubject: VerifiedProviderSubject;
+          try {
+            verifiedSubject = await readProtectedAppleLinkSubject(
+              oauthProtector,
+              transaction.provider_subject_ciphertext,
+            );
+          } catch {
+            throw new DomainError("UNAUTHENTICATED", "Apple link provider checkpoint is invalid");
+          }
+          return { kind: "completed" as const, verifiedSubject };
+        }
         if (input.kind === "session_revoke") {
           const payload = input.payload as {
             schema_version: 1;

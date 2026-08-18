@@ -10,8 +10,15 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
 import type { GatewayAuthenticatedSession, IdentityGatewayRouteDependencies } from "../app.js";
 import { IdentityGatewayFailure } from "../errors.js";
-import type { AppleAuthorizationCallback, AppleAuthorizationStart } from "../providers/auth-provider.js";
 import {
+  canonicalProviderStartPayloadHash,
+  type AppleAuthorizationCallback,
+  type AppleAuthorizationStart,
+  type AppleLinkProviderObservation,
+} from "../providers/auth-provider.js";
+import { ProviderFailure } from "../providers/provider-errors.js";
+import {
+  APPLE_LINK_SETTLEMENT_SECONDS,
   APPLE_FLOW_COOKIE_NAME,
   assertAppleCallbackPayloadHash,
   assertClientTransport,
@@ -28,9 +35,12 @@ import {
 import { deliverSession } from "./email.js";
 
 type AppleStartBody = {
+  readonly idempotency_key: string;
   readonly client_kind: "web" | "iphone" | "macos";
   readonly redirect_uri: string;
   readonly device_label?: string;
+  readonly nonce?: string;
+  readonly pkce_code_challenge?: string;
   readonly password?: string;
 };
 
@@ -62,12 +72,28 @@ function authorizationState(start: AppleAuthorizationStart, providerUrl: string,
 }
 
 function issueFlowCookie(reply: FastifyReply, dependencies: IdentityGatewayRouteDependencies, start: AppleAuthorizationStart, redirectUri: string, flowKind: "sign_in" | "link"): void {
-  issueAppleFlowCookie(reply, sealAppleFlowCookie(dependencies.flowCookieKey, {
+  const binding = {
     transactionId: start.transaction_id,
     state: authorizationState(start, dependencies.config.providerUrl, redirectUri),
     expiresAt: start.expires_at,
     flowKind,
-  }));
+    ...(flowKind === "link" ? {
+      settlementNotAfter: new Date(Date.parse(start.expires_at) + APPLE_LINK_SETTLEMENT_SECONDS * 1_000).toISOString(),
+    } : {}),
+  } as const;
+  const sealed = sealAppleFlowCookie(dependencies.flowCookieKey, binding);
+  if (flowKind === "link") issueAppleLinkSettlementCookie(reply, sealed);
+  else issueAppleFlowCookie(reply, sealed);
+}
+
+function isAppleLinkObservation(value: unknown): value is AppleLinkProviderObservation {
+  return typeof value === "object" && value !== null
+    && Object.getPrototypeOf(value) === Object.prototype
+    && Reflect.ownKeys(value).length === 4
+    && (value as { kind?: unknown }).kind === "apple_link_provider_observation"
+    && (value as { outcome?: unknown }).outcome === "in_progress"
+    && typeof (value as { transactionId?: unknown }).transactionId === "string"
+    && typeof (value as { payloadHash?: unknown }).payloadHash === "string";
 }
 
 function nativeStartResponse(start: AppleAuthorizationStart): Record<string, unknown> {
@@ -144,12 +170,18 @@ export async function registerAppleRoutes(app: FastifyInstance, dependencies: Id
     assertClientTransport(request, body.client_kind, dependencies.config);
     assertExactRedirect(body.client_kind, body.redirect_uri, dependencies.config);
     await consumePreAuthRateLimit(request, dependencies, "apple_start", `route:apple_start:${body.client_kind}`);
-    const start = await dependencies.provider.beginApple(request.body as never);
     const accountRetryAfterMs = await dependencies.operations.consumeRateLimit({
-      bucketKind: "apple_start", accountIdentifier: start.transaction_id,
+      bucketKind: "apple_start", accountIdentifier: `apple_start:${canonicalProviderStartPayloadHash({
+        flowKind: "apple_sign_in", idempotencyKey: body.idempotency_key,
+        clientKind: body.client_kind, redirectUri: body.redirect_uri,
+        ...(body.device_label === undefined ? {} : { deviceLabel: body.device_label }),
+        ...(body.nonce === undefined ? {} : { nonce: body.nonce }),
+        ...(body.pkce_code_challenge === undefined ? {} : { pkceChallenge: body.pkce_code_challenge }),
+      })}`,
       clientIdentifier: request.identityContext.clientIdentifier, dimensions: "account",
     });
     if (accountRetryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", accountRetryAfterMs);
+    const start = await dependencies.provider.beginApple(request.body as never);
     authorizationState(start, dependencies.config.providerUrl, body.redirect_uri);
     if (body.client_kind === "web") {
       issueFlowCookie(reply, dependencies, start, body.redirect_uri, "sign_in");
@@ -222,7 +254,24 @@ export async function registerAppleRoutes(app: FastifyInstance, dependencies: Id
     const callback = body.client_kind === "web"
       ? canonicalWebAppleCallback(request, reply, dependencies, body, "link")
       : body;
-    const subject = await dependencies.provider.linkApple({ ...callback, authenticatedActorId: authority.actorId });
+    let subject = await dependencies.provider.linkApple({ ...callback, authenticatedActorId: authority.actorId });
+    if (isAppleLinkObservation(subject)) {
+      const observation = subject;
+      const observed = await dependencies.operations.executeProtectedAuthorityCommand({
+        kind: "apple_link_provider_observation",
+        payload: {
+          schema_version: body.schema_version, payload_hash: body.payload_hash,
+          transaction_id: callback.transaction_id,
+        },
+        authority,
+        appleLinkObservation: observation,
+      }) as { readonly kind?: unknown; readonly verifiedSubject?: unknown };
+      if (observed.kind === "in_progress") throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+      if (observed.kind !== "completed" || observed.verifiedSubject === undefined) {
+        throw new IdentityGatewayFailure("AUTH_INVALID");
+      }
+      subject = observed.verifiedSubject as never;
+    }
     const settlementNotAfter = await dependencies.operations.readAppleLinkSettlement({
       transactionId: callback.transaction_id,
       actorId: authority.actorId,

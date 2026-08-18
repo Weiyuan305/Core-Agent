@@ -23,7 +23,7 @@ import {
 } from "../../src/providers/auth-provider.js";
 import { ProviderFailure } from "../../src/providers/provider-errors.js";
 import { SupabaseAuthProvider, type SupabaseClientFactory } from "../../src/providers/supabase-auth-provider.js";
-import { sealRecoveryCookie } from "../../src/security.js";
+import { sealAppleFlowCookie, sealRecoveryCookie } from "../../src/security.js";
 import { buildProductionIdentityGateway, identityGatewayServerTestInternals } from "../../src/server.js";
 
 const databaseUrl = process.env.CONTROL_PLANE_TEST_DATABASE_URL;
@@ -477,8 +477,10 @@ test("production composition atomically verifies email, registers Task 3, issues
       },
     });
     assert.equal(crashStart.statusCode, 200, crashStart.body);
-    const crashFlowCookie = ([] as string[]).concat(crashStart.headers["set-cookie"] ?? [])
-      .find((value) => value.startsWith("core_agent_apple_flow="))!.split(";", 1)[0]!;
+    const crashStartCookieHeader = ([] as string[]).concat(crashStart.headers["set-cookie"] ?? [])
+      .find((value) => value.startsWith("core_agent_apple_flow="))!;
+    assert.match(crashStartCookieHeader, /Max-Age=2100/u);
+    const crashFlowCookie = crashStartCookieHeader.split(";", 1)[0]!;
     const crashCallback = appleCallbackPayload("apple_link", {
       schema_version: 1, idempotency_key: "composition-web-link-crash-callback", client_kind: "web",
       transaction_id: "native-link-web", authorization_code: "composition-web-link-code",
@@ -500,20 +502,105 @@ test("production composition atomically verifies email, registers Task 3, issues
       "select expires_at from oauth_transactions where oauth_transaction_id = 'native-link-web'",
     )).rows[0]!.expires_at;
     crashLinkClock = new Date(linkAuthorizationExpiry.getTime() + 1_000);
-    const expiredAuthorizationCookie = await crashLinkApp.inject({
+    const originalCookieSettlement = await crashLinkApp.inject({
       method: "POST", url: "/auth/v1/apple/link/callback",
       headers: { ...crashHeaders, cookie: `${crashHeaders.cookie}; ${crashFlowCookie}` }, payload: crashCallback,
     });
-    assert.equal(expiredAuthorizationCookie.statusCode, 401, expiredAuthorizationCookie.body);
-    const retriedLink = await crashLinkApp.inject({
-      method: "POST", url: "/auth/v1/apple/link/callback",
-      headers: { ...crashHeaders, cookie: `${crashHeaders.cookie}; ${settlementFlowCookie}` }, payload: crashCallback,
-    });
-    assert.equal(retriedLink.statusCode, 200, retriedLink.body);
-    assert.match(String(retriedLink.headers["set-cookie"] ?? ""), /core_agent_apple_flow=;[^\n]*Max-Age=0/u);
+    assert.equal(originalCookieSettlement.statusCode, 200, originalCookieSettlement.body);
+    assert.match(String(originalCookieSettlement.headers["set-cookie"] ?? ""), /core_agent_apple_flow=;[^\n]*Max-Age=0/u);
+    assert.notEqual(settlementFlowCookie, undefined, "the response refresh remains additive but is not required for recovery");
     assert.equal((await pool.query("select status from oauth_transactions where oauth_transaction_id = 'native-link-web'")).rows[0]?.status, "consumed");
     assert.equal(nativeLinkProviderEffects, 2, "one native and one Web provider link effect; Web retry must not repeat it");
     await crashLinkApp.close();
+
+    const observationSession = await issueCoreSession({ db }, {
+      sessionId: "session_composition_apple_link_observation", actorId: registered.actorId,
+      authSubjectId: registered.authSubjectId, clientKind: "web",
+    });
+    await pool.query("update core_sessions set reauthenticated_at = clock_timestamp(), updated_at = clock_timestamp() where session_id = $1", [
+      observationSession.session.session_id,
+    ]);
+    const observationHeaders = {
+      host: "identity.example.test", origin: "https://app.example.test", "content-type": "application/json",
+      cookie: `core_agent_session=${observationSession.sessionSecret}; core_agent_csrf=${observationSession.csrfSecret!}`,
+      "x-core-agent-csrf": observationSession.csrfSecret!,
+    };
+    const observationProvider: AuthProviderAdapter = {
+      ...nativeProvider,
+      async linkApple(input) {
+        return {
+          kind: "apple_link_provider_observation", outcome: "in_progress",
+          transactionId: input.transaction_id, payloadHash: input.payload_hash,
+        } as never;
+      },
+    };
+    const observationApp = await buildIdentityGatewayApp({
+      config: {
+        publicOrigins: new Set(["https://app.example.test"]), cookieHost: "identity.example.test",
+        publicBaseUrl: "https://identity.example.test", providerUrl: "https://provider.example.test",
+        appleWebRedirectUris: new Set(["https://app.example.test/auth/apple/callback"]),
+        appleNativeRedirectUris: new Set(["coreagent://auth/apple/callback"]),
+        passwordResetRedirectUri: "https://app.example.test/auth/password/reset/callback", publicAuthEnabled: true,
+      },
+      flowCookieKey: key, provider: observationProvider, operations,
+      now: () => new Date("2099-01-01T00:00:00.000Z"),
+    });
+    try {
+      for (const boundary of ["unexpired", "expired"] as const) {
+        const transactionId = `oauth_composition_apple_link_${boundary}_observation`;
+        const state = `composition-apple-link-${boundary}-state`;
+        const payload = appleCallbackPayload("apple_link", {
+          schema_version: 1, idempotency_key: `composition-apple-link-${boundary}-callback`, client_kind: "web",
+          transaction_id: transactionId, authorization_code: "one-use-link-code", state,
+        });
+        const rowClock = (await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now;
+        const authExpiry = new Date(rowClock.getTime() + 5 * 60_000);
+        await providerStarts.save({
+          oauth_transaction_id: transactionId, provider: "supabase", flow_kind: "apple_link",
+          actor_id: registered.actorId, client_kind: "web",
+          state_digest: createHash("sha256").update(state).digest(), nonce_digest: Buffer.alloc(32, 0x75),
+          pkce_verifier_ciphertext: Buffer.alloc(33, 0x76),
+          redirect_uri: "https://app.example.test/auth/apple/callback", status: "pending",
+          expires_at: authExpiry.toISOString(),
+        });
+        await providerStarts.beginAppleLinkCompletion!({ transactionId, payloadHash: payload.payload_hash });
+        if (boundary === "expired") {
+          await pool.query(`with boundary as (select clock_timestamp() as now)
+            update oauth_transactions set expires_at = boundary.now - interval '30 minutes',
+              provider_completion_started_at = boundary.now - interval '30 minutes',
+              provider_settlement_expires_at = boundary.now, updated_at = boundary.now
+            from boundary where oauth_transaction_id = $1`, [transactionId]);
+        }
+        const stored = (await pool.query<{ expires_at: Date; provider_settlement_expires_at: Date }>(
+          "select expires_at, provider_settlement_expires_at from oauth_transactions where oauth_transaction_id = $1",
+          [transactionId],
+        )).rows[0]!;
+        const flowCookie = sealAppleFlowCookie(key, {
+          transactionId, state, expiresAt: stored.expires_at.toISOString(), flowKind: "link",
+          settlementNotAfter: new Date(stored.expires_at.getTime() + 30 * 60_000).toISOString(),
+        });
+        const response = await observationApp.inject({
+          method: "POST", url: "/auth/v1/apple/link/callback",
+          headers: { ...observationHeaders, cookie: `${observationHeaders.cookie}; core_agent_apple_flow=${flowCookie}` },
+          payload,
+        });
+        assert.equal(response.statusCode, boundary === "unexpired" ? 503 : 401, `${boundary}: ${response.body}`);
+        if (boundary === "unexpired") {
+          assert.doesNotMatch(String(response.headers["set-cookie"] ?? ""), /core_agent_apple_flow=;[^\n]*Max-Age=0/u);
+          assert.equal((await pool.query("select provider_completion_status from oauth_transactions where oauth_transaction_id = $1", [transactionId])).rows[0]?.provider_completion_status, "provider_started");
+        } else {
+          assert.match(String(response.headers["set-cookie"] ?? ""), /core_agent_apple_flow=;[^\n]*Max-Age=0/u);
+          assert.deepEqual((await pool.query(`select status, provider_completion_status, provider_completion_started_at,
+            provider_completion_payload_hash, provider_settlement_expires_at from oauth_transactions
+            where oauth_transaction_id = $1`, [transactionId])).rows[0], {
+            status: "expired", provider_completion_status: "pending", provider_completion_started_at: null,
+            provider_completion_payload_hash: null, provider_settlement_expires_at: null,
+          });
+        }
+      }
+    } finally {
+      await observationApp.close();
+    }
     const passwordAfterLink = await nativeApp.inject({
       method: "POST", url: "/auth/v1/email/sign-in",
       headers: { host: "identity.example.test", origin: "https://app.example.test", "content-type": "application/json" },
@@ -683,6 +770,7 @@ test("production composition atomically verifies email, registers Task 3, issues
     expiredLinkCiphertext.fill(0);
     await pool.query(`with boundary as (select clock_timestamp() as now)
       update oauth_transactions set
+        expires_at = boundary.now - interval '30 minutes',
         provider_completion_started_at = boundary.now - interval '30 minutes',
         provider_settlement_expires_at = boundary.now,
         provider_completed_at = boundary.now - interval '1 second',
@@ -768,7 +856,9 @@ test("production composition atomically verifies email, registers Task 3, issues
       cookie: `core_agent_session=${lockInviteeIssued.sessionSecret}; core_agent_csrf=${lockInviteeIssued.csrfSecret!}`,
       "x-core-agent-csrf": lockInviteeIssued.csrfSecret!,
     };
-    await pool.query("update core_sessions set reauthenticated_at = now(), updated_at = now() where session_id = $1", [adminIssued.session.session_id]);
+    await pool.query("update core_sessions set reauthenticated_at = now(), updated_at = now() where session_id = any($1::text[])", [[
+      adminIssued.session.session_id, inviteeIssued.session.session_id, lockInviteeIssued.session.session_id,
+    ]]);
     const adminAuthority = await operations.authenticateSession({ sessionSecret: adminIssued.sessionSecret, csrfSecret: adminIssued.csrfSecret!, requireCsrf: true });
     const invitation = await operations.executeProtectedAuthorityCommand({
       kind: "company_member_invite", authority: adminAuthority,
@@ -1788,12 +1878,13 @@ test("production composition atomically verifies email, registers Task 3, issues
     }
     const lockOrderAcceptanceResult = await lockOrderAcceptance!;
     assert.equal(lockOrderAcceptanceResult.statusCode >= 400, true, lockOrderAcceptanceResult.body);
-    for (const sessionChange of ["revoked", "idle-expired"] as const) {
+    for (const sessionChange of ["revoked", "idle-expired", "reauth-expired"] as const) {
       const barrierInvitation = await operations.executeProtectedAuthorityCommand({
         kind: "company_member_invite", authority: adminAuthority,
         payload: {
           schema_version: 1, idempotency_key: `composition-session-barrier-${sessionChange}-invite`,
-          payload_hash: `sha256:${sessionChange === "revoked" ? "4" : "5"}`.padEnd(71, sessionChange === "revoked" ? "4" : "5"),
+          payload_hash: `sha256:${sessionChange === "revoked" ? "4" : sessionChange === "idle-expired" ? "5" : "6"}`
+            .padEnd(71, sessionChange === "revoked" ? "4" : sessionChange === "idle-expired" ? "5" : "6"),
           tenant_id: company.tenant_id, email: lockInviteeEmail, role: "consultant",
         },
       }) as { invitation_id: string; invitation_secret: string; membership_id: string };
@@ -1801,6 +1892,10 @@ test("production composition atomically verifies email, registers Task 3, issues
         sessionId: `session_composition_accept_barrier_${sessionChange}`, actorId: "actor_composition_lock_invitee",
         authSubjectId: "auth_composition_lock_invitee", clientKind: "web",
       });
+      await pool.query(`update core_sessions set reauthenticated_at = case when $2 = 'reauth-expired'
+          then clock_timestamp() - interval '10 minutes' else clock_timestamp() end,
+          updated_at = clock_timestamp() where session_id = $1`,
+      [barrierSession.session.session_id, sessionChange]);
       const barrierHeaders = {
         host: "identity.example.test", origin: "https://app.example.test", "content-type": "application/json",
         cookie: `core_agent_session=${barrierSession.sessionSecret}; core_agent_csrf=${barrierSession.csrfSecret!}`,
@@ -1811,7 +1906,8 @@ test("production composition atomically verifies email, registers Task 3, issues
       let releaseFinalCommand!: () => void;
       const finalCommandRelease = new Promise<void>((resolve) => { releaseFinalCommand = resolve; });
       const barrierApp = await buildIdentityGatewayApp({
-        config: onboardingConfig, provider, flowCookieKey: Buffer.alloc(32, sessionChange === "revoked" ? 0x68 : 0x69),
+        config: onboardingConfig, provider,
+        flowCookieKey: Buffer.alloc(32, sessionChange === "revoked" ? 0x68 : sessionChange === "idle-expired" ? 0x69 : 0x6a),
         operations: {
           ...operations,
           async executeAuthorityCommand(input) {
@@ -1837,7 +1933,7 @@ test("production composition atomically verifies email, registers Task 3, issues
         await pool.query(`update core_sessions set status = 'revoked', revocation_reason = 'administrator_revoked',
           resource_version = resource_version + 1, updated_at = clock_timestamp() where session_id = $1`,
         [barrierSession.session.session_id]);
-      } else {
+      } else if (sessionChange === "idle-expired") {
         await pool.query(`update core_sessions set idle_expires_at = clock_timestamp() - interval '1 millisecond',
           updated_at = clock_timestamp() where session_id = $1`, [barrierSession.session.session_id]);
       }
@@ -2549,7 +2645,7 @@ test("production Fastify and Supabase adapter fail closed on ambiguous reset rec
     assert.notEqual(String(replacement.json().transaction_id), concurrentStart.binding.transaction_id);
     assert.equal(providerInspections, 0, "generic provider updated_at must never be used for reset recovery");
     await concurrentApp.close();
-    const ambiguousCases = ["corrupt", "missing", "inactive"] as const;
+    const ambiguousCases = ["corrupt", "missing", "corrupt-expected", "inactive"] as const;
     for (const [index, testCase] of ambiguousCases.entries()) {
       gatewayNow = (await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now;
       const payload = completionPayload(`round-fourteen-${testCase}-completion`);
@@ -2559,7 +2655,11 @@ test("production Fastify and Supabase adapter fail closed on ambiguous reset rec
         payloadHash: payload.payload_hash,
         settlementNotAfter: new Date(Date.parse(start.binding.expires_at) + 30 * 60_000).toISOString(),
       });
-      let sessionId: string | undefined;
+      const issued = await issueCoreSession({ db }, {
+        sessionId: `session_round_fifteen_${testCase.replace("-", "_")}`,
+        actorId: registered.actorId, authSubjectId: registered.authSubjectId, clientKind: "iphone",
+      });
+      const sessionId = issued.session.session_id;
       if (testCase === "corrupt") {
         await pool.query("update oauth_transactions set provider_subject_ciphertext = $2 where oauth_transaction_id = $1", [
           start.binding.transaction_id, Buffer.alloc(33, 0x7f),
@@ -2582,12 +2682,11 @@ test("production Fastify and Supabase adapter fail closed on ambiguous reset rec
         } finally {
           plaintext.fill(0);
         }
+      } else if (testCase === "corrupt-expected") {
+        await pool.query("update oauth_transactions set expected_provider_subject_ciphertext = $2 where oauth_transaction_id = $1", [
+          start.binding.transaction_id, Buffer.alloc(33, 0x6f),
+        ]);
       } else {
-        const issued = await issueCoreSession({ db }, {
-          sessionId: "session_round_fourteen_inactive", actorId: registered.actorId,
-          authSubjectId: registered.authSubjectId, clientKind: "iphone",
-        });
-        sessionId = issued.session.session_id;
         await pool.query("update auth_subjects set status = 'unlinked' where auth_subject_id = $1", [registered.authSubjectId]);
       }
       const app = await buildIdentityGatewayApp({ config, provider, operations, flowCookieKey, now: () => new Date(gatewayNow) });
@@ -2611,9 +2710,7 @@ test("production Fastify and Supabase adapter fail closed on ambiguous reset rec
           provider_completion_payload_hash: null, provider_settlement_expires_at: null,
           provider_completed_at: null, provider_evidence_at: null,
         }, testCase);
-        if (sessionId !== undefined) {
-          assert.equal((await pool.query("select status from core_sessions where session_id = $1", [sessionId])).rows[0]?.status, "revoked");
-        }
+        assert.equal((await pool.query("select status from core_sessions where session_id = $1", [sessionId])).rows[0]?.status, "revoked");
       } finally {
         await app.close();
       }

@@ -1322,6 +1322,8 @@ test("Supabase Apple link reauthenticates and starts on one transient client wit
   const result = await harness.provider.linkApple({
     ...callbackFromStart(start), authenticatedActorId: "actor-1",
   });
+  assert.equal("kind" in result, false);
+  if ("kind" in result) throw new Error("unexpected Apple link observation");
   assert.equal(result.identityKind, "apple");
   assert.equal(JSON.stringify(result).includes(currentJwt), false);
   assert.equal(JSON.stringify(result).includes(credential.password), false);
@@ -1348,9 +1350,12 @@ test("Supabase Apple link reauthenticates and starts on one transient client wit
   assert.equal(nativeAuthorizationUrl.searchParams.has("code_challenge"), false);
   const nativeRequest = native.methodCalls.find((call) => call.name === "nativeAuthorize")?.arguments[0] as object;
   assert.equal(Object.hasOwn(nativeRequest, "state"), false);
-  assert.equal((await native.provider.linkApple({
+  const nativeResult = await native.provider.linkApple({
     ...callbackFromStart(nativeStart, "iphone"), authenticatedActorId: "actor-1",
-  })).identityKind, "apple");
+  });
+  assert.equal("kind" in nativeResult, false);
+  if ("kind" in nativeResult) throw new Error("unexpected native Apple link observation");
+  assert.equal(nativeResult.identityKind, "apple");
 
   const changed = createHarness();
   const changedStart = await changed.provider.reauthenticateAndBeginAppleLink({
@@ -1386,6 +1391,26 @@ test("Supabase Apple link checkpoints provider success and replay skips the one-
   const replay = await harness.provider.linkApple({ ...callback, authenticatedActorId: "actor-1" });
   assert.deepEqual(replay, first);
   assert.equal(harness.methodCalls.filter((call) => call.name === "exchangeCodeForSession").length, 1);
+});
+
+test("Supabase Apple link returns a closed durable observation for an admitted in-flight callback", async () => {
+  const harness = createHarness();
+  const start = await harness.provider.reauthenticateAndBeginAppleLink({
+    ...webAppleLinkStart(), authenticatedActorId: "actor-1", ...credential,
+  });
+  const callback = callbackFromStart(start);
+  assert.equal((await harness.store.beginAppleLinkCompletion({
+    transactionId: start.transaction_id, payloadHash: callback.payload_hash,
+  })).kind, "acquired");
+  assert.deepEqual(await harness.provider.linkApple({
+    ...callback, authenticatedActorId: "actor-1",
+  }), {
+    kind: "apple_link_provider_observation",
+    outcome: "in_progress",
+    transactionId: start.transaction_id,
+    payloadHash: callback.payload_hash,
+  });
+  assert.equal(harness.methodCalls.some((call) => call.name === "exchangeCodeForSession"), false);
 });
 
 test("installed Supabase 2.112.2 Apple link uses only its operation-local password session", async () => {
@@ -1537,6 +1562,8 @@ test("installed Supabase 2.112.2 Apple link uses only its operation-local passwo
     const linkedSubject = await webProvider.linkApple({
       ...callbackFromStart(webStart), authenticatedActorId: "actor-1",
     });
+    assert.equal("kind" in linkedSubject, false);
+    if ("kind" in linkedSubject) throw new Error("unexpected installed-SDK Apple link observation");
     assert.equal(linkedSubject.providerSubject, "provider-subject-1");
     assert.equal(linkedSubject.identityKind, "apple");
     assert.equal(serverRequests.some((request) => {

@@ -254,7 +254,8 @@ export function readAppleFlowCookie(key: Uint8Array, value: string, now: Date): 
   const settlementNotAfter = hasSettlement && boundedString(parsed.settlement_not_after)
     ? strictUtc(parsed.settlement_not_after) : undefined;
   if (authExpiry === undefined || (!hasSettlement && authExpiry <= now.getTime())
-    || hasSettlement && (parsed.flow_kind !== "link" || settlementNotAfter === undefined || settlementNotAfter <= authExpiry)) {
+    || hasSettlement && (parsed.flow_kind !== "link" || settlementNotAfter === undefined
+      || settlementNotAfter !== authExpiry + APPLE_LINK_SETTLEMENT_SECONDS * 1_000)) {
     invalidAuthentication();
   }
   return {

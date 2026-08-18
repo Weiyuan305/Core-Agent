@@ -12,6 +12,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 
 import type { GatewayAuthenticatedSession, GatewayIssuedSession, IdentityGatewayRouteDependencies } from "../app.js";
 import { IdentityGatewayFailure } from "../errors.js";
+import type { AppleAuthorizationCallback } from "../providers/auth-provider.js";
 import { ProviderFailure } from "../providers/provider-errors.js";
 import { assertClientTransport, assertInvitationAcceptancePayloadHash, clearAppleFlowCookie, requireMutationCredentials, requireNativeSessionCredential } from "../security.js";
 import { canonicalWebAppleCallback } from "./apple.js";
@@ -111,11 +112,7 @@ export async function registerInvitationRoutes(app: FastifyInstance, dependencie
     const expectedClientKind = body.client_kind ?? body.authentication_proof?.client_kind;
     if (expectedClientKind === undefined) throw new IdentityGatewayFailure("INVALID_REQUEST");
     assertClientTransport(request, expectedClientKind, dependencies.config);
-    const retryAfterMs = await dependencies.operations.consumeRateLimit({
-      bucketKind: "invitation_accept", accountIdentifier: "route:invitation_accept",
-      clientIdentifier: request.identityContext.clientIdentifier, dimensions: "client",
-    });
-    if (retryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", retryAfterMs);
+    let appleCallback: AppleAuthorizationCallback | undefined;
     if (body.authentication_proof?.kind === "apple") {
       const appleRetryAfterMs = await dependencies.operations.consumeRateLimit({
         bucketKind: "apple_callback",
@@ -124,6 +121,27 @@ export async function registerInvitationRoutes(app: FastifyInstance, dependencie
         dimensions: "client",
       });
       if (appleRetryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", appleRetryAfterMs);
+      appleCallback = body.authentication_proof.client_kind === "web"
+        ? canonicalWebAppleCallback(request, reply, dependencies, {
+          ...(body.authentication_proof as unknown as Record<string, unknown>),
+          schema_version: body.schema_version as 1,
+          idempotency_key: body.idempotency_key as string,
+          payload_hash: body.payload_hash as `sha256:${string}`,
+        } as never, "sign_in")
+        : body.authentication_proof as never;
+      const callbackAccountRetryAfterMs = await dependencies.operations.consumeRateLimit({
+        bucketKind: "apple_callback", accountIdentifier: appleCallback.transaction_id,
+        clientIdentifier: request.identityContext.clientIdentifier, dimensions: "account",
+      });
+      if (callbackAccountRetryAfterMs !== null) {
+        throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", callbackAccountRetryAfterMs);
+      }
+    } else {
+      const retryAfterMs = await dependencies.operations.consumeRateLimit({
+        bucketKind: "invitation_accept", accountIdentifier: "route:invitation_accept",
+        clientIdentifier: request.identityContext.clientIdentifier, dimensions: "client",
+      });
+      if (retryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", retryAfterMs);
     }
     const inspected = await dependencies.operations.executeAuthorityCommand({
       kind: "invitation_rate_identity", payload: { invitation_secret: body.invitation_secret },
@@ -139,14 +157,7 @@ export async function registerInvitationRoutes(app: FastifyInstance, dependencie
       : undefined;
     const subject = body.authentication_proof === undefined
       ? undefined
-      : await dependencies.provider.completeApple(body.authentication_proof.client_kind === "web"
-        ? canonicalWebAppleCallback(request, reply, dependencies, {
-          ...(body.authentication_proof as unknown as Record<string, unknown>),
-          schema_version: body.schema_version as 1,
-          idempotency_key: body.idempotency_key as string,
-          payload_hash: body.payload_hash as `sha256:${string}`,
-        } as never, "sign_in")
-        : body.authentication_proof as never);
+      : await dependencies.provider.completeApple(appleCallback!);
     const { authentication_proof: _authenticationProof, client_kind: _clientKind, device_label: _deviceLabel, ...durablePayload } = body;
     const result = await dependencies.operations.executeAuthorityCommand({
       kind: "invitation_accept",
