@@ -8,6 +8,115 @@
 - Original implementation commit: `2240a1bb0645e50a22204783f7cac5362924d906`
 - No merge or push was performed.
 
+## Round 16 review fixes (2026-08-19)
+
+### Review resolution
+
+- Re-read and followed receiving-code-review, test-driven-development,
+  systematic-debugging, verification-before-completion, and the Supabase skill.
+  No schema or contract change was needed: migration 012 remains at its Round 15
+  checksum, 010/011 and Contracts 0.5 remain byte-identical, and Entitlement stays
+  reserved for schema 13.
+- `grantConsultantRole`, `removeConsultantRole`, and `suspendMembership` now use the
+  caller-owned Kysely transaction for discovery as well as all locks, authority
+  checks, idempotency, and mutation. The root database is used only to open the
+  service-owned serializable transaction when no transaction is supplied. A real
+  PostgreSQL max-three pool test starts three outer serializable transactions at
+  one snapshot barrier and proves grant/remove/suspend need no fourth connection;
+  serialization retries converge through fresh caller-owned transactions.
+- Email sign-in and password reauthentication still validate the released public
+  canonical hash before provider work. Before durable idempotency, production now
+  derives a purpose-separated HMAC-SHA-256 from the managed private key, closed
+  authority/request facts, and transient password bytes. The caller-owned bytes and
+  owned copies are cleared. Real Fastify/PostgreSQL assertions prove the stored hash
+  differs from both the public hash and plain SHA-256 password digest, while a
+  changed password under the same key conflicts without another Session.
+- OTP verification no longer has a cross-clock inspection recovery primitive in
+  the adapter, fake, Gateway operation, runtime repository, or test fixture. Only
+  an explicit successful `verifyOtp` result may checkpoint a verified subject. An
+  unavailable/unknown result or a consumed proof whose checkpoint was lost commits
+  `expired`, replaces encrypted/email bindings with non-secret sentinels, clears
+  attempt/subject fields, and returns a stable terminal authentication error. It
+  never registers an Actor or issues a Session; a new flow or ordinary sign-in is
+  still available.
+- Company create, member invite, consultant grant/remove, member suspend/revoke,
+  and invitation revoke recompute the exact public canonical payload hash before
+  Session authentication or any provider/database effect. Email facts are
+  normalized exactly as the contract requires. Malformed and changed hashes return
+  400 with an empty operation trace.
+
+### Round 16 RED evidence
+
+- Focused Gateway RED ran the new route/provider cases before production edits:
+  113 total / 109 pass / 4 fail. The failures proved that checkpoint-loss and
+  unknown OTP outcomes still recovered to 200, the Supabase inspection recovery
+  surface still existed, and protected company/invitation hashes reached authority
+  handling instead of returning pre-authentication 400.
+- The real PostgreSQL caller-owned role focus was RED 0/1. With pool `max: 3`, the
+  three outer transactions reached the snapshot barrier, then the first role
+  discovery attempted a fourth root-database connection and timed out at
+  `prepareRoleMutation`.
+- The production-composition additions were written before the private durable-hash
+  implementation and ambiguity terminalization. They initially observed the public
+  recomputable hash at the idempotency boundary and retained a recoverable OTP
+  attempt instead of a terminal scrub.
+- The first final official CI-equivalent run was RED 2/3 after all behavior suites
+  passed: the execution-proof manifest still expected the Round 15 Runtime Core
+  PostgreSQL count 343. The formal run had just observed 344/344. The manifest was
+  updated only to that observed count; its focused static gate is GREEN 38/38.
+
+### Focused, package, and real-boundary GREEN evidence
+
+- `npm run check -w @core-agent/identity-gateway` — PASS: build and 113/113.
+- `npm run check -w @core-agent/runtime-core` — PASS: build and 83/83.
+- `npm run check -w @core-agent/contracts` — PASS: 180/180, generated schemas,
+  current/cumulative compatibility, 86 valid fixtures, and 11 invalid fixtures.
+- `npm run test:unit` — PASS: Runtime 192/192, Contracts 180/180, Runtime Core
+  83/83, Identity Gateway 113/113, and Control Plane Web 129/129 across 9 files.
+- Focused real PostgreSQL role-mutation plus OTP ambiguity run — PASS 2/2. The role
+  test exercises three simultaneous caller-owned transactions and the OTP test
+  asserts durable terminal scrub rather than a fake adapter-only result.
+- `npm run test:postgres` against the protected SCRAM disposable database — PASS:
+  Runtime Core 344/344, Identity Gateway 2/2, and Control Plane API 14/14. The
+  Gateway composition is real Fastify plus production operations, provider ports,
+  and PostgreSQL; it proves private sign-in/reauth hashes, changed-secret conflict,
+  unknown OTP ahead/behind/unrelated/response-loss matrices, zero graph/Session,
+  and all seven protected-write pre-auth hash checks.
+- During local diagnosis one non-fresh Gateway run observed 1/2 with a calm 500 in
+  the OTP-attempt fixture after a previously interrupted two-hour test process. It
+  was not reproducible after the exact stale test process was removed: five
+  consecutive focused production runs, a complete Gateway 2/2, the root formal
+  2/2, and the fresh official run all passed. No speculative production change was
+  made for that isolated shared-environment observation.
+
+### Official gates, integrity, and concern
+
+- Final `npm run test:runtime:database-ci-equivalent` — PASS 3/3 in
+  147750.961583 ms. Its fresh protected run accepted the actual 344 + 2 + 14
+  PostgreSQL summaries and integration 93; injected-failure cleanup and protected
+  output-leak rejection passed. Exact labeled/prefixed container, volume, network,
+  credential-file, and stale-process residual scans are empty.
+- Root `npm run check` passes Contracts 180/180 and fixtures 86/11, Runtime Core
+  83/83, Gateway 113/113, and Control Plane API 17/17, then stops only at the
+  unchanged Worker `main.ts:60,129` TS2345 diagnostics for
+  `project_platform_memberships`. `npm run test:runtime:database-auth-topology` is
+  correspondingly 0/1 because its Worker image build stops before any topology
+  scenario runs; cleanup completed and no Task 7 file touches the Worker.
+- Exact pins remain Fastify 5.11.2, `@fastify/cookie` 11.1.2, Supabase JS 2.112.2,
+  and Contracts 0.6.0. `node scripts/verify-no-secret.mjs
+  identity-auth-private-sentinel`, `git diff --check`, production logging scan,
+  accepted-history diff, and Docker/filesystem residual scans pass.
+- SHA-256 remains: migration 010
+  `eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381`;
+  011 `fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393`;
+  012 `2e7a7d0b8f910ff5253ace5dff1f0cc242224ec432e75621f15f57d93d14af12`.
+- Self-review confirmed that provider effects remain outside automatically retried
+  transactions; public errors/logs contain none of the provider, proof, email,
+  Cookie, Session-secret, key, or database facts prohibited by the brief.
+- Round 16 implementation commit: `7af365f2b` (`fix(identity): close round 16
+  gateway review`). Remaining concern is only the pre-existing Worker build blocker
+  above. No merge or push was performed.
+
 ## Round 15 review fixes (2026-08-19)
 
 ### Review resolution

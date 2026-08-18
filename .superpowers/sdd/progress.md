@@ -7,7 +7,7 @@
 - Base: `e7624fe0425ff470b646f8322254d5e9e3857da8`
 - Brief: `.superpowers/sdd/task-7-brief.md`
 - Baseline: Contracts 179/179 with fixtures 84/11; Identity Gateway 28/28.
-- Current phase: Round 15 review fixes implemented and verified; ready for cumulative parent review.
+- Current phase: Round 16 review fixes implemented and verified; ready for cumulative parent review.
 - User-approved amendment: forward-only schema 12 adds durable encrypted
   email-verification/start-idempotency authority; Entitlement reservation moved to
   schema 13. Historical 010/011 and Contracts 0.5.0 are untouched.
@@ -16,9 +16,9 @@
   provider effects outside automatically retried transactions; Task 9 deletion
   explicitly unavailable; no provider or internal-detail leakage.
 - Result: Contracts 0.6.0 180/180 with fixtures 86/11; Runtime Core 83/83;
-  Identity Gateway 110/110; real Fastify plus pinned Supabase adapter and PostgreSQL
-  production composition 2/2. The Round 15 official CI-equivalent is fully green
-  3/3 and accepted Runtime Core 343 + Gateway 2 + API 14 + integration 93.
+  Identity Gateway 113/113; real Fastify plus pinned Supabase adapter and PostgreSQL
+  production composition 2/2. The Round 16 official CI-equivalent is fully green
+  3/3 and accepted Runtime Core 344 + Gateway 2 + API 14 + integration 93.
 - Concern: the untouched Control Plane Worker still has the two existing
   `project_platform_memberships` TS2345 errors, so root check and
   database-auth-topology stop at that independent build before topology execution.
@@ -38,3 +38,4 @@
 - Round 13 implementation commit: `0d0b692e0`.
 - Round 14 implementation commit: `ce9269ce2`.
 - Round 15 implementation commit: `b346bf60a`.
+- Round 16 implementation commit: `7af365f2b`.
