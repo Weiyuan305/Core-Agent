@@ -312,5 +312,5 @@ Production changes followed genuine focused REDs:
 - Live provider credentials remain Task 12 and were not used. All provider behavior
   here is the pinned offline SDK boundary plus deterministic adapter parity.
 
-- Review-fix commit: `PENDING`
+- Review-fix implementation commit: `00937575b9e0caa310526567bccd4bd281173f65`
 - No merge or push was performed.

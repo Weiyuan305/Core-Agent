@@ -23,4 +23,4 @@
   dispatcher TS2345 errors, so root check and database-auth-topology stop at that
   independent build. Task 7 gates and official fresh database CI pass.
 - Original commit: `2240a1bb0645e50a22204783f7cac5362924d906`
-- Review-fix commit: `PENDING`
+- Review-fix implementation commit: `00937575b9e0caa310526567bccd4bd281173f65`
