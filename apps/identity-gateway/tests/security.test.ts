@@ -380,26 +380,28 @@ test("Apple link cookie authenticates separate authorization and settlement dead
   const { readAppleFlowCookie, sealAppleFlowCookie } = await import("../src/security.js");
   const authorizationOnly = sealAppleFlowCookie(flowKey, {
     transactionId: "oauth_link_deadline", state: "state_link_deadline",
-    expiresAt: "2026-08-17T00:05:00.000Z", flowKind: "link",
+    actorId: "actor_01", expiresAt: "2026-08-17T00:05:00.000Z", flowKind: "link",
   });
   assert.throws(() => readAppleFlowCookie(
     flowKey, authorizationOnly, new Date("2026-08-17T00:05:00.000Z"),
   ), /AUTH_INVALID/u);
   const settlement = sealAppleFlowCookie(flowKey, {
     transactionId: "oauth_link_deadline", state: "state_link_deadline",
-    expiresAt: "2026-08-17T00:05:00.000Z", flowKind: "link",
+    actorId: "actor_01", expiresAt: "2026-08-17T00:05:00.000Z", flowKind: "link",
     settlementNotAfter: "2026-08-17T00:35:00.000Z",
   });
-  assert.deepEqual(readAppleFlowCookie(
+  const binding = readAppleFlowCookie(
     flowKey, settlement, new Date("2026-08-17T00:35:00.000Z"),
-  ), {
-    transactionId: "oauth_link_deadline", state: "state_link_deadline",
+  );
+  assert.deepEqual({ ...binding, stateDigest: undefined }, {
+    transactionId: "oauth_link_deadline", stateDigest: undefined, clientKind: "web", actorId: "actor_01",
     expiresAt: "2026-08-17T00:05:00.000Z", flowKind: "link",
     settlementNotAfter: "2026-08-17T00:35:00.000Z",
   });
+  assert.match(binding.stateDigest, /^hmac-sha256:[A-Za-z0-9_-]{43}$/u);
   const wrongSettlement = sealAppleFlowCookie(flowKey, {
     transactionId: "oauth_link_deadline", state: "state_link_deadline",
-    expiresAt: "2026-08-17T00:05:00.000Z", flowKind: "link",
+    actorId: "actor_01", expiresAt: "2026-08-17T00:05:00.000Z", flowKind: "link",
     settlementNotAfter: "2026-08-17T00:34:59.999Z",
   });
   assert.throws(() => readAppleFlowCookie(
@@ -407,19 +409,34 @@ test("Apple link cookie authenticates separate authorization and settlement dead
   ), /AUTH_INVALID/u);
 });
 
-test("Apple flow cookie round-trips the exact OAuth state bound without widening ordinary fields", async () => {
+test("Apple flow cookie stores only a fixed purpose digest at the Unicode OAuth bound", async () => {
   const { readAppleFlowCookie, sealAppleFlowCookie } = await import("../src/security.js");
   const now = new Date("2026-08-17T00:00:00.000Z");
-  for (const stateLength of [2_049, 4_096]) {
-    const state = "s".repeat(stateLength);
+  for (const state of ["s".repeat(4_096), "😀".repeat(4_096)]) {
     const sealed = sealAppleFlowCookie(flowKey, {
       transactionId: "oauth_state_boundary", state,
       expiresAt: "2026-08-17T00:05:00.000Z", flowKind: "sign_in",
     });
-    assert.equal(readAppleFlowCookie(flowKey, sealed, now).state, state, `${stateLength} state characters`);
+    assert.equal(Buffer.byteLength(sealed, "utf8") < 2_048, true);
+    const binding = readAppleFlowCookie(flowKey, sealed, now) as unknown as Record<string, unknown>;
+    assert.equal(Object.prototype.hasOwnProperty.call(binding, "state"), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(binding, "nonce"), false);
+    assert.match(String(binding.stateDigest), /^hmac-sha256:[A-Za-z0-9_-]{43}$/u);
+    assert.equal(binding.clientKind, "web");
   }
+  const signInBinding = readAppleFlowCookie(flowKey, sealAppleFlowCookie(flowKey, {
+    transactionId: "oauth_digest_purpose", state: "same_state_proof",
+    expiresAt: "2026-08-17T00:05:00.000Z", flowKind: "sign_in",
+  }), now);
+  const linkBinding = readAppleFlowCookie(flowKey, sealAppleFlowCookie(flowKey, {
+    transactionId: "oauth_digest_purpose", state: "same_state_proof", actorId: "actor_01",
+    expiresAt: "2026-08-17T00:05:00.000Z", flowKind: "link",
+    settlementNotAfter: "2026-08-17T00:35:00.000Z",
+  }), now);
+  assert.notEqual(signInBinding.stateDigest, linkBinding.stateDigest);
+  assert.equal(linkBinding.actorId, "actor_01");
   assert.throws(() => sealAppleFlowCookie(flowKey, {
-    transactionId: "oauth_state_boundary", state: "s".repeat(4_097),
+    transactionId: "oauth_state_boundary", state: "😀".repeat(4_097),
     expiresAt: "2026-08-17T00:05:00.000Z", flowKind: "sign_in",
   }), /AUTH_INVALID/u);
   const ordinaryFieldOverflow = sealAppleFlowCookie(flowKey, {
@@ -427,6 +444,102 @@ test("Apple flow cookie round-trips the exact OAuth state bound without widening
     expiresAt: "2026-08-17T00:05:00.000Z", flowKind: "sign_in",
   });
   assert.throws(() => readAppleFlowCookie(flowKey, ordinaryFieldOverflow, now), /AUTH_INVALID/u);
+});
+
+test("Web Apple max ASCII and Unicode states use a compact real Set-Cookie to Cookie round trip", async () => {
+  const cookieHeaderLengths: number[] = [];
+  for (const [label, state] of [
+    ["ascii", "s".repeat(4_096)],
+    ["unicode", "😀".repeat(4_096)],
+  ] as const) {
+    const boundedProvider = provider();
+    let completedState: string | undefined;
+    boundedProvider.beginApple = async () => {
+      const authorizationUrl = new URL("https://apple.example.test/auth/v1/authorize");
+      authorizationUrl.searchParams.set("state", state);
+      authorizationUrl.searchParams.set("redirect_uri", webRedirect);
+      return {
+        transaction_id: "oauth_max_boundary", authorization_url: authorizationUrl.toString(),
+        expires_at: "2026-08-17T00:05:00.000Z",
+      };
+    };
+    boundedProvider.completeApple = async (input?: Record<string, unknown>) => {
+      completedState = String(input?.state);
+      return {
+        provider: "supabase" as const, providerSubject: "apple_subject", identityKind: "apple" as const,
+        normalizedEmail: "relay@example.test", verifiedAt: "2026-08-17T00:00:00.000Z",
+      };
+    };
+    const app = await buildApp({ provider: boundedProvider });
+    const start = await app.inject({
+      method: "POST", url: "/auth/v1/apple/start", headers: jsonHeaders,
+      payload: { ...idem, idempotency_key: `idem_${label}_start`, client_kind: "web", redirect_uri: webRedirect },
+    });
+    assert.equal(start.statusCode, 200, `${label}: ${start.body}`);
+    const setCookie = ([] as string[]).concat(start.headers["set-cookie"] ?? [])
+      .find((value) => value.startsWith("core_agent_apple_flow="));
+    assert.equal(typeof setCookie, "string");
+    const cookieHeaderLength = Buffer.byteLength(setCookie!, "utf8");
+    cookieHeaderLengths.push(cookieHeaderLength);
+    assert.equal(cookieHeaderLength < 2_048, true, `${label} cookie header is bounded`);
+    const cookiePair = setCookie!.split(";", 1)[0]!;
+    const mismatchedStateCodePoints = Array.from(state);
+    mismatchedStateCodePoints[mismatchedStateCodePoints.length - 1] = "x";
+    const mismatchedState = mismatchedStateCodePoints.join("");
+    const mismatch = await app.inject({
+      method: "POST", url: "/auth/v1/apple/callback",
+      headers: { ...jsonHeaders, cookie: cookiePair },
+      payload: appleCallbackPayload({
+        schema_version: 1, idempotency_key: `idem_${label}_mismatch`, client_kind: "web",
+        transaction_id: "oauth_max_boundary", authorization_code: "opaque_code", state: mismatchedState,
+      }),
+    });
+    assert.equal(mismatch.statusCode, 401, `${label}: ${mismatch.body}`);
+    assert.equal(completedState, undefined);
+    const callback = await app.inject({
+      method: "POST", url: "/auth/v1/apple/callback",
+      headers: { ...jsonHeaders, cookie: cookiePair },
+      payload: appleCallbackPayload({
+        schema_version: 1, idempotency_key: `idem_${label}_callback`, client_kind: "web",
+        transaction_id: "oauth_max_boundary", authorization_code: "opaque_code", state,
+      }),
+    });
+    assert.equal(callback.statusCode, 200, `${label}: ${callback.body}`);
+    assert.equal(completedState, state);
+    await app.close();
+  }
+  assert.equal(new Set(cookieHeaderLengths).size, 1, "raw UTF-8 state length does not affect the cookie header");
+});
+
+test("Apple start rejects short provider state before Web cookie or native response", async () => {
+  for (const stateLength of [1, 7]) {
+    for (const clientKind of ["web", "iphone"] as const) {
+      const shortState = "💥".repeat(stateLength);
+      const unsafeProvider = provider();
+      unsafeProvider.beginApple = async () => {
+        const authorizationUrl = new URL("https://apple.example.test/auth/v1/authorize");
+        authorizationUrl.searchParams.set("state", shortState);
+        authorizationUrl.searchParams.set("redirect_uri", clientKind === "web" ? webRedirect : nativeRedirect);
+        return { transaction_id: "oauth_short_state", authorization_url: authorizationUrl.toString(), expires_at: "2026-08-17T00:05:00.000Z" };
+      };
+      const app = await buildApp({ provider: unsafeProvider });
+      const response = await app.inject({
+        method: "POST", url: "/auth/v1/apple/start",
+        headers: clientKind === "web" ? jsonHeaders : { host, "content-type": "application/json" },
+        payload: clientKind === "web"
+          ? { ...idem, client_kind: clientKind, redirect_uri: webRedirect }
+          : {
+            ...idem, client_kind: clientKind, redirect_uri: nativeRedirect,
+            nonce: "native_nonce_01", pkce_code_challenge: "a".repeat(43), pkce_code_challenge_method: "S256",
+          },
+      });
+      assert.equal(response.statusCode, 503, `${clientKind}:${stateLength}`);
+      assert.equal(response.json().code, "AUTH_PROVIDER_UNAVAILABLE");
+      assert.equal(response.headers["set-cookie"], undefined);
+      assert.equal(response.body.includes(shortState), false);
+      await app.close();
+    }
+  }
 });
 
 test("native Apple delivery returns the opaque secret once without any cookie", async () => {

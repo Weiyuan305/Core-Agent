@@ -1644,6 +1644,18 @@ test("Apple invitation proof preflight matches the exact 4096-character OAuth bo
     assert.doesNotThrow(() => assertInvitationAcceptancePayloadHash(nativePayload));
   }
 
+  const unicodeProof = "😀".repeat(4_096);
+  const unicodePayload = invitationAcceptancePayload({
+    schema_version: 1, idempotency_key: "idem_native_unicode_boundary",
+    expected_resource_version: 1, invitation_secret: "i".repeat(43),
+    authentication_proof: {
+      kind: "apple", client_kind: "iphone", transaction_id: "oauth_boundary",
+      authorization_code: unicodeProof, state: unicodeProof, nonce: unicodeProof,
+      pkce_code_verifier: "v".repeat(43),
+    },
+  });
+  assert.doesNotThrow(() => assertInvitationAcceptancePayloadHash(unicodePayload));
+
   const oversized = "o".repeat(4_097);
   for (const authenticationProof of [
     { kind: "apple", client_kind: "web", transaction_id: "oauth_boundary", authorization_code: oversized, state: "opaque_state" },
@@ -1656,6 +1668,15 @@ test("Apple invitation proof preflight matches the exact 4096-character OAuth bo
     });
     assert.throws(() => assertInvitationAcceptancePayloadHash(payload), /INVALID_REQUEST/u);
   }
+  const oversizedUnicodePayload = invitationAcceptancePayload({
+    schema_version: 1, idempotency_key: "idem_oversized_unicode_oauth_proof",
+    expected_resource_version: 1, invitation_secret: "i".repeat(43),
+    authentication_proof: {
+      kind: "apple", client_kind: "web", transaction_id: "oauth_boundary",
+      authorization_code: "opaque_code", state: "😀".repeat(4_097),
+    },
+  });
+  assert.throws(() => assertInvitationAcceptancePayloadHash(oversizedUnicodePayload), /INVALID_REQUEST/u);
 });
 
 test("management mutation delegates one transaction-scoped reauth plus durable command", async () => {

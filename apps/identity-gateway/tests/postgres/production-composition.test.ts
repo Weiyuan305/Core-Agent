@@ -656,7 +656,8 @@ test("production composition atomically verifies email, registers Task 3, issues
           [transactionId],
         )).rows[0]!;
         const flowCookie = sealAppleFlowCookie(key, {
-          transactionId, state, expiresAt: stored.expires_at.toISOString(), flowKind: "link",
+          transactionId, state, actorId: registered.actorId,
+          expiresAt: stored.expires_at.toISOString(), flowKind: "link",
           settlementNotAfter: new Date(stored.expires_at.getTime() + 30 * 60_000).toISOString(),
         });
         const response = await observationApp.inject({

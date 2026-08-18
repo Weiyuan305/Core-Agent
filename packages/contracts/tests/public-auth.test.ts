@@ -274,12 +274,36 @@ test("Apple and invitation proofs use closed Web and native PKCE variants", () =
       },
     }), true, `native OAuth proof accepts ${proofLength} characters`);
   }
+  const unicodeProof = "😀".repeat(4_096);
+  assert.equal(Array.from(unicodeProof).length, 4_096);
+  assert.equal(accept.Check({
+    ...common,
+    authentication_proof: {
+      kind: "apple", client_kind: "web", transaction_id: "oauth_01",
+      authorization_code: unicodeProof, state: unicodeProof,
+    },
+  }), true, "Web OAuth proof counts Unicode code points");
+  assert.equal(accept.Check({
+    ...common,
+    authentication_proof: {
+      kind: "apple", client_kind: "iphone", transaction_id: "oauth_01",
+      authorization_code: unicodeProof, state: unicodeProof, nonce: unicodeProof,
+      pkce_code_verifier: "b".repeat(43),
+    },
+  }), true, "native OAuth proof counts Unicode code points");
   const oversizedProof = "o".repeat(4_097);
   for (const authenticationProof of [
     { kind: "apple", client_kind: "web", transaction_id: "oauth_01", authorization_code: oversizedProof, state: "opaque_state" },
     { kind: "apple", client_kind: "web", transaction_id: "oauth_01", authorization_code: "opaque_code", state: oversizedProof },
     { kind: "apple", client_kind: "iphone", transaction_id: "oauth_01", authorization_code: "opaque_code", state: "opaque_state", nonce: oversizedProof, pkce_code_verifier: "b".repeat(43) },
   ]) assert.equal(accept.Check({ ...common, authentication_proof: authenticationProof }), false);
+  assert.equal(accept.Check({
+    ...common,
+    authentication_proof: {
+      kind: "apple", client_kind: "web", transaction_id: "oauth_01",
+      authorization_code: "opaque_code", state: "😀".repeat(4_097),
+    },
+  }), false);
 });
 
 test("Apple link start contains current password and released start fields without provider authority", () => {

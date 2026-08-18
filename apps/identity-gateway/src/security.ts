@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 import { canonicalPayloadHash } from "@core-agent/runtime-core";
 import type { FastifyReply, FastifyRequest } from "fastify";
@@ -20,6 +20,9 @@ const flowMaxAgeSeconds = 5 * 60;
 export const PASSWORD_RESET_SETTLEMENT_SECONDS = 30 * 60;
 export const APPLE_LINK_SETTLEMENT_SECONDS = 30 * 60;
 const recoveryCookieMaxAgeSeconds = flowMaxAgeSeconds + PASSWORD_RESET_SETTLEMENT_SECONDS;
+const APPLE_FLOW_COOKIE_MAX_HEADER_BYTES = 2_048;
+const MAX_OAUTH_PROOF_CODE_POINTS = 4_096;
+const MAX_OAUTH_PROOF_UTF8_BYTES = MAX_OAUTH_PROOF_CODE_POINTS * 4;
 
 export interface RecoveryCookieBinding {
   readonly transactionId: string;
@@ -30,7 +33,18 @@ export interface RecoveryCookieBinding {
 
 export interface AppleFlowCookieBinding {
   readonly transactionId: string;
+  readonly stateDigest: string;
+  readonly clientKind: "web";
+  readonly actorId?: string;
+  readonly expiresAt: string;
+  readonly flowKind: "sign_in" | "link";
+  readonly settlementNotAfter?: string;
+}
+
+export interface AppleFlowCookieInput {
+  readonly transactionId: string;
   readonly state: string;
+  readonly actorId?: string;
   readonly expiresAt: string;
   readonly flowKind: "sign_in" | "link";
   readonly settlementNotAfter?: string;
@@ -144,11 +158,11 @@ export function clearRecoveryCookie(reply: FastifyReply): void {
 }
 
 export function issueAppleFlowCookie(reply: FastifyReply, value: string): void {
-  flowCookie(reply, APPLE_FLOW_COOKIE_NAME, value, "/auth/v1");
+  issueBoundedAppleFlowCookie(reply, value, flowMaxAgeSeconds);
 }
 
 export function issueAppleLinkSettlementCookie(reply: FastifyReply, value: string): void {
-  flowCookie(reply, APPLE_FLOW_COOKIE_NAME, value, "/auth/v1", flowMaxAgeSeconds + APPLE_LINK_SETTLEMENT_SECONDS);
+  issueBoundedAppleFlowCookie(reply, value, flowMaxAgeSeconds + APPLE_LINK_SETTLEMENT_SECONDS);
 }
 
 export function clearAppleFlowCookie(reply: FastifyReply): void {
@@ -158,6 +172,14 @@ export function clearAppleFlowCookie(reply: FastifyReply): void {
 function assertFlowKey(key: Uint8Array): Buffer {
   if (!(key instanceof Uint8Array) || key.byteLength !== 32) throw new IdentityGatewayFailure("INTERNAL_ERROR");
   return Buffer.from(key);
+}
+
+function issueBoundedAppleFlowCookie(reply: FastifyReply, value: string, maxAgeSeconds: number): void {
+  const header = `${APPLE_FLOW_COOKIE_NAME}=${cookieValue(value)}; Secure; HttpOnly; SameSite=Lax; Path=/auth/v1; Max-Age=${maxAgeSeconds}`;
+  if (Buffer.byteLength(header, "utf8") >= APPLE_FLOW_COOKIE_MAX_HEADER_BYTES) {
+    throw new IdentityGatewayFailure("INTERNAL_ERROR");
+  }
+  appendSetCookie(reply, header);
 }
 
 function seal(key: Uint8Array, purpose: "recovery" | "apple", value: object): string {
@@ -171,7 +193,7 @@ function seal(key: Uint8Array, purpose: "recovery" | "apple", value: object): st
 
 function open(key: Uint8Array, purpose: "recovery" | "apple", value: string): unknown {
   const sealedValuePattern = purpose === "apple"
-    ? /^v1\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{1,12288}\.[A-Za-z0-9_-]{22}$/u
+    ? /^v1\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{1,1536}\.[A-Za-z0-9_-]{22}$/u
     : /^v1\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{1,4096}\.[A-Za-z0-9_-]{22}$/u;
   if (!sealedValuePattern.test(value)) invalidAuthentication();
   const fields = value.split(".");
@@ -199,8 +221,30 @@ function boundedString(value: unknown): value is string {
   return typeof value === "string" && value.length >= 1 && value.length <= 2_048;
 }
 
-function oauthProofString(value: unknown): value is string {
-  return typeof value === "string" && value.length >= 8 && value.length <= 4_096;
+export function isOAuthProofString(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  let codePoints = 0;
+  for (const _character of value) {
+    codePoints += 1;
+    if (codePoints > MAX_OAUTH_PROOF_CODE_POINTS) return false;
+  }
+  return codePoints >= 8 && Buffer.byteLength(value, "utf8") <= MAX_OAUTH_PROOF_UTF8_BYTES;
+}
+
+function appleFlowStateDigest(key: Uint8Array, flowKind: "sign_in" | "link", state: string): string {
+  if (!isOAuthProofString(state)) invalidAuthentication();
+  const ownedKey = assertFlowKey(key);
+  const ownedState = Buffer.from(state, "utf8");
+  try {
+    const digest = createHmac("sha256", ownedKey)
+      .update(`core-agent:apple-flow:${flowKind}:state:v1\0`, "utf8")
+      .update(ownedState)
+      .digest("base64url");
+    return `hmac-sha256:${digest}`;
+  } finally {
+    ownedKey.fill(0);
+    ownedState.fill(0);
+  }
 }
 
 function strictFutureUtc(value: string, now: Date): boolean {
@@ -241,10 +285,15 @@ export function readRecoveryCookie(key: Uint8Array, value: string, _now: Date): 
   };
 }
 
-export function sealAppleFlowCookie(key: Uint8Array, binding: AppleFlowCookieBinding): string {
-  if (!oauthProofString(binding.state)) invalidAuthentication();
+export function sealAppleFlowCookie(key: Uint8Array, binding: AppleFlowCookieInput): string {
+  if (!isOAuthProofString(binding.state)
+    || (binding.flowKind === "sign_in" && binding.actorId !== undefined)
+    || (binding.flowKind === "link" && !boundedString(binding.actorId))) invalidAuthentication();
   return seal(key, "apple", {
-    transaction_id: binding.transactionId, state: binding.state,
+    transaction_id: binding.transactionId,
+    state_digest: appleFlowStateDigest(key, binding.flowKind, binding.state),
+    client_kind: "web",
+    ...(binding.actorId === undefined ? {} : { actor_id: binding.actorId }),
     expires_at: binding.expiresAt, flow_kind: binding.flowKind,
     ...(binding.settlementNotAfter === undefined ? {} : { settlement_not_after: binding.settlementNotAfter }),
   });
@@ -254,11 +303,18 @@ export function readAppleFlowCookie(key: Uint8Array, value: string, now: Date): 
   const parsed = open(key, "apple", value);
   const hasSettlement = typeof parsed === "object" && parsed !== null
     && Object.prototype.hasOwnProperty.call(parsed, "settlement_not_after");
-  const keys = hasSettlement
-    ? ["transaction_id", "state", "expires_at", "flow_kind", "settlement_not_after"]
-    : ["transaction_id", "state", "expires_at", "flow_kind"];
-  if (!exactRecord(parsed, keys) || !boundedString(parsed.transaction_id) || !oauthProofString(parsed.state)
-    || !boundedString(parsed.expires_at) || (parsed.flow_kind !== "sign_in" && parsed.flow_kind !== "link")) {
+  const flowKind = typeof parsed === "object" && parsed !== null
+    ? (parsed as { readonly flow_kind?: unknown }).flow_kind : undefined;
+  const keys = flowKind === "link"
+    ? hasSettlement
+      ? ["transaction_id", "state_digest", "client_kind", "actor_id", "expires_at", "flow_kind", "settlement_not_after"]
+      : ["transaction_id", "state_digest", "client_kind", "actor_id", "expires_at", "flow_kind"]
+    : ["transaction_id", "state_digest", "client_kind", "expires_at", "flow_kind"];
+  if (!exactRecord(parsed, keys) || !boundedString(parsed.transaction_id)
+    || typeof parsed.state_digest !== "string" || !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(parsed.state_digest)
+    || parsed.client_kind !== "web" || !boundedString(parsed.expires_at)
+    || (flowKind !== "sign_in" && flowKind !== "link")
+    || (flowKind === "link" && !boundedString(parsed.actor_id))) {
     invalidAuthentication();
   }
   const authExpiry = strictUtc(parsed.expires_at);
@@ -270,10 +326,20 @@ export function readAppleFlowCookie(key: Uint8Array, value: string, now: Date): 
     invalidAuthentication();
   }
   return {
-    transactionId: parsed.transaction_id, state: parsed.state,
-    expiresAt: parsed.expires_at, flowKind: parsed.flow_kind,
+    transactionId: parsed.transaction_id, stateDigest: parsed.state_digest, clientKind: "web",
+    ...(flowKind === "link" ? { actorId: parsed.actor_id as string } : {}),
+    expiresAt: parsed.expires_at, flowKind,
     ...(settlementNotAfter === undefined ? {} : { settlementNotAfter: new Date(settlementNotAfter).toISOString() }),
   };
+}
+
+export function appleFlowStateMatches(
+  key: Uint8Array,
+  binding: Pick<AppleFlowCookieBinding, "flowKind" | "stateDigest">,
+  state: string,
+): boolean {
+  if (!isOAuthProofString(state)) return false;
+  return safeSecretEqual(binding.stateDigest, appleFlowStateDigest(key, binding.flowKind, state));
 }
 
 export function safeSecretEqual(left: string, right: string): boolean {
@@ -410,9 +476,9 @@ export function assertInvitationAcceptancePayloadHash(body: {
         ? ["kind", "client_kind", "transaction_id", "authorization_code", "state", "nonce", "pkce_code_verifier"]
         : undefined;
     if (expectedKeys === undefined || !exactRecord(proof, expectedKeys)
-      || !boundedString(proof.transaction_id) || !oauthProofString(proof.authorization_code)
-      || !oauthProofString(proof.state)
-      || (clientKind !== "web" && (!oauthProofString(nonce) || !boundedString(pkceCodeVerifier)))) {
+      || !boundedString(proof.transaction_id) || !isOAuthProofString(proof.authorization_code)
+      || !isOAuthProofString(proof.state)
+      || (clientKind !== "web" && (!isOAuthProofString(nonce) || !boundedString(pkceCodeVerifier)))) {
       invalidRequest();
     }
     canonicalProof = {

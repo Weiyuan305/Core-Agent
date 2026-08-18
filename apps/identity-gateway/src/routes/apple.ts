@@ -20,12 +20,14 @@ import {
   ANONYMOUS_APPLE_START_GLOBAL_CIRCUIT_BREAKER_ACCOUNT,
   APPLE_LINK_SETTLEMENT_SECONDS,
   APPLE_FLOW_COOKIE_NAME,
+  appleFlowStateMatches,
   assertAppleCallbackPayloadHash,
   assertClientTransport,
   assertExactRedirect,
   clearAppleFlowCookie,
   issueAppleFlowCookie,
   issueAppleLinkSettlementCookie,
+  isOAuthProofString,
   readAppleFlowCookie,
   requireMutationCredentials,
   requireNativeSessionCredential,
@@ -64,19 +66,27 @@ function authorizationState(start: AppleAuthorizationStart, providerUrl: string,
   if ((!providerEndpoint && !directAppleEndpoint) || parsed.protocol !== "https:"
     || parsed.username !== "" || parsed.password !== ""
     || parsed.hash !== "" || parsed.searchParams.getAll("state").length !== 1
-    || state === null || state.length < 1 || state.length > 4_096
+    || !isOAuthProofString(state)
     || parsed.searchParams.has("next") || parsed.searchParams.has("return_to")) {
     throw new IdentityGatewayFailure("AUTH_PROVIDER_UNAVAILABLE");
   }
   return state;
 }
 
-function issueFlowCookie(reply: FastifyReply, dependencies: IdentityGatewayRouteDependencies, start: AppleAuthorizationStart, redirectUri: string, flowKind: "sign_in" | "link"): void {
+function issueFlowCookie(
+  reply: FastifyReply,
+  dependencies: IdentityGatewayRouteDependencies,
+  start: AppleAuthorizationStart,
+  state: string,
+  flowKind: "sign_in" | "link",
+  actorId?: string,
+): void {
   const binding = {
     transactionId: start.transaction_id,
-    state: authorizationState(start, dependencies.config.providerUrl, redirectUri),
+    state,
     expiresAt: start.expires_at,
     flowKind,
+    ...(actorId === undefined ? {} : { actorId }),
     ...(flowKind === "link" ? {
       settlementNotAfter: new Date(Date.parse(start.expires_at) + APPLE_LINK_SETTLEMENT_SECONDS * 1_000).toISOString(),
     } : {}),
@@ -111,11 +121,17 @@ export function canonicalWebAppleCallback(
   dependencies: IdentityGatewayRouteDependencies,
   body: AppleCallbackBody,
   flowKind: "sign_in" | "link",
+  expectedActorId?: string,
 ): AppleAuthorizationCallback {
   const sealed = request.cookies[APPLE_FLOW_COOKIE_NAME];
   if (sealed === undefined) throw new IdentityGatewayFailure("AUTH_INVALID");
   const binding = readAppleFlowCookie(dependencies.flowCookieKey, sealed, dependencies.now());
-  if (binding.flowKind !== flowKind || !safeSecretEqual(binding.transactionId, body.transaction_id) || !safeSecretEqual(binding.state, body.state)) {
+  if (binding.flowKind !== flowKind || binding.clientKind !== "web"
+    || !safeSecretEqual(binding.transactionId, body.transaction_id)
+    || !appleFlowStateMatches(dependencies.flowCookieKey, binding, body.state)
+    || (flowKind === "sign_in" && binding.actorId !== undefined)
+    || (flowKind === "link" && (binding.actorId === undefined || expectedActorId === undefined
+      || !safeSecretEqual(binding.actorId, expectedActorId)))) {
     throw new IdentityGatewayFailure("AUTH_INVALID");
   }
   return {
@@ -125,7 +141,7 @@ export function canonicalWebAppleCallback(
     client_kind: "web",
     transaction_id: binding.transactionId,
     authorization_code: body.authorization_code,
-    state: binding.state,
+    state: body.state,
   };
 }
 
@@ -177,9 +193,9 @@ export async function registerAppleRoutes(app: FastifyInstance, dependencies: Id
     });
     if (accountRetryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", accountRetryAfterMs);
     const start = await dependencies.provider.beginApple(request.body as never);
-    authorizationState(start, dependencies.config.providerUrl, body.redirect_uri);
+    const state = authorizationState(start, dependencies.config.providerUrl, body.redirect_uri);
     if (body.client_kind === "web") {
-      issueFlowCookie(reply, dependencies, start, body.redirect_uri, "sign_in");
+      issueFlowCookie(reply, dependencies, start, state, "sign_in");
       return { schema_version: 1, authorization_url: start.authorization_url };
     }
     return nativeStartResponse(start);
@@ -226,9 +242,9 @@ export async function registerAppleRoutes(app: FastifyInstance, dependencies: Id
       authenticatedActorId: authority.actorId,
       email,
     } as never);
-    authorizationState(start, dependencies.config.providerUrl, body.redirect_uri);
+    const state = authorizationState(start, dependencies.config.providerUrl, body.redirect_uri);
     if (body.client_kind === "web") {
-      issueFlowCookie(reply, dependencies, start, body.redirect_uri, "link");
+      issueFlowCookie(reply, dependencies, start, state, "link", authority.actorId);
       return { schema_version: 1, authorization_url: start.authorization_url };
     }
     return nativeStartResponse(start);
@@ -247,7 +263,7 @@ export async function registerAppleRoutes(app: FastifyInstance, dependencies: Id
     if (accountRetryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", accountRetryAfterMs);
     await dependencies.operations.requireRecentReauthentication(authority);
     const callback = body.client_kind === "web"
-      ? canonicalWebAppleCallback(request, reply, dependencies, body, "link")
+      ? canonicalWebAppleCallback(request, reply, dependencies, body, "link", authority.actorId)
       : body;
     let subject = await dependencies.provider.linkApple({ ...callback, authenticatedActorId: authority.actorId });
     if (isAppleLinkObservation(subject)) {
@@ -277,7 +293,9 @@ export async function registerAppleRoutes(app: FastifyInstance, dependencies: Id
       if (sealed === undefined) throw new IdentityGatewayFailure("AUTH_INVALID");
       const binding = readAppleFlowCookie(dependencies.flowCookieKey, sealed, dependencies.now());
       issueAppleLinkSettlementCookie(reply, sealAppleFlowCookie(dependencies.flowCookieKey, {
-        ...binding,
+        transactionId: binding.transactionId, state: body.state,
+        ...(binding.actorId === undefined ? {} : { actorId: binding.actorId }),
+        expiresAt: binding.expiresAt, flowKind: binding.flowKind,
         settlementNotAfter,
       }));
     }
