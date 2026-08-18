@@ -19,7 +19,6 @@ import type {
   AuthProviderAdapter,
   EmailCredentialInput,
   EmailVerificationInput,
-  EmailVerificationRecoveryInput,
   ProviderClientKind,
   ProviderProof,
   PasswordResetCompletionInput,
@@ -806,42 +805,6 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
         throw new ProviderFailure("AUTH_CALLBACK_INVALID");
       }
       await this.#signOut(client, "local");
-      return subject;
-    } finally {
-      storage.clear();
-    }
-  }
-
-  async recoverVerifiedEmailSubject(input: EmailVerificationRecoveryInput): Promise<VerifiedProviderSubject> {
-    const expectedProviderSubject = ownString(input, "expectedProviderSubject");
-    const expectedNormalizedEmail = ownString(input, "expectedNormalizedEmail");
-    const verificationStartedAt = ownString(input, "verificationStartedAt");
-    const recoveryNotAfter = ownString(input, "recoveryNotAfter");
-    const verificationStartedTimestamp = verificationStartedAt === undefined
-      ? undefined : strictUtcTimestampMilliseconds(verificationStartedAt);
-    const recoveryNotAfterTimestamp = recoveryNotAfter === undefined
-      ? undefined : strictUtcTimestampMilliseconds(recoveryNotAfter);
-    if (expectedProviderSubject === undefined || expectedProviderSubject.length < 1
-      || expectedProviderSubject.length > 1_024 || expectedNormalizedEmail === undefined
-      || expectedNormalizedEmail !== normalizeEmail(expectedNormalizedEmail) || !validEmail(expectedNormalizedEmail)
-      || verificationStartedTimestamp === undefined || recoveryNotAfterTimestamp === undefined
-      || verificationStartedTimestamp > recoveryNotAfterTimestamp) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
-    const { client, storage } = this.#newClient(this.#serviceRoleKey);
-    try {
-      const data = requireResultData(await safeProviderCall(
-        () => client.auth.admin.getUserById(expectedProviderSubject),
-        "AUTH_PROVIDER_UNAVAILABLE",
-      ));
-      const providerUser = ownData(data, "user");
-      const confirmedAt = ownString(providerUser, "email_confirmed_at");
-      const confirmedTimestamp = confirmedAt === undefined ? undefined : strictUtcTimestampMilliseconds(confirmedAt);
-      if (confirmedTimestamp === undefined || confirmedTimestamp < verificationStartedTimestamp
-        || confirmedTimestamp > recoveryNotAfterTimestamp) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
-      const subject = copySubject(providerUser, "email_password");
-      if (!constantTimeStringEqual(subject.providerSubject, expectedProviderSubject)
-        || !constantTimeStringEqual(subject.normalizedEmail, expectedNormalizedEmail)) {
-        throw new ProviderFailure("AUTH_CALLBACK_INVALID");
-      }
       return subject;
     } finally {
       storage.clear();

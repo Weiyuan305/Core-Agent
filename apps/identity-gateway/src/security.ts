@@ -408,6 +408,31 @@ export function assertInvitationAcceptancePayloadHash(body: {
   });
 }
 
+export type ProtectedWritePayloadKind =
+  | "company_create"
+  | "company_member_invite"
+  | "company_consultant_grant"
+  | "company_consultant_remove"
+  | "company_member_suspend"
+  | "company_member_revoke"
+  | "invitation_revoke";
+
+/** Validate the released public command before Session or durable authority work. */
+export function assertProtectedWritePayloadHash(
+  kind: ProtectedWritePayloadKind,
+  body: Readonly<Record<string, unknown>>,
+): void {
+  const supplied = body.payload_hash;
+  if (typeof supplied !== "string") invalidRequest();
+  const { payload_hash: _payloadHash, ...facts } = body;
+  const normalizedFacts = kind === "company_create"
+    ? { ...facts, administrator_email: String(facts.administrator_email).toLowerCase() }
+    : kind === "company_member_invite"
+      ? { ...facts, email: String(facts.email).toLowerCase() }
+      : facts;
+  assertCanonicalHash(supplied, normalizedFacts);
+}
+
 export function requireMutationCredentials(request: FastifyRequest): { readonly sessionSecret: string; readonly csrfSecret: string } {
   const sessionSecret = request.cookies[CORE_SESSION_COOKIE_NAME];
   const csrfCookie = request.cookies[CORE_CSRF_COOKIE_NAME];

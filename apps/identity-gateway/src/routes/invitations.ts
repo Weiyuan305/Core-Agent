@@ -14,7 +14,7 @@ import type { GatewayAuthenticatedSession, GatewayIssuedSession, IdentityGateway
 import { IdentityGatewayFailure } from "../errors.js";
 import type { AppleAuthorizationCallback } from "../providers/auth-provider.js";
 import { ProviderFailure } from "../providers/provider-errors.js";
-import { assertClientTransport, assertInvitationAcceptancePayloadHash, clearAppleFlowCookie, requireMutationCredentials, requireNativeSessionCredential } from "../security.js";
+import { assertClientTransport, assertInvitationAcceptancePayloadHash, assertProtectedWritePayloadHash, clearAppleFlowCookie, requireMutationCredentials, requireNativeSessionCredential } from "../security.js";
 import { canonicalWebAppleCallback } from "./apple.js";
 import { completeReservedEmailProviderStart, deliverSession } from "./email.js";
 
@@ -173,6 +173,7 @@ export async function registerInvitationRoutes(app: FastifyInstance, dependencie
   });
 
   app.post("/auth/v1/invitations/revoke", { schema: { body: InvitationRevokeRequestSchema, response: { 200: InvitationRevokeResponseSchema } } }, async (request) => {
+    assertProtectedWritePayloadHash("invitation_revoke", request.body as Readonly<Record<string, unknown>>);
     assertClientTransport(request, "web", dependencies.config);
     const authority = await authenticateMutation(request, dependencies);
     return dependencies.operations.executeProtectedAuthorityCommand({ kind: "invitation_revoke", payload: request.body, authority });

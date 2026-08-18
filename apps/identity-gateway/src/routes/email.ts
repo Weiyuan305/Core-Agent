@@ -113,12 +113,18 @@ export async function registerEmailRoutes(app: FastifyInstance, dependencies: Id
     rateLimitFailure(await dependencies.operations.consumeRateLimit({ bucketKind: "login", accountIdentifier: normalizedEmail, clientIdentifier: request.identityContext.clientIdentifier }));
     const subject = await dependencies.provider.signInEmail({ email: normalizedEmail, password: body.password });
     const requestIdempotency = request.body as { idempotency_key: string; payload_hash: string };
-    const issued = await dependencies.operations.issueSession(subject, body.client_kind, body.device_label, {
-      idempotencyKey: requestIdempotency.idempotency_key,
-      payloadHash: requestIdempotency.payload_hash,
-      operation: "email_sign_in",
-    });
-    return deliverSession(reply, issued, body.client_kind);
+    const secretProof = Buffer.from(body.password, "utf8");
+    try {
+      const issued = await dependencies.operations.issueSession(subject, body.client_kind, body.device_label, {
+        idempotencyKey: requestIdempotency.idempotency_key,
+        payloadHash: requestIdempotency.payload_hash,
+        operation: "email_sign_in",
+        secretProof,
+      });
+      return deliverSession(reply, issued, body.client_kind);
+    } finally {
+      secretProof.fill(0);
+    }
   });
 
   app.post("/auth/v1/email/verification", { schema: { body: EmailVerificationRequestSchema, response: { 200: EmailVerificationResponseSchema } } }, async (request, reply) => {
@@ -152,39 +158,32 @@ export async function registerEmailRoutes(app: FastifyInstance, dependencies: Id
       if (attempt.kind === "in_progress") throw new IdentityGatewayFailure("AUTH_CONFLICT");
       if (attempt.kind === "verified") {
         subject = attempt.subject;
+      } else if (attempt.kind === "recovery") {
+        await dependencies.operations.terminalizeEmailVerificationProviderAttempt({
+          verificationId: body.verification_id,
+          verificationProofDigest,
+        });
+        throw new IdentityGatewayFailure("AUTH_INVALID");
       } else {
-        let verificationFailure: unknown;
         try {
           subject = await dependencies.provider.verifyEmail({
             verificationCode: body.verification_code,
             expectedProviderSubject: attempt.expectedProviderSubject,
           });
         } catch (error) {
-          verificationFailure = error;
-          const recovery = await dependencies.operations.readEmailVerificationProviderRecovery({
+          if (error instanceof ProviderFailure
+            && (error.code === "AUTH_CALLBACK_INVALID" || error.code === "AUTH_EMAIL_UNVERIFIED")) {
+            await dependencies.operations.releaseEmailVerificationProviderAttempt({
+              verificationId: body.verification_id,
+              verificationProofDigest,
+            });
+            throw error;
+          }
+          await dependencies.operations.terminalizeEmailVerificationProviderAttempt({
             verificationId: body.verification_id,
             verificationProofDigest,
           });
-          try {
-            subject = await dependencies.provider.recoverVerifiedEmailSubject({
-              expectedProviderSubject: recovery.expectedProviderSubject,
-              expectedNormalizedEmail: recovery.expectedNormalizedEmail,
-              verificationStartedAt: recovery.verificationStartedAt,
-              recoveryNotAfter: recovery.recoveryNotAfter,
-            });
-          } catch (recoveryError) {
-            if (verificationFailure instanceof ProviderFailure
-              && verificationFailure.code === "AUTH_CALLBACK_INVALID"
-              && recoveryError instanceof ProviderFailure
-              && (recoveryError.code === "AUTH_CALLBACK_INVALID" || recoveryError.code === "AUTH_EMAIL_UNVERIFIED")) {
-              await dependencies.operations.releaseEmailVerificationProviderAttempt({
-                verificationId: body.verification_id,
-                verificationProofDigest,
-              });
-              throw verificationFailure;
-            }
-            throw recoveryError;
-          }
+          throw new IdentityGatewayFailure("AUTH_INVALID");
         }
         await dependencies.operations.checkpointEmailVerification({
           verificationId: body.verification_id,

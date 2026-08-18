@@ -60,13 +60,6 @@ export interface EmailVerificationInput {
   readonly expectedProviderSubject: string;
 }
 
-export interface EmailVerificationRecoveryInput {
-  readonly expectedProviderSubject: string;
-  readonly expectedNormalizedEmail: string;
-  readonly verificationStartedAt: string;
-  readonly recoveryNotAfter: string;
-}
-
 export interface ProviderProof {
   readonly accessToken: string;
 }
@@ -148,7 +141,6 @@ export interface AuthProviderAdapter {
     readonly expectedProviderSubject: string;
   }>;
   verifyEmail(input: EmailVerificationInput): Promise<VerifiedProviderSubject>;
-  recoverVerifiedEmailSubject(input: EmailVerificationRecoveryInput): Promise<VerifiedProviderSubject>;
   signInEmail(input: EmailCredentialInput): Promise<VerifiedProviderSubject>;
   beginApple(input: AppleAuthorizationInput): Promise<AppleAuthorizationStart>;
   reauthenticateAndBeginAppleLink(input: AppleLinkAuthorizationInput): Promise<AppleAuthorizationStart>;

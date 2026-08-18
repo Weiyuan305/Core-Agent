@@ -22,6 +22,7 @@ const migrationsDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", 
 const now = new Date("2026-08-14T04:00:00.000Z");
 const emailHmacKey = Buffer.from("task4-email-hmac-key-material-v1", "utf8");
 let identityDb: Kysely<RuntimeDatabase>;
+let identityConnectionString: string;
 
 type CreateCompany = (
   dependencies: Record<string, unknown>, context: Record<string, unknown>, command: Record<string, unknown>,
@@ -139,7 +140,8 @@ test.before(async () => {
   const target = new URL(databaseUrl);
   target.username = "core_agent_identity";
   target.password = password;
-  identityDb = createRuntimeDatabase(new Pool({ connectionString: target.toString(), max: 6 }));
+  identityConnectionString = target.toString();
+  identityDb = createRuntimeDatabase(new Pool({ connectionString: identityConnectionString, max: 6 }));
 });
 
 test.beforeEach(resetDatabase);
@@ -287,6 +289,133 @@ test("consultant grant/remove contracts version Membership and Profile across cr
   const loadActorIdentityAuthority = requiredFunction<LoadAuthority>("loadActorIdentityAuthority");
   const authority = await identityDb.transaction().execute((trx) => loadActorIdentityAuthority(trx, "actor_target_admin"));
   assert.deepEqual(authority.memberships.map((membership) => membership.membershipId), ["membership_target"]);
+});
+
+test("caller-owned role mutations use only their outer serializable transaction and one snapshot", async () => {
+  const grantConsultantRole = requiredFunction<RoleCommand>("grantConsultantRole");
+  const removeConsultantRole = requiredFunction<RoleCommand>("removeConsultantRole");
+  const suspendMembership = requiredFunction<RoleCommand>("suspendMembership");
+  const withDatabaseTransactionRetry = requiredFunction<(
+    db: Kysely<RuntimeDatabase>, work: (trx: Transaction<RuntimeDatabase>) => Promise<unknown>,
+    options: { isolationLevel: "serializable" },
+  ) => Promise<unknown>>("withDatabaseTransactionRetry");
+  await seedActor("actor_outer_grant_admin");
+  await seedActor("actor_outer_remove_admin");
+  await seedActor("actor_outer_suspend_admin");
+  await seedActor("actor_outer_grant");
+  await seedActor("actor_outer_remove");
+  await seedActor("actor_outer_suspend");
+  for (const tenantId of ["tenant_outer_grant", "tenant_outer_remove", "tenant_outer_suspend"]) await seedTenant(tenantId);
+  await seedMembership({ tenantId: "tenant_outer_grant", membershipId: "membership_outer_grant_admin", actorId: "actor_outer_grant_admin", roles: ["admin"] });
+  await seedMembership({ tenantId: "tenant_outer_remove", membershipId: "membership_outer_remove_admin", actorId: "actor_outer_remove_admin", roles: ["admin"] });
+  await seedMembership({ tenantId: "tenant_outer_suspend", membershipId: "membership_outer_suspend_admin", actorId: "actor_outer_suspend_admin", roles: ["admin"] });
+  await seedMembership({ tenantId: "tenant_outer_grant", membershipId: "membership_outer_grant", actorId: "actor_outer_grant", roles: ["admin"] });
+  await seedMembership({ tenantId: "tenant_outer_remove", membershipId: "membership_outer_remove", actorId: "actor_outer_remove", roles: ["admin", "consultant"] });
+  await seedMembership({ tenantId: "tenant_outer_suspend", membershipId: "membership_outer_suspend", actorId: "actor_outer_suspend", roles: ["admin"] });
+  const removeProfileId = `profile_consultant_${createHash("sha256").update("actor_outer_remove:tenant_outer_remove").digest("hex").slice(0, 32)}`;
+  await identityDb.insertInto("profiles").values({
+    tenant_id: "tenant_outer_remove", profile_id: removeProfileId, schema_version: 1, resource_version: 1,
+    owner_actor_id: "actor_outer_remove", profile_kind: "consultant", hermes_profile_ref: `hermes_${removeProfileId}`,
+    description: "Outer transaction consultant", status: "active",
+    provider_config_id: "provider_consultant", model_id: "model_consultant", created_at: now, updated_at: now,
+  }).execute();
+
+  const outerPool = new Pool({
+    connectionString: identityConnectionString, max: 3, connectionTimeoutMillis: 250,
+  });
+  const outerDb = createRuntimeDatabase(outerPool);
+  const commands = [
+    {
+      tenantId: "tenant_outer_grant",
+      run: (transaction: Transaction<RuntimeDatabase>) => {
+        const payload = {
+          schema_version: 1, idempotency_key: "outer-role-grant", membership_id: "membership_outer_grant",
+          expected_membership_resource_version: 1, grant_mode: "create_profile",
+        };
+        return grantConsultantRole({ db: outerDb, transaction, consultantProfile: { providerConfigId: "provider_consultant", modelId: "model_consultant" } }, { tenantId: "tenant_outer_grant", actorId: "actor_outer_grant_admin", requestId: "request_outer_grant", traceId: "trace_outer_grant" }, {
+          ...payload, payload_hash: canonicalPayloadHash(payload),
+        });
+      },
+    },
+    {
+      tenantId: "tenant_outer_remove",
+      run: (transaction: Transaction<RuntimeDatabase>) => {
+        const payload = {
+          schema_version: 1, idempotency_key: "outer-role-remove", membership_id: "membership_outer_remove",
+          expected_membership_resource_version: 1, profile_id: removeProfileId, expected_profile_resource_version: 1,
+        };
+        return removeConsultantRole({ db: outerDb, transaction, consultantProfile: { providerConfigId: "provider_consultant", modelId: "model_consultant" } }, { tenantId: "tenant_outer_remove", actorId: "actor_outer_remove_admin", requestId: "request_outer_remove", traceId: "trace_outer_remove" }, {
+          ...payload, payload_hash: canonicalPayloadHash(payload),
+        });
+      },
+    },
+    {
+      tenantId: "tenant_outer_suspend",
+      run: (transaction: Transaction<RuntimeDatabase>) => {
+        const payload = {
+          schema_version: 1, idempotency_key: "outer-role-suspend", tenant_id: "tenant_outer_suspend",
+          membership_id: "membership_outer_suspend", expected_resource_version: 1,
+        };
+        return suspendMembership({ db: outerDb, transaction, consultantProfile: { providerConfigId: "provider_consultant", modelId: "model_consultant" } }, { tenantId: "tenant_outer_suspend", actorId: "actor_outer_suspend_admin", requestId: "request_outer_suspend", traceId: "trace_outer_suspend" }, {
+          ...payload, payload_hash: canonicalPayloadHash(payload),
+        });
+      },
+    },
+  ];
+  const transactionDbs = [outerDb, createRuntimeDatabase(outerPool), createRuntimeDatabase(outerPool)];
+  // Initialize each Kysely runtime driver before the barrier so driver startup
+  // is not mistaken for pool serialization.
+  for (const transactionDb of transactionDbs) {
+    await transactionDb.selectFrom("tenants").select("tenant_id").limit(1).execute();
+  }
+  let snapshotCount = 0;
+  let releaseSnapshots!: () => void;
+  const snapshotsReady = new Promise<void>((resolve) => { releaseSnapshots = resolve; });
+  let releaseFirstAttempts!: () => void;
+  const firstAttemptsReleased = new Promise<void>((resolve) => { releaseFirstAttempts = resolve; });
+  const attempts = commands.map(() => 0);
+  try {
+    const pending = commands.map(({ run, tenantId }, index) => withDatabaseTransactionRetry(
+      transactionDbs[index]!, async (transaction) => {
+        attempts[index]! += 1;
+        await transaction.selectFrom("tenants").select("tenant_id")
+          .where("tenant_id", "=", tenantId).executeTakeFirstOrThrow();
+        if (attempts[index] === 1) {
+          snapshotCount += 1;
+          if (snapshotCount === commands.length) releaseSnapshots();
+          await snapshotsReady;
+          await firstAttemptsReleased;
+        }
+        return run(transaction);
+      }, { isolationLevel: "serializable" }));
+    await Promise.race([
+      snapshotsReady,
+      ...pending.map((promise) => promise.then(
+        () => Promise.reject(new Error("outer transaction completed before the snapshot barrier")),
+        (error: unknown) => Promise.reject(error),
+      )),
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error(
+        `snapshot barrier timed out (${snapshotCount}/${commands.length}, pool=${outerPool.totalCount}/${outerPool.waitingCount})`,
+      )), 2_000)),
+    ]);
+    releaseFirstAttempts();
+    const results = await Promise.all(pending);
+    assert.equal(results.length, 3);
+    assert.deepEqual((await administratorPool.query(
+      "select membership_id, roles, status from memberships where membership_id like 'membership_outer_%' order by membership_id",
+    )).rows, [
+      { membership_id: "membership_outer_grant", roles: ["admin", "consultant"], status: "active" },
+      { membership_id: "membership_outer_grant_admin", roles: ["admin"], status: "active" },
+      { membership_id: "membership_outer_remove", roles: ["admin"], status: "active" },
+      { membership_id: "membership_outer_remove_admin", roles: ["admin"], status: "active" },
+      { membership_id: "membership_outer_suspend", roles: ["admin"], status: "suspended" },
+      { membership_id: "membership_outer_suspend_admin", roles: ["admin"], status: "active" },
+    ]);
+  } finally {
+    releaseSnapshots();
+    releaseFirstAttempts();
+    await outerDb.destroy();
+  }
 });
 
 test("customer administrators cannot mutate source platform Memberships", async () => {

@@ -88,13 +88,8 @@ export type PreparedEmailVerificationBinding = Omit<ConsumedEmailVerificationBin
 
 export type AdmittedEmailVerificationProviderAttempt =
   | { readonly kind: "in_progress" }
-  | {
-    readonly kind: "started" | "recovery";
-    readonly expectedProviderSubject: string;
-    readonly expectedNormalizedEmail: string;
-    readonly verificationStartedAt: string;
-    readonly recoveryNotAfter: string;
-  }
+  | { readonly kind: "started"; readonly expectedProviderSubject: string }
+  | { readonly kind: "recovery" }
   | { readonly kind: "verified"; readonly subject: VerifiedAuthSubjectInput };
 
 export interface ExpiredEmailVerificationTransaction {
@@ -682,30 +677,16 @@ function verificationProofHmac(
   return hmac(dependencies.hmacKey, "email-verification-proof-digest", verificationProofDigest);
 }
 
-async function pendingAttemptAuthority(
+async function pendingExpectedProviderSubject(
   dependencies: EmailVerificationTransactionDependencies,
   row: {
-    readonly binding_ciphertext: Uint8Array;
     readonly expected_provider_subject_ciphertext: Uint8Array | null;
     readonly expected_provider_subject_hmac: Uint8Array | null;
   },
-): Promise<{
-  readonly expectedProviderSubject: string;
-  readonly expectedNormalizedEmail: string;
-}> {
-  let bindingPlaintext: Uint8Array | undefined;
-  try {
-    bindingPlaintext = Uint8Array.from(await dependencies.protector.decrypt(row.binding_ciphertext));
-    const binding = parseBinding(bindingPlaintext);
-    return Object.freeze({
-      expectedProviderSubject: await decryptExpectedProviderSubject(
-        dependencies, row.expected_provider_subject_ciphertext, row.expected_provider_subject_hmac,
-      ),
-      expectedNormalizedEmail: binding.normalizedEmail,
-    });
-  } finally {
-    bindingPlaintext?.fill(0);
-  }
+): Promise<string> {
+  return decryptExpectedProviderSubject(
+    dependencies, row.expected_provider_subject_ciphertext, row.expected_provider_subject_hmac,
+  );
 }
 
 async function verifiedAttemptSubject(
@@ -757,7 +738,7 @@ export async function admitEmailVerificationProviderAttempt(
       return { kind: "verified", subject: await verifiedAttemptSubject(dependencies, row) };
     }
     if (row.provider_verification_attempt_count >= 5) invalidAuthority();
-    const authority = await pendingAttemptAuthority(dependencies, row);
+    const expectedProviderSubject = await pendingExpectedProviderSubject(dependencies, row);
     const proofHmac = verificationProofHmac(dependencies, input.verificationProofDigest);
     try {
       if (row.provider_verification_started_at === null) {
@@ -774,9 +755,7 @@ export async function admitEmailVerificationProviderAttempt(
           .where("provider_verification_status", "=", "pending").execute();
         return Object.freeze({
           kind: "started" as const,
-          ...authority,
-          verificationStartedAt: now.toISOString(),
-          recoveryNotAfter: now.toISOString(),
+          expectedProviderSubject,
         });
       }
       if (row.provider_verification_attempt_expires_at === null || row.provider_verification_proof_hmac === null) {
@@ -790,12 +769,7 @@ export async function admitEmailVerificationProviderAttempt(
         updated_at: now,
       }).where("email_verification_transaction_id", "=", input.verificationId)
         .where("provider_verification_status", "=", "pending").execute();
-      return Object.freeze({
-        kind: "recovery" as const,
-        ...authority,
-        verificationStartedAt: row.provider_verification_started_at.toISOString(),
-        recoveryNotAfter: now.toISOString(),
-      });
+      return Object.freeze({ kind: "recovery" as const });
     } finally {
       proofHmac.fill(0);
     }
@@ -805,38 +779,6 @@ export async function admitEmailVerificationProviderAttempt(
     : await execute(dependencies.transaction);
   if (result.kind === "expired") expiredAfterCommit();
   return result;
-}
-
-export async function readEmailVerificationProviderRecovery(
-  dependencies: EmailVerificationTransactionDependencies,
-  input: { readonly verificationId: string; readonly verificationProofDigest: string },
-): Promise<Exclude<AdmittedEmailVerificationProviderAttempt, { readonly kind: "in_progress" | "verified" }>> {
-  assertDependencies(dependencies);
-  assertVerificationAttemptInput(input);
-  const execute = async (trx: Transaction<RuntimeDatabase>) => {
-    const now = await databaseNow(dependencies, trx);
-    const row = await trx.selectFrom("email_verification_transactions").selectAll()
-      .where("email_verification_transaction_id", "=", input.verificationId).forUpdate().executeTakeFirst();
-    if (row === undefined || row.status !== "pending" || row.provider_start_status !== "finalized"
-      || row.provider_verification_status !== "pending" || row.provider_verification_started_at === null
-      || row.provider_verification_attempt_expires_at === null || row.provider_verification_proof_hmac === null
-      || now.getTime() >= row.expires_at.getTime()) invalidAuthority();
-    const proofHmac = verificationProofHmac(dependencies, input.verificationProofDigest);
-    try {
-      if (!timingSafeEqual(Buffer.from(row.provider_verification_proof_hmac), proofHmac)) invalidAuthority();
-    } finally {
-      proofHmac.fill(0);
-    }
-    return Object.freeze({
-      kind: "recovery" as const,
-      ...await pendingAttemptAuthority(dependencies, row),
-      verificationStartedAt: row.provider_verification_started_at.toISOString(),
-      recoveryNotAfter: now.toISOString(),
-    });
-  };
-  return dependencies.transaction === undefined
-    ? dependencies.db.transaction().execute(execute)
-    : execute(dependencies.transaction);
 }
 
 export async function releaseEmailVerificationProviderAttempt(
@@ -863,6 +805,53 @@ export async function releaseEmailVerificationProviderAttempt(
         updated_at: now,
       }).where("email_verification_transaction_id", "=", input.verificationId)
         .where("provider_verification_status", "=", "pending").execute();
+    } finally {
+      proofHmac.fill(0);
+    }
+  };
+  if (dependencies.transaction === undefined) await dependencies.db.transaction().execute(execute);
+  else await execute(dependencies.transaction);
+}
+
+/**
+ * An OTP provider call with an unknown outcome is never converted into proof by
+ * inspecting provider account metadata.  Commit one terminal scrub so a retry
+ * cannot attach an unrelated confirmation to this attempt.
+ */
+export async function terminalizeEmailVerificationProviderAttempt(
+  dependencies: EmailVerificationTransactionDependencies,
+  input: { readonly verificationId: string; readonly verificationProofDigest: string },
+): Promise<void> {
+  assertDependencies(dependencies);
+  assertVerificationAttemptInput(input);
+  const execute = async (trx: Transaction<RuntimeDatabase>): Promise<void> => {
+    const now = await databaseNow(dependencies, trx);
+    const row = await trx.selectFrom("email_verification_transactions")
+      .select(["status", "provider_verification_status", "provider_verification_proof_hmac"])
+      .where("email_verification_transaction_id", "=", input.verificationId).forUpdate().executeTakeFirst();
+    if (row === undefined || row.status !== "pending" || row.provider_verification_status !== "pending"
+      || row.provider_verification_proof_hmac === null) invalidAuthority();
+    const proofHmac = verificationProofHmac(dependencies, input.verificationProofDigest);
+    try {
+      if (!timingSafeEqual(Buffer.from(row.provider_verification_proof_hmac), proofHmac)) invalidAuthority();
+      await trx.updateTable("email_verification_transactions").set({
+        status: "expired",
+        normalized_email_hmac: Buffer.alloc(32),
+        binding_ciphertext: Buffer.alloc(33),
+        expected_provider_subject_hmac: null,
+        expected_provider_subject_ciphertext: null,
+        verified_provider_subject_hmac: null,
+        verified_subject_ciphertext: null,
+        provider_verification_status: "pending",
+        provider_verification_started_at: null,
+        provider_verification_attempt_expires_at: null,
+        provider_verification_proof_hmac: null,
+        provider_verified_at: null,
+        provider_start_status: "failed",
+        provider_start_finalized_at: null,
+        provider_start_failed_at: now,
+        updated_at: now,
+      }).where("email_verification_transaction_id", "=", input.verificationId).execute();
     } finally {
       proofHmac.fill(0);
     }
@@ -900,7 +889,6 @@ export async function checkpointEmailVerificationTransaction(
       dependencies, row.expected_provider_subject_ciphertext, row.expected_provider_subject_hmac,
     );
     const subject = input.verifiedSubject;
-    const subjectVerifiedAt = Date.parse(subject.verifiedAt);
     const expectedBytes = Buffer.from(expectedProviderSubject, "utf8");
     const observedBytes = Buffer.from(subject.providerSubject, "utf8");
     const emailHmac = hmac(dependencies.hmacKey, "email-verification-email", subject.normalizedEmail);
@@ -909,8 +897,7 @@ export async function checkpointEmailVerificationTransaction(
     let verifiedPlaintext: Buffer | undefined;
     let verifiedCiphertext: Uint8Array | undefined;
     try {
-      if (subjectVerifiedAt < row.provider_verification_started_at.getTime() || subjectVerifiedAt > now.getTime()
-        || expectedBytes.byteLength !== observedBytes.byteLength || !timingSafeEqual(expectedBytes, observedBytes)
+      if (expectedBytes.byteLength !== observedBytes.byteLength || !timingSafeEqual(expectedBytes, observedBytes)
         || !timingSafeEqual(Buffer.from(row.normalized_email_hmac), emailHmac)) invalidAuthority();
       bindingPlaintext = Uint8Array.from(await dependencies.protector.decrypt(row.binding_ciphertext));
       const binding = parseBinding(bindingPlaintext);

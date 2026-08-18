@@ -28,9 +28,9 @@ import {
   lockInvitationByDigest,
   lockInvitationBySecret,
   prepareEmailVerificationTransaction,
-  readEmailVerificationProviderRecovery,
   readInvitationBySecret,
   releaseEmailVerificationProviderAttempt,
+  terminalizeEmailVerificationProviderAttempt,
   registerB2c,
   registerInvitedIdentityForVerifiedInvitation,
   removeConsultantRole,
@@ -83,6 +83,30 @@ async function readManagedSecret(reference: string): Promise<Buffer> {
 function deriveKey(material: Uint8Array, purpose: string): Buffer {
   if (material.byteLength < 32) throw new Error("Identity Gateway key material is invalid");
   return createHmac("sha256", material).update(`core-agent:identity-gateway:${purpose}:v1`, "utf8").digest();
+}
+
+function durableSecretPayloadHash(
+  material: Uint8Array,
+  purpose: "email-sign-in" | "reauthenticate",
+  facts: Readonly<Record<string, unknown>>,
+  secretProof: Uint8Array | undefined,
+): string {
+  if (!(secretProof instanceof Uint8Array) || secretProof.byteLength < 8 || secretProof.byteLength > 4_096) {
+    throw new DomainError("INVALID_REQUEST", "Secret command binding is invalid");
+  }
+  const canonicalFacts = Buffer.from(canonicalPayloadHash(facts), "utf8");
+  const ownedSecret = Buffer.from(secretProof);
+  try {
+    return `sha256:${createHmac("sha256", material)
+      .update(`core-agent:identity-gateway:${purpose}:v1\0`, "utf8")
+      .update(canonicalFacts)
+      .update("\0", "utf8")
+      .update(ownedSecret)
+      .digest("hex")}`;
+  } finally {
+    canonicalFacts.fill(0);
+    ownedSecret.fill(0);
+  }
 }
 
 function aesProtector(key: Uint8Array, purpose: string): TransactionProtector {
@@ -563,11 +587,11 @@ function productionOperations(
     async admitEmailVerificationProviderAttempt(input) {
       return admitEmailVerificationProviderAttempt(verificationDependencies, input);
     },
-    async readEmailVerificationProviderRecovery(input) {
-      return readEmailVerificationProviderRecovery(verificationDependencies, input);
-    },
     async releaseEmailVerificationProviderAttempt(input) {
       await releaseEmailVerificationProviderAttempt(verificationDependencies, input);
+    },
+    async terminalizeEmailVerificationProviderAttempt(input) {
+      await terminalizeEmailVerificationProviderAttempt(verificationDependencies, input);
     },
     async checkpointEmailVerification(input) {
       await checkpointEmailVerificationTransaction(verificationDependencies, input);
@@ -703,6 +727,21 @@ function productionOperations(
     },
     async issueSession(subject, clientKind, deviceLabel, idempotency) {
       if (idempotency === undefined) throw new DomainError("INVALID_REQUEST", "Session issuance idempotency is required");
+      const durableIdempotency = idempotency.operation === "email_sign_in"
+        ? {
+          ...idempotency,
+          payloadHash: durableSecretPayloadHash(piiKey, "email-sign-in", {
+            schema_version: 1,
+            idempotency_key: idempotency.idempotencyKey,
+            public_payload_hash: idempotency.payloadHash,
+            provider: subject.provider,
+            provider_subject: subject.providerSubject,
+            client_kind: clientKind,
+            ...(deviceLabel === undefined ? {} : { device_label: deviceLabel }),
+          }, idempotency.secretProof),
+          secretProof: undefined,
+        }
+        : idempotency;
       return withDatabaseTransactionRetry(db, async (trx) => {
         let subjectRow = await trx.selectFrom("auth_subjects").select(["auth_subject_id", "actor_id", "provider_identity_kind"])
           .where("provider", "=", subject.provider).where("provider_subject", "=", subject.providerSubject)
@@ -742,8 +781,8 @@ function productionOperations(
         if (!(now instanceof Date) || !Number.isFinite(now.getTime())) throw new DomainError("INTERNAL_ERROR", "Session database clock is unavailable");
         const context = { tenantId: membership.tenant_id, trx };
         const admission = await beginIdempotentCommand(context, {
-          key: idempotency.idempotencyKey, payloadHash: idempotency.payloadHash,
-          operation: `identity.session.${idempotency.operation}`, now,
+          key: durableIdempotency.idempotencyKey, payloadHash: durableIdempotency.payloadHash,
+          operation: `identity.session.${durableIdempotency.operation}`, now,
           expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1_000),
         });
         if (admission.kind !== "acquired") {
@@ -756,8 +795,8 @@ function productionOperations(
         });
         const view = sessionView(issued.session as unknown as Record<string, unknown>, Number(actor.resource_version));
         await completeIdempotentCommand(context, {
-          key: idempotency.idempotencyKey, payloadHash: idempotency.payloadHash,
-          operation: `identity.session.${idempotency.operation}`, resultRef: String(view.session_id),
+          key: durableIdempotency.idempotencyKey, payloadHash: durableIdempotency.payloadHash,
+          operation: `identity.session.${durableIdempotency.operation}`, resultRef: String(view.session_id),
           response: { schema_version: 1, session_id: view.session_id }, updatedAt: now,
         });
         return { session: view, sessionSecret: issued.sessionSecret, ...(issued.csrfSecret === undefined ? {} : { csrfSecret: issued.csrfSecret }) };
@@ -819,6 +858,16 @@ function productionOperations(
         if (suppliedHash !== computedHash) {
           throw new DomainError("INVALID_REQUEST", "Reauthentication payload hash is invalid");
         }
+        const durablePayloadHash = durableSecretPayloadHash(piiKey, "reauthenticate", {
+          schema_version: payload.schema_version,
+          idempotency_key: payload.idempotency_key,
+          public_payload_hash: suppliedHash,
+          expected_resource_version: payload.expected_resource_version,
+          ...(payload.client_kind === undefined ? {} : { client_kind: payload.client_kind }),
+          actor_id: input.authority.actorId,
+          auth_subject_id: input.authority.authSubjectId,
+          session_id: input.authority.session.session_id,
+        }, input.secretProof);
         return withDatabaseTransactionRetry(db, async (trx) => {
           const tenant = await trx.selectFrom("memberships").select("tenant_id")
             .where("actor_id", "=", input.authority!.actorId).where("status", "=", "active")
@@ -829,7 +878,7 @@ function productionOperations(
           const context = { tenantId: tenant.tenant_id, trx };
           const operation = "identity.reauthenticate";
           const admission = await beginIdempotentCommand(context, {
-            key: payload.idempotency_key, payloadHash: computedHash, operation, now,
+            key: payload.idempotency_key, payloadHash: durablePayloadHash, operation, now,
             expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1_000),
           });
           if (admission.kind === "replay") return admission.response;
@@ -840,7 +889,7 @@ function productionOperations(
             expectedResourceVersion: payload.expected_resource_version,
           });
           await completeIdempotentCommand(context, {
-            key: payload.idempotency_key, payloadHash: computedHash, operation,
+            key: payload.idempotency_key, payloadHash: durablePayloadHash, operation,
             resultRef: String(input.authority!.session.session_id), response, updatedAt: now,
           });
           return response;

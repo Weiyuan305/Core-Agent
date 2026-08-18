@@ -539,12 +539,6 @@ test("Supabase signup uses the exact email callback and verification exchanges o
   };
   const provider = harness.provider as unknown as {
     verifyEmail?: (input: { verificationCode: string; expectedProviderSubject: string }) => Promise<unknown>;
-    recoverVerifiedEmailSubject?: (input: {
-      expectedProviderSubject: string;
-      expectedNormalizedEmail: string;
-      verificationStartedAt: string;
-      recoveryNotAfter: string;
-    }) => Promise<unknown>;
   };
   assert.equal(typeof provider.verifyEmail, "function");
   const verified = await provider.verifyEmail!({
@@ -561,80 +555,41 @@ test("Supabase signup uses the exact email callback and verification exchanges o
   assert.deepEqual(harness.methodCalls.find((call) => call.name === "verifyOtp")?.arguments, [
     { token_hash: "opaque-email-token-hash", type: "email" },
   ]);
-  assert.deepEqual(await provider.recoverVerifiedEmailSubject!({
-    expectedProviderSubject: signup.expectedProviderSubject,
-    expectedNormalizedEmail: "user@example.test",
-    verificationStartedAt: "2026-08-01T00:00:00.000Z",
-    recoveryNotAfter: "2026-08-01T00:00:00.000Z",
-  }), verified);
-  assert.deepEqual(harness.methodCalls.find((call) => call.name === "getUserById")?.arguments, [
-    signup.expectedProviderSubject,
-  ]);
-  assert.equal(harness.clientCalls.at(-1)?.key, serviceRoleKey);
+  assert.equal(harness.methodCalls.some((call) => call.name === "getUserById"), false);
   const signUp = harness.methodCalls.find((call) => call.name === "signUp")?.arguments[0] as { options?: { emailRedirectTo?: unknown } };
   assert.equal(signUp.options?.emailRedirectTo, "https://identity.example.test/auth/v1/email/verification");
   assert.equal(JSON.stringify(harness.methodCalls).includes(providerAccessToken), false);
 });
 
-test("Supabase email verification and recovery bind one exact expected provider subject", async () => {
+test("Supabase email verification exposes no cross-clock confirmation inspection recovery", () => {
+  const harness = createHarness();
+  assert.equal("recoverVerifiedEmailSubject" in harness.provider, false);
+  assert.equal(harness.methodCalls.some(({ name }) => name === "getUserById"), false);
+});
+
+test("Supabase email verification binds one exact expected provider subject without inspection", async () => {
   const harness = createHarness();
   const provider = harness.provider as unknown as {
     verifyEmail(input: { verificationCode: string; expectedProviderSubject: string }): Promise<unknown>;
-    recoverVerifiedEmailSubject(input: {
-      expectedProviderSubject: string;
-      expectedNormalizedEmail: string;
-      verificationStartedAt: string;
-      recoveryNotAfter: string;
-    }): Promise<unknown>;
   };
   await expectFailure(() => provider.verifyEmail({
     verificationCode: "opaque-email-token-hash",
     expectedProviderSubject: "different-provider-subject",
   }), "AUTH_CALLBACK_INVALID");
-  await expectFailure(() => provider.recoverVerifiedEmailSubject({
-    expectedProviderSubject: "",
-    expectedNormalizedEmail: "user@example.test",
-    verificationStartedAt: "2026-08-17T02:00:00.000Z",
-    recoveryNotAfter: "2026-08-17T02:00:01.000Z",
-  }), "AUTH_CALLBACK_INVALID");
+  assert.equal(harness.methodCalls.some((call) => call.name === "getUserById"), false);
 });
 
-test("Supabase recovery accepts only an own exact confirmation timestamp caused by the durable attempt", async () => {
-  const recovery = {
-    expectedProviderSubject: "provider-subject-1",
-    expectedNormalizedEmail: "user@example.test",
-    verificationStartedAt: "2026-08-17T02:00:00.000Z",
-    recoveryNotAfter: "2026-08-17T02:00:01.000Z",
-  };
-  const old = createHarness({
-    adminUser: user("email", recovery.expectedProviderSubject, "user@example.test", "2026-08-17T01:59:59.999Z"),
-  });
-  await expectFailure(() => old.provider.recoverVerifiedEmailSubject(recovery), "AUTH_CALLBACK_INVALID");
-
-  const current = createHarness({
+test("Supabase rejected or consumed OTP never falls back to account confirmation metadata", async () => {
+  const harness = createHarness({
     verifyOtpError: Object.freeze({ status: 403, code: "otp_expired" }),
-    adminUser: user("email", recovery.expectedProviderSubject, "USER@EXAMPLE.TEST", "2026-08-17T02:00:00.500Z"),
+    adminUser: user("email", "provider-subject-1", "USER@EXAMPLE.TEST", "2099-08-17T02:00:00.500Z"),
   });
-  await expectFailure(() => current.provider.verifyEmail({
+  await expectFailure(() => harness.provider.verifyEmail({
     verificationCode: "one-use-token-hash",
-    expectedProviderSubject: recovery.expectedProviderSubject,
+    expectedProviderSubject: "provider-subject-1",
   }), "AUTH_INVALID");
-  assert.deepEqual(await current.provider.recoverVerifiedEmailSubject(recovery), {
-    provider: "supabase",
-    providerSubject: recovery.expectedProviderSubject,
-    identityKind: "email_password",
-    normalizedEmail: recovery.expectedNormalizedEmail,
-    verifiedAt: "2026-08-17T02:00:00.500Z",
-  });
-
-  for (const adminUser of [
-    user("email", recovery.expectedProviderSubject, "other@example.test", "2026-08-17T02:00:00.500Z"),
-    user("email", recovery.expectedProviderSubject, "user@example.test", "2026-08-17T02:00:01.001Z"),
-    user("email", recovery.expectedProviderSubject, "user@example.test", "not-a-timestamp"),
-  ]) {
-    const invalid = createHarness({ adminUser });
-    await expectFailure(() => invalid.provider.recoverVerifiedEmailSubject(recovery), "AUTH_CALLBACK_INVALID");
-  }
+  assert.equal(harness.methodCalls.some((call) => call.name === "getUserById"), false);
+  assert.equal(harness.clientCalls.some((call) => call.key === serviceRoleKey), false);
 });
 
 test("Supabase provider-subject deletion is idempotent without reading a provider body", async () => {

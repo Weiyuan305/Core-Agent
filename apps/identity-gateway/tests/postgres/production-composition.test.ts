@@ -231,7 +231,7 @@ test("production composition atomically verifies email, registers Task 3, issues
       async reauthenticatePassword(input) {
         nativePasswordCalls += 1;
         assert.equal(input.email, verifiedSubject.normalizedEmail);
-        assert.equal(input.password, "native-current-password");
+        assert(["native-current-password", "changed-native-current-password"].includes(input.password));
         return verifiedSubject;
       },
       async reauthenticateAndBeginAppleLink(input) {
@@ -255,7 +255,6 @@ test("production composition atomically verifies email, registers Task 3, issues
         };
       },
       signUpEmail: async () => { throw new Error("unused provider method"); },
-      recoverVerifiedEmailSubject: async () => { throw new Error("unused provider method"); },
       verifyEmail: async () => { throw new Error("unused provider method"); },
       async signInEmail() { return verifiedSubject; },
       async beginApple() {
@@ -305,6 +304,37 @@ test("production composition atomically verifies email, registers Task 3, issues
       provider: nativeProvider,
       operations,
     });
+    const emailSignInFacts = {
+      schema_version: 1 as const, idempotency_key: "composition-email-signin-private-idempotency",
+      email: verifiedSubject.normalizedEmail, password: "composition-email-signin-password",
+      client_kind: "web" as const, device_label: "Private hash browser",
+    };
+    const emailSignInRequest = emailSignInPayload(emailSignInFacts);
+    const emailSignIn = await nativeApp.inject({
+      method: "POST", url: "/auth/v1/email/sign-in",
+      headers: { host: "identity.example.test", origin: "https://app.example.test", "content-type": "application/json" },
+      payload: emailSignInRequest,
+    });
+    assert.equal(emailSignIn.statusCode, 200, emailSignIn.body);
+    const storedSignInHash = String((await pool.query(
+      "select payload_hash from idempotency_records where idempotency_key = $1 and operation = 'identity.session.email_sign_in'",
+      [emailSignInFacts.idempotency_key],
+    )).rows[0]?.payload_hash);
+    assert.match(storedSignInHash, /^sha256:[a-f0-9]{64}$/u);
+    assert.notEqual(storedSignInHash, emailSignInRequest.payload_hash);
+    assert.notEqual(storedSignInHash, sensitiveDigest(emailSignInFacts.password));
+    const sessionsBeforeChangedSignIn = Number((await pool.query(
+      "select count(*)::int as count from core_sessions where actor_id = $1", [registered.actorId],
+    )).rows[0]?.count);
+    const changedEmailSignIn = await nativeApp.inject({
+      method: "POST", url: "/auth/v1/email/sign-in",
+      headers: { host: "identity.example.test", origin: "https://app.example.test", "content-type": "application/json" },
+      payload: emailSignInPayload({ ...emailSignInFacts, password: "composition-email-signin-password-changed" }),
+    });
+    assert.equal(changedEmailSignIn.statusCode, 409, changedEmailSignIn.body);
+    assert.equal(Number((await pool.query(
+      "select count(*)::int as count from core_sessions where actor_id = $1", [registered.actorId],
+    )).rows[0]?.count), sessionsBeforeChangedSignIn);
     const appleSignIn = async (idempotencyKey: string) => {
       const start = await nativeApp.inject({
         method: "POST", url: "/auth/v1/apple/start",
@@ -327,9 +357,14 @@ test("production composition atomically verifies email, registers Task 3, issues
         }),
       });
     };
+    const sessionsBeforeAppleSignIn = Number((await pool.query(
+      "select count(*)::int as count from core_sessions where actor_id = $1", [registered.actorId],
+    )).rows[0]?.count);
     const appleBeforeLink = await appleSignIn("composition-apple-before-link");
     assert.equal(appleBeforeLink.statusCode, 401, appleBeforeLink.body);
-    assert.equal((await pool.query("select count(*)::int as count from core_sessions where actor_id = $1", [registered.actorId])).rows[0]?.count, 1);
+    assert.equal(Number((await pool.query(
+      "select count(*)::int as count from core_sessions where actor_id = $1", [registered.actorId],
+    )).rows[0]?.count), sessionsBeforeAppleSignIn);
     const webAsNative = await nativeApp.inject({
       method: "POST", url: "/auth/v1/reauthenticate",
       headers: {
@@ -363,19 +398,27 @@ test("production composition atomically verifies email, registers Task 3, issues
       });
       assert.equal(mismatched.statusCode, 401, mismatched.body);
       assert.equal(nativePasswordCalls, clientKind === "iphone" ? 0 : 1);
+      const reauthenticationPayload = reauthenticationRequest({
+        schema_version: 1, idempotency_key: `composition-native-reauth-${clientKind}`,
+        expected_resource_version: 1, password: "native-current-password", client_kind: clientKind,
+      });
       const reauthentication = await nativeApp.inject({
         method: "POST", url: "/auth/v1/reauthenticate",
         headers: {
           host: "identity.example.test", authorization: `Bearer ${nativeSession.sessionSecret}`,
           "content-type": "application/json",
         },
-        payload: reauthenticationRequest({
-          schema_version: 1, idempotency_key: `composition-native-reauth-${clientKind}`,
-          expected_resource_version: 1, password: "native-current-password", client_kind: clientKind,
-        }),
+        payload: reauthenticationPayload,
       });
       assert.equal(reauthentication.statusCode, 200, reauthentication.body);
       assert.equal(nativePasswordCalls, clientKind === "iphone" ? 1 : 2);
+      const storedReauthenticationHash = String((await pool.query(
+        "select payload_hash from idempotency_records where idempotency_key = $1 and operation = 'identity.reauthenticate'",
+        [reauthenticationPayload.idempotency_key],
+      )).rows[0]?.payload_hash);
+      assert.match(storedReauthenticationHash, /^sha256:[a-f0-9]{64}$/u);
+      assert.notEqual(storedReauthenticationHash, reauthenticationPayload.payload_hash);
+      assert.notEqual(storedReauthenticationHash, sensitiveDigest(reauthenticationPayload.password));
       const mismatchedLink = await nativeApp.inject({
         method: "POST", url: "/auth/v1/apple/link/start",
         headers: {
@@ -430,6 +473,19 @@ test("production composition atomically verifies email, registers Task 3, issues
           "select count(*)::int as count, min(provider_identity_kind) as provider_identity_kind from auth_subjects where actor_id = $1",
           [registered.actorId],
         )).rows[0], { count: 1, provider_identity_kind: "email_password_apple" });
+      } else {
+        const changedReauthentication = await nativeApp.inject({
+          method: "POST", url: "/auth/v1/reauthenticate",
+          headers: {
+            host: "identity.example.test", authorization: `Bearer ${nativeSession.sessionSecret}`,
+            "content-type": "application/json",
+          },
+          payload: reauthenticationRequest({
+            schema_version: 1, idempotency_key: reauthenticationPayload.idempotency_key,
+            expected_resource_version: 1, password: "changed-native-current-password", client_kind: clientKind,
+          }),
+        });
+        assert.equal(changedReauthentication.statusCode, 409, changedReauthentication.body);
       }
     }
     const appleAfterLink = await appleSignIn("composition-apple-after-link");
@@ -622,16 +678,20 @@ test("production composition atomically verifies email, registers Task 3, issues
       ...reauthenticationPayload,
       payload_hash: canonicalPayloadHash(reauthenticationPayload),
     };
+    const directReauthenticationSecret = Buffer.from("direct-operation-proof", "utf8");
     const reauthenticated = await operations.executeAuthorityCommand({
       kind: "reauthenticate", authority, verifiedSubject, payload: reauthenticationCommand,
+      secretProof: directReauthenticationSecret,
     });
     const reauthenticationReplay = await operations.executeAuthorityCommand({
       kind: "reauthenticate", authority, verifiedSubject, payload: reauthenticationCommand,
+      secretProof: directReauthenticationSecret,
     });
     assert.deepEqual(reauthenticationReplay, reauthenticated);
     await assert.rejects(operations.executeAuthorityCommand({
       kind: "reauthenticate", authority, verifiedSubject,
       payload: { ...reauthenticationCommand, expected_resource_version: reauthenticationPayload.expected_resource_version + 1 },
+      secretProof: directReauthenticationSecret,
     }), /INVALID_REQUEST|IDEMPOTENCY_CONFLICT/u);
 
     const concurrentReauthenticationSession = await issueCoreSession({ db }, {
@@ -651,16 +711,21 @@ test("production composition atomically verifies email, registers Task 3, issues
       ...concurrentReauthenticationPayload,
       payload_hash: canonicalPayloadHash(concurrentReauthenticationPayload),
     };
+    const concurrentReauthenticationSecret = Buffer.from("direct-concurrent-proof", "utf8");
     const concurrentReauthentication = await Promise.all([
       operations.executeAuthorityCommand({
         kind: "reauthenticate", authority: concurrentReauthenticationAuthority,
         verifiedSubject, payload: concurrentReauthenticationCommand,
+        secretProof: concurrentReauthenticationSecret,
       }),
       operations.executeAuthorityCommand({
         kind: "reauthenticate", authority: concurrentReauthenticationAuthority,
         verifiedSubject, payload: concurrentReauthenticationCommand,
+        secretProof: concurrentReauthenticationSecret,
       }),
     ]);
+    directReauthenticationSecret.fill(0);
+    concurrentReauthenticationSecret.fill(0);
     assert.deepEqual(concurrentReauthentication[1], concurrentReauthentication[0]);
 
     await pool.query(`insert into platform_role_assignments (
@@ -924,6 +989,24 @@ test("production composition atomically verifies email, registers Task 3, issues
       normalizedEmail: "preconfirmed-before-attempt@example.test",
       verifiedAt: "2026-08-17T02:00:00.000Z",
     };
+    const ambiguousEmailSubjects = new Map<string, typeof onboardingSubject>([
+      ["ambiguous-lost-code", {
+        ...onboardingSubject, providerSubject: "provider_ambiguous_lost",
+        normalizedEmail: "ambiguous-lost@example.test",
+      }],
+      ["ambiguous-ahead-code", {
+        ...onboardingSubject, providerSubject: "provider_ambiguous_ahead",
+        normalizedEmail: "ambiguous-ahead@example.test", verifiedAt: "2099-01-01T00:00:00.000Z",
+      }],
+      ["ambiguous-behind-code", {
+        ...onboardingSubject, providerSubject: "provider_ambiguous_behind",
+        normalizedEmail: "ambiguous-behind@example.test", verifiedAt: "2000-01-01T00:00:00.000Z",
+      }],
+      ["ambiguous-unrelated-code", {
+        ...onboardingSubject, providerSubject: "provider_ambiguous_unrelated",
+        normalizedEmail: "ambiguous-unrelated@example.test", verifiedAt: "2000-01-01T00:00:00.000Z",
+      }],
+    ]);
     const appleSubjects = new Map<string, VerifiedProviderSubject>([
       ["apple-b2c-web-code", {
         ...onboardingSubject, providerSubject: "provider_apple_b2c_web",
@@ -965,10 +1048,8 @@ test("production composition atomically verifies email, registers Task 3, issues
       [checkpointRecoverySubject.normalizedEmail, checkpointRecoverySubject],
       [domainRetrySubject.normalizedEmail, domainRetrySubject],
       [preconfirmedSubject.normalizedEmail, preconfirmedSubject],
+      ...[...ambiguousEmailSubjects.values()].map((subject) => [subject.normalizedEmail, subject] as const),
       ...[...lateInvalidSubjects.values()].map((subject) => [subject.normalizedEmail, subject] as const),
-    ]);
-    const confirmedSubjects = new Map<string, typeof onboardingSubject>([
-      [preconfirmedSubject.providerSubject, preconfirmedSubject],
     ]);
     const usedVerificationCodes = new Set<string>();
     const appleCompletionCalls = new Map<string, number>();
@@ -983,35 +1064,24 @@ test("production composition atomically verifies email, registers Task 3, issues
         knownEmailSubjects.set(input.email, subject);
         return { kind: "verification_pending", expectedProviderSubject: subject.providerSubject };
       },
-      async recoverVerifiedEmailSubject(input) {
-        const subject = confirmedSubjects.get(input.expectedProviderSubject);
-        if (subject === undefined) throw new ProviderFailure("AUTH_EMAIL_UNVERIFIED");
-        const recovery = input as unknown as {
-          expectedNormalizedEmail?: string;
-          verificationStartedAt?: string;
-          recoveryNotAfter?: string;
-        };
-        if (subject.normalizedEmail !== recovery.expectedNormalizedEmail
-          || Date.parse(subject.verifiedAt) < Date.parse(String(recovery.verificationStartedAt))
-          || Date.parse(subject.verifiedAt) > Date.parse(String(recovery.recoveryNotAfter))) {
-          throw new ProviderFailure("AUTH_CALLBACK_INVALID");
-        }
-        return subject;
-      },
       async verifyEmail(input) {
         verificationCalls += 1;
         if (usedVerificationCodes.has(input.verificationCode)) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
-        const subject = lateInvalidSubjects.get(input.verificationCode)
+        const ambiguousSubject = ambiguousEmailSubjects.get(input.verificationCode);
+        const subject = ambiguousSubject ?? lateInvalidSubjects.get(input.verificationCode)
           ?? (input.verificationCode === "concurrent-verification-code" ? concurrentOnboardingSubject
             : input.verificationCode === "concurrent-callback-code" ? concurrentCallbackSubject
             : input.verificationCode === "checkpoint-recovery-code" ? checkpointRecoverySubject
               : input.verificationCode === "domain-retry-code" ? domainRetrySubject
                 : onboardingSubject);
         if (subject.providerSubject !== input.expectedProviderSubject) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+        if (ambiguousSubject !== undefined) {
+          usedVerificationCodes.add(input.verificationCode);
+          throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+        }
         const confirmedAt = (await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now;
         const verifiedSubject = { ...subject, verifiedAt: confirmedAt.toISOString() };
         usedVerificationCodes.add(input.verificationCode);
-        confirmedSubjects.set(subject.providerSubject, verifiedSubject);
         return verifiedSubject;
       },
       async signInEmail(input) {
@@ -1224,11 +1294,12 @@ test("production composition atomically verifies email, registers Task 3, issues
       where subject.provider_identity_kind = 'apple'
         and subject.provider_subject = any($1::text[])
         and membership.status = 'active'`, [[...appleSubjects.values()].map((subject) => subject.providerSubject)])).rows[0]?.count, 5);
-    const routeCompanyPayload = {
+    const routeCompanyFacts = {
       schema_version: 1, idempotency_key: "composition-route-company-once",
-      payload_hash: `sha256:${"9".repeat(64)}`, display_name: "Route One-Time Company",
+      display_name: "Route One-Time Company",
       administrator_email: "route-company-admin@example.test",
     };
+    const routeCompanyPayload = { ...routeCompanyFacts, payload_hash: canonicalPayloadHash(routeCompanyFacts) };
     const routeCompanyFirst = await onboardingApp.inject({
       method: "POST", url: "/auth/v1/companies", headers: managementHeaders,
       payload: routeCompanyPayload,
@@ -1244,7 +1315,10 @@ test("production composition atomically verifies email, registers Task 3, issues
       method: "POST", url: "/auth/v1/companies", headers: managementHeaders,
       payload: {
         schema_version: 1, idempotency_key: "composition-company",
-        payload_hash: `sha256:${"b".repeat(64)}`, display_name: "Composition Company",
+        payload_hash: canonicalPayloadHash({
+          schema_version: 1, idempotency_key: "composition-company",
+          display_name: "Composition Company", administrator_email: "admin@example.test",
+        }), display_name: "Composition Company",
         administrator_email: "admin@example.test",
       },
     });
@@ -1254,11 +1328,12 @@ test("production composition atomically verifies email, registers Task 3, issues
       cookie: `core_agent_session=${adminIssued.sessionSecret}; core_agent_csrf=${adminIssued.csrfSecret!}`,
       "x-core-agent-csrf": adminIssued.csrfSecret!,
     };
-    const routeInvitationPayload = {
+    const routeInvitationFacts = {
       schema_version: 1, idempotency_key: "composition-route-invitation-once",
-      payload_hash: `sha256:${"a".repeat(64)}`, tenant_id: company.tenant_id,
+      tenant_id: company.tenant_id,
       email: "route-invitee@example.test", role: "consultant",
     };
+    const routeInvitationPayload = { ...routeInvitationFacts, payload_hash: canonicalPayloadHash(routeInvitationFacts) };
     const routeInvitationFirst = await onboardingApp.inject({
       method: "POST", url: "/auth/v1/companies/members", headers: routeInvitationHeaders,
       payload: routeInvitationPayload,
@@ -1276,7 +1351,10 @@ test("production composition atomically verifies email, registers Task 3, issues
       },
       payload: {
         schema_version: 1, idempotency_key: "composition-member-invite",
-        payload_hash: `sha256:${"e".repeat(64)}`, tenant_id: company.tenant_id,
+        payload_hash: canonicalPayloadHash({
+          schema_version: 1, idempotency_key: "composition-member-invite",
+          tenant_id: company.tenant_id, email: inviteeEmail, role: "consultant",
+        }), tenant_id: company.tenant_id,
         email: inviteeEmail, role: "consultant",
       },
     });
@@ -1508,6 +1586,53 @@ test("production composition atomically verifies email, registers Task 3, issues
       [preconfirmedSubject.providerSubject],
     )).rows[0]?.count, 0);
 
+    for (const [verificationCode, ambiguousSubject] of ambiguousEmailSubjects) {
+      const startKey = `composition-${verificationCode}-start`;
+      const ambiguousStart = await onboardingApp.inject({
+        method: "POST", url: "/auth/v1/email/sign-up", headers: publicHeaders,
+        payload: {
+          schema_version: 1, idempotency_key: startKey,
+          payload_hash: canonicalEmailVerificationStartPayloadHash({
+            idempotencyKey: startKey, normalizedEmail: ambiguousSubject.normalizedEmail,
+            clientKind: "web", flowKind: "b2c",
+          }),
+          email: ambiguousSubject.normalizedEmail, password: "correct-horse-battery", client_kind: "web",
+        },
+      });
+      assert.equal(ambiguousStart.statusCode, 202, ambiguousStart.body);
+      const verificationId = String(ambiguousStart.json().verification_id);
+      const response = await onboardingApp.inject({
+        method: "POST", url: "/auth/v1/email/verification", headers: publicHeaders,
+        payload: emailVerificationRequest({
+          schema_version: 1, idempotency_key: `composition-${verificationCode}-complete`,
+          verification_id: verificationId, verification_code: verificationCode,
+        }),
+      });
+      assert.equal(response.statusCode, 401, `${verificationCode}: ${response.body}`);
+      assert.deepEqual((await pool.query(`select status, provider_start_status,
+        provider_verification_started_at, provider_verification_attempt_expires_at,
+        provider_verification_proof_hmac, expected_provider_subject_hmac,
+        expected_provider_subject_ciphertext, verified_subject_ciphertext,
+        encode(normalized_email_hmac, 'hex') as normalized_email_hmac_hex,
+        encode(binding_ciphertext, 'hex') as binding_ciphertext_hex
+        from email_verification_transactions where email_verification_transaction_id = $1`,
+      [verificationId])).rows[0], {
+        status: "expired", provider_start_status: "failed",
+        provider_verification_started_at: null, provider_verification_attempt_expires_at: null,
+        provider_verification_proof_hmac: null, expected_provider_subject_hmac: null,
+        expected_provider_subject_ciphertext: null, verified_subject_ciphertext: null,
+        normalized_email_hmac_hex: "00".repeat(32), binding_ciphertext_hex: "00".repeat(33),
+      });
+      assert.equal((await pool.query(
+        "select count(*)::int as count from auth_subjects where provider_subject = $1",
+        [ambiguousSubject.providerSubject],
+      )).rows[0]?.count, 0);
+      assert.equal((await pool.query(`select count(*)::int as count from core_sessions where actor_id in
+        (select actor_id from auth_subjects where provider_subject = $1)`, [ambiguousSubject.providerSubject])).rows[0]?.count, 0);
+    }
+    assert.equal("recoverVerifiedEmailSubject" in provider, false,
+      "unknown OTP outcomes must never expose email-confirmation inspection");
+
     let checkpointAttempts = 0;
     const checkpointRecoveryApp = await buildIdentityGatewayApp({
       config: onboardingConfig, provider, flowCookieKey: Buffer.alloc(32, 0x38), now: () => timestamp,
@@ -1556,16 +1681,32 @@ test("production composition atomically verifies email, registers Task 3, issues
       config: onboardingConfig, provider, flowCookieKey: Buffer.alloc(32, 0x38), now: () => timestamp,
       operations,
     });
-    const recoveredCheckpoint = await checkpointRestartApp.inject({
+    const terminalCheckpoint = await checkpointRestartApp.inject({
       method: "POST", url: "/auth/v1/email/verification", headers: publicHeaders,
       payload: checkpointVerification,
     });
-    assert.equal(recoveredCheckpoint.statusCode, 200, recoveredCheckpoint.body);
-    assert.equal(verificationCalls, verificationCallsBeforeCheckpointRecovery + 2, "restart recovery must retry the one-use OTP before exact inspection");
+    assert.equal(terminalCheckpoint.statusCode, 401, terminalCheckpoint.body);
+    assert.equal(verificationCalls, verificationCallsBeforeCheckpointRecovery + 1, "ambiguous restart must not retry or inspect the consumed OTP");
     assert.equal((await pool.query(
       "select count(*)::int as count from auth_subjects where provider_subject = $1",
       [checkpointRecoverySubject.providerSubject],
-    )).rows[0]?.count, 1);
+    )).rows[0]?.count, 0);
+    assert.deepEqual((await pool.query(`select status, provider_start_status,
+      provider_verification_status, provider_verification_started_at,
+      provider_verification_attempt_expires_at, provider_verification_proof_hmac,
+      verified_provider_subject_hmac, verified_subject_ciphertext, provider_verified_at,
+      expected_provider_subject_hmac, expected_provider_subject_ciphertext,
+      encode(normalized_email_hmac, 'hex') as normalized_email_hmac_hex,
+      encode(binding_ciphertext, 'hex') as binding_ciphertext_hex
+      from email_verification_transactions where email_verification_transaction_id = $1`,
+    [checkpointVerificationId])).rows[0], {
+      status: "expired", provider_start_status: "failed", provider_verification_status: "pending",
+      provider_verification_started_at: null, provider_verification_attempt_expires_at: null,
+      provider_verification_proof_hmac: null, verified_provider_subject_hmac: null,
+      verified_subject_ciphertext: null, provider_verified_at: null,
+      expected_provider_subject_hmac: null, expected_provider_subject_ciphertext: null,
+      normalized_email_hmac_hex: "00".repeat(32), binding_ciphertext_hex: "00".repeat(33),
+    });
     await checkpointRestartApp.close();
 
     const concurrentCallbackStartKey = "composition-concurrent-callback-start";
@@ -1665,6 +1806,7 @@ test("production composition atomically verifies email, registers Task 3, issues
 
     const concurrentFirstEmail = "concurrent-first-start@example.test";
     const concurrentFirstKey = "composition-concurrent-first-start";
+    await pool.query("delete from public_rate_limits where bucket_kind = 'signup'");
     const concurrentFirstPayload = {
       schema_version: 1 as const, idempotency_key: concurrentFirstKey,
       payload_hash: canonicalEmailVerificationStartPayloadHash({
@@ -1686,7 +1828,8 @@ test("production composition atomically verifies email, registers Task 3, issues
     ]);
     const concurrentFirstStatuses = concurrentFirstStarts.map(({ statusCode }) => statusCode);
     assert.equal(concurrentFirstStatuses.includes(202), true);
-    assert.equal(concurrentFirstStatuses.every((statusCode) => statusCode === 202 || statusCode === 503), true);
+    assert.equal(concurrentFirstStatuses.every((statusCode) => statusCode === 202 || statusCode === 503), true,
+      JSON.stringify(concurrentFirstStarts.map(({ statusCode, body }) => ({ statusCode, body }))));
     assert.equal(signUpCalls, startsBeforeConcurrentFirst + 1, "concurrent first start must invoke provider once");
     assert.equal((await pool.query(
       "select count(*)::int as count from email_verification_transactions where start_idempotency_key = $1",

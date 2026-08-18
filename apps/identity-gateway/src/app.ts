@@ -74,25 +74,14 @@ export interface IdentityGatewayOperations {
   }) => Promise<
     | { readonly kind: "in_progress" }
     | { readonly kind: "verified"; readonly subject: VerifiedProviderSubject }
-    | {
-      readonly kind: "started" | "recovery";
-      readonly expectedProviderSubject: string;
-      readonly expectedNormalizedEmail: string;
-      readonly verificationStartedAt: string;
-      readonly recoveryNotAfter: string;
-    }
+    | { readonly kind: "started"; readonly expectedProviderSubject: string }
+    | { readonly kind: "recovery" }
   >;
-  readonly readEmailVerificationProviderRecovery: (input: {
+  readonly releaseEmailVerificationProviderAttempt: (input: {
     readonly verificationId: string;
     readonly verificationProofDigest: string;
-  }) => Promise<{
-    readonly kind: "started" | "recovery";
-    readonly expectedProviderSubject: string;
-    readonly expectedNormalizedEmail: string;
-    readonly verificationStartedAt: string;
-    readonly recoveryNotAfter: string;
-  }>;
-  readonly releaseEmailVerificationProviderAttempt: (input: {
+  }) => Promise<void>;
+  readonly terminalizeEmailVerificationProviderAttempt: (input: {
     readonly verificationId: string;
     readonly verificationProofDigest: string;
   }) => Promise<void>;
@@ -131,6 +120,8 @@ export interface IdentityGatewayOperations {
       readonly idempotencyKey: string;
       readonly payloadHash: string;
       readonly operation: "email_sign_in" | "email_verification" | "apple_sign_in" | "invitation_accept";
+      /** Transient caller-owned bytes; implementations must not retain them. */
+      readonly secretProof?: Uint8Array;
     },
   ) => Promise<GatewayIssuedSession>;
   readonly authenticateSession: (input: {
@@ -154,6 +145,8 @@ export interface IdentityGatewayOperations {
     readonly authority?: GatewayAuthenticatedSession;
     readonly verifiedSubject?: VerifiedProviderSubject;
     readonly passwordResetObservation?: PasswordResetProviderObservation;
+    /** Transient caller-owned bytes; implementations must not retain them. */
+    readonly secretProof?: Uint8Array;
   }) => Promise<unknown>;
   /** Rechecks recent authority and performs the durable mutation in one caller-owned transaction. */
   readonly executeProtectedAuthorityCommand: (input: {

@@ -17,7 +17,12 @@ import {
 import type { FastifyInstance, FastifyRequest } from "fastify";
 
 import type { GatewayAuthenticatedSession, IdentityGatewayRouteDependencies } from "../app.js";
-import { assertClientTransport, requireMutationCredentials } from "../security.js";
+import {
+  assertClientTransport,
+  assertProtectedWritePayloadHash,
+  requireMutationCredentials,
+  type ProtectedWritePayloadKind,
+} from "../security.js";
 
 async function protectedAuthority(request: FastifyRequest, dependencies: IdentityGatewayRouteDependencies): Promise<GatewayAuthenticatedSession> {
   assertClientTransport(request, "web", dependencies.config);
@@ -26,17 +31,26 @@ async function protectedAuthority(request: FastifyRequest, dependencies: Identit
 }
 
 export async function registerCompanyRoutes(app: FastifyInstance, dependencies: IdentityGatewayRouteDependencies): Promise<void> {
-  const protectedRoute = (path: string, requestSchema: object, responseSchema: object, kind: string) => {
+  const protectedRoute = (
+    path: string,
+    requestSchema: object,
+    responseSchema: object,
+    kind: string,
+    writeKind?: ProtectedWritePayloadKind,
+  ) => {
     app.post(path, { schema: { body: requestSchema, response: { 200: responseSchema } } }, async (request) => {
+      if (writeKind !== undefined) {
+        assertProtectedWritePayloadHash(writeKind, request.body as Readonly<Record<string, unknown>>);
+      }
       const authority = await protectedAuthority(request, dependencies);
       return dependencies.operations.executeProtectedAuthorityCommand({ kind, payload: request.body, authority });
     });
   };
-  protectedRoute("/auth/v1/companies", CompanyCreateRequestSchema, CompanyCreateResponseSchema, "company_create");
-  protectedRoute("/auth/v1/companies/members", CompanyMemberInviteRequestSchema, CompanyMemberInviteResponseSchema, "company_member_invite");
+  protectedRoute("/auth/v1/companies", CompanyCreateRequestSchema, CompanyCreateResponseSchema, "company_create", "company_create");
+  protectedRoute("/auth/v1/companies/members", CompanyMemberInviteRequestSchema, CompanyMemberInviteResponseSchema, "company_member_invite", "company_member_invite");
   protectedRoute("/auth/v1/companies/members/list", CompanyMemberListRequestSchema, CompanyMemberListResponseSchema, "company_member_list");
-  protectedRoute("/auth/v1/companies/members/consultant/grant", CompanyConsultantRoleGrantRequestSchema, CompanyConsultantRoleGrantResponseSchema, "company_consultant_grant");
-  protectedRoute("/auth/v1/companies/members/consultant/remove", CompanyConsultantRoleRemoveRequestSchema, CompanyConsultantRoleRemoveResponseSchema, "company_consultant_remove");
-  protectedRoute("/auth/v1/companies/members/suspend", CompanyMemberSuspendRequestSchema, CompanyMemberSuspendResponseSchema, "company_member_suspend");
-  protectedRoute("/auth/v1/companies/members/revoke", CompanyMemberRevokeRequestSchema, CompanyMemberRevokeResponseSchema, "company_member_revoke");
+  protectedRoute("/auth/v1/companies/members/consultant/grant", CompanyConsultantRoleGrantRequestSchema, CompanyConsultantRoleGrantResponseSchema, "company_consultant_grant", "company_consultant_grant");
+  protectedRoute("/auth/v1/companies/members/consultant/remove", CompanyConsultantRoleRemoveRequestSchema, CompanyConsultantRoleRemoveResponseSchema, "company_consultant_remove", "company_consultant_remove");
+  protectedRoute("/auth/v1/companies/members/suspend", CompanyMemberSuspendRequestSchema, CompanyMemberSuspendResponseSchema, "company_member_suspend", "company_member_suspend");
+  protectedRoute("/auth/v1/companies/members/revoke", CompanyMemberRevokeRequestSchema, CompanyMemberRevokeResponseSchema, "company_member_revoke", "company_member_revoke");
 }

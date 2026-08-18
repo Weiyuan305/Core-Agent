@@ -250,7 +250,8 @@ async function prepareRoleMutation(
     };
   }) => Promise<ConsultantRoleGrantResult | ConsultantRoleRemoveResult>,
 ): Promise<ConsultantRoleGrantResult | ConsultantRoleRemoveResult> {
-  const discovered = await dependencies.db.selectFrom("memberships").select("actor_id")
+  const discoveryDb = dependencies.transaction ?? dependencies.db;
+  const discovered = await discoveryDb.selectFrom("memberships").select("actor_id")
     .where("tenant_id", "=", context.tenantId).where("membership_id", "=", membershipId).executeTakeFirst();
   if (discovered === undefined) throw new DomainError("RESOURCE_NOT_FOUND", "Membership was not found");
   const execute = async (trx: Transaction<RuntimeDatabase>) => {
@@ -435,7 +436,8 @@ export async function suspendMembership(
   assertContext(context);
   if (context.tenantId !== command.tenant_id) throw new DomainError("UNAUTHENTICATED", "Membership Tenant authority is invalid");
   assertPayloadHash(command);
-  const discovered = await dependencies.db.selectFrom("memberships").select("actor_id")
+  const discoveryDb = dependencies.transaction ?? dependencies.db;
+  const discovered = await discoveryDb.selectFrom("memberships").select("actor_id")
     .where("tenant_id", "=", command.tenant_id).where("membership_id", "=", command.membership_id).executeTakeFirst();
   if (discovered === undefined) throw new DomainError("RESOURCE_NOT_FOUND", "Membership was not found");
   const operation = "identity.membership.suspend";

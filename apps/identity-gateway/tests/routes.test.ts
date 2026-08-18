@@ -100,6 +100,7 @@ async function buildApp(
     readonly failFinalizedCompletion?: boolean;
     readonly failFirstCheckpoint?: boolean;
     readonly failFirstEmailCompletion?: boolean;
+    readonly failEmailVerificationUnknown?: boolean;
     readonly failAuthentication?: boolean;
     readonly failPasswordResetAuthority?: boolean;
     readonly rateLimitAfter?: number;
@@ -136,13 +137,12 @@ async function buildApp(
       },
       async verifyEmail(input: unknown) {
         calls.push({ name: "verifyEmail", input });
+        if (options.failEmailVerificationUnknown === true) {
+          providerEmailVerified = true;
+          throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+        }
         if (providerEmailVerified) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
         providerEmailVerified = true;
-        return subject;
-      },
-      async recoverVerifiedEmailSubject(input: unknown) {
-        calls.push({ name: "recoverVerifiedEmailSubject", input });
-        if (!providerEmailVerified) throw new ProviderFailure("AUTH_EMAIL_UNVERIFIED");
         return subject;
       },
       async signInEmail(input: unknown) { calls.push({ name: "signInEmail", input }); return subject; },
@@ -236,26 +236,14 @@ async function buildApp(
         calls.push({ name: "admitEmailVerificationProviderAttempt", input });
         const kind = providerAttemptStarted ? "recovery" as const : "started" as const;
         providerAttemptStarted = true;
-        return {
-          kind,
-          expectedProviderSubject: "subject_01",
-          expectedNormalizedEmail: "current@example.test",
-          verificationStartedAt: "2026-08-17T00:00:00.000Z",
-          recoveryNotAfter: "2026-08-17T00:01:00.000Z",
-        };
-      },
-      async readEmailVerificationProviderRecovery(input: unknown) {
-        calls.push({ name: "readEmailVerificationProviderRecovery", input });
-        return {
-          kind: "recovery" as const,
-          expectedProviderSubject: "subject_01",
-          expectedNormalizedEmail: "current@example.test",
-          verificationStartedAt: "2026-08-17T00:00:00.000Z",
-          recoveryNotAfter: "2026-08-17T00:01:00.000Z",
-        };
+        return kind === "started" ? { kind, expectedProviderSubject: "subject_01" } : { kind };
       },
       async releaseEmailVerificationProviderAttempt(input: unknown) {
         calls.push({ name: "releaseEmailVerificationProviderAttempt", input });
+        providerAttemptStarted = false;
+      },
+      async terminalizeEmailVerificationProviderAttempt(input: unknown) {
+        calls.push({ name: "terminalizeEmailVerificationProviderAttempt", input });
         providerAttemptStarted = false;
       },
       async checkpointEmailVerification(input: unknown) {
@@ -294,6 +282,7 @@ test("route sequencing rate-limits before provider and issues Session after prov
   assert.equal((calls[1]?.input as { email?: unknown }).email, "student@example.test");
   assert.deepEqual((calls[2]?.input as { idempotency?: unknown }).idempotency, {
     idempotencyKey: idem.idempotency_key, payloadHash: payload.payload_hash, operation: "email_sign_in",
+    secretProof: Buffer.alloc(Buffer.byteLength("correct-horse")),
   });
   await app.close();
 });
@@ -361,6 +350,10 @@ test("client rate identity ignores X-Forwarded-For by default and honors only an
 test("password reset normalizes one account identifier for rate limit and provider", async () => {
   const calls: Array<{ name: string; input: unknown }> = [];
   const app = await buildApp(calls);
+  const facts = {
+    schema_version: 1 as const, idempotency_key: idem.idempotency_key,
+    expected_resource_version: 1, invitation_id: "invitation_01", reason_code: "administrator_revoked",
+  };
   const response = await app.inject({
     method: "POST",
     url: "/auth/v1/password/reset/start",
@@ -922,7 +915,7 @@ test("email verification rejects a changed code under the same canonical hash be
   await app.close();
 });
 
-test("email verification recovers an OTP consumed before its durable checkpoint", async () => {
+test("email verification terminalizes an OTP consumed before its durable checkpoint without inspection", async () => {
   const calls: Array<{ name: string; input: unknown }> = [];
   const app = await buildApp(calls, { failFirstCheckpoint: true });
   const facts = {
@@ -941,17 +934,25 @@ test("email verification recovers an OTP consumed before its durable checkpoint"
     headers: { host, origin, "content-type": "application/json" }, payload,
   });
   assert.equal(first.statusCode, 500);
-  assert.equal(retry.statusCode, 200, retry.body);
-  assert.equal(calls.filter(({ name }) => name === "verifyEmail").length, 2);
-  assert.equal(calls.filter(({ name }) => name === "recoverVerifiedEmailSubject").length, 1);
-  const recovery = calls.find(({ name }) => name === "recoverVerifiedEmailSubject")?.input;
-  assert.deepEqual(recovery, {
-    expectedProviderSubject: "subject_01",
-    expectedNormalizedEmail: "current@example.test",
-    verificationStartedAt: "2026-08-17T00:00:00.000Z",
-    recoveryNotAfter: "2026-08-17T00:01:00.000Z",
+  assert.equal(retry.statusCode, 401, retry.body);
+  assert.equal(calls.filter(({ name }) => name === "verifyEmail").length, 1);
+  assert.equal(calls.filter(({ name }) => name === "terminalizeEmailVerificationProviderAttempt").length, 1);
+  assert.equal(calls.filter(({ name }) => name === "completeEmailVerification").length, 0);
+  await app.close();
+});
+
+test("email verification unknown provider outcome terminalizes without cross-clock inspection", async () => {
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const app = await buildApp(calls, { failEmailVerificationUnknown: true });
+  const response = await app.inject({
+    method: "POST", url: "/auth/v1/email/verification",
+    headers: { host, origin, "content-type": "application/json" },
+    payload: emailVerificationPayload("idem_email_unknown_outcome"),
   });
-  assert.equal(calls.filter(({ name }) => name === "completeEmailVerification").length, 1);
+  assert.equal(response.statusCode, 401, response.body);
+  assert.equal(calls.filter(({ name }) => name === "verifyEmail").length, 1);
+  assert.equal(calls.filter(({ name }) => name === "terminalizeEmailVerificationProviderAttempt").length, 1);
+  assert.equal(calls.some(({ name }) => name === "checkpointEmailVerification" || name === "completeEmailVerification"), false);
   await app.close();
 });
 
@@ -976,7 +977,6 @@ test("email verification skips its one-use provider proof after a durable checkp
   assert.equal(first.statusCode, 500);
   assert.equal(retry.statusCode, 200, retry.body);
   assert.equal(calls.filter(({ name }) => name === "verifyEmail").length, 1);
-  assert.equal(calls.filter(({ name }) => name === "recoverVerifiedEmailSubject").length, 0);
   assert.equal(calls.filter(({ name }) => name === "checkpointEmailVerification").length, 1);
   assert.equal(calls.filter(({ name }) => name === "completeEmailVerification").length, 2);
   await app.close();
@@ -1288,6 +1288,56 @@ test("existing invitation acceptance uses Core Session authority and rejects pro
   await app.close();
 });
 
+test("protected company and invitation writes reject malformed or changed public hashes before authority effects", async () => {
+  const cases = [
+    ["/auth/v1/companies", {
+      schema_version: 1, idempotency_key: "hash-company-create", display_name: "Hash Company",
+      administrator_email: "admin@hash-company.test",
+    }],
+    ["/auth/v1/companies/members", {
+      schema_version: 1, idempotency_key: "hash-company-invite", tenant_id: "tenant_hash",
+      email: "member@hash-company.test", role: "consultant",
+    }],
+    ["/auth/v1/companies/members/consultant/grant", {
+      schema_version: 1, idempotency_key: "hash-consultant-grant", membership_id: "membership_hash",
+      expected_membership_resource_version: 1, grant_mode: "create_profile",
+    }],
+    ["/auth/v1/companies/members/consultant/remove", {
+      schema_version: 1, idempotency_key: "hash-consultant-remove", membership_id: "membership_hash",
+      expected_membership_resource_version: 2, profile_id: "profile_hash", expected_profile_resource_version: 1,
+    }],
+    ["/auth/v1/companies/members/suspend", {
+      schema_version: 1, idempotency_key: "hash-member-suspend", membership_id: "membership_hash",
+      expected_resource_version: 1, reason_code: "administrator_suspended",
+    }],
+    ["/auth/v1/companies/members/revoke", {
+      schema_version: 1, idempotency_key: "hash-member-revoke", membership_id: "membership_hash",
+      expected_resource_version: 1, reason_code: "administrator_revoked",
+    }],
+    ["/auth/v1/invitations/revoke", {
+      schema_version: 1, idempotency_key: "hash-invitation-revoke", invitation_id: "invitation_hash",
+      expected_resource_version: 1, reason_code: "administrator_revoked",
+    }],
+  ] as const;
+  for (const [url, facts] of cases) {
+    for (const payloadHash of [`sha256:${"f".repeat(64)}`, "not-a-payload-hash"]) {
+      const calls: Array<{ name: string; input: unknown }> = [];
+      const app = await buildApp(calls);
+      const response = await app.inject({
+        method: "POST", url,
+        headers: {
+          host, origin, "content-type": "application/json", "x-core-agent-csrf": csrf,
+          cookie: `core_agent_session=${secret}; core_agent_csrf=${csrf}`,
+        },
+        payload: { ...facts, payload_hash: payloadHash },
+      });
+      assert.equal(response.statusCode, 400, `${url}: ${response.body}`);
+      assert.deepEqual(calls, [], `${url} must reject before Session or durable authority effects`);
+      await app.close();
+    }
+  }
+});
+
 test("email and invitation Session delivery fail closed when issued mode differs from validated mode", async () => {
   const calls: Array<{ name: string; input: unknown }> = [];
   const base = await buildApp(calls);
@@ -1439,11 +1489,15 @@ test("Web Apple invitation acceptance reconstructs provider authority from the f
 test("management mutation delegates one transaction-scoped reauth plus durable command", async () => {
   const calls: Array<{ name: string; input: unknown }> = [];
   const app = await buildApp(calls);
+  const facts = {
+    schema_version: 1 as const, idempotency_key: idem.idempotency_key,
+    expected_resource_version: 1, invitation_id: "invitation_01", reason_code: "administrator_revoked",
+  };
   const response = await app.inject({
     method: "POST",
     url: "/auth/v1/invitations/revoke",
     headers: { host, origin, "content-type": "application/json", cookie: `core_agent_session=${secret}; core_agent_csrf=${csrf}`, "x-core-agent-csrf": csrf },
-    payload: { ...idem, expected_resource_version: 1, invitation_id: "invitation_01", reason_code: "administrator_revoked" },
+    payload: { ...facts, payload_hash: canonicalPayloadHash(facts) },
   });
   assert.equal(response.statusCode, 200);
   assert.deepEqual(calls.map(({ name }) => name), ["authenticateSession", "executeProtectedAuthorityCommand"]);

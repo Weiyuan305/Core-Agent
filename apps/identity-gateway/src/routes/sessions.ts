@@ -118,11 +118,17 @@ export async function registerSessionRoutes(app: FastifyInstance, dependencies: 
     if (retryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", retryAfterMs);
     const email = await dependencies.operations.loadNormalizedEmail(authority);
     const subject = await dependencies.provider.reauthenticatePassword({ email, password: body.password });
-    return dependencies.operations.executeAuthorityCommand({
-      kind: "reauthenticate",
-      payload: { ...reauthenticationDurableFacts(body), payload_hash: body.payload_hash },
-      authority,
-      verifiedSubject: subject,
-    });
+    const secretProof = Buffer.from(body.password, "utf8");
+    try {
+      return await dependencies.operations.executeAuthorityCommand({
+        kind: "reauthenticate",
+        payload: { ...reauthenticationDurableFacts(body), payload_hash: body.payload_hash },
+        authority,
+        verifiedSubject: subject,
+        secretProof,
+      });
+    } finally {
+      secretProof.fill(0);
+    }
   });
 }

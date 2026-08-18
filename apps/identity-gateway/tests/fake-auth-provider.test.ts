@@ -106,31 +106,13 @@ test("deterministic fake implements the closed adapter and returns only verified
   });
   const verifier = provider as unknown as {
     verifyEmail?: (input: { verificationCode: string; expectedProviderSubject: string }) => Promise<unknown>;
-    recoverVerifiedEmailSubject?: (input: {
-      expectedProviderSubject: string;
-      expectedNormalizedEmail: string;
-      verificationStartedAt: string;
-      recoveryNotAfter: string;
-    }) => Promise<unknown>;
   };
   assert.equal(typeof verifier.verifyEmail, "function");
-  assert.equal(typeof verifier.recoverVerifiedEmailSubject, "function");
-  await expectFailure(() => verifier.recoverVerifiedEmailSubject!({
-    expectedProviderSubject: signup.expectedProviderSubject,
-    expectedNormalizedEmail: "new-user@example.test",
-    verificationStartedAt: "2026-08-17T01:02:03.000Z",
-    recoveryNotAfter: "2026-08-17T01:02:04.000Z",
-  }), "AUTH_EMAIL_UNVERIFIED");
+  assert.equal("recoverVerifiedEmailSubject" in provider, false);
   assert.equal((await verifier.verifyEmail!({
     verificationCode: "fake-email-verification-code",
     expectedProviderSubject: signup.expectedProviderSubject,
   }) as { normalizedEmail?: unknown }).normalizedEmail, "new-user@example.test");
-  assert.equal((await verifier.recoverVerifiedEmailSubject!({
-    expectedProviderSubject: signup.expectedProviderSubject,
-    expectedNormalizedEmail: "new-user@example.test",
-    verificationStartedAt: "2026-08-17T01:02:03.000Z",
-    recoveryNotAfter: "2026-08-17T01:02:04.000Z",
-  }) as { providerSubject?: unknown }).providerSubject, signup.expectedProviderSubject);
   await expectFailure(() => verifier.verifyEmail!({
     verificationCode: "fake-email-verification-code",
     expectedProviderSubject: signup.expectedProviderSubject,
@@ -184,12 +166,7 @@ test("deterministic fake timestamps email verification at successful OTP consump
     expectedProviderSubject: signup.expectedProviderSubject,
   });
   assert.equal(verified.verifiedAt, now.toISOString());
-  assert.equal((await provider.recoverVerifiedEmailSubject({
-    expectedProviderSubject: signup.expectedProviderSubject,
-    expectedNormalizedEmail: "new-user@example.test",
-    verificationStartedAt: attemptStartedAt,
-    recoveryNotAfter: "2026-08-17T01:03:02.000Z",
-  })).verifiedAt, now.toISOString());
+  assert(Date.parse(verified.verifiedAt) >= Date.parse(attemptStartedAt));
 });
 
 test("deterministic fake accepts inert own data properties without invoking getters or reflecting input", async () => {
