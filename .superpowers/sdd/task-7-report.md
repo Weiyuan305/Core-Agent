@@ -8,6 +8,137 @@
 - Original implementation commit: `2240a1bb0645e50a22204783f7cac5362924d906`
 - No merge or push was performed.
 
+## Round 3 review fixes (2026-08-18)
+
+Status: `DONE_WITH_CONCERNS`. All Round 3 Identity Gateway findings are fixed
+and the Task 7 package, real Fastify composition, schema-12, lock-order, and
+protected PostgreSQL phases pass. Two repeated, independently existing
+integration-harness teardown failures prevent the aggregate official wrapper
+from ending green; the same wrapper proves the complete identity PostgreSQL
+counts before reaching that later integration phase.
+
+### Delivered Round 3 corrections
+
+- `/auth/v1/reauthenticate` now accepts either exact Web cookie/CSRF transport or
+  exact native bearer Core Session transport. Native rejects Origin/cookies and
+  Web/native cross-mode sessions. Password verification remains provider-side;
+  the durable reauthentication command keeps expected-version CAS, canonical
+  payload binding, idempotency, database time, and Task 6 caller-owned locking.
+  Real Fastify/PostgreSQL covers both iPhone and macOS reauthentication followed
+  by native Apple-link start with no cookie output.
+- Schema 12 now stores encrypted/HMAC-bound expected provider subject and a
+  separate encrypted verified-subject checkpoint. Provider OTP verification is
+  one-use. A retry after domain rollback reads the checkpoint without a second
+  provider verification; a crash after provider verification but before the
+  checkpoint recovers only the exact confirmed expected subject through the
+  service-role inspection port, then checkpoints before domain composition.
+- Email verification, invitation acceptance, and reauthentication validate a
+  server-computed canonical hash over the released request facts before any
+  provider or durable effect. Password/code/proof changes under an old caller
+  hash fail closed. Sensitive values are represented only by the released hash
+  or one-way digest in durable commands.
+- Email first-start admission now uses `INSERT ... ON CONFLICT DO NOTHING` then
+  locks and classifies the exact row. Deterministic real PostgreSQL concurrency
+  proves one reservation, one provider call, one row, bounded in-progress/replay,
+  and no exposed `23505`.
+- The canonical invitation lock order is Actor -> Tenant -> Invitation for an
+  existing Actor and Tenant -> Invitation -> verification for unauthenticated
+  onboarding. Production acceptance no longer prelocks Invitation before Task 4.
+  Real barriers cover start-vs-complete, Fastify accept-vs-revoke, and runtime
+  accept-vs-revoke/replace without deadlock or partial graph. `replaceInvitation`
+  now honors the caller-owned transaction and rolls back with its caller.
+- The standalone unsafe invited-registration export is absent. The remaining
+  named helper requires the exact runtime-verified invitation id, Tenant, digest,
+  version, and role and rechecks active B2B authority before any identity write.
+  Direct bypass rolls back in real PostgreSQL.
+- Invitation registration preflights active B2B Tenant plus exact pending
+  invitation/email authority before provider signup or schema-12 admission.
+  Closed/B2C Tenant tests prove zero provider calls and zero transaction rows.
+- Enumeration coverage now warms each route and uses distinct delayed account,
+  invitation, and Tenant lookup failures rather than one immediate shared stub;
+  all map to the same bounded public class.
+
+### Round 3 RED evidence
+
+- `node --import tsx --test --test-name-pattern='changed code|native bearer|changed password|changed proof facts' apps/identity-gateway/tests/routes.test.ts`
+  — RED 0/4: changed email code, native reauthentication, changed password, and
+  changed invitation proof were not all enforced before provider/authority work.
+- Focused fake-provider email recovery was RED 0/1 because signup returned no
+  expected provider subject. Focused Supabase recovery was RED 0/2 because the
+  adapter had no exact service-role recovery path and accepted no expected-subject
+  binding.
+- `packages/runtime-core/tests/email-verification-transactions.test.ts` concurrent
+  first-start focus was RED 0/1: one reservation plus seven raw PostgreSQL `23505`
+  failures exposed the select-then-insert race.
+- The invited-registration export/direct-bypass focus was RED before the unsafe
+  root export was removed and exact verified-invitation dependency was required.
+- Caller-owned replacement RED was 0/1: an outer rollback left the old invitation
+  `replaced` and committed its replacement, proving `replaceInvitation` ignored
+  the caller transaction.
+- The final real Fastify/PostgreSQL existing-accept lock-order barrier was RED
+  0/1: an admin revoke timed out while acceptance held Invitation and waited for
+  the externally locked Actor. Removing the server prelock made the same barrier
+  green while retaining the public one-time Session replay conflict.
+
+### Round 3 focused and real-boundary GREEN evidence
+
+- Route canonical/native focus: 4/4. Email verification focus: 5/5.
+  Deterministic fake recovery: 1/1. Supabase exact-subject recovery: 2/2.
+- `packages/runtime-core/tests/email-verification-transactions.test.ts` — 3/3
+  against disposable PostgreSQL, including restart, expiry, verified checkpoint,
+  exact one-time consumption, and concurrent first admission.
+- Invited-registration export/bypass PostgreSQL focus — 1/1. Invitation
+  caller-owned rollback and accept-vs-revoke/replace barriers — 2/2.
+- `apps/identity-gateway/tests/postgres/production-composition.test.ts` — 1/1.
+  The real Fastify + production composition covers native reauth/link, one-use OTP
+  recovery and checkpoint retry, active-B2B preflight, concurrent first starts,
+  B2B onboarding, invalid/replay matrices, start-vs-complete, existing
+  accept-vs-revoke, protected Task 4 mutation, and one-time Session settlement.
+- Trust-only full Runtime Core PostgreSQL observed 338 total / 337 pass / 1
+  protected-role-bootstrap assertion because
+  `CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE` was intentionally absent. Both
+  protected official runs passed Runtime Core PostgreSQL 338, Identity Gateway
+  PostgreSQL 1, and Control Plane API PostgreSQL 14 before later integration
+  teardown. This includes fresh -> 12, schema 10 -> 12, schema 11 -> 12,
+  dirty-schema-11 reconvergence, exact ACL/catalog/rollback, restart, replay,
+  expiry, and concurrency.
+
+### Final Round 3 verification
+
+- `npm run check -w @core-agent/contracts` — PASS 180/180; 85 valid and 11
+  invalid fixtures; Contracts 0.6.0 current release is compatible.
+- `npm run check -w @core-agent/runtime-core` — PASS build and 82/82.
+- `npm run check -w @core-agent/identity-gateway` — PASS build and 79/79.
+- `npm run test:unit` with local socket permission — PASS: Runtime 192/192,
+  Contracts 180/180, Runtime Core 82/82, Identity Gateway 79/79, Web 129/129 in
+  9 files.
+- `npm run compat:history -w @core-agent/contracts -- --base e7624fe0425ff470b646f8322254d5e9e3857da8`
+  — PASS; accepted 0.5.0 is byte-untouched.
+- Official `npm run test:runtime:database-ci-equivalent` was run twice from fresh
+  disposable state. Run 1: 2/3 in 228012.898541 ms; all 93 integration behavior
+  tests passed but unchanged `agent-run.test.ts` after-hook database drop failed.
+  Run 2: 2/3 in 208763.848542 ms; the same drop failure repeated and unchanged
+  `harness-cleanup.test.ts` force-termination cleanup also failed. On both runs,
+  the complete protected identity PostgreSQL counts above passed and injected
+  failure/output-leak cleanup scenarios passed. No third blind retry was made.
+- Root `npm run check` passes Contracts, Runtime Core, Identity Gateway, and
+  Control Plane API 17/17, then stops only at untouched Worker
+  `src/main.ts:60,129` TS2345 `project_platform_memberships` dispatcher errors.
+  `npm run test:runtime:database-auth-topology` is consequently 0/1 at that same
+  Worker Docker build before topology execution. These files have no Task 7 diff.
+- Exact pins: Fastify 5.11.2, `@fastify/cookie` 11.1.2, Supabase JS 2.112.2,
+  Contracts 0.6.0. `verify-no-secret`, `git diff --check`, gateway log-call scan,
+  protected historical-file diff, and Docker/filesystem residual scans pass.
+  All official and local disposable containers, volumes, networks, and temporary
+  credential directories are absent.
+- SHA-256: 010
+  `eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381`;
+  011 `fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393`;
+  amended 012 `734a609cd7fb0eee84727820fc562b791ea48bba2fcad0494396bd33f8aaeb45`.
+- Round 3 implementation commit:
+  `3a5631da34d28be247a69639c01255c04a03e54a`.
+  No merge or push was performed.
+
 ## Delivered
 
 - Added the Fastify 5.11.2 public Identity Gateway and all approved `/auth/v1`
