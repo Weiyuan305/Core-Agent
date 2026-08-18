@@ -8,6 +8,117 @@
 - Original implementation commit: `2240a1bb0645e50a22204783f7cac5362924d906`
 - No merge or push was performed.
 
+## Round 7 review fixes (2026-08-18)
+
+Status: `DONE_WITH_CONCERNS`. All Round 7 findings are implemented and verified
+through the public Fastify boundary, installed Supabase 2.112.2 adapter boundary,
+and disposable PostgreSQL composition. The only remaining repository gates are
+still stopped by the unchanged Control Plane Worker compile defect described below.
+
+### Delivered Round 7 corrections
+
+- Session issuance now checks the verified authentication method against the
+  active stored Core identity before idempotency admission or Session mutation.
+  Password verification accepts only `email_password` or
+  `email_password_apple`; Apple verification accepts only `apple` or the combined
+  kind. Exact provider, subject, Actor, and active-state checks remain mandatory.
+- Password reset has separate database-clock authorization and settlement
+  deadlines. Provider exchange remains forbidden after the original authorization
+  expiry, while an already durable `provider_completed` checkpoint may replay only
+  Core Session revocation plus transaction consumption until the exact 30-minute
+  settlement boundary. The signed recovery Cookie authenticates both deadlines.
+- Reset start prebinds the exact expected Core provider subject without changing
+  public enumeration behavior. Completion persists `provider_started`, canonical
+  proof hash, attempt time, and settlement deadline before code exchange. Only the
+  caller that atomically acquires that admission may exchange/update; a concurrent
+  loser performs inspection-only recovery and never repeats the provider effect.
+- Recovery accepts provider administration evidence only for the exact prebound
+  subject and only when the password-update timestamp is at or after the durable
+  attempt start, no later than database now, and within settlement. A crash before
+  password update cannot claim revocation and permits a new reset; a crash after
+  update but before checkpoint recovers, revokes every Core Session, and consumes
+  the transaction on retry/restart.
+- Every retryable public reset failure, including `AUTH_RATE_LIMITED` 429, retains
+  the exact recovery Cookie. Success and terminal 400/401 failures clear it.
+- The unmerged schema-12 OAuth state now stores the encrypted expected subject and
+  bounded settlement deadline and expires legacy schema-11 pending reset rows that
+  cannot satisfy the new binding. No password, code, raw subject, token, or Session
+  secret is persisted. Migrations 010/011 and Contracts 0.5 remain unchanged.
+- Self-review restored the accepted root compatibility snapshot for
+  `reauthentication-request`; native `client_kind` remains present only in the
+  additive current 0.6 release artifact, so compatibility history is append-only.
+
+### Round 7 RED evidence
+
+- Real Fastify/PostgreSQL method-compatibility assertions were RED because an
+  Apple callback could issue a Session against an email-password-only AuthSubject,
+  and a password subject could issue against an Apple-only row. The same suite also
+  proved the combined-kind and B2B control cases after the fix.
+- Reset PostgreSQL replay was RED with 401 after original authorization expiry even
+  though provider completion had committed. Exact settlement-boundary and restart
+  assertions also failed before schema 12 carried a separate deadline.
+- Route focus for retryable recovery was RED 0/1 because 429 cleared the Cookie.
+  Recovery-cookie security focus was RED 0/2 before both authenticated deadlines
+  were signed and parsed.
+- Supabase reset admission/prebinding focus was RED 0/2 before the exact expected
+  subject and `provider_started` ordering existed. Crash-before-update could not
+  safely distinguish an unused code, while crash-after-update had no causal
+  checkpoint recovery path.
+- Final concurrency self-review was genuine RED 0/1 (`Missing expected rejection`):
+  a caller that lost provider-start admission could still invoke the provider.
+  The store now returns explicit `acquired | existing`; only `acquired` performs
+  exchange/update, and the identical focus is GREEN 1/1.
+
+### Round 7 GREEN and final verification
+
+- `npm run check -w @core-agent/identity-gateway` — PASS: build and 95/95. This
+  includes the complete Supabase reset saga, one-use concurrent admission,
+  retryable 429 Cookie behavior, method compatibility, and real-boundary route
+  ordering tests.
+- `npm run check -w @core-agent/contracts` — PASS: 180/180, generated schemas and
+  cumulative compatibility clean, 86 valid fixtures and 11 invalid fixtures.
+  `npm run check -w @core-agent/runtime-core` — PASS: build and 83/83.
+- Real Fastify plus production composition on disposable PostgreSQL is PASS 1/1.
+  It proves email-only rejects Apple until protected same-subject CAS combines the
+  method, combined accepts Apple and password, Apple-only rejects password, and
+  invited B2B onboarding remains unchanged. It also proves provider-completed reset
+  settlement after authorization expiry, exact deadline failure, rollback/restart,
+  all-Session revocation, and transaction consumption.
+- Adapter tests prove crash before update leaves password and Core Sessions
+  unchanged and permits a new reset; crash after update/checkpoint failure recovers
+  from exact causal evidence; mismatched, old, future, and malformed evidence fail
+  closed. Concurrent first completion invokes the provider exactly once.
+- `npm run test:runtime:database-ci-equivalent` — PASS 3/3 in 142672 ms. Its
+  protected summaries assert Runtime Core PostgreSQL 339, Identity Gateway
+  PostgreSQL 1, Control Plane API PostgreSQL 14, integration 93, injected-failure
+  cleanup, and output-leak redaction. A direct trust-only run observed 338/339; its
+  sole failure was the intentionally unavailable password-authentication rejection
+  in a host-trust database. The official protected run covers that case.
+- `npm run compat:history -w @core-agent/contracts -- --base
+  e7624fe0425ff470b646f8322254d5e9e3857da8` — PASS after the accepted snapshot
+  restoration was committed. `git diff --check`, sentinel secret scan, forbidden
+  gateway log scan, Contracts 0.5/010/011 base diffs, and exact pin checks pass.
+  Fastify 5.11.2, Cookie 11.1.2, Supabase 2.112.2, and Contracts 0.6.0 are exact.
+  Final exact label scans found zero database-CI containers, volumes, or networks;
+  the disposable Round 7 PostgreSQL container and protected temporary password
+  file were removed.
+- SHA-256 remains 010
+  `eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381`;
+  011 `fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393`;
+  amended unmerged 012 is
+  `663e23fedca217cce340316229c50dd6b507caf5104815946f090c2e281f3980`.
+
+### Remaining independent concern and commit
+
+- Root `npm run check` reaches the Task 7 packages and API, then fails only at the
+  untouched `apps/control-plane-worker/src/main.ts:60,129` with two TS2345 errors
+  for the unhandled `project_platform_memberships` claimed-job variant.
+  `npm run test:runtime:database-auth-topology` stops before topology execution at
+  the same Worker image build. No Task 7 diff touches Worker or the harness.
+- Round 7 implementation commit:
+  `97078db1df594a573259f51bea2ca50c01467378`.
+- No merge or push was performed.
+
 ## Round 6 review fixes (2026-08-18)
 
 Status: `DONE_WITH_CONCERNS`. All Round 6 gateway findings are implemented and
