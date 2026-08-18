@@ -7,7 +7,7 @@
 - Base: `e7624fe0425ff470b646f8322254d5e9e3857da8`
 - Brief: `.superpowers/sdd/task-7-brief.md`
 - Baseline: Contracts 179/179 with fixtures 84/11; Identity Gateway 28/28.
-- Current phase: Round 21 native Apple link provider-state validation implemented and verified;
+- Current phase: Round 22 closed Apple start responses and final authorization-URL bounds implemented and verified;
   ready for cumulative parent review.
 - User-approved amendment: forward-only schema 12 adds durable encrypted
   email-verification/start-idempotency authority; Entitlement reservation moved to
@@ -16,9 +16,9 @@
   server-derived authority; Task 6 same-transaction guard for protected mutation;
   provider effects outside automatically retried transactions; Task 9 deletion
   explicitly unavailable; no provider or internal-detail leakage.
-- Result: Contracts 0.6.0 180/180 with fixtures 86/11; Runtime Core 83/83;
-  Identity Gateway 124/124; real Fastify plus pinned Supabase adapter and PostgreSQL
-  production composition 2/2. The Round 21 official CI-equivalent is fully green
+- Result: Contracts 0.6.0 182/182 with fixtures 87/11; Runtime Core 83/83;
+  Identity Gateway 127/127; real Fastify plus pinned Supabase adapter and PostgreSQL
+  production composition 2/2. The Round 22 official CI-equivalent is fully green
   3/3 and accepted Runtime Core 344 + Gateway 2 + API 14 + integration 93.
 - Concern: the untouched Control Plane Worker still has the two existing
   `project_platform_memberships` TS2345 errors, so root check and
@@ -45,3 +45,4 @@
 - Round 19 implementation commit: `e24417eff`.
 - Round 20 implementation commit: `aab077094`.
 - Round 21 implementation commit: `67dbda57c`.
+- Round 22 implementation commit: `b2dde3d27`.

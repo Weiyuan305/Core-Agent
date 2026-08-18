@@ -8,6 +8,112 @@
 - Original implementation commit: `2240a1bb0645e50a22204783f7cac5362924d906`
 - No merge or push was performed.
 
+## Round 22 review fix (2026-08-19)
+
+### Outcome and boundary
+
+- Contracts 0.6.0 now publishes two distinct closed Apple start responses.
+  `AppleAuthorizationStartResponse` and `AppleIdentityLinkStartResponse` each
+  accept exactly a Web branch containing `schema_version` plus
+  `authorization_url`, or a native branch that additionally requires
+  `transaction_id` and `expires_at`. Partial native and additional fields fail.
+- Both `/auth/v1/apple/start` and `/auth/v1/apple/link/start` register their exact
+  200 response schema. Fastify serialization strips unapproved provider fields,
+  while a missing native field fails closed before a 200 response. Real inject
+  tests check sign-in/link and Web/native output against the exported Contracts.
+- The final provider authorization URL is bounded to 2,048 Unicode code points
+  and 2,048 UTF-8 bytes. The Gateway validates this before any HTTP 200 or flow
+  Cookie, and the Supabase adapter validates the final, fully mutated URL before
+  encrypting the completion envelope or calling `completeStart`. Replay metadata
+  is checked by the same bound.
+- A provider state can therefore remain syntactically valid at 4,096 Unicode code
+  points while the resulting percent-encoded URL safely fails with the calm
+  provider-unavailable response. The failed installed-SDK case retains only the
+  pre-provider durable reservation; it never becomes a completed OAuth start.
+- The compatibility checker now recognizes the sound additive case where an old
+  complete schema is preserved exactly as one branch of a new `anyOf`. Its focused
+  regression still leaves ordinary union narrowing and non-extensible union growth
+  checks intact. Contracts 0.5.0 and migrations 010/011 remain byte-identical.
+
+### Strict RED then GREEN
+
+- Contracts RED:
+  `node --import tsx --test packages/contracts/tests/public-auth.test.ts packages/contracts/tests/schema-generation.test.ts`
+  — 27 total / 24 pass / 3 fail. The old schema rejected the Web response and the
+  independent link-start response was absent from the export/registry.
+- Fastify RED:
+  `node --import tsx --test --test-name-pattern='Apple sign-in and link start serialize exact|Apple start response schemas reject missing|Apple start routes reject provider authorization' apps/identity-gateway/tests/routes.test.ts`
+  — 3 total / 0 pass / 3 fail. The link schema was absent, a missing native expiry
+  returned 200, and a provider URL above 2,048 returned 200.
+- Installed Supabase 2.112.2 RED:
+  `node --import tsx --test --test-name-pattern='installed Supabase 2.112.2 native Apple link validates proof syntax' apps/identity-gateway/tests/supabase-auth-provider.test.ts`
+  — 1 total / 0 pass / 1 fail with `Missing expected rejection` for the 2,049-byte
+  final authorization URL.
+- Compatibility RED:
+  `node --import tsx --test --test-name-pattern='allows a closed response object to become a union' packages/contracts/tests/compatibility.test.ts`
+  — 1 total / 0 pass / 1 fail with `union_narrowed`, despite the native schema
+  remaining an exact branch.
+- Focused GREEN: Contracts public auth 20/20; Contracts public plus registry 27/27;
+  Fastify response/URL focus 3/3; installed Supabase URL focus 1/1; compatibility
+  focus 1/1 and cumulative compatibility pass. The installed SDK boundary accepts
+  an exactly 2,048-character URL, rejects 2,049, and rejects a URL produced from
+  4,096 emoji state without completing its durable start.
+- The first full Gateway run was 127 total / 125 pass / 2 fail only because two
+  older tests still expected a 4,096-character/emoji start proof to yield an
+  oversized successful URL. They were updated to preserve 4,096 proof-parser and
+  Cookie-digest coverage while expecting the new final-URL boundary. No production
+  behavior was weakened; the final Gateway suite is 127/127.
+
+### Final verification and review
+
+- `npm run check -w @core-agent/contracts` — PASS: build and 182/182; generated
+  current schemas, 87 valid / 11 invalid fixtures, strict Ajv consumption, and
+  cumulative compatibility all pass. The current 0.6 release artifact contains
+  all 87 schemas, including the distinct link-start response.
+- `npm run check -w @core-agent/identity-gateway` — PASS: build and 127/127.
+- Protected `npm run test:unit` — PASS: Runtime 192/192, Contracts 182/182,
+  Runtime Core 83/83, Gateway 127/127, and Web 129/129 across nine files. The first
+  sandboxed attempt failed only because the sandbox denied its loopback/Unix test
+  listeners; the exact protected rerun passed.
+- Official `npm run test:runtime:database-ci-equivalent` — PASS 3/3 in
+  143,961.138292 ms. Its protected summaries validated Runtime Core PostgreSQL
+  344, Gateway PostgreSQL 2, API PostgreSQL 14, and integration 93. Injected
+  failure, output-leak rejection, cleanup, and the final zero container/volume/
+  network residual scan passed.
+- Post-implementation
+  `npm run compat:history -w @core-agent/contracts -- --base e7624fe0425ff470b646f8322254d5e9e3857da8`
+  — PASS. The pre-commit invocation correctly rejected the not-yet-committed final
+  0.6 manifest; the committed complete 87-schema release passes.
+- Exact pins remain Fastify 5.11.2, Cookie 11.1.2, Supabase JS/Auth JS 2.112.2,
+  and Contracts 0.6.0. The required official Supabase changelog scan found no
+  relevant Apple-link SDK breaking change.
+- `node scripts/verify-no-secret.mjs identity-auth-private-sentinel`, public-schema
+  forbidden-field scan, production log-call scan, and `git diff --check` pass.
+  Base diffs for migrations 010/011, Contracts 0.5.0, and the Worker are empty.
+  SHA-256 remains 010
+  `eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381`,
+  011 `fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393`,
+  and 012 `2e7a7d0b8f910ff5253ace5dff1f0cc242224ec432e75621f15f57d93d14af12`.
+- Self-review confirms Web never receives transaction/expiry authority in JSON,
+  native receives the complete required tuple, missing fields cannot serialize as
+  success, and neither an oversized URL nor its provider state appears in public
+  errors or logs.
+
+### Independent concern, files, and commit
+
+- Root `npm run check` again passes Contracts, Runtime Core, Gateway, and API 17/17,
+  then stops only at the unchanged Worker `src/main.ts:60,129` TS2345
+  `project_platform_memberships` dispatcher mismatch. The topology gate likewise
+  remains 0/1 at that Worker image build and cleans every exact resource. The
+  official Task 7 database gate above is fully green; Round 22 does not touch the
+  Worker or database schema.
+- Production files: Contracts public auth/registry/current 0.6 artifacts,
+  compatibility checker, Gateway Apple routes/proof helper/provider interface, and
+  the Supabase adapter. Tests cover Contracts, Fastify injection, security Cookie
+  roundtrip, and installed Supabase fake-fetch behavior.
+- Round 22 implementation commit: `b2dde3d27`
+  (`fix(identity): close Apple start responses`). No merge or push occurred.
+
 ## Round 21 review fix (2026-08-19)
 
 ### Outcome and boundary
