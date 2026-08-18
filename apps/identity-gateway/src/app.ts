@@ -54,17 +54,25 @@ export interface IdentityGatewayOperations {
   }) => Promise<{ readonly verificationId: string; readonly kind: "reserved" | "in_progress" | "finalized_replay" }>;
   readonly finalizeEmailVerificationStart: (input: {
     readonly verificationId: string;
-    readonly outcome: "finalized" | "failed";
+  } & (
+    | { readonly outcome: "failed" }
+    | { readonly outcome: "finalized"; readonly expectedProviderSubject: string }
+  )) => Promise<void>;
+  readonly checkpointEmailVerification: (input: {
+    readonly verificationId: string;
+    readonly verifiedSubject: VerifiedProviderSubject;
   }) => Promise<void>;
   readonly prepareEmailVerification: (input: {
     readonly verificationId: string;
   }) => Promise<{
     readonly clientKind: ProviderClientKind;
     readonly deviceLabel?: string;
+    readonly providerVerification:
+      | { readonly kind: "pending"; readonly expectedProviderSubject: string }
+      | { readonly kind: "verified"; readonly subject: VerifiedProviderSubject };
   }>;
   readonly completeEmailVerification: (input: {
     readonly verificationId: string;
-    readonly verifiedSubject: VerifiedProviderSubject;
     readonly idempotencyKey: string;
     readonly payloadHash: string;
   }) => Promise<{

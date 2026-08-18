@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { createHash } from "node:crypto";
+
+import { canonicalPayloadHash } from "@core-agent/runtime-core";
 import Fastify, { type FastifyInstance } from "fastify";
 
 import { ProviderFailure } from "../src/providers/provider-errors.js";
@@ -12,9 +15,55 @@ const secret = "s".repeat(43);
 const csrf = "c".repeat(43);
 const idem = { schema_version: 1, idempotency_key: "idem_01", payload_hash: `sha256:${"a".repeat(64)}` };
 
+function digest(value: string): string {
+  return `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}`;
+}
+
+function emailVerificationPayload(idempotencyKey = idem.idempotency_key) {
+  const facts = {
+    schema_version: 1 as const,
+    idempotency_key: idempotencyKey,
+    verification_id: "verification_01",
+    verification_code: "opaque-email-token-hash",
+  };
+  return { ...facts, payload_hash: canonicalPayloadHash(facts) };
+}
+
+function invitationAcceptancePayload<T extends {
+  schema_version: 1; idempotency_key: string; expected_resource_version: number;
+  invitation_secret: string; authentication_proof: Record<string, unknown>; device_label?: string;
+}>(facts: T): T & { payload_hash: string } {
+  const proof = facts.authentication_proof;
+  const canonicalProof = proof.kind === "email_password"
+    ? {
+      kind: proof.kind, client_kind: proof.client_kind,
+      verification_proof_digest: digest(String(proof.verification_proof)),
+    }
+    : {
+      kind: proof.kind, client_kind: proof.client_kind,
+      callback_proof_digest: digest(JSON.stringify(proof)),
+    };
+  return {
+    ...facts,
+    payload_hash: canonicalPayloadHash({
+      schema_version: facts.schema_version,
+      idempotency_key: facts.idempotency_key,
+      expected_resource_version: facts.expected_resource_version,
+      invitation_digest: digest(facts.invitation_secret),
+      authentication_proof: canonicalProof,
+      ...(facts.device_label === undefined ? {} : { device_label: facts.device_label }),
+    }),
+  };
+}
+
 async function buildApp(
   calls: Array<{ name: string; input: unknown }>,
-  options: { readonly failFirstEmailStart?: boolean; readonly failFinalizedCompletion?: boolean } = {},
+  options: {
+    readonly failFirstEmailStart?: boolean;
+    readonly failFinalizedCompletion?: boolean;
+    readonly failFirstCheckpoint?: boolean;
+    readonly failFirstEmailCompletion?: boolean;
+  } = {},
 ): Promise<FastifyInstance> {
   const path = "../src/app.ts";
   const module = await import(path).catch(() => undefined) as undefined | { buildIdentityGatewayApp(input: Record<string, unknown>): Promise<FastifyInstance> };
@@ -22,6 +71,10 @@ async function buildApp(
   const subject = { provider: "supabase" as const, providerSubject: "subject_01", identityKind: "email_password" as const, normalizedEmail: "current@example.test", verifiedAt: "2026-08-17T00:00:00.000Z" };
   let emailVerificationState: "reserved" | "finalized" | "failed" | undefined;
   let emailStartCalls = 0;
+  let providerEmailVerified = false;
+  let checkpointedSubject: typeof subject | undefined;
+  let checkpointCalls = 0;
+  let completionCalls = 0;
   return module.buildIdentityGatewayApp({
     config: { publicOrigins: new Set([origin]), cookieHost: host, publicBaseUrl: `https://${host}`, providerUrl: "https://apple.example.test", appleWebRedirectUris: new Set([redirect]), appleNativeRedirectUris: new Set(["coreagent://auth/apple/callback"]), passwordResetRedirectUri: `${origin}/auth/password/reset/callback`, publicAuthEnabled: true },
     flowCookieKey: Buffer.alloc(32, 0x34),
@@ -31,9 +84,14 @@ async function buildApp(
         calls.push({ name: "signUpEmail", input });
         emailStartCalls += 1;
         if (options.failFirstEmailStart === true && emailStartCalls === 1) throw new ProviderFailure("AUTH_INVALID");
-        return { kind: "verification_pending" as const };
+        return { kind: "verification_pending" as const, expectedProviderSubject: "subject_01" };
       },
-      async verifyEmail(input: unknown) { calls.push({ name: "verifyEmail", input }); return subject; },
+      async verifyEmail(input: unknown) { calls.push({ name: "verifyEmail", input }); providerEmailVerified = true; return subject; },
+      async recoverVerifiedEmailSubject(input: unknown) {
+        calls.push({ name: "recoverVerifiedEmailSubject", input });
+        if (!providerEmailVerified) throw new ProviderFailure("AUTH_EMAIL_UNVERIFIED");
+        return subject;
+      },
       async signInEmail(input: unknown) { calls.push({ name: "signInEmail", input }); return subject; },
       async beginApple(input: unknown) { calls.push({ name: "beginApple", input }); return { transaction_id: "oauth_01", authorization_url: `https://apple.example.test/auth/v1/authorize?state=state_01&redirect_to=${encodeURIComponent((input as { redirect_uri: string }).redirect_uri)}`, expires_at: "2026-08-17T00:05:00.000Z" }; },
       async reauthenticateAndBeginAppleLink(input: unknown) { calls.push({ name: "reauthenticateAndBeginAppleLink", input }); return { transaction_id: "oauth_link", authorization_url: `https://apple.example.test/auth/v1/authorize?state=state_link&redirect_to=${encodeURIComponent((input as { redirect_uri: string }).redirect_uri)}`, expires_at: "2026-08-17T00:05:00.000Z" }; },
@@ -45,7 +103,14 @@ async function buildApp(
     operations: {
       async consumeRateLimit(input: unknown) { calls.push({ name: "consumeRateLimit", input }); return null; },
       async issueSession(_subject: unknown, clientKind: "web" | "iphone" | "macos", deviceLabel?: string, idempotency?: unknown) { calls.push({ name: "issueSession", input: { clientKind, deviceLabel, idempotency } }); return { session: { schema_version: 1, actor_id: "actor_server", actor_resource_version: 1, session_id: "session_01", session_resource_version: 1, client_kind: clientKind, idle_expires_at: "2026-08-18T00:00:00.000Z", absolute_expires_at: "2026-09-16T00:00:00.000Z", reauthentication_required: false }, sessionSecret: secret, csrfSecret: csrf }; },
-      async authenticateSession(input: unknown) { calls.push({ name: "authenticateSession", input }); return { actorId: "actor_server", authSubjectId: "auth_server", session: { session_id: "session_01" } }; },
+      async authenticateSession(input: unknown) {
+        calls.push({ name: "authenticateSession", input });
+        const credential = input as { sessionSecret?: unknown; requireCsrf?: unknown };
+        const clientKind = credential.requireCsrf === true
+          ? "web"
+          : credential.sessionSecret === "m".repeat(43) ? "macos" : "iphone";
+        return { actorId: "actor_server", authSubjectId: "auth_server", session: { session_id: "session_01", client_kind: clientKind, session_resource_version: 1 } };
+      },
       async requireRecentReauthentication(input: unknown) { calls.push({ name: "requireRecentReauthentication", input }); },
       async loadNormalizedEmail(input: unknown) { calls.push({ name: "loadNormalizedEmail", input }); return "current@example.test"; },
       async executeAuthorityCommand(input: unknown) {
@@ -87,10 +152,24 @@ async function buildApp(
       },
       async prepareEmailVerification(input: unknown) {
         calls.push({ name: "prepareEmailVerification", input });
-        return { clientKind: "web" as const, deviceLabel: "Browser" };
+        return {
+          clientKind: "web" as const,
+          deviceLabel: "Browser",
+          providerVerification: checkpointedSubject === undefined
+            ? { kind: "pending" as const, expectedProviderSubject: "subject_01" }
+            : { kind: "verified" as const, subject: checkpointedSubject },
+        };
+      },
+      async checkpointEmailVerification(input: unknown) {
+        calls.push({ name: "checkpointEmailVerification", input });
+        checkpointCalls += 1;
+        if (options.failFirstCheckpoint === true && checkpointCalls === 1) throw new Error("checkpoint unavailable");
+        checkpointedSubject = (input as { verifiedSubject: typeof subject }).verifiedSubject;
       },
       async completeEmailVerification(input: unknown) {
         calls.push({ name: "completeEmailVerification", input });
+        completionCalls += 1;
+        if (options.failFirstEmailCompletion === true && completionCalls === 1) throw new Error("domain transaction rolled back");
         return {
           actorId: "actor_server",
           authSubjectId: "auth_server",
@@ -157,6 +236,8 @@ test("email signup reserves one durable idempotent binding before its provider e
   assert.equal(binding.normalizedEmail, "student@example.test");
   assert.equal(binding.clientKind, "web");
   assert.equal(binding.deviceLabel, "Browser");
+  assert.equal((calls.find(({ name }) => name === "finalizeEmailVerificationStart")?.input as Record<string, unknown>)
+    .expectedProviderSubject, "subject_01");
   await app.close();
 });
 
@@ -237,16 +318,21 @@ test("email verification verifies the provider subject, registers Task 3, and is
     method: "POST",
     url: "/auth/v1/email/verification",
     headers: { host, origin, "content-type": "application/json" },
-    payload: { ...idem, verification_id: "verification_01", verification_code: "opaque-email-token-hash" },
+    payload: emailVerificationPayload(),
   });
   assert.equal(response.statusCode, 200);
   assert.equal(response.json().transport, "web_cookie");
-  assert.deepEqual(calls.map(({ name }) => name), ["prepareEmailVerification", "verifyEmail", "completeEmailVerification"]);
-  const providerInput = calls[1]?.input as Record<string, unknown>;
-  assert.deepEqual(providerInput, { verificationCode: "opaque-email-token-hash" });
-  const completion = calls[2]?.input as { idempotencyKey?: unknown; payloadHash?: unknown };
+  assert.deepEqual(calls.map(({ name }) => name), [
+    "prepareEmailVerification", "recoverVerifiedEmailSubject", "verifyEmail",
+    "checkpointEmailVerification", "completeEmailVerification",
+  ]);
+  const providerInput = calls[2]?.input as Record<string, unknown>;
+  assert.deepEqual(providerInput, {
+    verificationCode: "opaque-email-token-hash", expectedProviderSubject: "subject_01",
+  });
+  const completion = calls[4]?.input as { idempotencyKey?: unknown; payloadHash?: unknown };
   assert.equal(completion.idempotencyKey, idem.idempotency_key);
-  assert.equal(completion.payloadHash, idem.payload_hash);
+  assert.equal(completion.payloadHash, emailVerificationPayload().payload_hash);
   await app.close();
 });
 
@@ -257,7 +343,7 @@ test("email verification rejects a cross-mode request before any provider effect
     method: "POST",
     url: "/auth/v1/email/verification",
     headers: { host, "content-type": "application/json" },
-    payload: { ...idem, verification_id: "verification_01", verification_code: "opaque-email-token-hash" },
+    payload: emailVerificationPayload(),
   });
   assert.equal(nativeAttempt.statusCode, 400);
   assert.deepEqual(calls.map(({ name }) => name), ["prepareEmailVerification"]);
@@ -266,10 +352,206 @@ test("email verification rejects a cross-mode request before any provider effect
     method: "POST",
     url: "/auth/v1/email/verification",
     headers: { host, origin, "content-type": "application/json" },
-    payload: { ...idem, verification_id: "verification_01", verification_code: "opaque-email-token-hash" },
+    payload: emailVerificationPayload(),
   });
   assert.equal(webRetry.statusCode, 200);
-  assert.deepEqual(calls.map(({ name }) => name), ["prepareEmailVerification", "verifyEmail", "completeEmailVerification"]);
+  assert.deepEqual(calls.map(({ name }) => name), [
+    "prepareEmailVerification", "recoverVerifiedEmailSubject", "verifyEmail",
+    "checkpointEmailVerification", "completeEmailVerification",
+  ]);
+  await app.close();
+});
+
+test("email verification rejects a changed code under the same canonical hash before any effect", async () => {
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const app = await buildApp(calls);
+  const original = {
+    schema_version: 1 as const,
+    idempotency_key: "idem_email_verify_hash",
+    verification_id: "verification_01",
+    verification_code: "opaque-email-token-hash",
+  };
+  const payload = { ...original, payload_hash: canonicalPayloadHash(original), verification_code: "changed-email-token-hash" };
+  const response = await app.inject({
+    method: "POST", url: "/auth/v1/email/verification",
+    headers: { host, origin, "content-type": "application/json" }, payload,
+  });
+  assert.equal(response.statusCode, 400);
+  assert.deepEqual(calls, []);
+  await app.close();
+});
+
+test("email verification recovers an OTP consumed before its durable checkpoint", async () => {
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const app = await buildApp(calls, { failFirstCheckpoint: true });
+  const facts = {
+    schema_version: 1 as const,
+    idempotency_key: "idem_email_checkpoint_recovery",
+    verification_id: "verification_01",
+    verification_code: "one-use-email-token-hash",
+  };
+  const payload = { ...facts, payload_hash: canonicalPayloadHash(facts) };
+  const first = await app.inject({
+    method: "POST", url: "/auth/v1/email/verification",
+    headers: { host, origin, "content-type": "application/json" }, payload,
+  });
+  const retry = await app.inject({
+    method: "POST", url: "/auth/v1/email/verification",
+    headers: { host, origin, "content-type": "application/json" }, payload,
+  });
+  assert.equal(first.statusCode, 500);
+  assert.equal(retry.statusCode, 200, retry.body);
+  assert.equal(calls.filter(({ name }) => name === "verifyEmail").length, 1);
+  assert.equal(calls.filter(({ name }) => name === "recoverVerifiedEmailSubject").length, 2);
+  assert.equal(calls.filter(({ name }) => name === "completeEmailVerification").length, 1);
+  await app.close();
+});
+
+test("email verification skips its one-use provider proof after a durable checkpoint and domain rollback", async () => {
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const app = await buildApp(calls, { failFirstEmailCompletion: true });
+  const facts = {
+    schema_version: 1 as const,
+    idempotency_key: "idem_email_domain_retry",
+    verification_id: "verification_01",
+    verification_code: "one-use-email-token-hash",
+  };
+  const payload = { ...facts, payload_hash: canonicalPayloadHash(facts) };
+  const first = await app.inject({
+    method: "POST", url: "/auth/v1/email/verification",
+    headers: { host, origin, "content-type": "application/json" }, payload,
+  });
+  const retry = await app.inject({
+    method: "POST", url: "/auth/v1/email/verification",
+    headers: { host, origin, "content-type": "application/json" }, payload,
+  });
+  assert.equal(first.statusCode, 500);
+  assert.equal(retry.statusCode, 200, retry.body);
+  assert.equal(calls.filter(({ name }) => name === "verifyEmail").length, 1);
+  assert.equal(calls.filter(({ name }) => name === "recoverVerifiedEmailSubject").length, 1);
+  assert.equal(calls.filter(({ name }) => name === "checkpointEmailVerification").length, 1);
+  assert.equal(calls.filter(({ name }) => name === "completeEmailVerification").length, 2);
+  await app.close();
+});
+
+test("reauthentication accepts exact native bearer transport and unlocks native Apple link start", async () => {
+  for (const [clientKind, sessionSecret] of [["iphone", "i".repeat(43)], ["macos", "m".repeat(43)]] as const) {
+    const calls: Array<{ name: string; input: unknown }> = [];
+    const app = await buildApp(calls);
+    const reauthentication = {
+      schema_version: 1 as const,
+      idempotency_key: `idem_native_reauth_${clientKind}`,
+      expected_resource_version: 1,
+      password: "correct-horse",
+    };
+    const reauthenticationPayload = {
+      ...reauthentication,
+      payload_hash: canonicalPayloadHash({
+        schema_version: reauthentication.schema_version,
+        idempotency_key: reauthentication.idempotency_key,
+        expected_resource_version: reauthentication.expected_resource_version,
+        reauthentication_proof_digest: digest(reauthentication.password),
+      }),
+    };
+    const response = await app.inject({
+      method: "POST", url: "/auth/v1/reauthenticate",
+      headers: { host, authorization: `Bearer ${sessionSecret}`, "content-type": "application/json" },
+      payload: reauthenticationPayload,
+    });
+    assert.equal(response.statusCode, 200, `${clientKind} reauthentication`);
+    assert.equal(response.headers["set-cookie"], undefined);
+    assert.equal(response.body.includes(sessionSecret), false);
+    const start = {
+      schema_version: 1 as const,
+      idempotency_key: `idem_native_link_${clientKind}`,
+      payload_hash: `sha256:${"c".repeat(64)}`,
+      client_kind: clientKind,
+      redirect_uri: "coreagent://auth/apple/callback",
+      password: "correct-horse",
+      nonce: "native-nonce-12345678",
+      pkce_code_challenge: "p".repeat(43),
+      pkce_code_challenge_method: "S256" as const,
+    };
+    const link = await app.inject({
+      method: "POST", url: "/auth/v1/apple/link/start",
+      headers: { host, authorization: `Bearer ${sessionSecret}`, "content-type": "application/json" },
+      payload: start,
+    });
+    assert.equal(link.statusCode, 200, `${clientKind} Apple link start`);
+    assert.equal(link.headers["set-cookie"], undefined);
+    assert.deepEqual(calls.filter(({ name }) => name === "executeAuthorityCommand").length, 1);
+    await app.close();
+  }
+});
+
+test("reauthentication rejects changed password before authentication or provider and native cookie mixing", async () => {
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const app = await buildApp(calls);
+  const original = {
+    schema_version: 1 as const,
+    idempotency_key: "idem_native_reauth_hash",
+    expected_resource_version: 1,
+    password: "correct-horse",
+  };
+  const payloadHash = canonicalPayloadHash({
+    schema_version: original.schema_version,
+    idempotency_key: original.idempotency_key,
+    expected_resource_version: original.expected_resource_version,
+    reauthentication_proof_digest: digest(original.password),
+  });
+  const changed = { ...original, payload_hash: payloadHash, password: "changed-horse" };
+  const forged = await app.inject({
+    method: "POST", url: "/auth/v1/reauthenticate",
+    headers: {
+      host, origin, "content-type": "application/json",
+      cookie: `core_agent_session=${secret}; core_agent_csrf=${csrf}`, "x-core-agent-csrf": csrf,
+    },
+    payload: changed,
+  });
+  assert.equal(forged.statusCode, 400);
+  assert.deepEqual(calls, []);
+  const mixed = await app.inject({
+    method: "POST", url: "/auth/v1/reauthenticate",
+    headers: { host, authorization: `Bearer ${"i".repeat(43)}`, cookie: `core_agent_session=${secret}`, "content-type": "application/json" },
+    payload: { ...original, payload_hash: payloadHash },
+  });
+  assert.equal(mixed.statusCode, 400);
+  assert.deepEqual(calls, []);
+  await app.close();
+});
+
+test("invitation acceptance rejects changed proof facts under the same hash before provider", async () => {
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const app = await buildApp(calls);
+  const original = {
+    schema_version: 1 as const,
+    idempotency_key: "idem_invitation_accept_hash",
+    expected_resource_version: 1,
+    invitation_secret: "i".repeat(43),
+    authentication_proof: { kind: "email_password" as const, client_kind: "web" as const, verification_proof: "correct-proof" },
+  };
+  const payloadHash = canonicalPayloadHash({
+    schema_version: original.schema_version,
+    idempotency_key: original.idempotency_key,
+    expected_resource_version: original.expected_resource_version,
+    invitation_digest: digest(original.invitation_secret),
+    authentication_proof: {
+      kind: original.authentication_proof.kind,
+      client_kind: original.authentication_proof.client_kind,
+      verification_proof_digest: digest(original.authentication_proof.verification_proof),
+    },
+  });
+  const payload = {
+    ...original,
+    payload_hash: payloadHash,
+    authentication_proof: { ...original.authentication_proof, verification_proof: "changed-proof" },
+  };
+  const response = await app.inject({
+    method: "POST", url: "/auth/v1/invitations/accept",
+    headers: { host, origin, "content-type": "application/json" }, payload,
+  });
+  assert.equal(response.statusCode, 400);
+  assert.deepEqual(calls, []);
   await app.close();
 });
 
@@ -376,7 +658,11 @@ test("Web Apple invitation acceptance reconstructs provider authority from the f
   const response = await app.inject({
     method: "POST", url: "/auth/v1/invitations/accept",
     headers: { host, origin, "content-type": "application/json", cookie: flowCookie!.split(";", 1)[0]! },
-    payload: { ...idem, expected_resource_version: 1, invitation_secret: "i".repeat(43), device_label: "Invitation Browser", authentication_proof: { kind: "apple", client_kind: "web", transaction_id: "oauth_01", authorization_code: "opaque_code", state } },
+    payload: invitationAcceptancePayload({
+      schema_version: 1, idempotency_key: idem.idempotency_key,
+      expected_resource_version: 1, invitation_secret: "i".repeat(43), device_label: "Invitation Browser",
+      authentication_proof: { kind: "apple", client_kind: "web", transaction_id: "oauth_01", authorization_code: "opaque_code", state },
+    }),
   });
   assert.equal(response.statusCode, 200);
   assert.match(String(response.headers["set-cookie"]), /core_agent_apple_flow=;[^\n]*Max-Age=0/u);
@@ -402,7 +688,7 @@ test("management mutation delegates one transaction-scoped reauth plus durable c
   assert.deepEqual(protectedInput.authority, {
     actorId: "actor_server",
     authSubjectId: "auth_server",
-    session: { session_id: "session_01" },
+    session: { session_id: "session_01", client_kind: "web", session_resource_version: 1 },
   });
   await app.close();
 });
@@ -415,11 +701,25 @@ test("durable commands receive verified facts but never passwords or provider pr
     method: "POST",
     url: "/auth/v1/reauthenticate",
     headers,
-    payload: { ...idem, expected_resource_version: 1, password: "correct-horse" },
+    payload: {
+      schema_version: 1, idempotency_key: idem.idempotency_key, expected_resource_version: 1,
+      password: "correct-horse",
+      payload_hash: canonicalPayloadHash({
+        schema_version: 1, idempotency_key: idem.idempotency_key, expected_resource_version: 1,
+        reauthentication_proof_digest: digest("correct-horse"),
+      }),
+    },
   });
   assert.equal(reauthentication.statusCode, 200);
   const reauthenticationCommand = calls.find(({ name, input }) => name === "executeAuthorityCommand" && (input as { kind?: unknown }).kind === "reauthenticate")?.input as { payload?: Record<string, unknown>; verifiedSubject?: unknown };
-  assert.deepEqual(reauthenticationCommand.payload, { ...idem, expected_resource_version: 1 });
+  assert.deepEqual(reauthenticationCommand.payload, {
+    schema_version: 1, idempotency_key: idem.idempotency_key, expected_resource_version: 1,
+    reauthentication_proof_digest: digest("correct-horse"),
+    payload_hash: canonicalPayloadHash({
+      schema_version: 1, idempotency_key: idem.idempotency_key, expected_resource_version: 1,
+      reauthentication_proof_digest: digest("correct-horse"),
+    }),
+  });
   assert.equal(reauthenticationCommand.verifiedSubject === undefined, false);
 
   calls.length = 0;
@@ -428,13 +728,14 @@ test("durable commands receive verified facts but never passwords or provider pr
     method: "POST",
     url: "/auth/v1/invitations/accept",
     headers: { host, origin, "content-type": "application/json" },
-    payload: {
-      ...idem,
+    payload: invitationAcceptancePayload({
+      schema_version: 1,
+      idempotency_key: idem.idempotency_key,
       expected_resource_version: 1,
       invitation_secret: "i".repeat(43),
       authentication_proof: { kind: "email_password", client_kind: "web", verification_proof: proof },
       device_label: "Invitation Browser",
-    },
+    }),
   });
   assert.equal(acceptance.statusCode, 200);
   const acceptanceCommand = calls.find(({ name, input }) => name === "executeAuthorityCommand" && (input as { kind?: unknown }).kind === "invitation_accept")?.input as { payload?: unknown; verifiedSubject?: unknown };

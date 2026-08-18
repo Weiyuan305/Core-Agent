@@ -390,7 +390,7 @@ export async function replaceInvitation(
   assertPayloadHash(command);
   const issued = issueInvitationSecret(dependencies.randomBytes);
   const operation = "identity.invitation.replace";
-  return withDatabaseTransactionRetry(dependencies.db, async (trx) => {
+  const execute = async (trx: Transaction<RuntimeDatabase>): Promise<InvitationCommandResult> => {
     const now = dependencies.now?.() ?? new Date();
     const adminMembershipId = await lockCompanyAdmin(trx, context);
     const old = await trx.selectFrom("identity_invitations").selectAll()
@@ -443,7 +443,10 @@ export async function replaceInvitation(
       resultRef: command.replacement_invitation_id, response: storedResult, updatedAt: now,
     });
     return Object.freeze({ ...storedResult, invitation_secret: issued.secret });
-  }, { isolationLevel: "serializable" });
+  };
+  return dependencies.transaction === undefined
+    ? withDatabaseTransactionRetry(dependencies.db, execute, { isolationLevel: "serializable" })
+    : execute(dependencies.transaction);
 }
 
 export async function revokeInvitation(

@@ -390,13 +390,18 @@ test("security config rejects dynamic recovery redirects and unsafe production b
 });
 
 test("enumeration responses for unknown account, invitation, and tenant share one bounded HTTP class", async () => {
-  const unavailable = Object.assign(new Error("private resource lookup failed"), { code: "RESOURCE_NOT_FOUND" });
+  const rejectDistinctLookup = async (kind: string, delayMs: number): Promise<never> => {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    throw Object.assign(new Error(`private ${kind} lookup failed`), { code: "RESOURCE_NOT_FOUND" });
+  };
   const baseOperations = operations();
   const app = await buildApp({
     operations: {
       ...baseOperations,
-      async executeAuthorityCommand() { throw unavailable; },
-      async executeProtectedAuthorityCommand() { throw unavailable; },
+      async executeAuthorityCommand(input: { readonly kind: string }) {
+        return rejectDistinctLookup(input.kind, input.kind === "invitation_inspect" ? 7 : 13);
+      },
+      async executeProtectedAuthorityCommand(input: { readonly kind: string }) { return rejectDistinctLookup(input.kind, 19); },
     },
   });
   const authenticatedHeaders = {
@@ -409,6 +414,7 @@ test("enumeration responses for unknown account, invitation, and tenant share on
     { method: "POST" as const, url: "/auth/v1/account/deletion/request", headers: authenticatedHeaders, payload: { ...idem, expected_resource_version: 1, reason_code: "user_requested" } },
     { method: "POST" as const, url: "/auth/v1/companies/members/list", headers: authenticatedHeaders, payload: { schema_version: 1, tenant_id: "tenant_missing", cursor: "member_cursor", limit: 20 } },
   ];
+  for (const options of requests) await app.inject(options);
   const observed: Array<{ statusCode: number; shape: string; elapsedMs: number }> = [];
   for (const options of requests) {
     const startedAt = performance.now();

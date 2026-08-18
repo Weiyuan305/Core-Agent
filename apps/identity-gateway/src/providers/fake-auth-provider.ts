@@ -10,6 +10,7 @@ import type {
   AuthProviderAdapter,
   EmailCredentialInput,
   EmailVerificationInput,
+  EmailVerificationRecoveryInput,
   ProviderClientKind,
   ProviderProof,
   PasswordResetCompletionInput,
@@ -204,6 +205,7 @@ export class FakeAuthProvider implements AuthProviderAdapter {
   readonly #proofs = new Map<string, VerifiedProviderSubject>();
   readonly #transactions = new Map<string, FakeAppleTransaction>();
   readonly #emailVerifications = new Map<string, VerifiedProviderSubject>();
+  readonly #verifiedEmailSubjects = new Map<string, VerifiedProviderSubject>();
   readonly #providerStarts = new Map<string, { readonly payloadHash: string; readonly response: AppleAuthorizationStart | PasswordResetStart }>();
   readonly #appleSubject: VerifiedProviderSubject;
   readonly #now: () => Date;
@@ -231,7 +233,10 @@ export class FakeAuthProvider implements AuthProviderAdapter {
     }
   }
 
-  async signUpEmail(input: EmailCredentialInput): Promise<{ readonly kind: "verification_pending" }> {
+  async signUpEmail(input: EmailCredentialInput): Promise<{
+    readonly kind: "verification_pending";
+    readonly expectedProviderSubject: string;
+  }> {
     const credential = readCredential(input);
     const subject = Object.freeze({
       provider: "supabase" as const,
@@ -241,7 +246,7 @@ export class FakeAuthProvider implements AuthProviderAdapter {
       verifiedAt: this.#now().toISOString(),
     });
     this.#emailVerifications.set("fake-email-verification-code", subject);
-    return Object.freeze({ kind: "verification_pending" });
+    return Object.freeze({ kind: "verification_pending", expectedProviderSubject: subject.providerSubject });
   }
 
   async verifyEmail(input: EmailVerificationInput): Promise<VerifiedProviderSubject> {
@@ -249,7 +254,22 @@ export class FakeAuthProvider implements AuthProviderAdapter {
     if (verificationCode === undefined) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
     const subject = this.#emailVerifications.get(verificationCode);
     if (subject === undefined) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+    const expectedProviderSubject = ownString(input, "expectedProviderSubject");
+    if (expectedProviderSubject === undefined
+      || !constantTimeEqual(expectedProviderSubject, subject.providerSubject)) {
+      throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+    }
     this.#emailVerifications.delete(verificationCode);
+    this.#verifiedEmailSubjects.set(subject.providerSubject, subject);
+    return copySubject(subject);
+  }
+
+  async recoverVerifiedEmailSubject(input: EmailVerificationRecoveryInput): Promise<VerifiedProviderSubject> {
+    const expectedProviderSubject = ownString(input, "expectedProviderSubject");
+    if (expectedProviderSubject === undefined || expectedProviderSubject.length < 1
+      || expectedProviderSubject.length > 1_024) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+    const subject = this.#verifiedEmailSubjects.get(expectedProviderSubject);
+    if (subject === undefined) throw new ProviderFailure("AUTH_EMAIL_UNVERIFIED");
     return copySubject(subject);
   }
 

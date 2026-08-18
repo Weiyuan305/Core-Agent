@@ -14,8 +14,10 @@ import Type from "typebox";
 import type { GatewayIssuedSession, IdentityGatewayRouteDependencies } from "../app.js";
 import { IdentityGatewayFailure } from "../errors.js";
 import { ProviderFailure } from "../providers/provider-errors.js";
+import type { VerifiedProviderSubject } from "../providers/auth-provider.js";
 import {
   assertClientTransport,
+  assertEmailVerificationPayloadHash,
   issueRecoveryCookie,
   issueWebSessionCookies,
   readRecoveryCookie,
@@ -56,7 +58,12 @@ async function completeReservedEmailProviderStart(
   credential: { readonly email: string; readonly password: string },
 ): Promise<void> {
   try {
-    await dependencies.provider.signUpEmail(credential);
+    const started = await dependencies.provider.signUpEmail(credential);
+    await dependencies.operations.finalizeEmailVerificationStart({
+      verificationId: binding.verificationId,
+      outcome: "finalized",
+      expectedProviderSubject: started.expectedProviderSubject,
+    });
   } catch (error) {
     if (error instanceof ProviderFailure && error.code !== "AUTH_PROVIDER_UNAVAILABLE") {
       await dependencies.operations.finalizeEmailVerificationStart({
@@ -65,9 +72,6 @@ async function completeReservedEmailProviderStart(
     }
     throw error;
   }
-  await dependencies.operations.finalizeEmailVerificationStart({
-    verificationId: binding.verificationId, outcome: "finalized",
-  });
 }
 
 export async function registerEmailRoutes(app: FastifyInstance, dependencies: IdentityGatewayRouteDependencies): Promise<void> {
@@ -107,14 +111,45 @@ export async function registerEmailRoutes(app: FastifyInstance, dependencies: Id
   });
 
   app.post("/auth/v1/email/verification", { schema: { body: EmailVerificationRequestSchema, response: { 200: EmailVerificationResponseSchema } } }, async (request, reply) => {
-    const body = request.body as { verification_id: string; verification_code: string };
+    const body = request.body as {
+      schema_version: 1; idempotency_key: string; payload_hash: string;
+      verification_id: string; verification_code: string;
+    };
+    assertEmailVerificationPayloadHash(body);
     const binding = await dependencies.operations.prepareEmailVerification({ verificationId: body.verification_id });
     assertClientTransport(request, binding.clientKind, dependencies.config);
-    const subject = await dependencies.provider.verifyEmail({ verificationCode: body.verification_code });
+    const providerVerification = binding.providerVerification;
+    let subject: VerifiedProviderSubject;
+    if (providerVerification.kind === "verified") {
+      subject = providerVerification.subject;
+    } else {
+      try {
+        subject = await dependencies.provider.recoverVerifiedEmailSubject({
+          expectedProviderSubject: providerVerification.expectedProviderSubject,
+        });
+      } catch (error) {
+        if (!(error instanceof ProviderFailure) || error.code !== "AUTH_EMAIL_UNVERIFIED") throw error;
+        try {
+          subject = await dependencies.provider.verifyEmail({
+            verificationCode: body.verification_code,
+            expectedProviderSubject: providerVerification.expectedProviderSubject,
+          });
+        } catch (verificationError) {
+          if (!(verificationError instanceof ProviderFailure)
+            || verificationError.code !== "AUTH_CALLBACK_INVALID") throw verificationError;
+          subject = await dependencies.provider.recoverVerifiedEmailSubject({
+            expectedProviderSubject: providerVerification.expectedProviderSubject,
+          });
+        }
+      }
+      await dependencies.operations.checkpointEmailVerification({
+        verificationId: body.verification_id,
+        verifiedSubject: subject,
+      });
+    }
     const requestIdempotency = request.body as { idempotency_key: string; payload_hash: string };
     const completed = await dependencies.operations.completeEmailVerification({
       verificationId: body.verification_id,
-      verifiedSubject: subject,
       idempotencyKey: requestIdempotency.idempotency_key,
       payloadHash: requestIdempotency.payload_hash,
     });

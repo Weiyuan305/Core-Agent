@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import type { Kysely, Transaction } from "kysely";
+import { sql, type Kysely, type Transaction } from "kysely";
 
 import type { RuntimeDatabase } from "../../db/database.js";
 import type { TenantTransaction } from "../../db/transaction.js";
@@ -15,6 +15,7 @@ import {
   type PrivateIdentityPiiProtection,
 } from "../../repositories/identity/private-pii.js";
 import type { RegisterB2cContext, VerifiedAuthSubjectInput } from "./register-b2c.js";
+import { constantTimeDigestMatches, invitationEmailHmac } from "../../repositories/identity/invitations.js";
 
 export interface RegisterInvitedIdentityCommand {
   readonly schema_version: 1;
@@ -29,6 +30,13 @@ export interface RegisterInvitedIdentityDependencies {
   readonly db: Kysely<RuntimeDatabase>;
   readonly transaction: Transaction<RuntimeDatabase>;
   readonly privatePii: PrivateIdentityPiiProtection;
+  readonly verifiedInvitationBinding: {
+    readonly invitationId: string;
+    readonly tenantId: string;
+    readonly secretDigest: Uint8Array;
+    readonly expectedResourceVersion: number;
+    readonly role: "admin" | "consultant";
+  };
   readonly now?: () => Date;
 }
 
@@ -125,7 +133,7 @@ function assertReplay(value: unknown, expected: InvitedIdentityRegistrationResul
   }
 }
 
-export async function registerInvitedIdentity(
+export async function registerInvitedIdentityForVerifiedInvitation(
   dependencies: RegisterInvitedIdentityDependencies,
   context: RegisterB2cContext,
   input: unknown,
@@ -140,6 +148,32 @@ export async function registerInvitedIdentity(
     .where("tenant_id", "=", input.tenant_id).forShare().executeTakeFirst();
   if (tenant?.tenant_mode !== "b2b" || tenant.status !== "active") {
     throw new DomainError("UNAUTHENTICATED", "Invited identity Tenant authority is unavailable");
+  }
+  const binding = dependencies.verifiedInvitationBinding;
+  if (!validId(binding?.invitationId) || binding.tenantId !== input.tenant_id
+    || !(binding.secretDigest instanceof Uint8Array) || binding.secretDigest.byteLength !== 32
+    || !Number.isSafeInteger(binding.expectedResourceVersion) || binding.expectedResourceVersion < 1
+    || (binding.role !== "admin" && binding.role !== "consultant")) {
+    throw new DomainError("UNAUTHENTICATED", "Verified invitation binding is required");
+  }
+  const invitation = await dependencies.transaction.selectFrom("identity_invitations")
+    .select(["tenant_id", "secret_digest", "normalized_email_hmac", "role", "status", "expires_at", "resource_version"])
+    .where("invitation_id", "=", binding.invitationId).forUpdate().executeTakeFirst();
+  const databaseTimestamp = (await sql<{ now: Date }>`select clock_timestamp() as now`.execute(dependencies.transaction)).rows[0]?.now;
+  const observedEmailHmac = invitationEmailHmac(
+    dependencies.privatePii.normalizedEmailHmacKey, input.auth_subject.normalizedEmail,
+  );
+  try {
+    if (!(databaseTimestamp instanceof Date) || invitation === undefined
+      || invitation.tenant_id !== binding.tenantId || invitation.role !== binding.role
+      || invitation.status !== "pending" || invitation.expires_at.getTime() <= databaseTimestamp.getTime()
+      || Number(invitation.resource_version) !== binding.expectedResourceVersion
+      || !constantTimeDigestMatches(binding.secretDigest, invitation.secret_digest)
+      || !constantTimeDigestMatches(observedEmailHmac, invitation.normalized_email_hmac)) {
+      throw new DomainError("UNAUTHENTICATED", "Verified invitation authority is unavailable");
+    }
+  } finally {
+    observedEmailHmac.fill(0);
   }
   const tenantTransaction: TenantTransaction = { tenantId: input.tenant_id, trx: dependencies.transaction };
   const expected = registrationResult(input.idempotency_key);

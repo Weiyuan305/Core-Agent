@@ -211,7 +211,7 @@ export {
   type VerifiedAuthSubjectInput,
 } from "./services/identity/register-b2c.js";
 export {
-  registerInvitedIdentity,
+  registerInvitedIdentityForVerifiedInvitation,
   type InvitedIdentityRegistrationResult,
   type RegisterInvitedIdentityCommand,
   type RegisterInvitedIdentityDependencies,
@@ -233,6 +233,7 @@ export {
 export {
   beginEmailVerificationTransaction,
   canonicalEmailVerificationStartPayloadHash,
+  checkpointEmailVerificationTransaction,
   consumeEmailVerificationTransaction,
   finalizeEmailVerificationTransactionStart,
   prepareEmailVerificationTransaction,
@@ -277,8 +278,10 @@ export {
   deriveIdentityCommandId,
   invitationEmailHmac,
   issueInvitationSecret,
+  lockInvitationByDigest,
   lockInvitationBySecret,
   publicInvitationNotFound,
+  readInvitationBySecret,
   type InvitationRandomBytes,
   type StoredInvitationCredential,
 } from "./repositories/identity/invitations.js";

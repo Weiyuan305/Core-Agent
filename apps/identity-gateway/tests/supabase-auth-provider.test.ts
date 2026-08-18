@@ -240,6 +240,10 @@ function createHarness(input: {
         return { data: { user: user("email") }, error: null };
       },
       admin: {
+        getUserById: async (...arguments_: unknown[]) => {
+          methodCalls.push({ name: "getUserById", arguments: arguments_ });
+          return { data: { user: user("email", String(arguments_[0])) }, error: null };
+        },
         updateUserById: async (...arguments_: unknown[]) => {
           methodCalls.push({ name: "updateUserById", arguments: arguments_ });
           return input.adminUpdateError === undefined
@@ -347,7 +351,10 @@ test("Supabase email, proof, reset, current-session revoke, and deletion use fre
     assert.equal(auth.detectSessionInUrl, false);
     assert.equal(await auth.storage.getItem(auth.storageKey), null);
   }
-  assert.deepEqual(outputs[0], { kind: "verification_pending" });
+  assert.deepEqual(outputs[0], {
+    kind: "verification_pending",
+    expectedProviderSubject: "provider-subject-1",
+  });
   for (const output of outputs.slice(1, 4)) {
     assert.deepEqual(output, {
       provider: "supabase",
@@ -380,10 +387,19 @@ test("Supabase email, proof, reset, current-session revoke, and deletion use fre
 
 test("Supabase signup uses the exact email callback and verification exchanges only a token hash", async () => {
   const harness = createHarness();
-  await harness.provider.signUpEmail(credential);
-  const provider = harness.provider as unknown as { verifyEmail?: (input: { verificationCode: string }) => Promise<unknown> };
+  const signup = await harness.provider.signUpEmail(credential) as {
+    kind: "verification_pending";
+    expectedProviderSubject: string;
+  };
+  const provider = harness.provider as unknown as {
+    verifyEmail?: (input: { verificationCode: string; expectedProviderSubject: string }) => Promise<unknown>;
+    recoverVerifiedEmailSubject?: (input: { expectedProviderSubject: string }) => Promise<unknown>;
+  };
   assert.equal(typeof provider.verifyEmail, "function");
-  const verified = await provider.verifyEmail!({ verificationCode: "opaque-email-token-hash" });
+  const verified = await provider.verifyEmail!({
+    verificationCode: "opaque-email-token-hash",
+    expectedProviderSubject: signup.expectedProviderSubject,
+  });
   assert.deepEqual(verified, {
     provider: "supabase",
     providerSubject: "provider-subject-1",
@@ -394,9 +410,31 @@ test("Supabase signup uses the exact email callback and verification exchanges o
   assert.deepEqual(harness.methodCalls.find((call) => call.name === "verifyOtp")?.arguments, [
     { token_hash: "opaque-email-token-hash", type: "email" },
   ]);
+  assert.deepEqual(await provider.recoverVerifiedEmailSubject!({
+    expectedProviderSubject: signup.expectedProviderSubject,
+  }), verified);
+  assert.deepEqual(harness.methodCalls.find((call) => call.name === "getUserById")?.arguments, [
+    signup.expectedProviderSubject,
+  ]);
+  assert.equal(harness.clientCalls.at(-1)?.key, serviceRoleKey);
   const signUp = harness.methodCalls.find((call) => call.name === "signUp")?.arguments[0] as { options?: { emailRedirectTo?: unknown } };
   assert.equal(signUp.options?.emailRedirectTo, "https://identity.example.test/auth/v1/email/verification");
   assert.equal(JSON.stringify(harness.methodCalls).includes(providerAccessToken), false);
+});
+
+test("Supabase email verification and recovery bind one exact expected provider subject", async () => {
+  const harness = createHarness();
+  const provider = harness.provider as unknown as {
+    verifyEmail(input: { verificationCode: string; expectedProviderSubject: string }): Promise<unknown>;
+    recoverVerifiedEmailSubject(input: { expectedProviderSubject: string }): Promise<unknown>;
+  };
+  await expectFailure(() => provider.verifyEmail({
+    verificationCode: "opaque-email-token-hash",
+    expectedProviderSubject: "different-provider-subject",
+  }), "AUTH_CALLBACK_INVALID");
+  await expectFailure(() => provider.recoverVerifiedEmailSubject({
+    expectedProviderSubject: "",
+  }), "AUTH_CALLBACK_INVALID");
 });
 
 test("Supabase provider-subject deletion is idempotent without reading a provider body", async () => {

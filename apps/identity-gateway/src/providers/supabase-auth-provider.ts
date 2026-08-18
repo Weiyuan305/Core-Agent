@@ -15,6 +15,7 @@ import type {
   AuthProviderAdapter,
   EmailCredentialInput,
   EmailVerificationInput,
+  EmailVerificationRecoveryInput,
   ProviderClientKind,
   ProviderProof,
   PasswordResetCompletionInput,
@@ -65,6 +66,7 @@ interface SupabaseAuthPort {
       attributes: { readonly password: string },
     ): Promise<unknown>;
     deleteUser(providerSubject: string, shouldSoftDelete: boolean): Promise<unknown>;
+    getUserById(providerSubject: string): Promise<unknown>;
   };
 }
 
@@ -400,6 +402,17 @@ function equalDigest(left: Uint8Array, right: Uint8Array): boolean {
   return timingSafeEqual(left, right);
 }
 
+function constantTimeStringEqual(left: string, right: string): boolean {
+  const leftBytes = Buffer.from(left, "utf8");
+  const rightBytes = Buffer.from(right, "utf8");
+  try {
+    return leftBytes.byteLength === rightBytes.byteLength && timingSafeEqual(leftBytes, rightBytes);
+  } finally {
+    leftBytes.fill(0);
+    rightBytes.fill(0);
+  }
+}
+
 function copySubject(
   user: unknown,
   forcedIdentityKind?: VerifiedProviderSubject["identityKind"],
@@ -431,6 +444,16 @@ function copySubject(
     normalizedEmail: normalizeEmail(email),
     verifiedAt: verifiedTime.toISOString(),
   });
+}
+
+function copyExpectedProviderSubject(user: unknown, normalizedEmail: string): string {
+  const providerSubject = ownString(user, "id");
+  const email = ownString(user, "email");
+  if (providerSubject === undefined || providerSubject.length < 1 || providerSubject.length > 1_024
+    || email === undefined || normalizeEmail(email) !== normalizedEmail) {
+    throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+  }
+  return providerSubject;
 }
 
 function encodeOpaque(bytes: Uint8Array): string {
@@ -575,7 +598,10 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       ?? ((length) => Uint8Array.from(nodeRandomBytes(length)));
   }
 
-  async signUpEmail(input: EmailCredentialInput): Promise<{ readonly kind: "verification_pending" }> {
+  async signUpEmail(input: EmailCredentialInput): Promise<{
+    readonly kind: "verification_pending";
+    readonly expectedProviderSubject: string;
+  }> {
     const credential = readCredential(input);
     const { client, storage } = this.#newClient();
     try {
@@ -588,7 +614,10 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
         await this.#signOut(client, "local");
         throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
       }
-      return Object.freeze({ kind: "verification_pending" });
+      return Object.freeze({
+        kind: "verification_pending",
+        expectedProviderSubject: copyExpectedProviderSubject(ownData(data, "user"), credential.email),
+      });
     } finally {
       storage.clear();
     }
@@ -596,7 +625,10 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
 
   async verifyEmail(input: EmailVerificationInput): Promise<VerifiedProviderSubject> {
     const verificationCode = ownString(input, "verificationCode");
-    if (verificationCode === undefined || verificationCode.length < 8 || verificationCode.length > 4_096) {
+    const expectedProviderSubject = ownString(input, "expectedProviderSubject");
+    if (verificationCode === undefined || verificationCode.length < 8 || verificationCode.length > 4_096
+      || expectedProviderSubject === undefined || expectedProviderSubject.length < 1
+      || expectedProviderSubject.length > 1_024) {
       throw new ProviderFailure("AUTH_CALLBACK_INVALID");
     }
     const { client, storage } = this.#newClient();
@@ -606,7 +638,31 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
         "AUTH_CALLBACK_INVALID",
       ));
       const subject = copySubject(ownData(data, "user"), "email_password");
+      if (!constantTimeStringEqual(subject.providerSubject, expectedProviderSubject)) {
+        await this.#signOut(client, "local");
+        throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+      }
       await this.#signOut(client, "local");
+      return subject;
+    } finally {
+      storage.clear();
+    }
+  }
+
+  async recoverVerifiedEmailSubject(input: EmailVerificationRecoveryInput): Promise<VerifiedProviderSubject> {
+    const expectedProviderSubject = ownString(input, "expectedProviderSubject");
+    if (expectedProviderSubject === undefined || expectedProviderSubject.length < 1
+      || expectedProviderSubject.length > 1_024) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+    const { client, storage } = this.#newClient(this.#serviceRoleKey);
+    try {
+      const data = requireResultData(await safeProviderCall(
+        () => client.auth.admin.getUserById(expectedProviderSubject),
+        "AUTH_PROVIDER_UNAVAILABLE",
+      ));
+      const subject = copySubject(ownData(data, "user"), "email_password");
+      if (!constantTimeStringEqual(subject.providerSubject, expectedProviderSubject)) {
+        throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+      }
       return subject;
     } finally {
       storage.clear();

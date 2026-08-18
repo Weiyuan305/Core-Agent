@@ -21,7 +21,7 @@ import {
   type RegisterB2cCommand,
   type RegisterB2cDependencies,
 } from "../src/services/identity/register-b2c.js";
-import type { Kysely } from "kysely";
+import type { Kysely, Transaction } from "kysely";
 
 const databaseUrl = process.env.CONTROL_PLANE_TEST_DATABASE_URL;
 if (databaseUrl === undefined || !new URL(databaseUrl).pathname.slice(1).startsWith("core_agent_")) {
@@ -455,8 +455,8 @@ test("registerB2c creates only the personal identity graph and replays byte-equi
 
 test("registerInvitedIdentity composes in a caller-owned transaction without self authority", async () => {
   const module = await import("../src/index.js") as Record<string, unknown>;
-  assert.equal(typeof module.registerInvitedIdentity, "function");
-  const registerInvitedIdentity = module.registerInvitedIdentity as (...args: unknown[]) => Promise<{ actor_id: string; auth_subject_id: string }>;
+  assert.equal("registerInvitedIdentity" in module, false, "invited registration must not be a root public bypass");
+  const { registerInvitedIdentityForVerifiedInvitation } = await import("../src/services/identity/register-invited-identity.js");
   await identityDb.insertInto("tenants").values({
     tenant_id: "tenant_invited_registration",
     schema_version: 1,
@@ -466,6 +466,11 @@ test("registerInvitedIdentity composes in a caller-owned transaction without sel
     status: "active",
     created_at: now,
     updated_at: now,
+  }).execute();
+  await identityDb.insertInto("actors").values({
+    actor_id: "actor_invited_registration_admin", schema_version: 1, resource_version: 1,
+    actor_kind: "human", display_name: "Inviting admin", status: "active",
+    created_at: now, updated_at: now,
   }).execute();
   const withoutHash = {
     schema_version: 1 as const,
@@ -481,31 +486,57 @@ test("registerInvitedIdentity composes in a caller-owned transaction without sel
     display_name: "Invited User",
   };
   const invitedCommand = { ...withoutHash, payload_hash: canonicalPayloadHash(withoutHash) };
-  const first = await identityDb.transaction().execute((trx) => registerInvitedIdentity({
+  await assert.rejects(identityDb.transaction().execute((trx) => registerInvitedIdentityForVerifiedInvitation({
     db: identityDb,
     transaction: trx,
     now: () => new Date(now),
     privatePii: dependencies().privatePii,
-  }, context, invitedCommand));
-  const replay = await identityDb.transaction().execute((trx) => registerInvitedIdentity({
+  } as never, context, invitedCommand)), (error: unknown) => (
+    error instanceof DomainError && error.code === "UNAUTHENTICATED"
+  ));
+  assert.equal(await tableCount("actors"), 1, "missing verified binding must roll back the partial identity graph");
+  const invitationSecretDigest = Buffer.alloc(32, 0x4a);
+  await identityDb.insertInto("identity_invitations").values({
+    invitation_id: "invitation_invited_registration",
+    tenant_id: "tenant_invited_registration",
+    membership_id: "membership_invited_registration",
+    invited_by_actor_id: "actor_invited_registration_admin",
+    role: "consultant",
+    secret_digest: invitationSecretDigest,
+    normalized_email_hmac: createHmac("sha256", normalizedEmailHmacKey).update("invited@example.test").digest(),
+    status: "pending",
+    expires_at: new Date("2099-01-01T00:00:00.000Z"),
+    accepted_actor_id: null,
+    accepted_at: null,
+    replaced_by_invitation_id: null,
+    resource_version: 1,
+    created_at: now,
+    updated_at: now,
+  }).execute();
+  const invitedDependencies = (trx: Transaction<RuntimeDatabase>) => ({
     db: identityDb,
     transaction: trx,
     now: () => new Date(now),
     privatePii: dependencies().privatePii,
-  }, context, invitedCommand));
+    verifiedInvitationBinding: {
+      invitationId: "invitation_invited_registration", tenantId: "tenant_invited_registration",
+      secretDigest: invitationSecretDigest, expectedResourceVersion: 1, role: "consultant" as const,
+    },
+  });
+  const first = await identityDb.transaction().execute((trx) => registerInvitedIdentityForVerifiedInvitation(
+    invitedDependencies(trx), context, invitedCommand,
+  ));
+  const replay = await identityDb.transaction().execute((trx) => registerInvitedIdentityForVerifiedInvitation(
+    invitedDependencies(trx), context, invitedCommand,
+  ));
   assert.deepEqual(replay, first);
-  assert.equal(await tableCount("actors"), 1);
+  assert.equal(await tableCount("actors"), 2);
   assert.equal(await tableCount("auth_subjects"), 1);
   assert.equal(await tableCount("private_identity_pii"), 1);
   assert.equal(await tableCount("memberships"), 0);
   assert.equal(await tableCount("profiles"), 0);
   assert.equal(await tableCount("tenants"), 1, "the service must not create a personal Tenant");
-  await assert.rejects(identityDb.transaction().execute((trx) => registerInvitedIdentity({
-    db: identityDb,
-    transaction: trx,
-    now: () => new Date(now),
-    privatePii: dependencies().privatePii,
-  }, context, {
+  await assert.rejects(identityDb.transaction().execute((trx) => registerInvitedIdentityForVerifiedInvitation(invitedDependencies(trx), context, {
     ...invitedCommand,
     auth_subject: { ...invitedCommand.auth_subject, providerSubject: "supabase-invited-conflict" },
   })), (error: unknown) => error instanceof DomainError && error.code === "INVALID_REQUEST");

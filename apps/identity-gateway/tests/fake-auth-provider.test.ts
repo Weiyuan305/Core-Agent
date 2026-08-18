@@ -72,14 +72,34 @@ test("deterministic fake implements the closed adapter and returns only verified
   });
   assert.deepEqual(await provider.reauthenticatePassword(credential), await provider.signInEmail(credential));
   assert.deepEqual(await provider.verifyCurrentSubject(providerProof), await provider.signInEmail(credential));
-  assert.deepEqual(await provider.signUpEmail({
+  const signup = await provider.signUpEmail({
     email: "new-user@example.test",
     password: "a sufficiently long password",
-  }), { kind: "verification_pending" });
-  const verifier = provider as unknown as { verifyEmail?: (input: { verificationCode: string }) => Promise<unknown> };
+  });
+  assert.deepEqual(signup, {
+    kind: "verification_pending",
+    expectedProviderSubject: "fake-email-f2d3ae2417396d63d9061593",
+  });
+  const verifier = provider as unknown as {
+    verifyEmail?: (input: { verificationCode: string; expectedProviderSubject: string }) => Promise<unknown>;
+    recoverVerifiedEmailSubject?: (input: { expectedProviderSubject: string }) => Promise<unknown>;
+  };
   assert.equal(typeof verifier.verifyEmail, "function");
-  assert.equal((await verifier.verifyEmail!({ verificationCode: "fake-email-verification-code" }) as { normalizedEmail?: unknown }).normalizedEmail, "new-user@example.test");
-  await expectFailure(() => verifier.verifyEmail!({ verificationCode: "fake-email-verification-code" }), "AUTH_CALLBACK_INVALID");
+  assert.equal(typeof verifier.recoverVerifiedEmailSubject, "function");
+  await expectFailure(() => verifier.recoverVerifiedEmailSubject!({
+    expectedProviderSubject: signup.expectedProviderSubject,
+  }), "AUTH_EMAIL_UNVERIFIED");
+  assert.equal((await verifier.verifyEmail!({
+    verificationCode: "fake-email-verification-code",
+    expectedProviderSubject: signup.expectedProviderSubject,
+  }) as { normalizedEmail?: unknown }).normalizedEmail, "new-user@example.test");
+  assert.equal((await verifier.recoverVerifiedEmailSubject!({
+    expectedProviderSubject: signup.expectedProviderSubject,
+  }) as { providerSubject?: unknown }).providerSubject, signup.expectedProviderSubject);
+  await expectFailure(() => verifier.verifyEmail!({
+    verificationCode: "fake-email-verification-code",
+    expectedProviderSubject: signup.expectedProviderSubject,
+  }), "AUTH_CALLBACK_INVALID");
   const unknownBinding = await provider.beginPasswordReset("unknown@example.test");
   assert.deepEqual(Object.keys(unknownBinding).sort(), ["expires_at", "state", "transaction_id"]);
   assert.equal(Object.isFrozen(unknownBinding), true);

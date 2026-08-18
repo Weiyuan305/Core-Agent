@@ -12,7 +12,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 
 import type { GatewayAuthenticatedSession, GatewayIssuedSession, IdentityGatewayRouteDependencies } from "../app.js";
 import { IdentityGatewayFailure } from "../errors.js";
-import { assertClientTransport, requireMutationCredentials } from "../security.js";
+import { assertClientTransport, assertInvitationAcceptancePayloadHash, requireMutationCredentials } from "../security.js";
 import { canonicalWebAppleCallback } from "./apple.js";
 import { completeReservedEmailProviderStart, deliverSession } from "./email.js";
 
@@ -57,6 +57,7 @@ export async function registerInvitationRoutes(app: FastifyInstance, dependencie
 
   app.post("/auth/v1/invitations/accept", { schema: { body: InvitationAcceptanceRequestSchema, response: { 200: InvitationAcceptanceResponseSchema } } }, async (request, reply) => {
     const body = request.body as { invitation_secret: string; authentication_proof: { kind: "email_password" | "apple"; client_kind: "web" | "iphone" | "macos"; verification_proof?: string }; device_label?: string } & Record<string, unknown>;
+    assertInvitationAcceptancePayloadHash(body as never);
     assertClientTransport(request, body.authentication_proof.client_kind, dependencies.config);
     const retryAfterMs = await dependencies.operations.consumeRateLimit({ bucketKind: "invitation_accept", accountIdentifier: body.invitation_secret, clientIdentifier: request.identityContext.clientIdentifier });
     if (retryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", retryAfterMs);

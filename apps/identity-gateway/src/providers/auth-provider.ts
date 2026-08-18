@@ -53,6 +53,11 @@ export interface EmailCredentialInput {
 
 export interface EmailVerificationInput {
   readonly verificationCode: string;
+  readonly expectedProviderSubject: string;
+}
+
+export interface EmailVerificationRecoveryInput {
+  readonly expectedProviderSubject: string;
 }
 
 export interface ProviderProof {
@@ -99,8 +104,12 @@ export interface PasswordResetCompletionInput {
 }
 
 export interface AuthProviderAdapter {
-  signUpEmail(input: EmailCredentialInput): Promise<{ readonly kind: "verification_pending" }>;
+  signUpEmail(input: EmailCredentialInput): Promise<{
+    readonly kind: "verification_pending";
+    readonly expectedProviderSubject: string;
+  }>;
   verifyEmail(input: EmailVerificationInput): Promise<VerifiedProviderSubject>;
+  recoverVerifiedEmailSubject(input: EmailVerificationRecoveryInput): Promise<VerifiedProviderSubject>;
   signInEmail(input: EmailCredentialInput): Promise<VerifiedProviderSubject>;
   beginApple(input: AppleAuthorizationInput): Promise<AppleAuthorizationStart>;
   reauthenticateAndBeginAppleLink(input: AppleLinkAuthorizationInput): Promise<AppleAuthorizationStart>;

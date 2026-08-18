@@ -1,5 +1,6 @@
-import { createCipheriv, createDecipheriv, randomBytes, timingSafeEqual } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
+import { canonicalPayloadHash } from "@core-agent/runtime-core";
 import type { FastifyReply, FastifyRequest } from "fastify";
 
 import type { IdentityGatewayConfig } from "./config.js";
@@ -213,6 +214,93 @@ export function safeSecretEqual(left: string, right: string): boolean {
   const leftBytes = Buffer.from(left, "utf8");
   const rightBytes = Buffer.from(right, "utf8");
   return leftBytes.byteLength === rightBytes.byteLength && timingSafeEqual(leftBytes, rightBytes);
+}
+
+function sensitiveFactDigest(value: string): string {
+  return `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}`;
+}
+
+function assertCanonicalHash(supplied: string, facts: Readonly<Record<string, unknown>>): void {
+  if (!safeSecretEqual(supplied, canonicalPayloadHash(facts))) invalidRequest();
+}
+
+export function assertEmailVerificationPayloadHash(body: {
+  readonly schema_version: 1;
+  readonly idempotency_key: string;
+  readonly payload_hash: string;
+  readonly verification_id: string;
+  readonly verification_code: string;
+}): void {
+  assertCanonicalHash(body.payload_hash, {
+    schema_version: body.schema_version,
+    idempotency_key: body.idempotency_key,
+    verification_id: body.verification_id,
+    verification_code: body.verification_code,
+  });
+}
+
+export function assertReauthenticationPayloadHash(body: {
+  readonly schema_version: 1;
+  readonly idempotency_key: string;
+  readonly payload_hash: string;
+  readonly expected_resource_version: number;
+  readonly password: string;
+}): void {
+  assertCanonicalHash(body.payload_hash, reauthenticationDurableFacts(body));
+}
+
+export function reauthenticationDurableFacts(body: {
+  readonly schema_version: 1;
+  readonly idempotency_key: string;
+  readonly expected_resource_version: number;
+  readonly password: string;
+}): Readonly<{
+  schema_version: 1;
+  idempotency_key: string;
+  expected_resource_version: number;
+  reauthentication_proof_digest: string;
+}> {
+  return Object.freeze({
+    schema_version: body.schema_version,
+    idempotency_key: body.idempotency_key,
+    expected_resource_version: body.expected_resource_version,
+    reauthentication_proof_digest: sensitiveFactDigest(body.password),
+  });
+}
+
+export function assertInvitationAcceptancePayloadHash(body: {
+  readonly schema_version: 1;
+  readonly idempotency_key: string;
+  readonly payload_hash: string;
+  readonly expected_resource_version: number;
+  readonly invitation_secret: string;
+  readonly authentication_proof: Readonly<Record<string, unknown>>;
+  readonly device_label?: string;
+}): void {
+  const proof = body.authentication_proof;
+  let canonicalProof: Readonly<Record<string, unknown>>;
+  if (proof.kind === "email_password" && typeof proof.client_kind === "string"
+    && typeof proof.verification_proof === "string") {
+    canonicalProof = {
+      kind: proof.kind,
+      client_kind: proof.client_kind,
+      verification_proof_digest: sensitiveFactDigest(proof.verification_proof),
+    };
+  } else {
+    canonicalProof = {
+      kind: proof.kind,
+      client_kind: proof.client_kind,
+      callback_proof_digest: sensitiveFactDigest(JSON.stringify(proof)),
+    };
+  }
+  assertCanonicalHash(body.payload_hash, {
+    schema_version: body.schema_version,
+    idempotency_key: body.idempotency_key,
+    expected_resource_version: body.expected_resource_version,
+    invitation_digest: sensitiveFactDigest(body.invitation_secret),
+    authentication_proof: canonicalProof,
+    ...(body.device_label === undefined ? {} : { device_label: body.device_label }),
+  });
 }
 
 export function requireMutationCredentials(request: FastifyRequest): { readonly sessionSecret: string; readonly csrfSecret: string } {

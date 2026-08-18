@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import type { Kysely } from "kysely";
+import type { Kysely, Transaction } from "kysely";
 import { Pool } from "pg";
 
 import { createRuntimeDatabase, type RuntimeDatabase } from "../src/db/database.js";
@@ -149,6 +149,18 @@ function acceptPayload(secret: string, overrides: Record<string, unknown> = {}):
   return {
     schema_version: 1, idempotency_key: "accept-consultant-0001", tenant_id: "tenant_invitation",
     invitation_code: secret, expected_resource_version: 1, ...overrides,
+  };
+}
+
+function twoPartyActorLockBarrier(): (trx: Transaction<RuntimeDatabase>, actorId: string) => Promise<void> {
+  let arrivals = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  return async (trx, actorId) => {
+    await trx.selectFrom("actors").select("actor_id").where("actor_id", "=", actorId).forUpdate().executeTakeFirstOrThrow();
+    arrivals += 1;
+    if (arrivals === 2) release();
+    await gate;
   };
 }
 
@@ -470,16 +482,23 @@ test("concurrent accept and revoke reach one terminal invitation outcome without
   await seedCompany();
   await seedActor("actor_consultant", "consultant@example.test");
   const created = await createInvitation(dependencies(), adminContext(), command(createPayload()));
-  const accept = acceptInvitation(dependencies(), {
-    actorId: "actor_consultant", normalizedEmail: "consultant@example.test", requestId: "request_race_accept", traceId: "trace_race_accept",
-  }, command(acceptPayload(created.invitation_secret as string, { idempotency_key: "race-accept" })));
   const revokePayload = {
     schema_version: 1, idempotency_key: "race-revoke", tenant_id: "tenant_invitation",
     invitation_id: "invitation_consultant_0001", expected_resource_version: 1,
   };
+  const actorBarrier = twoPartyActorLockBarrier();
   const outcomes = await Promise.allSettled([
-    accept,
-    revokeInvitation(dependencies(), adminContext(), command(revokePayload)),
+    identityDb.transaction().execute(async (trx) => {
+      await actorBarrier(trx, "actor_consultant");
+      return acceptInvitation({ ...dependencies(), transaction: trx }, {
+        actorId: "actor_consultant", normalizedEmail: "consultant@example.test",
+        requestId: "request_race_accept", traceId: "trace_race_accept",
+      }, command(acceptPayload(created.invitation_secret as string, { idempotency_key: "race-accept" })));
+    }),
+    identityDb.transaction().execute(async (trx) => {
+      await actorBarrier(trx, "actor_company_admin");
+      return revokeInvitation({ ...dependencies(), transaction: trx }, adminContext(), command(revokePayload));
+    }),
   ]);
   assert.equal(outcomes.filter((outcome) => outcome.status === "fulfilled").length, 1);
   const invitation = await administratorPool.query("select status from identity_invitations");
@@ -488,6 +507,58 @@ test("concurrent accept and revoke reach one terminal invitation outcome without
   const profileCount = (await administratorPool.query("select count(*)::int as count from profiles where owner_actor_id = 'actor_consultant'")).rows[0]?.count;
   assert.equal(membershipCount, invitation.rows[0]?.status === "accepted" ? 1 : 0);
   assert.equal(profileCount, invitation.rows[0]?.status === "accepted" ? 1 : 0);
+});
+
+test("caller-owned replacement rolls back and accept versus replace follows Actor-Tenant-Invitation lock order", async () => {
+  const createInvitation = requiredFunction<CommandFunction>("createInvitation");
+  const acceptInvitation = requiredFunction<CommandFunction>("acceptInvitation");
+  const replaceInvitation = requiredFunction<CommandFunction>("replaceInvitation");
+  await seedCompany();
+  await seedActor("actor_consultant", "consultant@example.test");
+  const created = await createInvitation(dependencies(), adminContext(), command(createPayload()));
+  const rollbackPayload = command({
+    schema_version: 1, idempotency_key: "replace-caller-rollback", tenant_id: "tenant_invitation",
+    invitation_id: "invitation_consultant_0001", replacement_invitation_id: "invitation_rollback_replacement",
+    expected_resource_version: 1,
+  });
+  await assert.rejects(identityDb.transaction().execute(async (trx) => {
+    await replaceInvitation({ ...dependencies(), transaction: trx }, adminContext(), rollbackPayload);
+    throw new Error("force caller rollback");
+  }), /force caller rollback/u);
+  assert.deepEqual((await administratorPool.query(
+    "select invitation_id, status from identity_invitations order by invitation_id",
+  )).rows, [{ invitation_id: "invitation_consultant_0001", status: "pending" }]);
+
+  const replacePayload = command({
+    schema_version: 1, idempotency_key: "replace-race", tenant_id: "tenant_invitation",
+    invitation_id: "invitation_consultant_0001", replacement_invitation_id: "invitation_race_replacement",
+    expected_resource_version: 1,
+  });
+  const actorBarrier = twoPartyActorLockBarrier();
+  const outcomes = await Promise.allSettled([
+    identityDb.transaction().execute(async (trx) => {
+      await actorBarrier(trx, "actor_consultant");
+      return acceptInvitation({ ...dependencies(), transaction: trx }, {
+        actorId: "actor_consultant", normalizedEmail: "consultant@example.test",
+        requestId: "request_replace_race_accept", traceId: "trace_replace_race_accept",
+      }, command(acceptPayload(created.invitation_secret as string, { idempotency_key: "replace-race-accept" })));
+    }),
+    identityDb.transaction().execute(async (trx) => {
+      await actorBarrier(trx, "actor_company_admin");
+      return replaceInvitation({ ...dependencies(), transaction: trx }, adminContext(), replacePayload);
+    }),
+  ]);
+  assert.equal(outcomes.filter((outcome) => outcome.status === "fulfilled").length, 1);
+  const invitationRows = (await administratorPool.query(
+    "select invitation_id, status from identity_invitations order by invitation_id",
+  )).rows;
+  assert.ok(
+    JSON.stringify(invitationRows) === JSON.stringify([{ invitation_id: "invitation_consultant_0001", status: "accepted" }])
+      || JSON.stringify(invitationRows) === JSON.stringify([
+        { invitation_id: "invitation_consultant_0001", status: "replaced" },
+        { invitation_id: "invitation_race_replacement", status: "pending" },
+      ]),
+  );
 });
 
 test("controlled concurrent accepted replay and suspension report both outcomes and one versioned terminal graph", async () => {

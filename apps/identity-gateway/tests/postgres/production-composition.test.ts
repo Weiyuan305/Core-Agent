@@ -17,6 +17,7 @@ import { Pool } from "pg";
 
 import { buildIdentityGatewayApp } from "../../src/app.js";
 import type { AuthProviderAdapter } from "../../src/providers/auth-provider.js";
+import { ProviderFailure } from "../../src/providers/provider-errors.js";
 import { buildProductionIdentityGateway, identityGatewayServerTestInternals } from "../../src/server.js";
 
 const databaseUrl = process.env.CONTROL_PLANE_TEST_DATABASE_URL;
@@ -24,6 +25,63 @@ if (databaseUrl === undefined || !new URL(databaseUrl).pathname.slice(1).startsW
   throw new Error("CONTROL_PLANE_TEST_DATABASE_URL must name a disposable core_agent_ database");
 }
 const migrations = join(dirname(fileURLToPath(import.meta.url)), "../../../../packages/runtime-core/migrations");
+
+function sensitiveDigest(value: string): string {
+  return `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}`;
+}
+
+function emailVerificationRequest(facts: {
+  readonly schema_version: 1; readonly idempotency_key: string;
+  readonly verification_id: string; readonly verification_code: string;
+}) {
+  return { ...facts, payload_hash: canonicalPayloadHash(facts) };
+}
+
+function invitationAcceptanceHash(facts: {
+  readonly schema_version: 1; readonly idempotency_key: string; readonly expected_resource_version: number;
+  readonly invitation_secret: string; readonly device_label?: string;
+  readonly authentication_proof: { readonly kind: "email_password"; readonly client_kind: "web"; readonly verification_proof: string };
+}): string {
+  return canonicalPayloadHash({
+    schema_version: facts.schema_version,
+    idempotency_key: facts.idempotency_key,
+    expected_resource_version: facts.expected_resource_version,
+    invitation_digest: sensitiveDigest(facts.invitation_secret),
+    authentication_proof: {
+      kind: facts.authentication_proof.kind,
+      client_kind: facts.authentication_proof.client_kind,
+      verification_proof_digest: sensitiveDigest(facts.authentication_proof.verification_proof),
+    },
+    ...(facts.device_label === undefined ? {} : { device_label: facts.device_label }),
+  });
+}
+
+function reauthenticationRequest(facts: {
+  readonly schema_version: 1; readonly idempotency_key: string;
+  readonly expected_resource_version: number; readonly password: string;
+}) {
+  return {
+    ...facts,
+    payload_hash: canonicalPayloadHash({
+      schema_version: facts.schema_version,
+      idempotency_key: facts.idempotency_key,
+      expected_resource_version: facts.expected_resource_version,
+      reauthentication_proof_digest: sensitiveDigest(facts.password),
+    }),
+  };
+}
+
+async function waitForBlockedLocks(pool: Pool, minimum: number): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const blocked = Number((await pool.query(
+      "select count(*)::int as count from pg_stat_activity where datname = current_database() and cardinality(pg_blocking_pids(pid)) > 0",
+    )).rows[0]?.count);
+    if (blocked >= minimum) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for ${minimum} blocked PostgreSQL locks`);
+}
 
 test("production composition atomically verifies email, registers Task 3, issues Task 6, and protects Task 4", async () => {
   const pool = new Pool({ connectionString: databaseUrl });
@@ -56,7 +114,10 @@ test("production composition atomically verifies email, registers Task 3, issues
       }),
       normalizedEmail: "composition@example.test", clientKind: "web", deviceLabel: "Composition Browser",
     });
-    await operations.finalizeEmailVerificationStart({ verificationId: begun.verificationId, outcome: "finalized" });
+    await operations.finalizeEmailVerificationStart({
+      verificationId: begun.verificationId, outcome: "finalized",
+      expectedProviderSubject: "composition-provider-subject",
+    });
     const verifiedSubject = {
       provider: "supabase" as const, providerSubject: "composition-provider-subject",
       identityKind: "email_password" as const, normalizedEmail: "composition@example.test",
@@ -66,9 +127,9 @@ test("production composition atomically verifies email, registers Task 3, issues
       idempotencyKey: "composition-session-issue", payloadHash: `sha256:${"c".repeat(64)}`,
       operation: "email_verification" as const,
     };
+    await operations.checkpointEmailVerification({ verificationId: begun.verificationId, verifiedSubject });
     const registered = await operations.completeEmailVerification({
       verificationId: begun.verificationId,
-      verifiedSubject,
       idempotencyKey: sessionIdempotency.idempotencyKey,
       payloadHash: sessionIdempotency.payloadHash,
     });
@@ -85,16 +146,91 @@ test("production composition atomically verifies email, registers Task 3, issues
     assert.equal((await pool.query("select count(*)::int as count from auth_subjects where actor_id = $1", [registered.actorId])).rows[0]?.count, 1);
     await assert.rejects(operations.completeEmailVerification({
       verificationId: begun.verificationId,
-      verifiedSubject,
       idempotencyKey: sessionIdempotency.idempotencyKey,
       payloadHash: sessionIdempotency.payloadHash,
     }), /IDEMPOTENCY_CONFLICT/u);
     assert.equal((await pool.query("select count(*)::int as count from core_sessions where actor_id = $1", [registered.actorId])).rows[0]?.count, 1);
 
+    const nativeProvider: AuthProviderAdapter = {
+      async reauthenticatePassword(input) {
+        assert.equal(input.email, verifiedSubject.normalizedEmail);
+        assert.equal(input.password, "native-current-password");
+        return verifiedSubject;
+      },
+      async reauthenticateAndBeginAppleLink(input) {
+        return {
+          transaction_id: `native-link-${input.client_kind}`,
+          authorization_url: `https://provider.example.test/auth/v1/authorize?state=native-link-state&redirect_to=${encodeURIComponent(input.redirect_uri)}`,
+          expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
+        };
+      },
+      signUpEmail: async () => { throw new Error("unused provider method"); },
+      recoverVerifiedEmailSubject: async () => { throw new Error("unused provider method"); },
+      verifyEmail: async () => { throw new Error("unused provider method"); },
+      signInEmail: async () => { throw new Error("unused provider method"); },
+      beginApple: async () => { throw new Error("unused provider method"); },
+      completeApple: async () => { throw new Error("unused provider method"); },
+      verifyCurrentSubject: async () => { throw new Error("unused provider method"); },
+      beginPasswordReset: async () => { throw new Error("unused provider method"); },
+      completePasswordReset: async () => { throw new Error("unused provider method"); },
+      linkApple: async () => { throw new Error("unused provider method"); },
+      revokeCurrentProviderSession: async () => { throw new Error("unused provider method"); },
+      deleteProviderSubject: async () => { throw new Error("unused provider method"); },
+    };
+    const nativeApp = await buildIdentityGatewayApp({
+      config: {
+        publicOrigins: new Set(["https://app.example.test"]), cookieHost: "identity.example.test",
+        publicBaseUrl: "https://identity.example.test", providerUrl: "https://provider.example.test",
+        appleWebRedirectUris: new Set(["https://app.example.test/auth/apple/callback"]),
+        appleNativeRedirectUris: new Set(["coreagent://auth/apple/callback"]),
+        passwordResetRedirectUri: "https://app.example.test/auth/password/reset/callback",
+        publicAuthEnabled: true,
+      },
+      flowCookieKey: key,
+      provider: nativeProvider,
+      operations,
+    });
+    for (const clientKind of ["iphone", "macos"] as const) {
+      const nativeSession = await issueCoreSession({ db }, {
+        sessionId: `session_composition_native_${clientKind}`, actorId: registered.actorId,
+        authSubjectId: registered.authSubjectId, clientKind,
+      });
+      const reauthentication = await nativeApp.inject({
+        method: "POST", url: "/auth/v1/reauthenticate",
+        headers: {
+          host: "identity.example.test", authorization: `Bearer ${nativeSession.sessionSecret}`,
+          "content-type": "application/json",
+        },
+        payload: reauthenticationRequest({
+          schema_version: 1, idempotency_key: `composition-native-reauth-${clientKind}`,
+          expected_resource_version: 1, password: "native-current-password",
+        }),
+      });
+      assert.equal(reauthentication.statusCode, 200, reauthentication.body);
+      const link = await nativeApp.inject({
+        method: "POST", url: "/auth/v1/apple/link/start",
+        headers: {
+          host: "identity.example.test", authorization: `Bearer ${nativeSession.sessionSecret}`,
+          "content-type": "application/json",
+        },
+        payload: {
+          schema_version: 1, idempotency_key: `composition-native-link-${clientKind}`,
+          payload_hash: `sha256:${"9".repeat(64)}`, client_kind: clientKind,
+          redirect_uri: "coreagent://auth/apple/callback", password: "native-current-password",
+          nonce: "native-link-nonce", pkce_code_challenge: "p".repeat(43),
+          pkce_code_challenge_method: "S256",
+        },
+      });
+      assert.equal(link.statusCode, 200, link.body);
+      assert.equal(link.headers["set-cookie"], undefined);
+    }
+    await nativeApp.close();
+
     const reauthenticationPayload = {
       schema_version: 1 as const,
       idempotency_key: "composition-reauthentication",
       expected_resource_version: Number(authority.session.session_resource_version),
+      reauthentication_proof_digest: sensitiveDigest("direct-operation-proof"),
     };
     const reauthenticationCommand = {
       ...reauthenticationPayload,
@@ -123,6 +259,7 @@ test("production composition atomically verifies email, registers Task 3, issues
     const concurrentReauthenticationPayload = {
       schema_version: 1 as const, idempotency_key: "composition-concurrent-reauthentication",
       expected_resource_version: 1,
+      reauthentication_proof_digest: sensitiveDigest("direct-concurrent-proof"),
     };
     const concurrentReauthenticationCommand = {
       ...concurrentReauthenticationPayload,
@@ -224,16 +361,20 @@ test("production composition atomically verifies email, registers Task 3, issues
     await db.insertInto("actors").values([
       { actor_id: "actor_composition_admin", schema_version: 1, resource_version: 1, actor_kind: "human", display_name: "Composition admin", status: "active", created_at: timestamp, updated_at: timestamp },
       { actor_id: "actor_composition_invitee", schema_version: 1, resource_version: 1, actor_kind: "human", display_name: "Composition invitee", status: "active", created_at: timestamp, updated_at: timestamp },
+      { actor_id: "actor_composition_lock_invitee", schema_version: 1, resource_version: 1, actor_kind: "human", display_name: "Composition lock invitee", status: "active", created_at: timestamp, updated_at: timestamp },
     ]).execute();
     await db.insertInto("auth_subjects").values([
       { auth_subject_id: "auth_composition_admin", actor_id: "actor_composition_admin", provider: "supabase", provider_subject: "provider_composition_admin", provider_identity_kind: "email_password", verified_at: timestamp, status: "active", resource_version: 1, created_at: timestamp, updated_at: timestamp },
       { auth_subject_id: "auth_composition_invitee", actor_id: "actor_composition_invitee", provider: "supabase", provider_subject: "provider_composition_invitee", provider_identity_kind: "email_password", verified_at: timestamp, status: "active", resource_version: 1, created_at: timestamp, updated_at: timestamp },
+      { auth_subject_id: "auth_composition_lock_invitee", actor_id: "actor_composition_lock_invitee", provider: "supabase", provider_subject: "provider_composition_lock_invitee", provider_identity_kind: "email_password", verified_at: timestamp, status: "active", resource_version: 1, created_at: timestamp, updated_at: timestamp },
     ]).execute();
     const adminEmail = "company-admin@example.test";
     const inviteeEmail = "company-invitee@example.test";
+    const lockInviteeEmail = "company-lock-invitee@example.test";
     await db.insertInto("private_identity_pii").values([
       { actor_id: "actor_composition_admin", normalized_email_hmac: createHmac("sha256", key).update(adminEmail).digest(), encrypted_email: Buffer.from("encrypted-admin"), encryption_key_ref: "composition", created_at: timestamp, updated_at: timestamp },
       { actor_id: "actor_composition_invitee", normalized_email_hmac: createHmac("sha256", key).update(inviteeEmail).digest(), encrypted_email: Buffer.from("encrypted-invitee"), encryption_key_ref: "composition", created_at: timestamp, updated_at: timestamp },
+      { actor_id: "actor_composition_lock_invitee", normalized_email_hmac: createHmac("sha256", key).update(lockInviteeEmail).digest(), encrypted_email: Buffer.from("encrypted-lock-invitee"), encryption_key_ref: "composition", created_at: timestamp, updated_at: timestamp },
     ]).execute();
     await db.insertInto("memberships").values({
       tenant_id: company.tenant_id, membership_id: "membership_composition_admin", actor_id: "actor_composition_admin",
@@ -273,6 +414,16 @@ test("production composition atomically verifies email, registers Task 3, issues
       identityKind: "email_password" as const, normalizedEmail: concurrentInviteeEmail,
       verifiedAt: timestamp.toISOString(),
     };
+    const checkpointRecoverySubject = {
+      ...onboardingSubject,
+      providerSubject: "provider_checkpoint_recovery",
+      normalizedEmail: "checkpoint-recovery@example.test",
+    };
+    const domainRetrySubject = {
+      ...onboardingSubject,
+      providerSubject: "provider_domain_retry",
+      normalizedEmail: "domain-retry@example.test",
+    };
     const lateInvalidStatuses = ["wrong-binding", "revoked", "replaced", "expired"] as const;
     const lateInvalidSubjects = new Map<string, typeof onboardingSubject>(lateInvalidStatuses.map((status) => {
       const normalizedEmail = `late-${status}-composition-invitee@example.test`;
@@ -285,20 +436,56 @@ test("production composition atomically verifies email, registers Task 3, issues
       }] as const;
     }));
     const unavailableProvider = async (): Promise<never> => { throw new Error("unused provider method"); };
+    const knownEmailSubjects = new Map<string, typeof onboardingSubject>([
+      [onboardingSubject.normalizedEmail, onboardingSubject],
+      [concurrentOnboardingSubject.normalizedEmail, concurrentOnboardingSubject],
+      [checkpointRecoverySubject.normalizedEmail, checkpointRecoverySubject],
+      [domainRetrySubject.normalizedEmail, domainRetrySubject],
+      ...[...lateInvalidSubjects.values()].map((subject) => [subject.normalizedEmail, subject] as const),
+    ]);
+    const confirmedSubjects = new Map<string, typeof onboardingSubject>();
+    const usedVerificationCodes = new Set<string>();
     const provider: AuthProviderAdapter = {
-      async signUpEmail() { signUpCalls += 1; return { kind: "verification_pending" }; },
+      async signUpEmail(input) {
+        signUpCalls += 1;
+        const subject = knownEmailSubjects.get(input.email) ?? {
+          ...onboardingSubject,
+          providerSubject: `provider_${createHash("sha256").update(input.email).digest("hex").slice(0, 24)}`,
+          normalizedEmail: input.email,
+        };
+        knownEmailSubjects.set(input.email, subject);
+        return { kind: "verification_pending", expectedProviderSubject: subject.providerSubject };
+      },
+      async recoverVerifiedEmailSubject(input) {
+        const subject = confirmedSubjects.get(input.expectedProviderSubject);
+        if (subject === undefined) throw new ProviderFailure("AUTH_EMAIL_UNVERIFIED");
+        return subject;
+      },
       async verifyEmail(input) {
+        if (usedVerificationCodes.has(input.verificationCode)) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
         verificationCalls += 1;
-        return lateInvalidSubjects.get(input.verificationCode)
-          ?? (input.verificationCode === "concurrent-verification-code"
-            ? concurrentOnboardingSubject
-            : onboardingSubject);
+        const subject = lateInvalidSubjects.get(input.verificationCode)
+          ?? (input.verificationCode === "concurrent-verification-code" ? concurrentOnboardingSubject
+            : input.verificationCode === "checkpoint-recovery-code" ? checkpointRecoverySubject
+              : input.verificationCode === "domain-retry-code" ? domainRetrySubject
+                : onboardingSubject);
+        if (subject.providerSubject !== input.expectedProviderSubject) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+        usedVerificationCodes.add(input.verificationCode);
+        confirmedSubjects.set(subject.providerSubject, subject);
+        return subject;
       },
       signInEmail: unavailableProvider,
       beginApple: unavailableProvider,
       reauthenticateAndBeginAppleLink: unavailableProvider,
       completeApple: unavailableProvider,
-      async verifyCurrentSubject() {
+      async verifyCurrentSubject(input) {
+        if (input.accessToken === "opaque-lock-order-proof") {
+          return {
+            provider: "supabase", providerSubject: "provider_composition_lock_invitee",
+            identityKind: "email_password", normalizedEmail: lockInviteeEmail,
+            verifiedAt: timestamp.toISOString(),
+          };
+        }
         return {
           provider: "supabase", providerSubject: "provider_composition_invitee",
           identityKind: "email_password", normalizedEmail: inviteeEmail,
@@ -312,15 +499,16 @@ test("production composition atomically verifies email, registers Task 3, issues
       revokeCurrentProviderSession: unavailableProvider,
       deleteProviderSubject: unavailableProvider,
     };
+    const onboardingConfig = {
+      publicOrigins: new Set(["https://app.example.test"]), cookieHost: "identity.example.test",
+      publicBaseUrl: "https://identity.example.test", providerUrl: "https://provider.example.test",
+      appleWebRedirectUris: new Set(["https://app.example.test/auth/apple/callback"]),
+      appleNativeRedirectUris: new Set(["coreagent://auth/apple/callback"]),
+      passwordResetRedirectUri: "https://app.example.test/auth/password/reset/callback",
+      publicAuthEnabled: true,
+    };
     const onboardingApp = await buildIdentityGatewayApp({
-      config: {
-        publicOrigins: new Set(["https://app.example.test"]), cookieHost: "identity.example.test",
-        publicBaseUrl: "https://identity.example.test", providerUrl: "https://provider.example.test",
-        appleWebRedirectUris: new Set(["https://app.example.test/auth/apple/callback"]),
-        appleNativeRedirectUris: new Set(["coreagent://auth/apple/callback"]),
-        passwordResetRedirectUri: "https://app.example.test/auth/password/reset/callback",
-        publicAuthEnabled: true,
-      },
+      config: onboardingConfig,
       provider,
       operations,
       flowCookieKey: Buffer.alloc(32, 0x37),
@@ -417,6 +605,35 @@ test("production composition atomically verifies email, registers Task 3, issues
     const transactionsBeforeInvalidStarts = Number((await pool.query(
       "select count(*)::int as count from email_verification_transactions",
     )).rows[0]?.count);
+    for (const tenantState of ["closed", "b2c"] as const) {
+      await pool.query(
+        `update tenants set status = $1, tenant_mode = $2, updated_at = now() where tenant_id = $3`,
+        [tenantState === "closed" ? "closed" : "active", tenantState === "b2c" ? "b2c" : "b2b", company.tenant_id],
+      );
+      const idempotencyKey = `composition-invalid-tenant-${tenantState}`;
+      const tenantPreflight = await onboardingApp.inject({
+        method: "POST", url: "/auth/v1/invitations/register", headers: publicHeaders,
+        payload: {
+          schema_version: 1, idempotency_key: idempotencyKey,
+          payload_hash: canonicalEmailVerificationStartPayloadHash({
+            idempotencyKey, normalizedEmail: newInviteeEmail, clientKind: "web",
+            flowKind: "invitation", invitationDigest: createHash("sha256")
+              .update(Buffer.from(onboardingInvitation.invitation_secret, "base64url")).digest("base64url"),
+          }),
+          invitation_secret: onboardingInvitation.invitation_secret, email: newInviteeEmail,
+          password: "correct-horse-battery", client_kind: "web",
+        },
+      });
+      assert.equal(tenantPreflight.statusCode, 401, `${tenantState}: ${tenantPreflight.body}`);
+      assert.equal(signUpCalls, 0, `${tenantState} Tenant must reject before provider`);
+      assert.equal(Number((await pool.query(
+        "select count(*)::int as count from email_verification_transactions",
+      )).rows[0]?.count), transactionsBeforeInvalidStarts);
+    }
+    await pool.query(
+      "update tenants set status = 'active', tenant_mode = 'b2b', updated_at = now() where tenant_id = $1",
+      [company.tenant_id],
+    );
     for (const invalidCase of invalidCases) {
       const idempotencyKey = `composition-invalid-${invalidCase.name}-start`;
       const invalidStart = await onboardingApp.inject({
@@ -469,11 +686,11 @@ test("production composition atomically verifies email, registers Task 3, issues
     assert.equal(changedStartReplay.statusCode, 400, changedStartReplay.body);
     assert.equal(signUpCalls, 1, "payload conflict must reject before provider signup");
     const verificationId = String(start.json().verification_id);
-    const verifyPayload = {
+    const verifyPayload = emailVerificationRequest({
       schema_version: 1, idempotency_key: "composition-invited-email-complete",
-      payload_hash: `sha256:${"3".repeat(64)}`, verification_id: verificationId,
+      verification_id: verificationId,
       verification_code: "opaque-verification-code",
-    };
+    });
     const verified = await onboardingApp.inject({
       method: "POST", url: "/auth/v1/email/verification", headers: publicHeaders, payload: verifyPayload,
     });
@@ -504,11 +721,11 @@ test("production composition atomically verifies email, registers Task 3, issues
       where email_verification_transaction_id = $1`, [expiredVerificationId]);
     const expiredVerify = await onboardingApp.inject({
       method: "POST", url: "/auth/v1/email/verification", headers: publicHeaders,
-      payload: {
+      payload: emailVerificationRequest({
         schema_version: 1, idempotency_key: "composition-expired-email-complete",
-        payload_hash: `sha256:${"4".repeat(64)}`, verification_id: expiredVerificationId,
+        verification_id: expiredVerificationId,
         verification_code: "opaque-expired-code",
-      },
+      }),
     });
     assert.equal(expiredVerify.statusCode, 401, expiredVerify.body);
     assert.equal(verificationCalls, 1, "expired binding must reject before provider verification");
@@ -516,6 +733,141 @@ test("production composition atomically verifies email, registers Task 3, issues
       "select status from email_verification_transactions where email_verification_transaction_id = $1",
       [expiredVerificationId],
     )).rows[0]?.status, "expired");
+
+    let checkpointAttempts = 0;
+    const checkpointRecoveryApp = await buildIdentityGatewayApp({
+      config: onboardingConfig, provider, flowCookieKey: Buffer.alloc(32, 0x38), now: () => timestamp,
+      operations: {
+        ...operations,
+        async checkpointEmailVerification(input) {
+          checkpointAttempts += 1;
+          if (checkpointAttempts === 1) throw new Error("simulated checkpoint commit failure");
+          return operations.checkpointEmailVerification(input);
+        },
+      },
+    });
+    const checkpointStartKey = "composition-checkpoint-recovery-start";
+    const checkpointStart = await checkpointRecoveryApp.inject({
+      method: "POST", url: "/auth/v1/email/sign-up", headers: publicHeaders,
+      payload: {
+        schema_version: 1, idempotency_key: checkpointStartKey,
+        payload_hash: canonicalEmailVerificationStartPayloadHash({
+          idempotencyKey: checkpointStartKey, normalizedEmail: checkpointRecoverySubject.normalizedEmail,
+          clientKind: "web", flowKind: "b2c",
+        }),
+        email: checkpointRecoverySubject.normalizedEmail, password: "correct-horse-battery", client_kind: "web",
+      },
+    });
+    assert.equal(checkpointStart.statusCode, 202, checkpointStart.body);
+    const checkpointVerificationId = String(checkpointStart.json().verification_id);
+    const checkpointVerification = emailVerificationRequest({
+      schema_version: 1, idempotency_key: "composition-checkpoint-recovery-complete",
+      verification_id: checkpointVerificationId, verification_code: "checkpoint-recovery-code",
+    });
+    const verificationCallsBeforeCheckpointRecovery = verificationCalls;
+    const failedCheckpoint = await checkpointRecoveryApp.inject({
+      method: "POST", url: "/auth/v1/email/verification", headers: publicHeaders,
+      payload: checkpointVerification,
+    });
+    assert.equal(failedCheckpoint.statusCode, 500, failedCheckpoint.body);
+    assert.equal((await pool.query(
+      "select provider_verification_status from email_verification_transactions where email_verification_transaction_id = $1",
+      [checkpointVerificationId],
+    )).rows[0]?.provider_verification_status, "pending");
+    const recoveredCheckpoint = await checkpointRecoveryApp.inject({
+      method: "POST", url: "/auth/v1/email/verification", headers: publicHeaders,
+      payload: checkpointVerification,
+    });
+    assert.equal(recoveredCheckpoint.statusCode, 200, recoveredCheckpoint.body);
+    assert.equal(verificationCalls, verificationCallsBeforeCheckpointRecovery + 1, "checkpoint recovery must not reuse OTP");
+    assert.equal((await pool.query(
+      "select count(*)::int as count from auth_subjects where provider_subject = $1",
+      [checkpointRecoverySubject.providerSubject],
+    )).rows[0]?.count, 1);
+    await checkpointRecoveryApp.close();
+
+    let domainCompletionAttempts = 0;
+    const domainRetryApp = await buildIdentityGatewayApp({
+      config: onboardingConfig, provider, flowCookieKey: Buffer.alloc(32, 0x39), now: () => timestamp,
+      operations: {
+        ...operations,
+        async completeEmailVerification(input) {
+          domainCompletionAttempts += 1;
+          if (domainCompletionAttempts === 1) throw new Error("simulated domain transaction rollback");
+          return operations.completeEmailVerification(input);
+        },
+      },
+    });
+    const domainStartKey = "composition-domain-retry-start";
+    const domainStart = await domainRetryApp.inject({
+      method: "POST", url: "/auth/v1/email/sign-up", headers: publicHeaders,
+      payload: {
+        schema_version: 1, idempotency_key: domainStartKey,
+        payload_hash: canonicalEmailVerificationStartPayloadHash({
+          idempotencyKey: domainStartKey, normalizedEmail: domainRetrySubject.normalizedEmail,
+          clientKind: "web", flowKind: "b2c",
+        }),
+        email: domainRetrySubject.normalizedEmail, password: "correct-horse-battery", client_kind: "web",
+      },
+    });
+    assert.equal(domainStart.statusCode, 202, domainStart.body);
+    const domainVerificationId = String(domainStart.json().verification_id);
+    const domainVerification = emailVerificationRequest({
+      schema_version: 1, idempotency_key: "composition-domain-retry-complete",
+      verification_id: domainVerificationId, verification_code: "domain-retry-code",
+    });
+    const verificationCallsBeforeDomainRetry = verificationCalls;
+    const failedDomain = await domainRetryApp.inject({
+      method: "POST", url: "/auth/v1/email/verification", headers: publicHeaders,
+      payload: domainVerification,
+    });
+    assert.equal(failedDomain.statusCode, 500, failedDomain.body);
+    assert.equal((await pool.query(
+      "select provider_verification_status, status from email_verification_transactions where email_verification_transaction_id = $1",
+      [domainVerificationId],
+    )).rows[0]?.provider_verification_status, "verified");
+    const recoveredDomain = await domainRetryApp.inject({
+      method: "POST", url: "/auth/v1/email/verification", headers: publicHeaders,
+      payload: domainVerification,
+    });
+    assert.equal(recoveredDomain.statusCode, 200, recoveredDomain.body);
+    assert.equal(verificationCalls, verificationCallsBeforeDomainRetry + 1, "durable checkpoint retry must skip OTP");
+    assert.equal((await pool.query(
+      "select count(*)::int as count from core_sessions where actor_id = (select actor_id from auth_subjects where provider_subject = $1)",
+      [domainRetrySubject.providerSubject],
+    )).rows[0]?.count, 1);
+    await domainRetryApp.close();
+
+    const concurrentFirstEmail = "concurrent-first-start@example.test";
+    const concurrentFirstKey = "composition-concurrent-first-start";
+    const concurrentFirstPayload = {
+      schema_version: 1 as const, idempotency_key: concurrentFirstKey,
+      payload_hash: canonicalEmailVerificationStartPayloadHash({
+        idempotencyKey: concurrentFirstKey, normalizedEmail: concurrentFirstEmail,
+        clientKind: "web", flowKind: "b2c",
+      }),
+      email: concurrentFirstEmail, password: "correct-horse-battery", client_kind: "web" as const,
+    };
+    const startsBeforeConcurrentFirst = signUpCalls;
+    const concurrentFirstStarts = await Promise.all([
+      onboardingApp.inject({
+        method: "POST", url: "/auth/v1/email/sign-up", headers: publicHeaders,
+        payload: concurrentFirstPayload,
+      }),
+      onboardingApp.inject({
+        method: "POST", url: "/auth/v1/email/sign-up", headers: publicHeaders,
+        payload: concurrentFirstPayload,
+      }),
+    ]);
+    const concurrentFirstStatuses = concurrentFirstStarts.map(({ statusCode }) => statusCode);
+    assert.equal(concurrentFirstStatuses.includes(202), true);
+    assert.equal(concurrentFirstStatuses.every((statusCode) => statusCode === 202 || statusCode === 409), true);
+    assert.equal(signUpCalls, startsBeforeConcurrentFirst + 1, "concurrent first start must invoke provider once");
+    assert.equal((await pool.query(
+      "select count(*)::int as count from email_verification_transactions where start_idempotency_key = $1",
+      [concurrentFirstKey],
+    )).rows[0]?.count, 1);
+
     const invitedGraph = await pool.query(`select
       (select count(*)::int from auth_subjects where provider_subject = $1) as subjects,
       (select count(*)::int from memberships where membership_id = $2 and status = 'active') as memberships,
@@ -540,36 +892,56 @@ test("production composition atomically verifies email, registers Task 3, issues
     const concurrentStartKey = "composition-concurrent-invited-email-start";
     const concurrentInvitationDigest = createHash("sha256")
       .update(Buffer.from(concurrentInvitation.invitation_secret, "base64url")).digest("base64url");
+    const concurrentStartPayload = {
+      schema_version: 1 as const, idempotency_key: concurrentStartKey,
+      payload_hash: canonicalEmailVerificationStartPayloadHash({
+        idempotencyKey: concurrentStartKey, normalizedEmail: concurrentInviteeEmail,
+        clientKind: "web", flowKind: "invitation", invitationDigest: concurrentInvitationDigest,
+      }),
+      invitation_secret: concurrentInvitation.invitation_secret, email: concurrentInviteeEmail,
+      password: "correct-horse-battery", client_kind: "web" as const,
+    };
     const concurrentStart = await onboardingApp.inject({
       method: "POST", url: "/auth/v1/invitations/register", headers: publicHeaders,
-      payload: {
-        schema_version: 1, idempotency_key: concurrentStartKey,
-        payload_hash: canonicalEmailVerificationStartPayloadHash({
-          idempotencyKey: concurrentStartKey, normalizedEmail: concurrentInviteeEmail,
-          clientKind: "web", flowKind: "invitation", invitationDigest: concurrentInvitationDigest,
-        }),
-        invitation_secret: concurrentInvitation.invitation_secret, email: concurrentInviteeEmail,
-        password: "correct-horse-battery", client_kind: "web",
-      },
+      payload: concurrentStartPayload,
     });
     assert.equal(concurrentStart.statusCode, 202, concurrentStart.body);
-    const concurrentVerificationPayload = {
+    const concurrentVerificationPayload = emailVerificationRequest({
       schema_version: 1, idempotency_key: "composition-concurrent-invited-email-complete",
-      payload_hash: `sha256:${"8".repeat(64)}`,
       verification_id: String(concurrentStart.json().verification_id),
       verification_code: "concurrent-verification-code",
-    };
-    const concurrentVerifications = await Promise.all([
-      onboardingApp.inject({
-        method: "POST", url: "/auth/v1/email/verification", headers: publicHeaders,
-        payload: concurrentVerificationPayload,
-      }),
-      onboardingApp.inject({
-        method: "POST", url: "/auth/v1/email/verification", headers: publicHeaders,
-        payload: concurrentVerificationPayload,
-      }),
-    ]);
-    assert.deepEqual(concurrentVerifications.map(({ statusCode }) => statusCode).sort(), [200, 409]);
+    });
+    const [settledStartReplay, settledVerification] = await (async () => {
+      const invitationBarrier = await pool.connect();
+      try {
+        await invitationBarrier.query("begin");
+        await invitationBarrier.query(
+          "select invitation_id from identity_invitations where invitation_id = $1 for update",
+          [concurrentInvitation.invitation_id],
+        );
+        const concurrentStartReplay = onboardingApp.inject({
+          method: "POST", url: "/auth/v1/invitations/register", headers: publicHeaders,
+          payload: concurrentStartPayload,
+        });
+        const concurrentVerification = onboardingApp.inject({
+          method: "POST", url: "/auth/v1/email/verification", headers: publicHeaders,
+          payload: concurrentVerificationPayload,
+        });
+        await waitForBlockedLocks(pool, 1);
+        await invitationBarrier.query("commit");
+        return Promise.all([concurrentStartReplay, concurrentVerification]);
+      } finally {
+        await invitationBarrier.query("rollback").catch(() => undefined);
+        invitationBarrier.release();
+      }
+    })();
+    assert.equal(settledStartReplay.statusCode, 202, settledStartReplay.body);
+    assert.equal(settledVerification.statusCode, 200, settledVerification.body);
+    const concurrentConsumedReplay = await onboardingApp.inject({
+      method: "POST", url: "/auth/v1/email/verification", headers: publicHeaders,
+      payload: concurrentVerificationPayload,
+    });
+    assert.equal(concurrentConsumedReplay.statusCode, 409, concurrentConsumedReplay.body);
     const concurrentGraph = await pool.query(`select
       (select count(*)::int from auth_subjects where provider_subject = $1) as subjects,
       (select count(*)::int from memberships where membership_id = $2 and status = 'active') as memberships,
@@ -616,12 +988,11 @@ test("production composition atomically verifies email, registers Task 3, issues
       }
       const lateVerify = await onboardingApp.inject({
         method: "POST", url: "/auth/v1/email/verification", headers: publicHeaders,
-        payload: {
+        payload: emailVerificationRequest({
           schema_version: 1, idempotency_key: `composition-late-${status}-complete`,
-          payload_hash: `sha256:${createHash("sha256").update(`complete:${status}`).digest("hex")}`,
           verification_id: String(lateStart.json().verification_id),
           verification_code: `late-${status}-verification-code`,
-        },
+        }),
       });
       assert.equal(lateVerify.statusCode >= 400, true, `${status}: ${lateVerify.body}`);
       assert.equal((await pool.query(
@@ -637,14 +1008,62 @@ test("production composition atomically verifies email, registers Task 3, issues
         [`%${status}%`],
       )).rows[0]?.count, 0);
     }
-    const acceptancePayload = {
-      schema_version: 1, idempotency_key: "composition-invitation-accept",
-      payload_hash: `sha256:${"f".repeat(64)}`, invitation_secret: invitation.invitation_secret,
-      expected_resource_version: 1, device_label: "Existing Invitation Browser",
+    const lockOrderInvitation = await operations.executeProtectedAuthorityCommand({
+      kind: "company_member_invite", authority: adminAuthority,
+      payload: {
+        schema_version: 1, idempotency_key: "composition-existing-accept-lock-order-invite",
+        payload_hash: `sha256:${"8".repeat(64)}`, tenant_id: company.tenant_id,
+        email: lockInviteeEmail, role: "consultant",
+      },
+    }) as { invitation_id: string; invitation_secret: string };
+    const lockOrderFacts = {
+      schema_version: 1 as const, idempotency_key: "composition-existing-accept-lock-order",
+      invitation_secret: lockOrderInvitation.invitation_secret,
+      expected_resource_version: 1, device_label: "Lock Order Browser",
       authentication_proof: {
-        kind: "email_password", client_kind: "web", verification_proof: "opaque-existing-proof",
+        kind: "email_password" as const, client_kind: "web" as const,
+        verification_proof: "opaque-lock-order-proof",
       },
     };
+    const actorLock = await pool.connect();
+    let lockOrderAcceptance: Promise<{ readonly statusCode: number; readonly body: string }> | undefined;
+    try {
+      await actorLock.query("begin");
+      await actorLock.query("select actor_id from actors where actor_id = $1 for update", ["actor_composition_lock_invitee"]);
+      lockOrderAcceptance = onboardingApp.inject({
+        method: "POST", url: "/auth/v1/invitations/accept", headers: publicHeaders,
+        payload: { ...lockOrderFacts, payload_hash: invitationAcceptanceHash(lockOrderFacts) },
+      });
+      await waitForBlockedLocks(pool, 1);
+      const revokeWithoutHash = {
+        schema_version: 1 as const, idempotency_key: "composition-existing-accept-lock-order-revoke",
+        invitation_id: lockOrderInvitation.invitation_id, expected_resource_version: 1,
+        reason_code: "administrator_revoked" as const,
+      };
+      const revokeResult = await Promise.race([
+        operations.executeProtectedAuthorityCommand({
+          kind: "invitation_revoke", authority: adminAuthority,
+          payload: { ...revokeWithoutHash, payload_hash: canonicalPayloadHash(revokeWithoutHash) },
+        }).then(() => "settled" as const),
+        new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 2_000)),
+      ]);
+      assert.equal(revokeResult, "settled", "revoke must not wait behind an acceptance that is blocked on its Actor lock");
+      await actorLock.query("commit");
+    } finally {
+      await actorLock.query("rollback").catch(() => undefined);
+      actorLock.release();
+    }
+    const lockOrderAcceptanceResult = await lockOrderAcceptance!;
+    assert.equal(lockOrderAcceptanceResult.statusCode >= 400, true, lockOrderAcceptanceResult.body);
+    const acceptanceFacts = {
+      schema_version: 1 as const, idempotency_key: "composition-invitation-accept",
+      invitation_secret: invitation.invitation_secret,
+      expected_resource_version: 1, device_label: "Existing Invitation Browser",
+      authentication_proof: {
+        kind: "email_password" as const, client_kind: "web" as const, verification_proof: "opaque-existing-proof",
+      },
+    };
+    const acceptancePayload = { ...acceptanceFacts, payload_hash: invitationAcceptanceHash(acceptanceFacts) };
     const accepted = await onboardingApp.inject({
       method: "POST", url: "/auth/v1/invitations/accept", headers: publicHeaders, payload: acceptancePayload,
     });

@@ -47,8 +47,9 @@ test("durable email verification converges starts across restart and consumes ex
   assert.equal(typeof module.consumeEmailVerificationTransaction, "function");
   const begin = module.beginEmailVerificationTransaction as (dependencies: unknown, input: unknown) => Promise<{ kind: string; verificationId: string; expiresAt: string }>;
   const finalize = module.finalizeEmailVerificationTransactionStart as (dependencies: unknown, input: unknown) => Promise<void>;
-  const prepare = module.prepareEmailVerificationTransaction as (dependencies: unknown, input: unknown) => Promise<{ clientKind: string; deviceLabel?: string; flowKind: string; invitationId?: string }>;
-  const consume = module.consumeEmailVerificationTransaction as (dependencies: unknown, input: unknown) => Promise<{ clientKind: string; deviceLabel?: string }>;
+  const prepare = module.prepareEmailVerificationTransaction as (dependencies: unknown, input: unknown) => Promise<{ clientKind: string; deviceLabel?: string; flowKind: string; invitationId?: string; providerVerification: unknown }>;
+  const checkpoint = module.checkpointEmailVerificationTransaction as (dependencies: unknown, input: unknown) => Promise<void>;
+  const consume = module.consumeEmailVerificationTransaction as (dependencies: unknown, input: unknown) => Promise<{ clientKind: string; deviceLabel?: string; verifiedSubject: unknown }>;
   let randomCalls = 0;
   const dependencies = {
     db,
@@ -78,16 +79,19 @@ test("durable email verification converges starts across restart and consumes ex
     verificationId: first.verificationId,
     expiresAt: "2026-08-18T00:10:00.000Z",
   });
-  const restartedDependencies = { ...dependencies, randomBytes: () => { throw new Error("replay must not draw randomness"); } };
+  const restartedDependencies = { ...dependencies, randomBytes: (length: number) => Buffer.alloc(length, 0x7e) };
   assert.deepEqual(await begin(restartedDependencies, input), { ...first, kind: "in_progress" });
   await assert.rejects(begin(restartedDependencies, {
     ...input,
     normalizedEmail: "changed@example.test",
   }), (error: unknown) => (error as { code?: unknown }).code === "INVALID_REQUEST");
-  await finalize(dependencies, { verificationId: first.verificationId, outcome: "finalized" });
+  await finalize(dependencies, {
+    verificationId: first.verificationId, outcome: "finalized", expectedProviderSubject: "provider_subject_01",
+  });
   assert.deepEqual(await begin(restartedDependencies, input), { ...first, kind: "finalized_replay" });
   assert.deepEqual(await prepare(dependencies, { verificationId: first.verificationId }), {
     normalizedEmail: "student@example.test", clientKind: "web", deviceLabel: "Browser", flowKind: "b2c",
+    providerVerification: { kind: "pending", expectedProviderSubject: "provider_subject_01" },
   });
   assert.equal(randomCalls, 1);
   await assert.rejects(
@@ -116,7 +120,9 @@ test("durable email verification converges starts across restart and consumes ex
     ...failedStart,
     kind: "reserved",
   });
-  await finalize(dependencies, { verificationId: failedStart.verificationId, outcome: "finalized" });
+  await finalize(dependencies, {
+    verificationId: failedStart.verificationId, outcome: "finalized", expectedProviderSubject: "provider_subject_retry",
+  });
   assert.equal((await pool.query(
     "select provider_start_status, provider_start_attempt from email_verification_transactions where email_verification_transaction_id = $1",
     [failedStart.verificationId],
@@ -140,14 +146,22 @@ test("durable email verification converges starts across restart and consumes ex
     normalizedEmail: "student@example.test",
     verifiedAt: "2026-08-18T00:00:00.000Z",
   };
+  await checkpoint(dependencies, { verificationId: first.verificationId, verifiedSubject });
+  assert.deepEqual(await prepare(restartedDependencies, { verificationId: first.verificationId }), {
+    normalizedEmail: "student@example.test", clientKind: "web", deviceLabel: "Browser", flowKind: "b2c",
+    providerVerification: { kind: "verified", subject: verifiedSubject },
+  });
   const outcomes = await Promise.allSettled([
-    consume(dependencies, { verificationId: first.verificationId, verifiedSubject }),
-    consume(dependencies, { verificationId: first.verificationId, verifiedSubject }),
+    consume(dependencies, { verificationId: first.verificationId }),
+    consume(dependencies, { verificationId: first.verificationId }),
   ]);
   assert.equal(outcomes.filter(({ status }) => status === "fulfilled").length, 1);
   assert.equal(outcomes.filter(({ status }) => status === "rejected").length, 1);
   const accepted = outcomes.find((outcome): outcome is PromiseFulfilledResult<{ clientKind: string; deviceLabel?: string }> => outcome.status === "fulfilled")!;
-  assert.deepEqual(accepted.value, { clientKind: "web", deviceLabel: "Browser", normalizedEmail: "student@example.test", flowKind: "b2c" });
+  assert.deepEqual(accepted.value, {
+    clientKind: "web", deviceLabel: "Browser", normalizedEmail: "student@example.test", flowKind: "b2c",
+    verifiedSubject,
+  });
   const consumed = (await pool.query<{ status: string; consumed_at: Date | null; provider_hmac_bytes: number }>(
     `select status, consumed_at, octet_length(verified_provider_subject_hmac)::int as provider_hmac_bytes
      from email_verification_transactions where email_verification_transaction_id = $1`,
@@ -190,7 +204,9 @@ test("invitation email verification encrypts exact invitation authority and dura
     },
   });
   assert.equal(started.kind, "reserved");
-  await finalize(dependencies, { verificationId: started.verificationId, outcome: "finalized" });
+  await finalize(dependencies, {
+    verificationId: started.verificationId, outcome: "finalized", expectedProviderSubject: "provider_invitee_01",
+  });
   assert.deepEqual(await prepare(dependencies, { verificationId: started.verificationId }), {
     normalizedEmail: "invitee@example.test",
     clientKind: "iphone",
@@ -201,6 +217,7 @@ test("invitation email verification encrypts exact invitation authority and dura
     invitationSecretDigest: invitationDigest,
     expectedResourceVersion: 3,
     role: "consultant",
+    providerVerification: { kind: "pending", expectedProviderSubject: "provider_invitee_01" },
   });
   const raw = await pool.query<{ binding: string; status: string; start_status: string }>(
     "select encode(binding_ciphertext, 'escape') as binding, status, provider_start_status as start_status from email_verification_transactions where email_verification_transaction_id = $1",
@@ -241,4 +258,48 @@ test("invitation email verification encrypts exact invitation authority and dura
     [started.verificationId],
   );
   assert.equal(expired.rows[0]?.status, "expired");
+});
+
+test("concurrent first email starts admit one durable reservation without raw uniqueness failures", async () => {
+  const module = await import("../src/index.js") as Record<string, unknown>;
+  const begin = module.beginEmailVerificationTransaction as (
+    dependencies: unknown,
+    input: unknown,
+  ) => Promise<{ kind: string; verificationId: string }>;
+  let randomSeed = 0;
+  let encryptionsWaiting = 0;
+  let releaseEncryptions!: () => void;
+  const allEncryptionsWaiting = new Promise<void>((resolve) => { releaseEncryptions = resolve; });
+  const concurrentProtector = {
+    async encrypt(plaintext: Uint8Array): Promise<Uint8Array> {
+      encryptionsWaiting += 1;
+      if (encryptionsWaiting === 8) releaseEncryptions();
+      await allEncryptionsWaiting;
+      return protector.encrypt(plaintext);
+    },
+    decrypt: protector.decrypt,
+  };
+  const dependencies = {
+    db, hmacKey, protector: concurrentProtector, ttlMs: 60_000,
+    databaseNow: async () => new Date(now),
+    randomBytes: (length: number) => Buffer.alloc(length, ++randomSeed),
+  };
+  const input = {
+    idempotencyKey: "concurrent-first-start",
+    payloadHash: canonicalPayloadHash({
+      schema_version: 1, flow_kind: "b2c", idempotency_key: "concurrent-first-start",
+      normalized_email: "concurrent@example.test", client_kind: "web",
+    }),
+    normalizedEmail: "concurrent@example.test", clientKind: "web", flow: { kind: "b2c" },
+  };
+  const settled = await Promise.allSettled(Array.from({ length: 8 }, () => begin(dependencies, input)));
+  assert.equal(settled.every(({ status }) => status === "fulfilled"), true, JSON.stringify(settled));
+  const results = settled.map((result) => (result as PromiseFulfilledResult<{ kind: string; verificationId: string }>).value);
+  assert.equal(results.filter(({ kind }) => kind === "reserved").length, 1);
+  assert.equal(results.filter(({ kind }) => kind === "in_progress").length, 7);
+  assert.equal(new Set(results.map(({ verificationId }) => verificationId)).size, 1);
+  assert.equal((await pool.query(
+    "select count(*)::int as count from email_verification_transactions where start_idempotency_key = $1",
+    [input.idempotencyKey],
+  )).rows[0]?.count, 1);
 });

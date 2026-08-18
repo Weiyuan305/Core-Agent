@@ -7,6 +7,7 @@ import {
   authenticateCoreSession,
   beginIdempotentCommand,
   beginEmailVerificationTransaction,
+  checkpointEmailVerificationTransaction,
   canonicalPayloadHash,
   constantTimeDigestMatches,
   consumeEmailVerificationTransaction,
@@ -22,10 +23,12 @@ import {
   inspectInvitation,
   invitationEmailHmac,
   issueCoreSession,
+  lockInvitationByDigest,
   lockInvitationBySecret,
   prepareEmailVerificationTransaction,
+  readInvitationBySecret,
   registerB2c,
-  registerInvitedIdentity,
+  registerInvitedIdentityForVerifiedInvitation,
   removeConsultantRole,
   requireRecentReauthentication,
   revokeCoreSession,
@@ -274,12 +277,21 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
         if (begun.kind === "expired") throw new DomainError("UNAUTHENTICATED", "Email verification authority is invalid");
         return begun;
       }
+      const inspected = await inspectInvitation({ db }, input.invitationSecret);
       const begun = await db.transaction().execute(async (trx) => {
+        // Canonical unauthenticated lock order: Tenant -> Invitation -> verification transaction.
+        const tenant = await trx.selectFrom("tenants").select(["tenant_mode", "status"])
+          .where("tenant_id", "=", inspected.tenant_id).forUpdate().executeTakeFirst();
+        if (tenant?.tenant_mode !== "b2b" || tenant.status !== "active") {
+          throw new DomainError("RESOURCE_NOT_FOUND", "Invitation was not found");
+        }
         const invitation = await lockInvitationBySecret(trx, input.invitationSecret!);
         const now = (await sql<{ now: Date }>`select clock_timestamp() as now`.execute(trx)).rows[0]?.now;
         const observedEmail = invitationEmailHmac(piiKey, input.normalizedEmail);
         try {
-          if (!(now instanceof Date) || invitation.status !== "pending" || invitation.expiresAt.getTime() <= now.getTime()
+          if (!(now instanceof Date) || invitation.invitationId !== inspected.invitation_id
+            || invitation.tenantId !== inspected.tenant_id || invitation.status !== "pending"
+            || invitation.expiresAt.getTime() <= now.getTime()
             || !constantTimeDigestMatches(observedEmail, invitation.normalizedEmailHmac)) {
             throw new DomainError("RESOURCE_NOT_FOUND", "Invitation was not found");
           }
@@ -314,10 +326,47 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
     async prepareEmailVerification(input) {
       return prepareEmailVerificationTransaction(verificationDependencies, input);
     },
+    async checkpointEmailVerification(input) {
+      await checkpointEmailVerificationTransaction(verificationDependencies, input);
+    },
     async completeEmailVerification(input) {
+      const prepared = await prepareEmailVerificationTransaction(
+        verificationDependencies, { verificationId: input.verificationId },
+      );
+      if (prepared.providerVerification.kind !== "verified") {
+        throw new DomainError("UNAUTHENTICATED", "Provider verification checkpoint is required");
+      }
       const completion = await db.transaction().execute(async (trx) => {
+        if (prepared.flowKind === "invitation") {
+          if (prepared.tenantId === undefined || prepared.invitationId === undefined
+            || prepared.invitationSecretDigest === undefined || prepared.expectedResourceVersion === undefined
+            || prepared.role === undefined) {
+            throw new DomainError("INTERNAL_ERROR", "Verified invitation binding is incomplete");
+          }
+          // New invited Actors do not exist yet; canonical lock order is Tenant -> Invitation -> verification.
+          const tenant = await trx.selectFrom("tenants").select(["tenant_mode", "status"])
+            .where("tenant_id", "=", prepared.tenantId).forUpdate().executeTakeFirst();
+          if (tenant?.tenant_mode !== "b2b" || tenant.status !== "active") {
+            throw new DomainError("UNAUTHENTICATED", "Verified invitation authority is unavailable");
+          }
+          const secretDigest = Buffer.from(prepared.invitationSecretDigest, "base64url");
+          try {
+            const invitation = await lockInvitationByDigest(trx, secretDigest);
+            if (invitation.invitationId !== prepared.invitationId || invitation.tenantId !== prepared.tenantId
+              || invitation.resourceVersion !== prepared.expectedResourceVersion || invitation.role !== prepared.role) {
+              throw new DomainError("UNAUTHENTICATED", "Verified invitation authority is unavailable");
+            }
+          } finally {
+            secretDigest.fill(0);
+          }
+        }
         const binding = await consumeEmailVerificationTransaction({ ...verificationDependencies, transaction: trx }, input);
         if ("kind" in binding) return binding;
+        if (binding.flowKind !== prepared.flowKind || binding.normalizedEmail !== prepared.normalizedEmail
+          || binding.clientKind !== prepared.clientKind || binding.invitationId !== prepared.invitationId
+          || binding.tenantId !== prepared.tenantId || binding.expectedResourceVersion !== prepared.expectedResourceVersion) {
+          throw new DomainError("UNAUTHENTICATED", "Email verification binding changed");
+        }
         const context = { requestId: `request_${randomUUID()}`, traceId: `trace_${randomUUID()}` };
         const privatePii = {
           normalizedEmailHmacKey: piiKey, encryptionKeyRef: "identity-pii-v1",
@@ -328,7 +377,7 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
           const commandWithoutHash = {
             schema_version: 1 as const,
             idempotency_key: `email-verification:${input.verificationId}:register-b2c`,
-            auth_subject: input.verifiedSubject,
+            auth_subject: binding.verifiedSubject,
             display_name: "学生用户",
           };
           registration = await registerB2c({
@@ -346,12 +395,24 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
             schema_version: 1 as const,
             idempotency_key: `email-verification:${input.verificationId}:register-invited`,
             tenant_id: binding.tenantId,
-            auth_subject: input.verifiedSubject,
+            auth_subject: binding.verifiedSubject,
             display_name: "受邀用户",
           };
-          registration = await registerInvitedIdentity({ db, transaction: trx, privatePii }, context, {
-            ...registrationPayload, payload_hash: canonicalPayloadHash(registrationPayload),
-          });
+          const registrationSecretDigest = Buffer.from(binding.invitationSecretDigest, "base64url");
+          try {
+            registration = await registerInvitedIdentityForVerifiedInvitation({
+              db, transaction: trx, privatePii,
+              verifiedInvitationBinding: {
+                invitationId: binding.invitationId, tenantId: binding.tenantId,
+                secretDigest: registrationSecretDigest, expectedResourceVersion: binding.expectedResourceVersion,
+                role: binding.role,
+              },
+            }, context, {
+              ...registrationPayload, payload_hash: canonicalPayloadHash(registrationPayload),
+            });
+          } finally {
+            registrationSecretDigest.fill(0);
+          }
           const acceptPayload = {
             schema_version: 1 as const,
             idempotency_key: `email-verification:${input.verificationId}:accept-invitation`,
@@ -373,7 +434,7 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
                 expectedResourceVersion: binding.expectedResourceVersion,
                 role: binding.role,
               },
-            }, { ...context, actorId: registration.actor_id, normalizedEmail: input.verifiedSubject.normalizedEmail }, {
+            }, { ...context, actorId: registration.actor_id, normalizedEmail: binding.verifiedSubject.normalizedEmail }, {
               ...acceptPayload, payload_hash: canonicalPayloadHash(acceptPayload),
             });
           } finally {
@@ -387,7 +448,7 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
           client_kind: binding.clientKind,
           ...(binding.deviceLabel === undefined ? {} : { device_label: binding.deviceLabel }),
         };
-        const issuedSession = await issueSessionInTransaction(trx, input.verifiedSubject, binding.clientKind, binding.deviceLabel, {
+        const issuedSession = await issueSessionInTransaction(trx, binding.verifiedSubject, binding.clientKind, binding.deviceLabel, {
           idempotencyKey: `email-verification:${input.verificationId}:issue-session`,
           payloadHash: canonicalPayloadHash(sessionPayload),
           operation: "email_verification",
@@ -438,7 +499,7 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
     async authenticateSession(input) {
       const authenticated = await authenticateCoreSession({ db }, {
         ...input,
-        ...(input.requireCsrf ? { advanceActivity: false } : {}),
+        advanceActivity: false,
       });
       const actor = await db.selectFrom("actors").select("resource_version").where("actor_id", "=", authenticated.authSubject.actorId).executeTakeFirstOrThrow();
       return { actorId: authenticated.authSubject.actorId, authSubjectId: authenticated.authSubject.authSubjectId, session: sessionView(authenticated.session as unknown as Record<string, unknown>, Number(actor.resource_version)) };
@@ -470,6 +531,7 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
           idempotency_key: string;
           payload_hash: string;
           expected_resource_version: number;
+          reauthentication_proof_digest: string;
         };
         const { payload_hash: suppliedHash, ...canonicalPayload } = payload;
         const computedHash = canonicalPayloadHash(canonicalPayload);
@@ -520,17 +582,17 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
           client_kind: "web" | "iphone" | "macos";
           device_label?: string;
         };
+        const inspected = await db.transaction().execute((trx) => readInvitationBySecret(trx, payload.invitation_secret));
         return db.transaction().execute(async (trx) => {
           const subject = await trx.selectFrom("auth_subjects").select(["actor_id", "auth_subject_id"])
             .where("provider", "=", input.verifiedSubject!.provider)
             .where("provider_subject", "=", input.verifiedSubject!.providerSubject)
             .where("status", "=", "active").executeTakeFirst();
           if (subject === undefined) throw new DomainError("UNAUTHENTICATED", "Invitation subject is not registered");
-          const invitation = await lockInvitationBySecret(trx, payload.invitation_secret);
           const acceptCommand = internalCommand({
             schema_version: 1 as const,
             idempotency_key: derivedId("idem_invitation_accept", payload.idempotency_key),
-            tenant_id: invitation.tenantId,
+            tenant_id: inspected.tenantId,
             invitation_code: payload.invitation_secret,
             expected_resource_version: payload.expected_resource_version,
           });
@@ -557,7 +619,7 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
             schema_version: 1, tenant_id: accepted.tenant_id,
             invitation_resource_version: accepted.invitation_resource_version,
             membership_id: accepted.membership_id, membership_resource_version: accepted.membership_resource_version,
-            role: invitation.role,
+            role: inspected.role,
             ...(accepted.profile_id === undefined ? {} : { profile_id: accepted.profile_id, profile_resource_version: 1 }),
             issuedSession,
           };
