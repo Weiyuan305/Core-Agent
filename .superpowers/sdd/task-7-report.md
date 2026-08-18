@@ -8,6 +8,115 @@
 - Original implementation commit: `2240a1bb0645e50a22204783f7cac5362924d906`
 - No merge or push was performed.
 
+## Round 17 review fixes (2026-08-19)
+
+### Outcome and design
+
+- Anonymous `/auth/v1/apple/start` no longer derives an account-dimension rate
+  key from caller-controlled idempotency, redirect, device, nonce, or PKCE facts.
+  It consumes the existing independent per-client route row and one fixed
+  `global-circuit-breaker:anonymous-apple-start` row under the explicitly named
+  `anonymous_apple_start_global_circuit_breaker` policy. The production policy is
+  separately bounded at 2,000 requests per 15 minutes; it is a high-threshold
+  global safety circuit breaker, not user-account identity. Callback account rows
+  remain keyed by the server-minted transaction.
+- Invitation Apple proof binding now accepts only the exact Web or native closed
+  field set. It hashes authorization code, state, nonce, and PKCE facts before
+  placing their digests into canonical key-sorted JSON. Semantically equal object
+  property orders bind identically; extra, missing, or cross-mode facts fail
+  before provider or durable effects.
+- Production secret loading is sequential and ownership-scoped. The filesystem
+  read buffer is wiped on validation success or failure; the validated value is
+  copied into a separately owned buffer; already fulfilled siblings are wiped on
+  partial acquisition failure; and all owned inputs are wiped after successful or
+  failed production composition. No raw secret value is logged or persisted.
+- The current brief, plan, and design record these boundaries. No contract,
+  migration, database authority, or public response shape changed in Round 17.
+  Supabase remains exactly 2.112.2; the required official changelog scan found no
+  relevant newer Auth/Apple behavior requiring a scope change.
+
+### RED evidence
+
+- Before production edits,
+  `npm test -w @core-agent/identity-gateway -- --test-name-pattern='anonymous Apple starts|Apple sign-in start and callback|Apple sign-in start account|Apple invitation proof hashing|managed-secret'`
+  was RED: 117 total, 109 passed, 8 failed. The genuine failures showed the four
+  rotated Apple starts created four different caller-derived account keys, the
+  expected fixed circuit breaker was not consumed/limited, and neither managed-
+  secret wipe helper existed. Three proof cases initially stopped in a test helper
+  because it incorrectly sent raw secret-shaped keys to the canonicalizer; the
+  helper was corrected to secret digests before any production proof edit.
+- The corrected proof regression was mutation-audited against the prior
+  `JSON.stringify(proof)` behavior:
+  `node --import tsx --test --test-name-pattern='Apple invitation proof hashing' apps/identity-gateway/tests/routes.test.ts`
+  was RED 0/1 with `INVALID_REQUEST` for a semantically equal reordered proof.
+  Restoring the closed canonical implementation made the exact command GREEN 1/1.
+
+### GREEN and real-boundary evidence
+
+- `npm run check -w @core-agent/identity-gateway` — PASS: build and 117/117.
+  Route tests prove four rotated Web/native start payloads share one fixed global
+  account key while four direct client addresses retain four independent client
+  keys; limiting the global row returns calm 429 before provider start. They also
+  prove reordered Apple invitation proof acceptance and extra/missing rejection
+  before effects. Composition tests capture and verify zeroed buffers for valid,
+  invalid, callback-failure, and partial-acquisition paths.
+- Disposable real PostgreSQL production composition — final PASS 2/2 in
+  5,642.6055 ms using a passwordless configured URL plus a process-scoped protected
+  credential. It persists exactly one Apple global circuit-breaker row at count 21
+  and proves the separate threshold remains unexhausted above the ordinary limit
+  of 20, while the complete Fastify/Task3-6/Supabase-adapter flows remain green.
+  The first sandboxed attempt was 0/2 solely because local TCP returned EPERM; an
+  initial disposable setup also exposed missing prerequisite roles, and one
+  password-bearing URL was correctly rejected by strict production config. The
+  final protected form was green and its explicit disposable container was removed.
+- `npm run check -w @core-agent/contracts` — PASS: 180/180; 86 valid and 11
+  invalid fixtures, generated schemas, and cumulative 0.6 compatibility all pass.
+- `npm run check -w @core-agent/runtime-core` — PASS: build and 83/83.
+- Authorized `npm run test:unit` — PASS: Runtime 192/192, Contracts 180/180,
+  Runtime Core 83/83, Identity Gateway 117/117, and Web 129/129 across 9 files.
+  The sandboxed precursor was 189/192 only because TCP/Unix listen returned EPERM.
+- Final official `npm run test:runtime:database-ci-equivalent` rerun — PASS 3/3
+  in 153,366.095 ms. Its tracked count manifest and protected summaries assert
+  Runtime Core PostgreSQL 344, Identity Gateway PostgreSQL 2, Control Plane API
+  PostgreSQL 14, and integration 93 from a fresh database, plus injected-failure
+  cleanup and output-leak redaction. The first official run was 2/3: all database
+  commands completed, but integration reported 93 pass plus one file-level
+  `agent-run` teardown failure at `database drop`. Both cleanup scenarios passed
+  and an exact label audit was empty before the single clean rerun; this evidence
+  is retained rather than hidden.
+- Root `npm run check` again passes Contracts, Runtime Core, Gateway, and Control
+  Plane API 17/17, then stops only at the untouched Worker `src/main.ts:60,129`
+  TS2345 `project_platform_memberships` errors. The corresponding database-auth
+  topology wrapper is 0/1 because its image build reaches the same Worker errors
+  before any topology scenario; its exact randomized resources were absent after
+  cleanup. The fully fresh official database CI-equivalent above is green.
+- `npm run compat:history -w @core-agent/contracts -- --base e7624fe0425ff470b646f8322254d5e9e3857da8`
+  — PASS. Exact pins are Fastify 5.11.2, Cookie 11.1.2, Supabase JS 2.112.2, and
+  Contracts 0.6.0. Base diffs for migrations 010/011 and Contracts 0.5.0 are empty.
+  SHA-256 remains 010
+  `eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381`,
+  011 `fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393`,
+  and unmodified Round-17 012
+  `2e7a7d0b8f910ff5253ace5dff1f0cc242224ec432e75621f15f57d93d14af12`.
+- Final unique-sentinel scan across every Round 17 source, test, current design,
+  brief, progress, and report artifact — PASS with empty output. `git diff --check`,
+  production logging/provider-token residual search, official-CI label
+  scan, and historical migration/Contracts residual scans are also empty.
+
+### Files, self-review, and commit
+
+- Production: `apps/identity-gateway/src/app.ts`, `routes/apple.ts`,
+  `security.ts`, and `server.ts`.
+- Tests: `apps/identity-gateway/tests/routes.test.ts`, `composition.test.ts`, and
+  `tests/postgres/production-composition.test.ts`.
+- Current documentation: Task 7 brief, approved plan, and approved design.
+- Self-review found no provider effect moved into a retried database transaction,
+  no new caller authority, no public token/PII exposure, and no migration or
+  historical contract drift. Callback client+server-transaction rate dimensions
+  and all prior Task3-6 composition behavior remain unchanged.
+- Round 17 implementation commit: `2a9fb545b`
+  (`fix(identity): close round 17 review findings`). No merge or push was performed.
+
 ## Round 16 review fixes (2026-08-19)
 
 ### Review resolution
