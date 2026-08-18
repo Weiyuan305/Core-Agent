@@ -8,6 +8,100 @@
 - Original implementation commit: `2240a1bb0645e50a22204783f7cac5362924d906`
 - No merge or push was performed.
 
+## Round 6 review fixes (2026-08-18)
+
+Status: `DONE_WITH_CONCERNS`. All Round 6 gateway findings are implemented and
+verified at the public Fastify, installed Supabase 2.112.2 adapter, and disposable
+PostgreSQL boundaries. The remaining failures are unchanged Control Plane Worker
+compile and integration teardown defects outside Task 7.
+
+### Delivered Round 6 corrections
+
+- Same-subject password plus Apple linking now CAS-updates the one active Core
+  AuthSubject from internal `email_password` to `email_password_apple`. Replay is
+  idempotent; a different Actor or provider subject fails before mutation. The
+  combined kind remains private to Runtime Core because adding it to the released
+  0.6 public union would violate the accepted 0.5 closed-union compatibility gate.
+- First Apple authentication now atomically creates either a complete B2C graph or,
+  for an exact valid invitation, a bare invited identity followed by the intended
+  B2B Membership/Profile and Session. Existing subjects sign in normally. The
+  post-provider domain phase is one caller-owned serializable retry; provider work
+  is never inside the retry.
+- Password-reset completion is a recoverable saga. Schema 12 records the encrypted
+  exact provider subject, database-clock attempt start, server-validated completion
+  payload hash, and causal provider evidence. Core Session revocation and OAuth
+  consumption commit together. Retry after Core rollback retains the recovery
+  Cookie, skips provider mutation, and completes the missing Core phase; changed
+  completion facts conflict with the durable checkpoint.
+- Production Session inspection enables Task 6 bounded activity advancement while
+  preserving absolute expiry. Mutation authentication remains non-advancing so its
+  released resource-version CAS semantics are unchanged.
+- Email verification and reset completion use stable route/client pre-provider rate
+  buckets; the email transaction has a durable five-attempt OTP bound. Contracts
+  0.6 now publishes `PasswordResetCompletionRequestSchema` in source, registry,
+  generated schema, current release, fixture, and compatibility coverage.
+
+### Round 6 RED evidence
+
+- Contracts focused/full was RED 180 total / 177 pass / 3 fail because reset
+  completion was absent from source/registry/current schema. After adding the
+  combined identity kind publicly, cumulative compatibility correctly stayed RED;
+  the combined state was moved back behind the private Runtime boundary.
+- Gateway completion focus was RED 0/2 because email verification had no dedicated
+  completion bucket and reset used a route-local schema without recovery-cookie
+  retry behavior. The schema-12 catalog focus was RED 0/1 for missing OAuth provider
+  completion columns. Invited Apple Runtime PostgreSQL focus was RED 0/1 with
+  `INVALID_REQUEST` because verified invited registration accepted password only.
+- Final saga self-review added a genuine replay RED:
+  `node --import tsx --test --test-name-pattern='Supabase password recovery uses' tests/supabase-auth-provider.test.ts`
+  was 0/1 (`Missing expected rejection`) when changed reset facts could reuse a
+  completed provider checkpoint. Schema 12 and the adapter now bind and compare the
+  server-validated payload hash; the identical focused command is GREEN 1/1.
+
+### Round 6 GREEN and integration evidence
+
+- `npm run test:unit` — PASS after the final checkpoint binding: Runtime 192/192,
+  Contracts 180/180, Runtime Core 83/83, Identity Gateway 90/90, and Web 129/129
+  across 9 files.
+- Contracts — PASS 180/180, generated schemas have no drift, cumulative compatibility
+  passes, and fixtures are 86 valid / 11 invalid. Runtime Core package check is
+  83/83; Identity Gateway package check is 90/90.
+- Current schema-12 focused topology is GREEN 3/3: fresh database, schema-10 upgrade,
+  and dirty recorded schema-11 reconvergence. Historical migration SHA-256 remains
+  010 `eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381`
+  and 011 `fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393`;
+  amended unmerged 012 is
+  `9bd9e2521bac3c6e172ee170bc163d42fbecd69e7af352d9415c1e80040ef32c`.
+- Production composition through real Fastify plus PostgreSQL is GREEN 1/1. It proves
+  email verification to Task 3 registration and Task 6 Session, same-subject Apple
+  combination with exactly one AuthSubject, new Apple B2C Web/native graphs, invited
+  B2B admin/consultant graphs, invalid invitation rollback, forced SQLSTATE 40001
+  retry with the provider called once, OTP attempt exhaustion, reset provider
+  checkpoint plus forced Core rollback/retry/all-session revocation/transaction
+  consumption, and bounded Session activity advancement.
+- Installed Supabase 2.112.2 fake-fetch Apple-link callback is GREEN 1/1 with the
+  password-authenticated and Apple-linked callbacks returning the same `user.id`.
+  Supabase reset recovery is GREEN 4/4, including checkpoint failure/restart and
+  mismatched, old, future, and malformed causal evidence rejection.
+- The formal direct Runtime PostgreSQL run observed 339 total / 338 pass / 1 fail;
+  the sole failure was the environment not supplying
+  `CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE`. The official protected wrapper did
+  supply it and passed the required 339 Runtime Core + 1 Gateway + 14 API summaries.
+  Its aggregate remained 2/3 because all 93 integration behaviors passed but the
+  unchanged `agent-run.test.ts` after-hook failed its database drop (94 total / 93
+  pass / 1 teardown failure); both cleanup scenarios passed.
+- Root `npm run check` passes Contracts, Runtime Core, Gateway, and API 17/17, then
+  stops only on the unchanged Worker `project_platform_memberships` TS2345 errors at
+  `apps/control-plane-worker/src/main.ts:60,129`. Database-auth topology stops at the
+  same Worker image build error before topology execution.
+- `git diff --check`, accepted 0.5/010/011 history diff, exact pin check, sentinel
+  secret scan, public log/output scan, and final labeled container/volume/network
+  residual scans pass. Fastify 5.11.2, Cookie 11.1.2, Supabase 2.112.2, and
+  Contracts 0.6.0 remain exact.
+- Round 6 implementation commit:
+  `1799d50a612f08da97031cefcc3d3212db6bd949`.
+- No merge or push was performed.
+
 ## Round 5 review fixes (2026-08-18)
 
 Status: `DONE_WITH_CONCERNS`. The bounded callback-rate, reauthentication ordering,
