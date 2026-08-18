@@ -1446,7 +1446,7 @@ test("Supabase Apple link returns a closed durable observation for an admitted i
   assert.equal(harness.methodCalls.some((call) => call.name === "exchangeCodeForSession"), false);
 });
 
-test("installed Supabase 2.112.2 Apple link uses only its operation-local password session", async () => {
+test("installed Supabase 2.112.2 native Apple link validates provider state by OAuth code points", async () => {
   const runtimePackage = createRequire(import.meta.url)("@supabase/supabase-js/package.json") as {
     readonly version?: unknown;
   };
@@ -1454,6 +1454,7 @@ test("installed Supabase 2.112.2 Apple link uses only its operation-local passwo
 
   const originalFetch = globalThis.fetch;
   const serverRequests: Request[] = [];
+  let linkProviderState = "4fd0445c-badc-4bdb-bc0f-7af9b821c7ec";
   const accessToken = [
     Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url"),
     Buffer.from(JSON.stringify({ exp: 4_102_444_800 })).toString("base64url"),
@@ -1504,7 +1505,7 @@ test("installed Supabase 2.112.2 Apple link uses only its operation-local passwo
       // external.go creates a UUID flow state; provider/apple.go ignores AuthCodeURL
       // options and reports RequiresPKCE=false, so caller PKCE remains at GoTrue.
       const authorizationUrl = new URL("https://appleid.apple.com/auth/authorize");
-      authorizationUrl.searchParams.set("state", "4fd0445c-badc-4bdb-bc0f-7af9b821c7ec");
+      authorizationUrl.searchParams.set("state", linkProviderState);
       return Response.json({ url: authorizationUrl.toString() });
     }
     if (requestUrl.pathname === "/auth/v1/logout") {
@@ -1514,58 +1515,69 @@ test("installed Supabase 2.112.2 Apple link uses only its operation-local passwo
   };
 
   try {
-    const store = new MemoryTransactionStore();
-    const provider = new SupabaseAuthProvider({
-      supabaseUrl: "https://example.supabase.co",
-      publishableKey: "publishable-key-not-secret",
-      serviceRoleKey,
-      appleRedirectUris: [nativeCallbackUri],
-      passwordResetRedirectUri: callbackUri, emailVerificationRedirectUri: "https://identity.example.test/auth/v1/email/verification",
-      transactionStore: store,
-      transactionProtector: protector,
-      now: () => new Date(fixedNow),
-    });
-
-    const installedNativeVerifier = "n".repeat(44);
-    const installedNativeStart = nativeAppleLinkStartWithProof(installedNativeVerifier);
-    const start = await provider.reauthenticateAndBeginAppleLink({
-      ...installedNativeStart,
-      authenticatedActorId: "actor-1",
-      ...credential,
-    });
-
-    const authorizationRequest = serverRequests.find(
-      (request) => new URL(request.url).pathname === "/auth/v1/user/identities/authorize",
-    );
-    assert(authorizationRequest !== undefined);
-    const authorizationRequestUrl = new URL(authorizationRequest.url);
-    assert.equal(authorizationRequestUrl.searchParams.get("code_challenge"), installedNativeStart.pkce_code_challenge);
-    assert.equal(authorizationRequestUrl.searchParams.get("code_challenge_method"), "S256");
-    assert.equal(authorizationRequestUrl.searchParams.has("state"), false);
-    assert.equal(authorizationRequest.headers.get("authorization"), `Bearer ${accessToken}`);
-    assert.equal(authorizationRequest.headers.get("apikey"), "publishable-key-not-secret");
-    const appleAuthorizationUrl = new URL(start.authorization_url);
-    assert.equal(appleAuthorizationUrl.searchParams.get("state"), "4fd0445c-badc-4bdb-bc0f-7af9b821c7ec");
-    assert.notEqual(appleAuthorizationUrl.searchParams.get("state"), start.transaction_id);
-    assert.equal(appleAuthorizationUrl.searchParams.has("code_challenge"), false);
-    assert.equal(appleAuthorizationUrl.searchParams.has("code_challenge_method"), false);
-    const transaction = store.records.get(start.transaction_id);
-    assert(transaction !== undefined);
-    const envelopeText = new TextDecoder().decode(
-      await protector.decrypt(transaction.pkce_verifier_ciphertext),
-    );
-    assert.equal(envelopeText.includes(accessToken), false);
-    assert.equal(envelopeText.includes(credential.password), false);
-    assert.equal(JSON.stringify(start).includes(accessToken), false);
-    assert.equal(JSON.stringify(start).includes(credential.password), false);
-    const installedLinkedSubject = await provider.linkApple({
-      ...callbackFromStart(start, "iphone"),
-      pkce_code_verifier: installedNativeVerifier,
-      authenticatedActorId: "actor-1",
-    });
-    assert.equal("kind" in installedLinkedSubject, false);
-    if ("kind" in installedLinkedSubject) throw new Error("unexpected installed-SDK native Apple link observation");
-    assert.equal(installedLinkedSubject.providerSubject, "provider-subject-1");
+    for (const scenario of [
+      { state: "s".repeat(7), verifier: "n".repeat(44), accepted: false },
+      { state: "s".repeat(8), verifier: "n".repeat(44), accepted: true },
+      { state: "😀".repeat(4_096), verifier: "n".repeat(128), accepted: true },
+      { state: "😀".repeat(4_097), verifier: "n".repeat(128), accepted: false },
+    ]) {
+      linkProviderState = scenario.state;
+      const store = new MemoryTransactionStore();
+      const provider = new SupabaseAuthProvider({
+        supabaseUrl: "https://example.supabase.co",
+        publishableKey: "publishable-key-not-secret",
+        serviceRoleKey,
+        appleRedirectUris: [nativeCallbackUri],
+        passwordResetRedirectUri: callbackUri, emailVerificationRedirectUri: "https://identity.example.test/auth/v1/email/verification",
+        transactionStore: store,
+        transactionProtector: protector,
+        now: () => new Date(fixedNow),
+      });
+      const requestOffset = serverRequests.length;
+      const installedNativeStart = nativeAppleLinkStartWithProof(scenario.verifier);
+      const startAction = () => provider.reauthenticateAndBeginAppleLink({
+        ...installedNativeStart,
+        authenticatedActorId: "actor-1",
+        ...credential,
+      });
+      const start = scenario.accepted
+        ? await startAction()
+        : await expectFailure(startAction, "AUTH_PROVIDER_UNAVAILABLE");
+      const authorizationRequest = serverRequests.slice(requestOffset).find(
+        (request) => new URL(request.url).pathname === "/auth/v1/user/identities/authorize",
+      );
+      assert(authorizationRequest !== undefined);
+      const authorizationRequestUrl = new URL(authorizationRequest.url);
+      assert.equal(authorizationRequestUrl.searchParams.get("code_challenge"), installedNativeStart.pkce_code_challenge);
+      assert.equal(authorizationRequestUrl.searchParams.get("code_challenge_method"), "S256");
+      assert.equal(authorizationRequestUrl.searchParams.has("state"), false);
+      assert.equal(authorizationRequest.headers.get("authorization"), `Bearer ${accessToken}`);
+      assert.equal(authorizationRequest.headers.get("apikey"), "publishable-key-not-secret");
+      if (!scenario.accepted) continue;
+      assert(start !== undefined);
+      const appleAuthorizationUrl = new URL(start.authorization_url);
+      assert.equal(appleAuthorizationUrl.searchParams.get("state"), scenario.state);
+      assert.notEqual(appleAuthorizationUrl.searchParams.get("state"), start.transaction_id);
+      assert.equal(appleAuthorizationUrl.searchParams.has("code_challenge"), false);
+      assert.equal(appleAuthorizationUrl.searchParams.has("code_challenge_method"), false);
+      const transaction = store.records.get(start.transaction_id);
+      assert(transaction !== undefined);
+      const envelopeText = new TextDecoder().decode(
+        await protector.decrypt(transaction.pkce_verifier_ciphertext),
+      );
+      assert.equal(envelopeText.includes(accessToken), false);
+      assert.equal(envelopeText.includes(credential.password), false);
+      assert.equal(JSON.stringify(start).includes(accessToken), false);
+      assert.equal(JSON.stringify(start).includes(credential.password), false);
+      const installedLinkedSubject = await provider.linkApple({
+        ...callbackFromStart(start, "iphone"),
+        pkce_code_verifier: scenario.verifier,
+        authenticatedActorId: "actor-1",
+      });
+      assert.equal("kind" in installedLinkedSubject, false);
+      if ("kind" in installedLinkedSubject) throw new Error("unexpected installed-SDK native Apple link observation");
+      assert.equal(installedLinkedSubject.providerSubject, "provider-subject-1");
+    }
 
     const webStore = new MemoryTransactionStore();
     const webRequestOffset = serverRequests.length;

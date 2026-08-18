@@ -1146,7 +1146,7 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       let callbackState = state;
       if (flowKind === "apple_link" && parsed.clientKind !== "web") {
         const providerState = authorizationUrl.searchParams.get("state");
-        if (providerState === null || providerState.length < 1 || providerState.length > 4_096
+        if (!isOAuthProofString(providerState)
           || authorizationUrl.searchParams.getAll("state").length !== 1) {
           throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
         }
