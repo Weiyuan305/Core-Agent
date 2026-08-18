@@ -11,13 +11,13 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { GatewayAuthenticatedSession, IdentityGatewayRouteDependencies } from "../app.js";
 import { IdentityGatewayFailure } from "../errors.js";
 import {
-  canonicalProviderStartPayloadHash,
   type AppleAuthorizationCallback,
   type AppleAuthorizationStart,
   type AppleLinkProviderObservation,
 } from "../providers/auth-provider.js";
 import { ProviderFailure } from "../providers/provider-errors.js";
 import {
+  ANONYMOUS_APPLE_START_GLOBAL_CIRCUIT_BREAKER_ACCOUNT,
   APPLE_LINK_SETTLEMENT_SECONDS,
   APPLE_FLOW_COOKIE_NAME,
   assertAppleCallbackPayloadHash,
@@ -171,14 +171,9 @@ export async function registerAppleRoutes(app: FastifyInstance, dependencies: Id
     assertExactRedirect(body.client_kind, body.redirect_uri, dependencies.config);
     await consumePreAuthRateLimit(request, dependencies, "apple_start", `route:apple_start:${body.client_kind}`);
     const accountRetryAfterMs = await dependencies.operations.consumeRateLimit({
-      bucketKind: "apple_start", accountIdentifier: `apple_start:${canonicalProviderStartPayloadHash({
-        flowKind: "apple_sign_in", idempotencyKey: body.idempotency_key,
-        clientKind: body.client_kind, redirectUri: body.redirect_uri,
-        ...(body.device_label === undefined ? {} : { deviceLabel: body.device_label }),
-        ...(body.nonce === undefined ? {} : { nonce: body.nonce }),
-        ...(body.pkce_code_challenge === undefined ? {} : { pkceChallenge: body.pkce_code_challenge }),
-      })}`,
+      bucketKind: "apple_start", accountIdentifier: ANONYMOUS_APPLE_START_GLOBAL_CIRCUIT_BREAKER_ACCOUNT,
       clientIdentifier: request.identityContext.clientIdentifier, dimensions: "account",
+      policy: "anonymous_apple_start_global_circuit_breaker",
     });
     if (accountRetryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", accountRetryAfterMs);
     const start = await dependencies.provider.beginApple(request.body as never);

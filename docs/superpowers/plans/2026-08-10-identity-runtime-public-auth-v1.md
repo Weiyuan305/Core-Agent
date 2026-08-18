@@ -757,6 +757,11 @@ Inject requests and prove:
 
 Require `IDENTITY_DATABASE_URL`, exact public origins, Cookie host, public base URL, provider URL/key references, Apple redirect allowlists, Session HMAC reference, PII HMAC reference, signing key reference, port, and feature flag. Bind loopback by default; require `IDENTITY_GATEWAY_CONTAINER_BIND=1` for `0.0.0.0`. Reject unknown/blank/relative URLs and production `http:` origins.
 
+Resolve managed-secret references sequentially under one owned scope. Copy the
+validated value into an owned buffer, immediately wipe the read buffer, wipe every
+already-acquired sibling on partial failure, and wipe all owned input buffers when
+composition returns or throws.
+
 - [ ] **Step 3: Implement route composition and calm error mapping**
 
 Register the approved route families under `/auth/v1`. All handlers follow this sequence:
@@ -773,6 +778,14 @@ const routeSequence = Object.freeze([
   "return_public_view",
 ] as const);
 ```
+
+Because anonymous Apple start has no authenticated account, its pre-provider
+limits are a normal stable client route bucket plus a fixed server-owned,
+separately high-threshold `anonymous_apple_start_global_circuit_breaker` row. This
+is a global safety circuit breaker, not caller/account identity; all valid start
+payload variations share it. Invitation Apple authentication proof hashing uses
+only the exact closed Web/native field set with secret facts digested before
+canonical JSON, so property reordering is equivalent and extra/missing fields fail.
 
 Map `AUTH_INVALID`, unknown Session, unknown invitation, and unknown account to the same Chinese public copy: `“无法完成验证，请检查信息后重试。”` Map rate limiting to `“尝试次数较多，请稍后再试。”` and provider outage to `“登录服务暂时不可用，请稍后再试。”` Never expose Supabase or Hermes product names.
 

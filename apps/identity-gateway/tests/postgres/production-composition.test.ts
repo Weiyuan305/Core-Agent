@@ -73,7 +73,19 @@ function appleInvitationAcceptancePayload<T extends {
       authentication: {
         kind: facts.authentication_proof.kind,
         client_kind: facts.authentication_proof.client_kind,
-        callback_proof_digest: sensitiveDigest(JSON.stringify(facts.authentication_proof)),
+        callback_proof_digest: canonicalPayloadHash({
+          kind: facts.authentication_proof.kind,
+          client_kind: facts.authentication_proof.client_kind,
+          transaction_id: facts.authentication_proof.transaction_id,
+          code_proof_digest: sensitiveDigest(String(facts.authentication_proof.authorization_code)),
+          state_proof_digest: sensitiveDigest(String(facts.authentication_proof.state)),
+          ...(facts.authentication_proof.nonce === undefined ? {} : {
+            nonce_proof_digest: sensitiveDigest(String(facts.authentication_proof.nonce)),
+          }),
+          ...(facts.authentication_proof.pkce_code_verifier === undefined ? {} : {
+            pkce_proof_digest: sensitiveDigest(String(facts.authentication_proof.pkce_code_verifier)),
+          }),
+        }),
       },
       ...(facts.device_label === undefined ? {} : { device_label: facts.device_label }),
     }),
@@ -148,6 +160,18 @@ test("production composition atomically verifies email, registers Task 3, issues
   const oauthProtector = identityGatewayServerTestInternals.aesProtector(key, "composition-oauth-transaction");
   const operations = identityGatewayServerTestInternals.productionOperations(db, key, protector, oauthProtector);
   try {
+    for (let attempt = 0; attempt < 21; attempt += 1) {
+      assert.equal(await operations.consumeRateLimit({
+        bucketKind: "apple_start",
+        accountIdentifier: "global-circuit-breaker:anonymous-apple-start",
+        clientIdentifier: `composition-circuit-breaker-client-${attempt}`,
+        dimensions: "account",
+        policy: "anonymous_apple_start_global_circuit_breaker",
+      }), null, "the global anonymous-Apple circuit breaker must use its separate high threshold");
+    }
+    assert.deepEqual((await pool.query(`select count(*)::int as rows, max(request_count)::int as request_count
+      from public_rate_limits where bucket_kind = 'apple_start'`)).rows[0], { rows: 1, request_count: 21 });
+
     const providerStarts = identityGatewayServerTestInternals.oauthStore(db);
     const providerStartRecord = {
       oauth_transaction_id: "oauth_composition_idempotent_start", provider: "supabase" as const,

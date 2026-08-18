@@ -335,6 +335,11 @@ responses preserve it so a checkpointed flow can settle. This Cookie is distinct
 from both the Core Session Cookie and the password-reset recovery Cookie and
 cannot be used in either role.
 
+Invitation acceptance canonicalizes Apple callback authority from an explicit
+closed Web/native field set. Authorization code, state, nonce, and PKCE verifier
+enter the binding only through purpose-specific digests; JSON property order is
+irrelevant and extra or missing fields are rejected.
+
 Manual Apple-link start signs both the five-minute authorization expiry and the
 exact authorization-expiry-plus-thirty-minutes settlement deadline into that
 initial Cookie; its `Max-Age` covers the settlement window. Before provider
@@ -382,6 +387,13 @@ transaction identifiers or proofs cannot bypass them. Forwarded addresses are tr
 only through an explicit proxy-IP allowlist and otherwise Fastify's direct request IP
 is used. Email verification also has a bounded durable provider-attempt count. Public
 errors do not reveal whether an email, invitation, Actor, or Tenant exists.
+
+Anonymous Apple start has no authenticatable account identity. Before its provider
+effect it therefore consumes a normal per-client route bucket and one fixed,
+server-owned, high-threshold global circuit-breaker row in the account dimension.
+That row is explicitly not a user-account bucket. Rotating idempotency, nonce, PKCE,
+device, or redirect facts cannot rotate it; callback account buckets remain keyed
+by the server-minted transaction.
 
 Existing invited identities authenticate invitation acceptance with their opaque Core
 Session (Web Cookie+CSRF or exact native bearer and stored client kind). No browser or

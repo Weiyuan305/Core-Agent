@@ -59,7 +59,13 @@ import {
   type OAuthTransactionStore,
   type TransactionProtector,
 } from "./providers/supabase-auth-provider.js";
-import { APPLE_LINK_SETTLEMENT_SECONDS, PASSWORD_RESET_SETTLEMENT_SECONDS } from "./security.js";
+import {
+  ANONYMOUS_APPLE_START_GLOBAL_CIRCUIT_BREAKER_ACCOUNT,
+  ANONYMOUS_APPLE_START_GLOBAL_CIRCUIT_BREAKER_LIMIT,
+  ANONYMOUS_APPLE_START_GLOBAL_CIRCUIT_BREAKER_WINDOW_MS,
+  APPLE_LINK_SETTLEMENT_SECONDS,
+  PASSWORD_RESET_SETTLEMENT_SECONDS,
+} from "./security.js";
 
 export interface ProductionIdentityGatewayOptions {
   readonly environment?: NodeJS.ProcessEnv;
@@ -69,15 +75,46 @@ export interface ProductionIdentityGatewayOptions {
 export const TASK9_ACCOUNT_DELETION_AVAILABLE = false;
 const expiredAppleLinkSettlement = Symbol("expired-apple-link-settlement");
 
-async function readManagedSecret(reference: string): Promise<Buffer> {
+interface ManagedSecretIo {
+  readonly stat: (path: string) => Promise<{ readonly size: number; readonly mode: number; isFile(): boolean }>;
+  readonly readFile: (path: string) => Promise<Buffer>;
+}
+
+const managedSecretIo: ManagedSecretIo = Object.freeze({
+  async stat(path: string) { return stat(path, { bigint: false }); },
+  async readFile(path: string) { return readFile(path); },
+});
+
+async function readManagedSecret(reference: string, io: ManagedSecretIo = managedSecretIo): Promise<Buffer> {
   const path = assertManagedSecretFile(reference);
-  const metadata = await stat(path, { bigint: false });
+  const metadata = await io.stat(path);
   if (!metadata.isFile() || metadata.size < 1 || metadata.size > 65_536 || (metadata.mode & 0o077) !== 0) {
     throw new Error("Identity Gateway secret reference is invalid");
   }
-  const bytes = await readFile(path);
-  if (bytes.byteLength < 1 || bytes.includes(0)) throw new Error("Identity Gateway secret reference is invalid");
-  return bytes.at(-1) === 0x0a ? bytes.subarray(0, -1) : bytes;
+  const bytes = await io.readFile(path);
+  try {
+    const end = bytes.at(-1) === 0x0a ? bytes.byteLength - 1 : bytes.byteLength;
+    if (end < 1 || bytes.byteLength > 65_536 || bytes.includes(0)) {
+      throw new Error("Identity Gateway secret reference is invalid");
+    }
+    return Buffer.from(bytes.subarray(0, end));
+  } finally {
+    bytes.fill(0);
+  }
+}
+
+async function withManagedSecrets<T>(
+  references: readonly string[],
+  use: (secrets: readonly Buffer[]) => Promise<T>,
+  reader: (reference: string) => Promise<Buffer> = readManagedSecret,
+): Promise<T> {
+  const secrets: Buffer[] = [];
+  try {
+    for (const reference of references) secrets.push(await reader(reference));
+    return await use(Object.freeze([...secrets]));
+  } finally {
+    for (const secret of secrets) secret.fill(0);
+  }
 }
 
 function deriveKey(material: Uint8Array, purpose: string): Buffer {
@@ -471,6 +508,20 @@ function productionOperations(
   };
   return Object.freeze({
     async consumeRateLimit(input) {
+      if (input.policy === "anonymous_apple_start_global_circuit_breaker") {
+        if (input.bucketKind !== "apple_start" || input.dimensions !== "account"
+          || input.accountIdentifier !== ANONYMOUS_APPLE_START_GLOBAL_CIRCUIT_BREAKER_ACCOUNT) {
+          throw new DomainError("INVALID_REQUEST", "Anonymous Apple circuit-breaker policy is invalid");
+        }
+        return consumePublicRateLimit({ db, hmacKey: piiKey }, {
+          bucketKind: input.bucketKind,
+          accountIdentifier: ANONYMOUS_APPLE_START_GLOBAL_CIRCUIT_BREAKER_ACCOUNT,
+          clientIdentifier: input.clientIdentifier,
+          dimensions: "account",
+          limit: ANONYMOUS_APPLE_START_GLOBAL_CIRCUIT_BREAKER_LIMIT,
+          windowMs: ANONYMOUS_APPLE_START_GLOBAL_CIRCUIT_BREAKER_WINDOW_MS,
+        });
+      }
       return consumePublicRateLimit({ db, hmacKey: piiKey }, { ...input, limit: 20, windowMs: 15 * 60 * 1_000 });
     },
     async preparePasswordReset(normalizedEmail) {
@@ -1586,39 +1637,49 @@ function productionOperations(
   } satisfies IdentityGatewayOperations);
 }
 
-export const identityGatewayServerTestInternals = Object.freeze({ aesProtector, oauthStore, productionOperations });
+export const identityGatewayServerTestInternals = Object.freeze({
+  aesProtector, oauthStore, productionOperations, readManagedSecret, withManagedSecrets,
+  anonymousAppleStartGlobalCircuitBreaker: Object.freeze({
+    accountIdentifier: ANONYMOUS_APPLE_START_GLOBAL_CIRCUIT_BREAKER_ACCOUNT,
+    limit: ANONYMOUS_APPLE_START_GLOBAL_CIRCUIT_BREAKER_LIMIT,
+    windowMs: ANONYMOUS_APPLE_START_GLOBAL_CIRCUIT_BREAKER_WINDOW_MS,
+  }),
+});
 
 export async function buildProductionIdentityGateway(options: ProductionIdentityGatewayOptions = {}): Promise<FastifyInstance> {
   const config = loadIdentityGatewayConfig(options.environment ?? process.env);
-  const [publishableKey, serviceRoleKey, sessionMaterial, piiMaterial, signingMaterial] = await Promise.all([
-    readManagedSecret(config.providerPublishableKeyRef), readManagedSecret(config.providerServiceRoleKeyRef),
-    readManagedSecret(config.sessionHmacKeyRef), readManagedSecret(config.piiHmacKeyRef), readManagedSecret(config.signingKeyRef),
-  ]);
-  const pool = new Pool({ connectionString: config.databaseUrl });
-  const db = createRuntimeDatabase(pool);
-  try {
-    await assertSchemaVersion(db);
-    const piiKey = deriveKey(piiMaterial, "pii-hmac");
-    const piiProtector = aesProtector(piiMaterial, "private-pii");
-    const oauthProtector = aesProtector(signingMaterial, "oauth-transaction");
-    const provider = new SupabaseAuthProvider({
-      supabaseUrl: config.providerUrl, publishableKey: publishableKey.toString("utf8"), serviceRoleKey: serviceRoleKey.toString("utf8"),
-      appleRedirectUris: [...config.appleWebRedirectUris, ...config.appleNativeRedirectUris],
-      passwordResetRedirectUri: config.passwordResetRedirectUri, emailVerificationRedirectUri: config.emailVerificationRedirectUri,
-      transactionStore: oauthStore(db), transactionProtector: oauthProtector,
-    });
-    const app = await buildIdentityGatewayApp({
-      config, provider, operations: productionOperations(db, piiKey, piiProtector, oauthProtector),
-      flowCookieKey: deriveKey(sessionMaterial, "flow-cookie"),
-    });
-    app.addHook("onClose", async () => { await db.destroy(); });
-    return app;
-  } catch (error) {
-    await db.destroy().catch(() => undefined);
-    throw error;
-  } finally {
-    publishableKey.fill(0); serviceRoleKey.fill(0); sessionMaterial.fill(0); piiMaterial.fill(0); signingMaterial.fill(0);
-  }
+  return withManagedSecrets([
+    config.providerPublishableKeyRef, config.providerServiceRoleKeyRef,
+    config.sessionHmacKeyRef, config.piiHmacKeyRef, config.signingKeyRef,
+  ], async ([publishableKey, serviceRoleKey, sessionMaterial, piiMaterial, signingMaterial]) => {
+    if (publishableKey === undefined || serviceRoleKey === undefined || sessionMaterial === undefined
+      || piiMaterial === undefined || signingMaterial === undefined) {
+      throw new Error("Identity Gateway secret acquisition is incomplete");
+    }
+    const pool = new Pool({ connectionString: config.databaseUrl });
+    const db = createRuntimeDatabase(pool);
+    try {
+      await assertSchemaVersion(db);
+      const piiKey = deriveKey(piiMaterial, "pii-hmac");
+      const piiProtector = aesProtector(piiMaterial, "private-pii");
+      const oauthProtector = aesProtector(signingMaterial, "oauth-transaction");
+      const provider = new SupabaseAuthProvider({
+        supabaseUrl: config.providerUrl, publishableKey: publishableKey.toString("utf8"), serviceRoleKey: serviceRoleKey.toString("utf8"),
+        appleRedirectUris: [...config.appleWebRedirectUris, ...config.appleNativeRedirectUris],
+        passwordResetRedirectUri: config.passwordResetRedirectUri, emailVerificationRedirectUri: config.emailVerificationRedirectUri,
+        transactionStore: oauthStore(db), transactionProtector: oauthProtector,
+      });
+      const app = await buildIdentityGatewayApp({
+        config, provider, operations: productionOperations(db, piiKey, piiProtector, oauthProtector),
+        flowCookieKey: deriveKey(sessionMaterial, "flow-cookie"),
+      });
+      app.addHook("onClose", async () => { await db.destroy(); });
+      return app;
+    } catch (error) {
+      await db.destroy().catch(() => undefined);
+      throw error;
+    }
+  });
 }
 
 export async function startIdentityGatewayServer(): Promise<FastifyInstance> {

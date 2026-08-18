@@ -57,11 +57,21 @@
 - The Entitlement migration reservation moves from schema 12 to schema 13.
 - Production composition owns managed secret resolution, PostgreSQL, the pinned
   Supabase adapter, and every Task 3-6 operation consumed by the registered route
-  families. Account deletion alone remains explicitly unavailable until Task 9.
-- Apple start consumes independent stable client and server-derived account
-  limits before provider or durable start effects. Invitation Apple callback
+  families. Every acquired managed-secret buffer is caller-owned and zeroized on
+  validation failure, partial acquisition failure, composition failure, and
+  successful composition exit. Account deletion alone remains explicitly
+  unavailable until Task 9.
+- Anonymous Apple start consumes an independent stable client bucket plus one
+  fixed server-owned `anonymous_apple_start_global_circuit_breaker` account-
+  dimension bucket before provider or durable start effects. The latter is a
+  separately configured high-threshold global safety circuit breaker, not a user
+  account bucket; no caller-controlled start field can change its durable key.
+  Invitation Apple callback
   consumes its callback client and transaction-account limits before provider,
   then only the invitation-account limit after lookup.
+- Invitation Apple proof binding is a closed canonical record of the exact Web or
+  native fields; secret facts enter it only as digests. JSON property order cannot
+  change the digest, while extra or missing fields fail closed.
 - The initial Web Apple-link Cookie authenticates the authorization expiry plus
   an exact thirty-minute settlement deadline and remains usable only for durable
   `provider_started`/`provider_completed` reconciliation after authorization

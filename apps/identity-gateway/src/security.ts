@@ -11,6 +11,9 @@ export const CORE_SESSION_COOKIE_NAME = "core_agent_session";
 export const CORE_CSRF_COOKIE_NAME = "core_agent_csrf";
 export const RECOVERY_COOKIE_NAME = "core_agent_recovery";
 export const APPLE_FLOW_COOKIE_NAME = "core_agent_apple_flow";
+export const ANONYMOUS_APPLE_START_GLOBAL_CIRCUIT_BREAKER_ACCOUNT = "global-circuit-breaker:anonymous-apple-start";
+export const ANONYMOUS_APPLE_START_GLOBAL_CIRCUIT_BREAKER_LIMIT = 2_000;
+export const ANONYMOUS_APPLE_START_GLOBAL_CIRCUIT_BREAKER_WINDOW_MS = 15 * 60 * 1_000;
 export const CSRF_HEADER_NAME = "x-core-agent-csrf";
 export const CORE_SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 const flowMaxAgeSeconds = 5 * 60;
@@ -388,6 +391,36 @@ export function assertInvitationAcceptancePayloadHash(body: {
     canonicalProof = {
       kind: "core_session",
       client_kind: body.client_kind,
+    };
+  } else if (proof?.kind === "apple") {
+    const clientKind = proof.client_kind;
+    const nonce = proof.nonce;
+    const pkceCodeVerifier = proof.pkce_code_verifier;
+    const expectedKeys = clientKind === "web"
+      ? ["kind", "client_kind", "transaction_id", "authorization_code", "state"]
+      : clientKind === "iphone" || clientKind === "macos"
+        ? ["kind", "client_kind", "transaction_id", "authorization_code", "state", "nonce", "pkce_code_verifier"]
+        : undefined;
+    if (expectedKeys === undefined || !exactRecord(proof, expectedKeys)
+      || !boundedString(proof.transaction_id) || !boundedString(proof.authorization_code)
+      || !boundedString(proof.state)
+      || (clientKind !== "web" && (!boundedString(nonce) || !boundedString(pkceCodeVerifier)))) {
+      invalidRequest();
+    }
+    canonicalProof = {
+      kind: "apple",
+      client_kind: clientKind,
+      callback_proof_digest: canonicalPayloadHash({
+        kind: "apple",
+        client_kind: clientKind,
+        transaction_id: proof.transaction_id,
+        code_proof_digest: sensitiveFactDigest(proof.authorization_code),
+        state_proof_digest: sensitiveFactDigest(proof.state),
+        ...(clientKind === "web" ? {} : {
+          nonce_proof_digest: sensitiveFactDigest(nonce as string),
+          pkce_proof_digest: sensitiveFactDigest(pkceCodeVerifier as string),
+        }),
+      }),
     };
   } else if (proof !== undefined) {
     canonicalProof = {

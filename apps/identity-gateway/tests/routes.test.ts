@@ -6,12 +6,13 @@ import { createHash } from "node:crypto";
 import { canonicalPayloadHash } from "@core-agent/runtime-core";
 import Fastify, { type FastifyInstance } from "fastify";
 
-import { canonicalProviderStartPayloadHash } from "../src/providers/auth-provider.js";
 import { ProviderFailure } from "../src/providers/provider-errors.js";
+import { assertInvitationAcceptancePayloadHash } from "../src/security.js";
 
 const host = "identity.example.test";
 const origin = "https://app.example.test";
 const redirect = `${origin}/auth/apple/callback`;
+const alternateRedirect = `${origin}/auth/apple/callback-alternate`;
 const secret = "s".repeat(43);
 const csrf = "c".repeat(43);
 const idem = { schema_version: 1, idempotency_key: "idem_01", payload_hash: `sha256:${"a".repeat(64)}` };
@@ -76,6 +77,22 @@ function invitationAcceptancePayload<T extends {
   const proof = facts.authentication_proof;
   const canonicalProof = proof === undefined
     ? { kind: "core_session", client_kind: facts.client_kind }
+    : proof.kind === "apple"
+      ? {
+        kind: proof.kind,
+        client_kind: proof.client_kind,
+        callback_proof_digest: canonicalPayloadHash({
+          kind: proof.kind,
+          client_kind: proof.client_kind,
+          transaction_id: proof.transaction_id,
+          code_proof_digest: digest(String(proof.authorization_code)),
+          state_proof_digest: digest(String(proof.state)),
+          ...(proof.nonce === undefined ? {} : { nonce_proof_digest: digest(String(proof.nonce)) }),
+          ...(proof.pkce_code_verifier === undefined ? {} : {
+            pkce_proof_digest: digest(String(proof.pkce_code_verifier)),
+          }),
+        }),
+      }
     : {
       kind: proof.kind, client_kind: proof.client_kind,
       callback_proof_digest: digest(JSON.stringify(proof)),
@@ -125,7 +142,7 @@ async function buildApp(
   let rateLimitCalls = 0;
   let providerAttemptStarted = false;
   return module.buildIdentityGatewayApp({
-    config: { publicOrigins: new Set([origin]), cookieHost: host, publicBaseUrl: `https://${host}`, providerUrl: "https://apple.example.test", appleWebRedirectUris: new Set([redirect]), appleNativeRedirectUris: new Set(["coreagent://auth/apple/callback"]), passwordResetRedirectUri: `${origin}/auth/password/reset/callback`, publicAuthEnabled: true, trustedProxyAddresses: options.trustedProxyAddresses ?? new Set() },
+    config: { publicOrigins: new Set([origin]), cookieHost: host, publicBaseUrl: `https://${host}`, providerUrl: "https://apple.example.test", appleWebRedirectUris: new Set([redirect, alternateRedirect]), appleNativeRedirectUris: new Set(["coreagent://auth/apple/callback", "coreagent://auth/apple/callback-alternate"]), passwordResetRedirectUri: `${origin}/auth/password/reset/callback`, publicAuthEnabled: true, trustedProxyAddresses: options.trustedProxyAddresses ?? new Set() },
     flowCookieKey: Buffer.alloc(32, 0x34),
     now: () => new Date("2026-08-17T00:00:00.000Z"),
     provider: {
@@ -522,14 +539,13 @@ test("Apple sign-in start and callback consume route buckets before provider eff
   assert.equal(start.statusCode, 200, start.body);
   assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit", "consumeRateLimit", "beginApple"]);
   assert.equal((calls[0]?.input as { bucketKind?: unknown }).bucketKind, "apple_start");
-  const expectedStartHash = canonicalProviderStartPayloadHash({
-    flowKind: "apple_sign_in", idempotencyKey: idem.idempotency_key,
-    clientKind: "web", redirectUri: redirect,
-  });
   assert.deepEqual(calls.filter(({ name }) => name === "consumeRateLimit").map(({ input }) => {
-    const rate = input as { dimensions?: unknown; accountIdentifier?: unknown };
-    return [rate.dimensions, rate.accountIdentifier];
-  }), [["client", "route:apple_start:web"], ["account", `apple_start:${expectedStartHash}`]]);
+    const rate = input as { dimensions?: unknown; accountIdentifier?: unknown; policy?: unknown };
+    return [rate.dimensions, rate.accountIdentifier, rate.policy];
+  }), [
+    ["client", "route:apple_start:web", undefined],
+    ["account", "global-circuit-breaker:anonymous-apple-start", "anonymous_apple_start_global_circuit_breaker"],
+  ]);
   calls.length = 0;
   const flowCookie = ([] as string[]).concat(start.headers["set-cookie"] ?? [])
     .find((value) => value.startsWith("core_agent_apple_flow="));
@@ -553,7 +569,7 @@ test("Apple sign-in start account limiting precedes every provider and durable s
   const calls: Array<{ name: string; input: unknown }> = [];
   const app = await buildApp(calls, {
     rateLimit(input) {
-      return input.bucketKind === "apple_start" && input.accountIdentifier !== "route:apple_start:web"
+      return input.bucketKind === "apple_start" && input.accountIdentifier === "global-circuit-breaker:anonymous-apple-start"
         ? 60_000 : null;
     },
   });
@@ -565,6 +581,55 @@ test("Apple sign-in start account limiting precedes every provider and durable s
   assert.equal(response.statusCode, 429, response.body);
   assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit", "consumeRateLimit"]);
   assert.equal(calls.some(({ name }) => name === "beginApple"), false);
+  await app.close();
+});
+
+test("anonymous Apple starts share one server-owned global circuit breaker while client buckets stay independent", async () => {
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const app = await buildApp(calls);
+  const requests = [
+    {
+      remoteAddress: "198.51.100.10",
+      headers: { host, origin, "content-type": "application/json" },
+      payload: { ...idem, idempotency_key: "idem_apple_rotate_1", client_kind: "web", redirect_uri: redirect, device_label: "Browser A" },
+    },
+    {
+      remoteAddress: "198.51.100.11",
+      headers: { host, origin, "content-type": "application/json" },
+      payload: { ...idem, idempotency_key: "idem_apple_rotate_2", client_kind: "web", redirect_uri: alternateRedirect, device_label: "Browser B" },
+    },
+    {
+      remoteAddress: "198.51.100.12",
+      headers: { host, "content-type": "application/json" },
+      payload: {
+        ...idem, idempotency_key: "idem_apple_rotate_3", client_kind: "iphone",
+        redirect_uri: "coreagent://auth/apple/callback", nonce: "nonce_apple_rotate_3",
+        pkce_code_challenge: "a".repeat(43), pkce_code_challenge_method: "S256",
+      },
+    },
+    {
+      remoteAddress: "198.51.100.13",
+      headers: { host, "content-type": "application/json" },
+      payload: {
+        ...idem, idempotency_key: "idem_apple_rotate_4", client_kind: "iphone",
+        redirect_uri: "coreagent://auth/apple/callback-alternate", nonce: "nonce_apple_rotate_4",
+        pkce_code_challenge: "b".repeat(43), pkce_code_challenge_method: "S256",
+      },
+    },
+  ] as const;
+  for (const request of requests) {
+    const response = await app.inject({ method: "POST", url: "/auth/v1/apple/start", ...request });
+    assert.equal(response.statusCode, 200, response.body);
+  }
+  const rates = calls.filter(({ name }) => name === "consumeRateLimit").map(({ input }) => input as {
+    dimensions?: unknown; accountIdentifier?: unknown; clientIdentifier?: unknown; policy?: unknown;
+  });
+  const global = rates.filter(({ dimensions }) => dimensions === "account");
+  assert.equal(global.length, requests.length);
+  assert.deepEqual(new Set(global.map(({ accountIdentifier }) => accountIdentifier)), new Set(["global-circuit-breaker:anonymous-apple-start"]));
+  assert.deepEqual(new Set(global.map(({ policy }) => policy)), new Set(["anonymous_apple_start_global_circuit_breaker"]));
+  const clients = rates.filter(({ dimensions }) => dimensions === "client");
+  assert.equal(new Set(clients.map(({ clientIdentifier }) => clientIdentifier)).size, requests.length);
   await app.close();
 });
 
@@ -1483,6 +1548,62 @@ test("Web Apple invitation acceptance reconstructs provider authority from the f
   assert.equal(providerInput.transaction_id, "oauth_01");
   assert.equal(providerInput.state, state);
   assert.equal((providerInput as { authorization_code?: unknown }).authorization_code, "opaque_code");
+  await app.close();
+});
+
+test("Apple invitation proof hashing is canonical and rejects non-closed proof objects before effects", async () => {
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const app = await buildApp(calls);
+  const start = await app.inject({
+    method: "POST", url: "/auth/v1/apple/start",
+    headers: { host, origin, "content-type": "application/json" },
+    payload: { ...idem, idempotency_key: "idem_canonical_invitation_start", client_kind: "web", redirect_uri: redirect },
+  });
+  const flowCookie = ([] as string[]).concat(start.headers["set-cookie"] ?? [])
+    .find((value) => value.startsWith("core_agent_apple_flow="))?.split(";", 1)[0];
+  const state = new URL(start.json().authorization_url).searchParams.get("state")!;
+  calls.length = 0;
+  const reorderedProof = {
+    state,
+    authorization_code: "opaque_canonical_code",
+    transaction_id: "oauth_01",
+    client_kind: "web",
+    kind: "apple",
+  };
+  const payload = invitationAcceptancePayload({
+    schema_version: 1, idempotency_key: "idem_canonical_invitation_accept", expected_resource_version: 1,
+    invitation_secret: "i".repeat(43), authentication_proof: reorderedProof,
+  });
+  const canonicalOrderPayload = invitationAcceptancePayload({
+    schema_version: 1, idempotency_key: "idem_canonical_invitation_accept", expected_resource_version: 1,
+    invitation_secret: "i".repeat(43),
+    authentication_proof: {
+      kind: "apple", client_kind: "web", transaction_id: "oauth_01",
+      authorization_code: "opaque_canonical_code", state,
+    },
+  });
+  assert.equal(payload.payload_hash, canonicalOrderPayload.payload_hash);
+  assert.doesNotThrow(() => assertInvitationAcceptancePayloadHash(payload));
+  assert.doesNotThrow(() => assertInvitationAcceptancePayloadHash(canonicalOrderPayload));
+  const accepted = await app.inject({
+    method: "POST", url: "/auth/v1/invitations/accept",
+    headers: { host, origin, "content-type": "application/json", cookie: flowCookie! }, payload,
+  });
+  assert.equal(accepted.statusCode, 200, accepted.body);
+  assert.equal(calls.some(({ name }) => name === "completeApple"), true);
+  calls.length = 0;
+  for (const invalidProof of [
+    { ...reorderedProof, attacker_controlled: "extra" },
+    { kind: "apple", client_kind: "web", transaction_id: "oauth_01", authorization_code: "opaque_canonical_code" },
+  ]) {
+    const invalid = await app.inject({
+      method: "POST", url: "/auth/v1/invitations/accept",
+      headers: { host, origin, "content-type": "application/json", cookie: flowCookie! },
+      payload: { ...payload, authentication_proof: invalidProof },
+    });
+    assert.equal(invalid.statusCode, 400, invalid.body);
+  }
+  assert.deepEqual(calls, []);
   await app.close();
 });
 

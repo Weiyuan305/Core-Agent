@@ -110,6 +110,7 @@ export interface IdentityGatewayOperations {
     readonly accountIdentifier: string;
     readonly clientIdentifier: string;
     readonly dimensions?: "both" | "account" | "client";
+    readonly policy?: "anonymous_apple_start_global_circuit_breaker";
   }) => Promise<number | null>;
   readonly preparePasswordReset: (normalizedEmail: string) => Promise<VerifiedProviderSubject>;
   readonly issueSession: (
