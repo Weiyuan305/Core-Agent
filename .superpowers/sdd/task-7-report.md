@@ -152,6 +152,9 @@
   Worker/harness diff, prior review instructions explicitly excluded them, and
   the topology harness cleaned its exact disposable resources. The fully fresh
   official database CI-equivalent above is green.
+- Round 13 implementation commit:
+  `0d0b692e0` (`fix(identity): close final gateway review findings`). No merge or
+  push was performed.
 
 ## Round 12 review fix (2026-08-18)
 

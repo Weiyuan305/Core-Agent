@@ -35,4 +35,4 @@
 - Round 10 implementation commit: `49b34e6758f5232e6cb361c11c01e2bfbc59c49e`
 - Round 11 implementation commit: `5984028b3`
 - Round 12 implementation commit: `6660f03bd`
-- Round 13 implementation commit: pending final verification commit.
+- Round 13 implementation commit: `0d0b692e0`.
