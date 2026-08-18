@@ -7,7 +7,7 @@
 - Base: `e7624fe0425ff470b646f8322254d5e9e3857da8`
 - Brief: `.superpowers/sdd/task-7-brief.md`
 - Baseline: Contracts 179/179 with fixtures 84/11; Identity Gateway 28/28.
-- Current phase: Round 8 review fixes implemented and verified; ready for parent review.
+- Current phase: Round 9 review fixes implemented and verified; ready for cumulative parent review.
 - User-approved amendment: forward-only schema 12 adds durable encrypted
   email-verification/start-idempotency authority; Entitlement reservation moved to
   schema 13. Historical 010/011 and Contracts 0.5.0 are untouched.
@@ -16,11 +16,12 @@
   provider effects outside automatically retried transactions; Task 9 deletion
   explicitly unavailable; no provider or internal-detail leakage.
 - Result: Contracts 0.6.0 180/180 with fixtures 86/11; Runtime Core 83/83;
-  Identity Gateway 96/96; real Fastify plus PostgreSQL composition 1/1. The final
-  Round 8 official protected database wrapper passed 3/3 and asserted its 340
-  Runtime Core + 1 Gateway + 14 API + 93 integration summaries, including cleanup
-  and output-leak gates.
-- Concern: untouched Control Plane Worker still has the two existing
+  Identity Gateway 97/97; real Fastify plus pinned Supabase adapter and PostgreSQL
+  production composition 2/2. The Round 9 official protected database stage
+  accepted Runtime Core 340 + Gateway 2 + API 14; all identity behavior passed.
+- Concern: the official integration phase reported the two unchanged teardown-only
+  failures (agent-run database-drop after-hook and harness-cleanup startup-delay
+  classification). The untouched Control Plane Worker still has the two existing
   `project_platform_memberships` TS2345 errors, so root check and
   database-auth-topology stop at that independent build before topology execution.
 - Original commit: `2240a1bb0645e50a22204783f7cac5362924d906`
@@ -32,3 +33,4 @@
 - Round 6 implementation commit: `1799d50a612f08da97031cefcc3d3212db6bd949`
 - Round 7 implementation commit: `97078db1df594a573259f51bea2ca50c01467378`
 - Round 8 implementation commit: `4d180ce11ddeed5e937d88c280f9e8fff4e2f7e2`
+- Round 9 implementation commit: `27162e2d8ead727ca3bcc4956b02c369809212e8`

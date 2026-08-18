@@ -8,6 +8,100 @@
 - Original implementation commit: `2240a1bb0645e50a22204783f7cac5362924d906`
 - No merge or push was performed.
 
+## Round 9 review fixes (2026-08-18)
+
+Status: `DONE_WITH_CONCERNS`. Both remaining reset-settlement findings are fixed
+through the pinned Supabase adapter and real Fastify/PostgreSQL production
+composition. The unchanged Worker compile defect and two already reproduced
+integration teardown-only failures remain outside Task 7 behavior.
+
+### Delivered Round 9 corrections
+
+- A loaded `provider_started` reset whose signed settlement binding has reached
+  its deadline no longer fails inside the provider adapter. The adapter returns a
+  closed internal settlement checkpoint without inspecting Provider evidence or
+  repeating the Provider effect. Production composition locks the exact OAuth row
+  in a caller-owned serializable transaction, uses `clock_timestamp()`, commits
+  `expired`, replaces PKCE ciphertext with the non-secret sentinel, and clears
+  expected/completed subject ciphertext, canonical payload hash, completion
+  timestamps, evidence, and settlement deadline before the terminal public 401.
+- A concurrent loser that initially loads a fresh `provider_started` row and sees
+  the pre-effect Provider timestamp receives the retryable provider-unavailable
+  result. The public route returns 503 and preserves the recovery Cookie. The
+  fresh-attempt lease is bounded to 30 seconds from the durable database start;
+  only old evidence inside that interval is retryable. Mismatched subject/email,
+  malformed or future evidence, and evidence older than a non-fresh attempt remain
+  terminal callback-invalid failures and clear the Cookie.
+- The winning request still performs the Provider code exchange/password update
+  exactly once and outside database retry. If its subsequent Core revocation rolls
+  back, the loser retry loads the durable Provider checkpoint, skips Provider work,
+  revokes every Core Session, consumes the transaction, and clears the Cookie.
+- The formal Identity Gateway PostgreSQL manifest changed from 1 to 2 only after
+  the complete disposable suite reported the observed 2/2 total.
+
+### Round 9 RED evidence
+
+- From `apps/identity-gateway`, `npm test --
+  --test-name-pattern='Supabase password recovery settlement|freshly loaded
+  provider-started'` ran the package's complete file set and was RED 97 total / 95
+  pass / 2 fail. Expired `provider_started` returned `AUTH_CALLBACK_INVALID`
+  instead of the settlement checkpoint; freshly loaded state with old evidence
+  returned `AUTH_CALLBACK_INVALID` instead of retryable
+  `AUTH_PROVIDER_UNAVAILABLE`.
+- The first meaningful disposable PostgreSQL run was RED 2 total / 1 pass / 1
+  fail: the expired public route returned 401 but left the row pending with its
+  encrypted subject, hash, and timestamps. After ordering the barrier scenario
+  before expiry, it was independently RED 2 total / 1 pass / 1 fail because the
+  concurrent loser returned 401 instead of the required 503. An earlier attempt
+  stopped only because the isolated database lacked prerequisite roles and is not
+  counted as behavioral RED.
+
+### Round 9 GREEN and final verification
+
+- `npm run check -w @core-agent/identity-gateway` — PASS: build and 97/97.
+  `npm run check -w @core-agent/runtime-core` — PASS: build and 83/83.
+  `npm run check -w @core-agent/contracts` — PASS: 180/180, generated schema and
+  cumulative compatibility clean, 86 valid fixtures and 11 invalid fixtures.
+- `CONTROL_PLANE_TEST_DATABASE_URL=postgresql://core_agent_ci@127.0.0.1:55445/core_agent_task7_r9
+  npm run test:postgres -w @core-agent/identity-gateway` — PASS 2/2 in
+  4747.6485 ms. The new test uses the real `SupabaseAuthProvider`, production
+  OAuth store/envelope/composition, Fastify injection, and disposable PostgreSQL.
+  It proves the expired durable scrub and the controlled winner/loser sequence,
+  forced winner Core rollback, retained Cookie, loser recovery, Session revocation,
+  transaction consumption, and exactly one Provider exchange/update.
+- Root `npm run test:unit` — PASS: Runtime 192/192, Contracts 180/180, Runtime
+  Core 83/83, Identity Gateway 97/97, Web 129/129 across nine files. The first
+  sandbox attempt had only three `listen EPERM` environment failures; the required
+  permitted rerun is the reported result.
+- Direct root PostgreSQL reached Runtime Core 340 total / 339 pass / 1 expected
+  protected-bootstrap failure because the disposable host-trust database has no
+  `CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE`; the separate Gateway suite passed
+  2/2. `npm run test:runtime:database-ci-equivalent` reported 3 total / 2 pass / 1
+  fail in 241898.956583 ms. Its protected stage accepted the exact Runtime Core
+  340 + Gateway 2 + API 14 counts, then integration reported 94 total / 92 pass /
+  2 teardown-only failures: the unchanged agent-run database-drop after-hook and
+  unchanged harness-cleanup startup-delay classification. All identity behavior,
+  injected cleanup, and output-leak scenarios passed; this repeatedly reproduced
+  independent teardown condition was not blindly rerun.
+- Root `npm run check` reaches the Gateway and API successfully, then stops at the
+  unchanged Worker `project_platform_memberships` TS2345 errors at `main.ts:60`
+  and `main.ts:129`. `npm run test:runtime:database-auth-topology` likewise stops
+  during the Worker image build before topology execution. These files were not
+  touched by Task 7.
+- Contracts history compatibility, exact dependency pins, `git diff --check`,
+  sentinel secret scan, forbidden Gateway log scan, historical Contracts 0.5 and
+  migration 010/011 diffs, checksum scan, and final Docker residual scan pass.
+  Fastify 5.11.2, Cookie 11.1.2, Supabase JS 2.112.2, and Contracts 0.6.0 remain
+  exact. Migration 012 was unchanged in Round 9.
+- SHA-256 remains 010
+  `eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381`;
+  011 `fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393`;
+  unmerged 012
+  `42a2120802daa43b19f842e638e310c4285d927bc292186d996ff61af3d83767`.
+- Round 9 implementation commit:
+  `27162e2d8ead727ca3bcc4956b02c369809212e8`.
+- No merge or push was performed.
+
 ## Round 8 review fixes (2026-08-18)
 
 Status: `DONE_WITH_CONCERNS`. All three Round 8 reset-state findings are fixed and
