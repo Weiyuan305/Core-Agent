@@ -8,6 +8,127 @@
 - Original implementation commit: `2240a1bb0645e50a22204783f7cac5362924d906`
 - No merge or push was performed.
 
+## Round 15 review fixes (2026-08-19)
+
+### Review resolution
+
+- Re-read and followed receiving-code-review, test-driven-development,
+  verification-before-completion, and the Supabase skill before production
+  changes. No new schema or authority decision was required; the still-unmerged
+  migration 012 was amended, while 010/011 and Contracts 0.5 remain unchanged.
+- Apple sign-in start now consumes the stable client route limit and an
+  independent account limit derived server-side from the exact canonical start
+  facts before `beginApple` or any durable/provider start effect. Apple
+  invitation callback consumes `apple_callback` client plus exact durable
+  transaction account admission before `completeApple`, then only the
+  `invitation_accept` account admission after exact invitation lookup; it does
+  not duplicate the client dimension.
+- Ambiguous password-reset recovery independently decrypts the durable completed
+  and expected provider-subject bindings. It resolves all distinct Actors and
+  revokes their Sessions without requiring an active AuthSubject; a corrupt or
+  absent binding does not prevent the other binding's revocation or the final
+  durable scrub.
+- The initial Web Apple-link Cookie now signs the exact five-minute authorization
+  expiry and its exact plus-thirty-minute settlement deadline, with a 2,100-second
+  `Max-Age`. Authorization expiry still prevents new provider acquisition. A
+  durable `provider_started` callback returns a closed observation to the Core
+  caller-owned transaction, whose PostgreSQL clock returns retryable 503 before
+  the settlement boundary or commits `expired` plus checkpoint scrub at/after
+  the boundary. The same initial Cookie resumes `provider_completed` settlement
+  after an authorization-expiry response-loss crash.
+- Pinned Supabase 2.112.2 offers exact subject inspection but no causal receipt
+  proving that one specific Apple-link attempt created a provider identity.
+  Therefore the bounded ambiguous `provider_started` state fails safely at its
+  settlement deadline rather than claiming link success from ambient account
+  state.
+- Existing-Session invitation acceptance now invokes Task 6
+  `requireRecentReauthentication` and locks/revalidates the exact Core Session,
+  Actor, and AuthSubject in the same serializable transaction as Task 4
+  acceptance and replacement Session issuance. The ten-minute database-clock
+  boundary is exclusive. Verified-provider onboarding has no old Session and
+  intentionally skips this guard.
+
+### Round 15 RED evidence
+
+- Focused Fastify command:
+  `npm test -w @core-agent/identity-gateway -- --test-name-pattern='Apple sign-in start and callback consume|Apple sign-in start account limiting|Apple invitation callback rotation|Apple link cookie authenticates|Apple link start derives'`
+  was RED at 109 total / 104 pass / 5 fail. The exact failures were provider
+  start before account admission, account exhaustion still reaching `beginApple`,
+  duplicate invitation client admission with no callback account admission,
+  Apple-link Cookie `Max-Age=300` instead of 2,100, and acceptance of a non-exact
+  29:59 settlement binding.
+- Adding the durable Supabase Apple-link observation focus made the suite 110 total
+  / 104 pass / 6 fail: loaded `provider_started` returned
+  `AUTH_PROVIDER_UNAVAILABLE` before the PostgreSQL clock could settle it.
+- Real Fastify/production-composition/PostgreSQL was RED 0/2: the initial
+  Apple-link Cookie still expired at five minutes, and the ambiguous-reset active
+  Session reachable through the alternate durable subject remained active.
+- The existing-invitation reauthentication matrix was written before its
+  production edit and failed for missing Task 6 guard behavior; it covers revoked,
+  idle-expired, and exact ten-minute reauthentication boundaries.
+
+### Focused and package GREEN evidence
+
+- The expanded focused Fastify/Supabase command is GREEN 110/110. Ordered traces
+  prove both Apple-start limits precede provider work, account 429 performs zero
+  provider work, and invitation Apple callback uses exactly three admissions:
+  callback client, callback transaction account, invitation account.
+- `npm run check -w @core-agent/identity-gateway` — PASS: build and 110/110.
+- `npm run check -w @core-agent/runtime-core` — PASS: build and 83/83.
+- `npm run check -w @core-agent/contracts` — PASS: 180/180, schema/current 0.6
+  compatibility, 86 valid fixtures, and 11 invalid fixtures.
+- `npm run test:unit` initially stopped at Runtime 189/192 only because the
+  restricted sandbox denied three local TCP/Unix `listen` calls with `EPERM`.
+  The same command outside that socket restriction is PASS: Runtime 192/192,
+  Contracts 180/180, Runtime Core 83/83, Identity Gateway 110/110, and Control
+  Plane Web 129/129 across 9 files.
+
+### Real PostgreSQL and official evidence
+
+- `CONTROL_PLANE_TEST_DATABASE_URL=postgresql://core_agent_ci@127.0.0.1:55451/core_agent_runtime npm run test:postgres -w @core-agent/identity-gateway`
+  — PASS 2/2. Real Fastify plus production composition proves original-Cookie
+  resume after authorization expiry, database-clock `provider_started`
+  retry/terminal scrub boundaries, independent ambiguous-reset subject recovery,
+  and existing invitation Session reauthentication/revoke/expiry barriers.
+- Manual full Runtime Core PostgreSQL was 343 total / 342 pass / 1 environment
+  failure: the disposable diagnostic container used
+  `POSTGRES_HOST_AUTH_METHOD=trust`, so the test requiring rejection of a stale
+  password could not reject it. All migration-012, restart, ACL, concurrency, and
+  identity behavior passed in that run.
+- `npm run test:runtime:database-ci-equivalent` — PASS 3/3 in
+  144423 ms. Its protected SCRAM run asserted Runtime Core PostgreSQL 343,
+  Identity Gateway PostgreSQL 2, Control Plane API PostgreSQL 14, and integration
+  93; injected-failure cleanup and output-leak rejection passed.
+- `npm run test:runtime:database-auth-topology` is 0/1 because the unchanged
+  Control Plane Worker Docker build stops first at its two existing TS2345
+  `project_platform_memberships` dispatcher errors. No migration/topology
+  assertion ran or failed. `npm run check` likewise passes Task 7 packages and
+  Control Plane API 17/17 before stopping at those same Worker lines 60 and 129.
+
+### Integrity, scans, and self-review
+
+- Exact pins remain Fastify 5.11.2, `@fastify/cookie` 11.1.2,
+  `@supabase/supabase-js` 2.112.2, and Contracts 0.6.0.
+- Historical SHA-256 values remain: migration 010
+  `eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381`;
+  migration 011
+  `fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393`.
+  Amended migration 012 and its manifest are
+  `2e7a7d0b8f910ff5253ace5dff1f0cc242224ec432e75621f15f57d93d14af12`.
+  Base diffs for 010/011 and Contracts 0.5 are empty.
+- `node scripts/verify-no-secret.mjs identity-auth-private-sentinel`,
+  `git diff --check`, dependency inspection, and the production logging/residual
+  scans pass. No provider proof/token, raw Cookie, provider subject/email,
+  Session secret, key identifier, database detail, or internal body was added to
+  public output/logging.
+- Self-review confirmed provider effects remain outside automatically retried
+  database transactions; the post-provider observation and all protected Task 4
+  mutations use caller-owned serializable transactions and database time.
+- Round 15 implementation commit:
+  `b346bf60a` (`fix(identity): close round 15 gateway review`).
+- Remaining concern is limited to the pre-existing, out-of-scope Worker TS2345
+  build failure described above. No merge or push was performed.
+
 ## Round 14 review fixes (2026-08-18)
 
 ### Review resolution
