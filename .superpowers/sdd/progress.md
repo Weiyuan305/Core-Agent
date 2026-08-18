@@ -7,7 +7,7 @@
 - Base: `e7624fe0425ff470b646f8322254d5e9e3857da8`
 - Brief: `.superpowers/sdd/task-7-brief.md`
 - Baseline: Contracts 179/179 with fixtures 84/11; Identity Gateway 28/28.
-- Current phase: Round 7 review fixes implemented and verified; ready for parent review.
+- Current phase: Round 8 review fixes implemented and verified; ready for parent review.
 - User-approved amendment: forward-only schema 12 adds durable encrypted
   email-verification/start-idempotency authority; Entitlement reservation moved to
   schema 13. Historical 010/011 and Contracts 0.5.0 are untouched.
@@ -16,8 +16,8 @@
   provider effects outside automatically retried transactions; Task 9 deletion
   explicitly unavailable; no provider or internal-detail leakage.
 - Result: Contracts 0.6.0 180/180 with fixtures 86/11; Runtime Core 83/83;
-  Identity Gateway 95/95; real Fastify plus PostgreSQL composition 1/1. The final
-  Round 7 official protected database wrapper passed 3/3 and asserted its 339
+  Identity Gateway 96/96; real Fastify plus PostgreSQL composition 1/1. The final
+  Round 8 official protected database wrapper passed 3/3 and asserted its 340
   Runtime Core + 1 Gateway + 14 API + 93 integration summaries, including cleanup
   and output-leak gates.
 - Concern: untouched Control Plane Worker still has the two existing
@@ -31,3 +31,4 @@
 - Round 5 implementation commit: `a90623fde99da4ba7fa5306ed3e0a0861b9bd175`
 - Round 6 implementation commit: `1799d50a612f08da97031cefcc3d3212db6bd949`
 - Round 7 implementation commit: `97078db1df594a573259f51bea2ca50c01467378`
+- Round 8 implementation commit: `4d180ce11ddeed5e937d88c280f9e8fff4e2f7e2`

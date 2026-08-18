@@ -8,6 +8,94 @@
 - Original implementation commit: `2240a1bb0645e50a22204783f7cac5362924d906`
 - No merge or push was performed.
 
+## Round 8 review fixes (2026-08-18)
+
+Status: `DONE_WITH_CONCERNS`. All three Round 8 reset-state findings are fixed and
+verified through schema-11 upgrade, pinned Supabase adapter, public Fastify, and
+disposable PostgreSQL boundaries. The only concern remains the unchanged Worker
+compile defect already documented in prior rounds; every Round 8 scoped gate passes.
+
+### Delivered Round 8 corrections
+
+- Migration 012 now admits a schema-11 `consumed` password-reset row only as an
+  exact terminal legacy state: `provider_completion_status = pending` and every
+  newly introduced subject/checkpoint/deadline field is null. It preserves status,
+  `consumed_at`, and history. The constraint also explicitly binds new pending,
+  provider-started, provider-completed, consumed, and expired combinations so a
+  terminal legacy row cannot reacquire an expected-subject checkpoint.
+- Recovery Cookie parsing authenticates the exact signed authorization and
+  settlement deadlines without rejecting solely on wall time. The database clock
+  remains the settlement authority. A durable provider-completed subject can pass
+  the adapter at or after the settlement boundary only to reach Core settlement;
+  no provider code exchange or password update is repeated.
+- The Core expired branch now commits `status = expired`, replaces the encrypted
+  PKCE material with a non-secret sentinel, and clears both subject ciphertexts,
+  payload hash, completion timestamps, evidence, and settlement deadline before
+  returning the stable terminal authentication error. The recovery Cookie is then
+  cleared by the existing terminal-error policy.
+- A completion caller that loaded pending state but loses the atomic provider-start
+  admission now returns the existing retryable provider-unavailable result without
+  inspecting premature evidence. It performs zero provider effect and preserves the
+  Cookie. After the winner checkpoints provider completion—even when its Core phase
+  rolls back—the loser retry loads the completed checkpoint, skips Provider work,
+  revokes Sessions, and consumes the transaction.
+- The formal Runtime Core PostgreSQL count manifest changed from 339 to 340 only
+  after the complete direct suite reported the new observed total.
+
+### Round 8 RED evidence
+
+- Real schema-11 upgrade focus was RED 0/1: adding the schema-12 provider state
+  constraint failed with PostgreSQL 23514 for a preserved consumed reset row.
+- The recovery-Cookie deadline focus was RED 0/1 with `AUTH_INVALID` at the exact
+  settlement boundary. The completed-checkpoint adapter focus was independently
+  RED 0/1 with `AUTH_CALLBACK_INVALID`, proving the adapter also blocked Core.
+- The concurrent-admission adapter focus was RED 0/1: actual
+  `AUTH_CALLBACK_INVALID` versus the required retryable
+  `AUTH_PROVIDER_UNAVAILABLE`; exchange and admin password-update counts remained
+  zero.
+- Real Fastify plus PostgreSQL was RED 0/1: an expired signed completion returned
+  before the provider/Core boundary (`providerCalls = 0`) and left the OAuth row
+  pending instead of durably terminalizing it.
+- Schema self-review added a second genuine PostgreSQL RED 0/1 (`Missing expected
+  rejection`): a legacy consumed row could reacquire expected-subject ciphertext
+  through the overly broad pending branch. Explicit status combinations close it.
+
+### Round 8 GREEN and final verification
+
+- Focused GREEN: schema-11 consumed upgrade/terminal constraint 1/1; recovery
+  Cookie 1/1; adapter expired-checkpoint plus concurrent-loser 2/2.
+- `npm run check -w @core-agent/identity-gateway` — PASS: build and 96/96.
+  `npm run check -w @core-agent/runtime-core` — PASS: build and 83/83.
+  `npm run check -w @core-agent/contracts` — PASS: 180/180, generated schemas and
+  cumulative compatibility clean, 86 valid fixtures and 11 invalid fixtures.
+- `CONTROL_PLANE_TEST_DATABASE_URL=postgresql://core_agent_ci@127.0.0.1:55441/core_agent_task7_r8
+  npm run test:postgres -w @core-agent/identity-gateway` — PASS 1/1. The real
+  Fastify/PostgreSQL test proves expired durable scrub plus 401/Cookie clear and a
+  barrier-controlled sequence: loser 503/Cookie retained, one winner Provider
+  update, forced winner Core rollback, loser retry, all Sessions revoked, OAuth
+  transaction consumed, and no repeated Provider effect.
+- Direct Runtime Core PostgreSQL reported 340 total / 339 pass / 1 fail. The sole
+  failure is expected in this host-trust disposable database because
+  `CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE` is absent; all 340 behaviors,
+  including the new schema-11 consumed upgrade, ran.
+- `npm run test:runtime:database-ci-equivalent` — PASS 3/3 in 151229.157 ms. The
+  protected run asserted Runtime Core PostgreSQL 340, Identity Gateway PostgreSQL
+  1, Control Plane API PostgreSQL 14, integration 93, injected-failure cleanup,
+  and output-leak redaction.
+- `npm run compat:history -w @core-agent/contracts -- --base
+  e7624fe0425ff470b646f8322254d5e9e3857da8` — PASS. `git diff --check`, sentinel
+  secret scan, forbidden Gateway log scan, exact pin check, Contracts 0.5 and
+  migrations 010/011 base diffs, and final Docker residual scans pass. Fastify
+  5.11.2, Cookie 11.1.2, and Supabase JS 2.112.2 remain exact.
+- SHA-256 remains 010
+  `eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381`;
+  011 `fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393`;
+  amended unmerged 012 is
+  `42a2120802daa43b19f842e638e310c4285d927bc292186d996ff61af3d83767`.
+- Round 8 implementation commit:
+  `4d180ce11ddeed5e937d88c280f9e8fff4e2f7e2`.
+- No merge or push was performed.
+
 ## Round 7 review fixes (2026-08-18)
 
 Status: `DONE_WITH_CONCERNS`. All Round 7 findings are implemented and verified
