@@ -24,6 +24,7 @@ export type ProviderStartPayloadFacts =
     readonly deviceLabel?: string;
     readonly nonce?: string;
     readonly pkceChallenge?: string;
+    readonly passwordProofHmac?: string;
   };
 
 export function canonicalProviderStartPayloadHash(input: ProviderStartPayloadFacts): string {
@@ -41,6 +42,9 @@ export function canonicalProviderStartPayloadHash(input: ProviderStartPayloadFac
       ...(input.pkceChallenge === undefined ? {} : {
         pkce_code_challenge: input.pkceChallenge,
         pkce_code_challenge_method: "S256",
+      }),
+      ...(input.passwordProofHmac === undefined ? {} : {
+        proof_binding_hmac: input.passwordProofHmac,
       }),
     }),
   });

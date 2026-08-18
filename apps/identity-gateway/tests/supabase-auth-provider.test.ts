@@ -1061,12 +1061,16 @@ test("Supabase provider starts replay one idempotent effect", async () => {
   const linkFirst = await linkHarness.provider.reauthenticateAndBeginAppleLink(linkInput);
   const linkReplay = await linkHarness.provider.reauthenticateAndBeginAppleLink(linkInput);
   assert.deepEqual(linkReplay, linkFirst);
-  assert.equal(linkHarness.methodCalls.filter(({ name }) => name === "signInWithPassword").length, 1);
+  assert.equal(linkHarness.methodCalls.filter(({ name }) => name === "signInWithPassword").length, 2);
   assert.equal(linkHarness.methodCalls.filter(({ name }) => name === "linkIdentity").length, 1);
+  await expectFailure(() => linkHarness.provider.reauthenticateAndBeginAppleLink({
+    ...linkInput, password: "changed-current-password",
+  }), "AUTH_CONFLICT");
+  assert.equal(linkHarness.methodCalls.filter(({ name }) => name === "signInWithPassword").length, 2);
   await expectFailure(() => linkHarness.provider.reauthenticateAndBeginAppleLink({
     ...linkInput, device_label: "changed without a new payload hash",
   }), "AUTH_CALLBACK_INVALID");
-  assert.equal(linkHarness.methodCalls.filter(({ name }) => name === "signInWithPassword").length, 1);
+  assert.equal(linkHarness.methodCalls.filter(({ name }) => name === "signInWithPassword").length, 2);
   assert.equal(linkHarness.methodCalls.filter(({ name }) => name === "linkIdentity").length, 1);
 
   await expectFailure(() => harness.provider.beginApple({

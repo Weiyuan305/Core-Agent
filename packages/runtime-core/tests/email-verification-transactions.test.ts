@@ -45,7 +45,7 @@ test("durable email verification converges starts across restart and consumes ex
   const module = await import("../src/index.js") as Record<string, unknown>;
   assert.equal(typeof module.beginEmailVerificationTransaction, "function");
   assert.equal(typeof module.consumeEmailVerificationTransaction, "function");
-  const begin = module.beginEmailVerificationTransaction as (dependencies: unknown, input: unknown) => Promise<{ kind: string; verificationId: string; expiresAt: string }>;
+  const begin = module.beginEmailVerificationTransaction as (dependencies: unknown, input: unknown) => Promise<{ kind: string; verificationId: string; expiresAt: string; providerStartAttempt: number }>;
   const finalize = module.finalizeEmailVerificationTransactionStart as (dependencies: unknown, input: unknown) => Promise<void>;
   const prepare = module.prepareEmailVerificationTransaction as (dependencies: unknown, input: unknown) => Promise<{ clientKind: string; deviceLabel?: string; flowKind: string; invitationId?: string; providerVerification: unknown }>;
   const admit = module.admitEmailVerificationProviderAttempt as (dependencies: unknown, input: unknown) => Promise<{ kind: string }>;
@@ -79,6 +79,7 @@ test("durable email verification converges starts across restart and consumes ex
     kind: "reserved",
     verificationId: first.verificationId,
     expiresAt: "2026-08-18T00:10:00.000Z",
+    providerStartAttempt: 1,
   });
   const restartedDependencies = { ...dependencies, randomBytes: (length: number) => Buffer.alloc(length, 0x7e) };
   assert.deepEqual(await begin(restartedDependencies, input), { ...first, kind: "in_progress" });
@@ -87,7 +88,8 @@ test("durable email verification converges starts across restart and consumes ex
     normalizedEmail: "changed@example.test",
   }), (error: unknown) => (error as { code?: unknown }).code === "INVALID_REQUEST");
   await finalize(dependencies, {
-    verificationId: first.verificationId, outcome: "finalized", expectedProviderSubject: "provider_subject_01",
+    verificationId: first.verificationId, providerStartAttempt: first.providerStartAttempt,
+    outcome: "finalized", expectedProviderSubject: "provider_subject_01",
   });
   assert.deepEqual(await begin(restartedDependencies, input), { ...first, kind: "finalized_replay" });
   assert.deepEqual(await prepare(dependencies, { verificationId: first.verificationId }), {
@@ -116,13 +118,16 @@ test("durable email verification converges starts across restart and consumes ex
     }),
   };
   const failedStart = await begin(dependencies, failedInput);
-  await finalize(dependencies, { verificationId: failedStart.verificationId, outcome: "failed" });
-  assert.deepEqual(await begin(dependencies, failedInput), {
+  await finalize(dependencies, { verificationId: failedStart.verificationId, providerStartAttempt: failedStart.providerStartAttempt, outcome: "failed" });
+  const failedRetry = await begin(dependencies, failedInput);
+  assert.deepEqual(failedRetry, {
     ...failedStart,
     kind: "reserved",
+    providerStartAttempt: 2,
   });
   await finalize(dependencies, {
-    verificationId: failedStart.verificationId, outcome: "finalized", expectedProviderSubject: "provider_subject_retry",
+    verificationId: failedStart.verificationId, providerStartAttempt: failedRetry.providerStartAttempt,
+    outcome: "finalized", expectedProviderSubject: "provider_subject_retry",
   });
   assert.equal((await pool.query(
     "select provider_start_status, provider_start_attempt from email_verification_transactions where email_verification_transaction_id = $1",
@@ -182,7 +187,11 @@ test("unknown provider-start outcome has a database-clock lease and the exact ke
   const begin = module.beginEmailVerificationTransaction as (
     dependencies: unknown,
     input: unknown,
-  ) => Promise<{ kind: string; verificationId: string }>;
+  ) => Promise<{ kind: string; verificationId: string; providerStartAttempt: number }>;
+  const finalize = module.finalizeEmailVerificationTransactionStart as (
+    dependencies: unknown,
+    input: unknown,
+  ) => Promise<void>;
   let clock = new Date(now);
   const dependencies = {
     db, hmacKey, protector, ttlMs: 10 * 60_000, providerStartLeaseMs: 30_000,
@@ -198,10 +207,12 @@ test("unknown provider-start outcome has a database-clock lease and the exact ke
     normalizedEmail: "unknown-start@example.test", clientKind: "web", flow: { kind: "b2c" },
   };
   const first = await begin(dependencies, input);
+  assert.equal(first.providerStartAttempt, 1);
   clock = new Date(now.getTime() + 29_999);
   assert.equal((await begin(dependencies, input)).kind, "in_progress");
   clock = new Date(now.getTime() + 30_000);
-  assert.deepEqual(await begin(dependencies, input), { ...first, kind: "reserved" });
+  const reacquired = await begin(dependencies, input);
+  assert.deepEqual(reacquired, { ...first, kind: "reserved", providerStartAttempt: 2 });
   const row = (await pool.query<{
     provider_start_attempt: number;
     provider_start_reserved_at: Date;
@@ -210,6 +221,27 @@ test("unknown provider-start outcome has a database-clock lease and the exact ke
   [first.verificationId])).rows[0]!;
   assert.equal(row.provider_start_attempt, 2);
   assert.equal(row.provider_start_reserved_at.toISOString(), clock.toISOString());
+
+  await assert.rejects(finalize(dependencies, {
+    verificationId: first.verificationId,
+    providerStartAttempt: 1,
+    outcome: "finalized",
+    expectedProviderSubject: "stale-provider-subject",
+  }), (error: unknown) => (error as { code?: unknown }).code === "IDEMPOTENCY_CONFLICT");
+  assert.equal((await pool.query(
+    "select provider_start_status from email_verification_transactions where email_verification_transaction_id = $1",
+    [first.verificationId],
+  )).rows[0]?.provider_start_status, "reserved");
+  await finalize(dependencies, {
+    verificationId: first.verificationId,
+    providerStartAttempt: reacquired.providerStartAttempt,
+    outcome: "finalized",
+    expectedProviderSubject: "current-provider-subject",
+  });
+  assert.equal((await pool.query(
+    "select provider_start_status from email_verification_transactions where email_verification_transaction_id = $1",
+    [first.verificationId],
+  )).rows[0]?.provider_start_status, "finalized");
 
   await assert.rejects(begin(dependencies, {
     ...input,
@@ -223,7 +255,7 @@ test("unknown provider-start outcome has a database-clock lease and the exact ke
 
 test("invitation email verification encrypts exact invitation authority and durably commits expiry", async () => {
   const module = await import("../src/index.js") as Record<string, unknown>;
-  const begin = module.beginEmailVerificationTransaction as (dependencies: unknown, input: unknown) => Promise<{ kind: string; verificationId: string }>;
+  const begin = module.beginEmailVerificationTransaction as (dependencies: unknown, input: unknown) => Promise<{ kind: string; verificationId: string; providerStartAttempt: number }>;
   const finalize = module.finalizeEmailVerificationTransactionStart as (dependencies: unknown, input: unknown) => Promise<void>;
   const prepare = module.prepareEmailVerificationTransaction as (dependencies: unknown, input: unknown) => Promise<Record<string, unknown>>;
   let clock = new Date(now);
@@ -254,7 +286,8 @@ test("invitation email verification encrypts exact invitation authority and dura
   });
   assert.equal(started.kind, "reserved");
   await finalize(dependencies, {
-    verificationId: started.verificationId, outcome: "finalized", expectedProviderSubject: "provider_invitee_01",
+    verificationId: started.verificationId, providerStartAttempt: started.providerStartAttempt,
+    outcome: "finalized", expectedProviderSubject: "provider_invitee_01",
   });
   assert.deepEqual(await prepare(dependencies, { verificationId: started.verificationId }), {
     normalizedEmail: "invitee@example.test",
@@ -314,7 +347,7 @@ test("concurrent first email starts admit one durable reservation without raw un
   const begin = module.beginEmailVerificationTransaction as (
     dependencies: unknown,
     input: unknown,
-  ) => Promise<{ kind: string; verificationId: string }>;
+  ) => Promise<{ kind: string; verificationId: string; providerStartAttempt: number }>;
   let randomSeed = 0;
   let encryptionsWaiting = 0;
   let releaseEncryptions!: () => void;
@@ -357,7 +390,7 @@ test("provider verification attempt is durably timed, HMAC-bound, leased once, a
   const module = await import("../src/index.js") as Record<string, unknown>;
   const begin = module.beginEmailVerificationTransaction as (
     dependencies: unknown, input: unknown,
-  ) => Promise<{ verificationId: string }>;
+  ) => Promise<{ verificationId: string; providerStartAttempt: number }>;
   const finalize = module.finalizeEmailVerificationTransactionStart as (
     dependencies: unknown, input: unknown,
   ) => Promise<void>;
@@ -387,6 +420,7 @@ test("provider verification attempt is durably timed, HMAC-bound, leased once, a
   const started = await begin(dependencies, input);
   await finalize(dependencies, {
     verificationId: started.verificationId,
+    providerStartAttempt: started.providerStartAttempt,
     outcome: "finalized",
     expectedProviderSubject: "provider_attempt_subject",
   });

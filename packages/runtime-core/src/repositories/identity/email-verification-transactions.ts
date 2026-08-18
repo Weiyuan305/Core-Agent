@@ -28,6 +28,10 @@ export interface EmailVerificationTransactionDependencies {
 export interface BeginEmailVerificationTransactionInput {
   readonly idempotencyKey: string;
   readonly payloadHash: string;
+  /** Optional caller hash validated against public non-secret facts. */
+  readonly publicPayloadHash?: string;
+  /** Purpose-separated HMAC of the submitted password, never the password itself. */
+  readonly passwordProofHmac?: string;
   readonly normalizedEmail: string;
   readonly clientKind: "web" | "iphone" | "macos";
   readonly deviceLabel?: string;
@@ -50,12 +54,15 @@ export interface EmailVerificationStartPayloadFacts {
   readonly deviceLabel?: string;
   readonly flowKind: "b2c" | "invitation";
   readonly invitationDigest?: string;
+  readonly passwordProofHmac?: string;
 }
 
 export interface BegunEmailVerificationTransaction {
   readonly kind: "reserved" | "in_progress" | "finalized_replay";
   readonly verificationId: string;
   readonly expiresAt: string;
+  /** Exact fencing generation; only a `reserved` caller may finalize it. */
+  readonly providerStartAttempt: number;
 }
 
 export interface ConsumedEmailVerificationBinding {
@@ -166,11 +173,12 @@ export function canonicalEmailVerificationStartPayloadHash(input: EmailVerificat
     client_kind: input.clientKind,
     ...(input.deviceLabel === undefined ? {} : { device_label: input.deviceLabel }),
     ...(input.flowKind === "invitation" ? { invitation_digest: input.invitationDigest } : {}),
+    ...(input.passwordProofHmac === undefined ? {} : { proof_binding_hmac: input.passwordProofHmac }),
   });
 }
 
 function assertPayloadHash(input: BeginEmailVerificationTransactionInput): void {
-  const expected = canonicalEmailVerificationStartPayloadHash({
+  const publicExpected = canonicalEmailVerificationStartPayloadHash({
     idempotencyKey: input.idempotencyKey,
     normalizedEmail: input.normalizedEmail,
     clientKind: input.clientKind,
@@ -178,11 +186,28 @@ function assertPayloadHash(input: BeginEmailVerificationTransactionInput): void 
     flowKind: input.flow.kind,
     ...(input.flow.kind === "invitation" ? { invitationDigest: input.flow.invitationSecretDigest } : {}),
   });
+  const expected = canonicalEmailVerificationStartPayloadHash({
+    idempotencyKey: input.idempotencyKey,
+    normalizedEmail: input.normalizedEmail,
+    clientKind: input.clientKind,
+    ...(input.deviceLabel === undefined ? {} : { deviceLabel: input.deviceLabel }),
+    flowKind: input.flow.kind,
+    ...(input.flow.kind === "invitation" ? { invitationDigest: input.flow.invitationSecretDigest } : {}),
+    ...(input.passwordProofHmac === undefined ? {} : { passwordProofHmac: input.passwordProofHmac }),
+  });
+  const publicSupplied = input.publicPayloadHash ?? input.payloadHash;
+  const publicSuppliedBytes = Buffer.from(publicSupplied, "utf8");
+  const publicExpectedBytes = Buffer.from(publicExpected, "utf8");
   const suppliedBytes = Buffer.from(input.payloadHash, "utf8");
   const expectedBytes = Buffer.from(expected, "utf8");
   try {
-    if (suppliedBytes.byteLength !== expectedBytes.byteLength || !timingSafeEqual(suppliedBytes, expectedBytes)) invalidInput();
+    if (publicSuppliedBytes.byteLength !== publicExpectedBytes.byteLength
+      || !timingSafeEqual(publicSuppliedBytes, publicExpectedBytes)
+      || suppliedBytes.byteLength !== expectedBytes.byteLength
+      || !timingSafeEqual(suppliedBytes, expectedBytes)) invalidInput();
   } finally {
+    publicSuppliedBytes.fill(0);
+    publicExpectedBytes.fill(0);
     suppliedBytes.fill(0);
     expectedBytes.fill(0);
   }
@@ -194,6 +219,8 @@ function assertBeginInput(input: BeginEmailVerificationTransactionInput): void {
     || input.idempotencyKey.length < 1
     || input.idempotencyKey.length > 255
     || !payloadHashPattern.test(input.payloadHash)
+    || input.publicPayloadHash !== undefined && !payloadHashPattern.test(input.publicPayloadHash)
+    || input.passwordProofHmac !== undefined && !/^[A-Za-z0-9_-]{43}$/u.test(input.passwordProofHmac)
     || typeof input.normalizedEmail !== "string"
     || input.normalizedEmail.length < 3
     || input.normalizedEmail.length > 320
@@ -423,6 +450,7 @@ export async function beginEmailVerificationTransaction(
         kind: "reserved" as const,
         verificationId: inserted.email_verification_transaction_id,
         expiresAt: candidateExpiresAt.toISOString(),
+        providerStartAttempt: 1,
       });
     }
     const existing = await trx.selectFrom("email_verification_transactions")
@@ -460,6 +488,7 @@ export async function beginEmailVerificationTransaction(
           kind: "reserved" as const,
           verificationId: existing.email_verification_transaction_id,
           expiresAt: expiresAt.toISOString(),
+          providerStartAttempt: existing.provider_start_attempt + 1,
         });
       }
       if (existing.provider_start_status === "reserved"
@@ -475,12 +504,14 @@ export async function beginEmailVerificationTransaction(
           kind: "reserved" as const,
           verificationId: existing.email_verification_transaction_id,
           expiresAt: existing.expires_at.toISOString(),
+          providerStartAttempt: existing.provider_start_attempt + 1,
         });
       }
       return Object.freeze({
         kind: existing.provider_start_status === "finalized" ? "finalized_replay" as const : "in_progress" as const,
         verificationId: existing.email_verification_transaction_id,
         expiresAt: existing.expires_at.toISOString(),
+        providerStartAttempt: existing.provider_start_attempt,
       });
     }
     throw new DomainError("INTERNAL_ERROR", "Email verification admission did not converge");
@@ -496,21 +527,25 @@ export async function beginEmailVerificationTransaction(
 export async function finalizeEmailVerificationTransactionStart(
   dependencies: EmailVerificationTransactionDependencies,
   input:
-    | { readonly verificationId: string; readonly outcome: "failed" }
-    | { readonly verificationId: string; readonly outcome: "finalized"; readonly expectedProviderSubject: string },
+    | { readonly verificationId: string; readonly providerStartAttempt: number; readonly outcome: "failed" }
+    | { readonly verificationId: string; readonly providerStartAttempt: number; readonly outcome: "finalized"; readonly expectedProviderSubject: string },
 ): Promise<void> {
   assertDependencies(dependencies);
   if (typeof input.verificationId !== "string" || input.verificationId.length < 1 || input.verificationId.length > 255
+    || !Number.isSafeInteger(input.providerStartAttempt) || input.providerStartAttempt < 1
     || (input.outcome !== "finalized" && input.outcome !== "failed")
     || input.outcome === "finalized" && (typeof input.expectedProviderSubject !== "string"
       || input.expectedProviderSubject.length < 1 || input.expectedProviderSubject.length > 1_024)) invalidInput();
   const execute = async (trx: Transaction<RuntimeDatabase>): Promise<"ok" | "expired"> => {
     const now = await databaseNow(dependencies, trx);
     const row = await trx.selectFrom("email_verification_transactions")
-      .select(["provider_start_status", "status", "expires_at", "expected_provider_subject_hmac", "expected_provider_subject_ciphertext"])
+      .select(["provider_start_status", "provider_start_attempt", "status", "expires_at", "expected_provider_subject_hmac", "expected_provider_subject_ciphertext"])
       .where("email_verification_transaction_id", "=", input.verificationId)
       .forUpdate().executeTakeFirst();
     if (row === undefined || row.status !== "pending") invalidAuthority();
+    if (row.provider_start_attempt !== input.providerStartAttempt) {
+      throw new DomainError("IDEMPOTENCY_CONFLICT", "Email verification provider start fence conflicts");
+    }
     if (now.getTime() >= row.expires_at.getTime()) {
       await trx.updateTable("email_verification_transactions").set({ status: "expired", updated_at: now })
         .where("email_verification_transaction_id", "=", input.verificationId).execute();
@@ -555,7 +590,8 @@ export async function finalizeEmailVerificationTransactionStart(
         expected_provider_subject_ciphertext: input.outcome === "finalized" ? subjectCiphertext! : null,
         updated_at: now,
       }).where("email_verification_transaction_id", "=", input.verificationId)
-        .where("provider_start_status", "=", "reserved").execute();
+        .where("provider_start_status", "=", "reserved")
+        .where("provider_start_attempt", "=", input.providerStartAttempt).execute();
     } finally {
       subjectPlaintext?.fill(0);
       subjectCiphertext?.fill(0);

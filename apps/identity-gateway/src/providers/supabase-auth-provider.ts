@@ -1,5 +1,6 @@
 import {
   createHash,
+  createHmac,
   randomBytes as nodeRandomBytes,
   timingSafeEqual,
 } from "node:crypto";
@@ -430,6 +431,15 @@ function readCredential(input: unknown): EmailCredentialInput {
     throw new ProviderFailure("AUTH_INVALID");
   }
   return { email: normalizeEmail(email), password };
+}
+
+function passwordBindingHmac(key: string, purpose: string, password: string): string {
+  const ownedPassword = Buffer.from(password, "utf8");
+  try {
+    return createHmac("sha256", key).update(purpose, "utf8").update(ownedPassword).digest("base64url");
+  } finally {
+    ownedPassword.fill(0);
+  }
 }
 
 function readProof(input: unknown): string {
@@ -1056,7 +1066,7 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
     const parsed = this.#parseAppleStart(input);
     const idempotency = readStartIdempotency(input);
     const deviceLabel = ownString(input, "device_label");
-    assertCanonicalStartPayloadHash(idempotency.payloadHash, canonicalProviderStartPayloadHash({
+    const publicStartFacts = {
       flowKind,
       idempotencyKey: idempotency.key,
       clientKind: parsed.clientKind,
@@ -1064,7 +1074,15 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       ...(deviceLabel === undefined ? {} : { deviceLabel }),
       ...(parsed.nonce === null ? {} : { nonce: parsed.nonce }),
       ...(parsed.pkceChallenge === null ? {} : { pkceChallenge: parsed.pkceChallenge }),
-    }));
+    } as const;
+    assertCanonicalStartPayloadHash(idempotency.payloadHash, canonicalProviderStartPayloadHash(publicStartFacts));
+    const passwordProofHmac = linkCredential === null ? undefined : passwordBindingHmac(
+      this.#serviceRoleKey, "core-agent:apple-link-password:v1\0", linkCredential.password,
+    );
+    const durableStartPayloadHash = canonicalProviderStartPayloadHash({
+      ...publicStartFacts,
+      ...(passwordProofHmac === undefined ? {} : { passwordProofHmac }),
+    });
     const transactionId = idempotentStartTransactionId(flowKind, actorId, idempotency.key);
     const state = transactionId;
     const nonce = parsed.nonce ?? encodeOpaque(this.#randomBytes(32));
@@ -1081,7 +1099,7 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       status: "pending" as const,
       expires_at: expiresAt,
     });
-    const reservation = await this.#reserveProviderStart(recordBase, idempotency.payloadHash);
+    const reservation = await this.#reserveProviderStart(recordBase, durableStartPayloadHash);
     if (reservation.kind === "existing") {
       const stored = parseOAuthTransaction(reservation.record);
       if (stored === undefined || stored.transactionId !== transactionId || stored.flowKind !== flowKind
@@ -1090,15 +1108,26 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
         throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
       }
       const metadata = await this.#startMetadata(stored.ciphertext);
-      if (metadata.payloadHash !== idempotency.payloadHash) throw new ProviderFailure("AUTH_CONFLICT");
+      if (metadata.payloadHash !== durableStartPayloadHash) throw new ProviderFailure("AUTH_CONFLICT");
       if ((metadata.kind !== "web" && metadata.kind !== "native") || metadata.authorizationUrl === undefined) {
         throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
       }
-      return Object.freeze({
-        transaction_id: transactionId,
-        authorization_url: metadata.authorizationUrl,
-        expires_at: reservation.record.expires_at,
-      });
+      if (linkCredential !== null) {
+        const { client, storage } = this.#newClient(undefined, `${transactionId}-reauth`);
+        let authenticated = false;
+        try {
+          await this.#authenticatePasswordOnClient(client, linkCredential);
+          authenticated = true;
+        } finally {
+          try {
+            if (authenticated) await this.#signOut(client, "local");
+          } finally {
+            storage.clear();
+          }
+        }
+      }
+      return Object.freeze({ transaction_id: transactionId, authorization_url: metadata.authorizationUrl,
+        expires_at: reservation.record.expires_at });
     }
     const { client, storage, storageKey } = this.#newClient(undefined, transactionId);
     let verifierBytes: Uint8Array | undefined;
@@ -1197,7 +1226,7 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       }
       const replayEnvelope = {
         ...envelope,
-        startPayloadHash: idempotency.payloadHash,
+        startPayloadHash: durableStartPayloadHash,
         authorizationUrl: authorizationUrl.toString(),
       };
       verifierBytes = utf8.encode(JSON.stringify(replayEnvelope));
@@ -1301,7 +1330,6 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
         || settlementExpiresAt === undefined || settlementExpiresAt > bindingSettlementNotAfter) {
         throw new ProviderFailure("AUTH_CALLBACK_INVALID");
       }
-      await this.#readPasswordResetSubject(transaction.providerSubjectCiphertext);
       return Object.freeze({
         kind: "password_reset_provider_observation" as const,
         outcome: "ambiguous" as const,
@@ -1531,7 +1559,8 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
     if (transaction.flowKind !== expectedFlowKind || transaction.actorId !== expectedActorId
       || transaction.clientKind !== callback.clientKind
       || !validateRedirectUri(transaction.redirectUri, this.#appleRedirectUris)
-      || transaction.expiresAt <= this.#now().getTime()
+      || (expectedFlowKind !== "apple_link" || transaction.providerCompletionStatus === "pending")
+        && transaction.expiresAt <= this.#now().getTime()
       || !equalDigest(transaction.stateDigest, sha256(callback.state))
       || (callback.clientKind !== "web"
         && !equalDigest(transaction.nonceDigest, sha256(callback.nonce!)))) {

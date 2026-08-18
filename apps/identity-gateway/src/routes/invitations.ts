@@ -67,14 +67,21 @@ export async function registerInvitationRoutes(app: FastifyInstance, dependencie
       clientIdentifier: request.identityContext.clientIdentifier, dimensions: "account",
     });
     if (accountRetryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", accountRetryAfterMs);
-    const binding = await dependencies.operations.beginEmailVerification({
-      idempotencyKey: body.idempotency_key,
-      payloadHash: body.payload_hash,
-      normalizedEmail,
-      clientKind: body.client_kind,
-      ...(body.device_label === undefined ? {} : { deviceLabel: body.device_label }),
-      invitationSecret: String(body.invitation_secret),
-    });
+    const passwordProof = Buffer.from(body.password, "utf8");
+    let binding: Awaited<ReturnType<typeof dependencies.operations.beginEmailVerification>>;
+    try {
+      binding = await dependencies.operations.beginEmailVerification({
+        idempotencyKey: body.idempotency_key,
+        payloadHash: body.payload_hash,
+        passwordProof,
+        normalizedEmail,
+        clientKind: body.client_kind,
+        ...(body.device_label === undefined ? {} : { deviceLabel: body.device_label }),
+        invitationSecret: String(body.invitation_secret),
+      });
+    } finally {
+      passwordProof.fill(0);
+    }
     if (binding.kind === "in_progress") throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
     if (binding.kind === "reserved") {
       await completeReservedEmailProviderStart(dependencies, binding, { email: normalizedEmail, password: body.password });
@@ -114,12 +121,10 @@ export async function registerInvitationRoutes(app: FastifyInstance, dependencie
         bucketKind: "apple_callback",
         accountIdentifier: "route:apple_invitation_callback",
         clientIdentifier: request.identityContext.clientIdentifier,
+        dimensions: "client",
       });
       if (appleRetryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", appleRetryAfterMs);
     }
-    const authority = body.authentication_proof === undefined
-      ? await authenticateClientMutation(request, dependencies, expectedClientKind)
-      : undefined;
     const inspected = await dependencies.operations.executeAuthorityCommand({
       kind: "invitation_rate_identity", payload: { invitation_secret: body.invitation_secret },
     }) as { readonly invitation_id?: unknown };
@@ -129,6 +134,9 @@ export async function registerInvitationRoutes(app: FastifyInstance, dependencie
       clientIdentifier: request.identityContext.clientIdentifier, dimensions: "account",
     });
     if (accountRetryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", accountRetryAfterMs);
+    const authority = body.authentication_proof === undefined
+      ? await authenticateClientMutation(request, dependencies, expectedClientKind)
+      : undefined;
     const subject = body.authentication_proof === undefined
       ? undefined
       : await dependencies.provider.completeApple(body.authentication_proof.client_kind === "web"

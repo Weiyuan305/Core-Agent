@@ -140,12 +140,12 @@ alter table oauth_transactions
     or (flow_kind = 'apple_link' and status = 'pending' and provider_completion_status = 'provider_started'
       and provider_completion_started_at is not null and expected_provider_subject_ciphertext is null
       and provider_subject_ciphertext is null and provider_completion_payload_hash is not null
-      and provider_settlement_expires_at = expires_at
+      and provider_settlement_expires_at = provider_completion_started_at + interval '30 minutes'
       and provider_completed_at is null and provider_evidence_at is null)
     or (flow_kind = 'apple_link' and status in ('pending', 'consumed') and provider_completion_status = 'provider_completed'
       and provider_completion_started_at is not null and expected_provider_subject_ciphertext is null
       and provider_subject_ciphertext is not null and provider_completion_payload_hash is not null
-      and provider_settlement_expires_at = expires_at
+      and provider_settlement_expires_at = provider_completion_started_at + interval '30 minutes'
       and provider_completed_at is not null and provider_evidence_at = provider_completed_at
       and provider_completed_at >= provider_completion_started_at
       and provider_completed_at <= provider_settlement_expires_at)

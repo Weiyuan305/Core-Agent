@@ -107,10 +107,14 @@ export async function registerSessionRoutes(app: FastifyInstance, dependencies: 
       bucketKind: "reauthenticate",
       accountIdentifier: `route:reauthenticate:${body.client_kind ?? "web"}`,
       clientIdentifier: request.identityContext.clientIdentifier,
+      dimensions: "client",
     });
     if (preAuthRetryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", preAuthRetryAfterMs);
     const authority = await authenticateValidatedMutation(credential, dependencies);
-    const retryAfterMs = await dependencies.operations.consumeRateLimit({ bucketKind: "reauthenticate", accountIdentifier: authority.actorId, clientIdentifier: request.identityContext.clientIdentifier });
+    const retryAfterMs = await dependencies.operations.consumeRateLimit({
+      bucketKind: "reauthenticate", accountIdentifier: authority.actorId,
+      clientIdentifier: request.identityContext.clientIdentifier, dimensions: "account",
+    });
     if (retryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", retryAfterMs);
     const email = await dependencies.operations.loadNormalizedEmail(authority);
     const subject = await dependencies.provider.reauthenticatePassword({ email, password: body.password });

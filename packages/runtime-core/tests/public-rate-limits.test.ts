@@ -31,6 +31,7 @@ interface ConsumeInput {
   readonly clientIdentifier: string;
   readonly limit: number;
   readonly windowMs: number;
+  readonly dimensions?: "both" | "account" | "client";
 }
 type ConsumePublicRateLimit = (
   dependencies: { readonly db: Kysely<RuntimeDatabase>; readonly hmacKey: Uint8Array },
@@ -181,6 +182,40 @@ test("account and client rate-limit dimensions exhaust independently", async () 
   assert.equal(typeof await consume({ bucketKind: "signup", accountIdentifier: "same@example.test", clientIdentifier: "client-b" }), "number");
   assert.equal(await consume({ bucketKind: "login", accountIdentifier: "first@example.test", clientIdentifier: "same-client" }), null);
   assert.equal(typeof await consume({ bucketKind: "login", accountIdentifier: "second@example.test", clientIdentifier: "same-client" }), "number");
+});
+
+test("explicit route-client and server-account dimensions never collapse into a global bucket", async () => {
+  const consumePublicRateLimit = requiredFunction<ConsumePublicRateLimit>("consumePublicRateLimit");
+  const consume = (overrides: Partial<ConsumeInput>) => consumePublicRateLimit(
+    { db: identityDb, hmacKey },
+    input({ limit: 1, ...overrides }),
+  );
+
+  assert.equal(await consume({
+    bucketKind: "apple_callback", dimensions: "client",
+    accountIdentifier: "route:/auth/v1/apple/callback", clientIdentifier: "same-client",
+  }), null);
+  assert.equal(typeof await consume({
+    bucketKind: "apple_callback", dimensions: "client",
+    accountIdentifier: "route:/auth/v1/apple/callback/rotated", clientIdentifier: "same-client",
+  }), "number", "attacker-controlled route/account facts cannot rotate the stable client bucket");
+  assert.equal(await consume({
+    bucketKind: "apple_callback", dimensions: "client",
+    accountIdentifier: "route:/auth/v1/apple/callback", clientIdentifier: "independent-client",
+  }), null);
+
+  assert.equal(await consume({
+    bucketKind: "invitation_accept", dimensions: "account",
+    accountIdentifier: "server-invitation-a", clientIdentifier: "client-a",
+  }), null);
+  assert.equal(typeof await consume({
+    bucketKind: "invitation_accept", dimensions: "account",
+    accountIdentifier: "server-invitation-a", clientIdentifier: "client-b",
+  }), "number", "client rotation cannot bypass the server-derived account bucket");
+  assert.equal(await consume({
+    bucketKind: "invitation_accept", dimensions: "account",
+    accountIdentifier: "server-invitation-b", clientIdentifier: "client-a",
+  }), null, "different server-derived accounts do not collapse into one global bucket");
 });
 
 test("concurrent public attempts share one atomic PostgreSQL counter", async () => {

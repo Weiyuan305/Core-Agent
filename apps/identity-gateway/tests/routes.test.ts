@@ -175,6 +175,10 @@ async function buildApp(
       },
       async requireRecentReauthentication(input: unknown) { calls.push({ name: "requireRecentReauthentication", input }); },
       async loadNormalizedEmail(input: unknown) { calls.push({ name: "loadNormalizedEmail", input }); return "current@example.test"; },
+      async readAppleLinkSettlement(input: unknown) {
+        calls.push({ name: "readAppleLinkSettlement", input });
+        return "2026-08-17T00:30:00.000Z";
+      },
       async executeAuthorityCommand(input: unknown) {
         calls.push({ name: "executeAuthorityCommand", input });
         const kind = (input as { kind?: unknown }).kind;
@@ -207,7 +211,7 @@ async function buildApp(
           ? "reserved" as const
           : emailVerificationState === "finalized" ? "finalized_replay" as const : "in_progress" as const;
         if (kind === "reserved") emailVerificationState = "reserved";
-        return { verificationId: "verification_01", kind };
+        return { verificationId: "verification_01", kind, ...(kind === "reserved" ? { providerStartAttempt: emailStartCalls + 1 } : {}) };
       },
       async finalizeEmailVerificationStart(input: unknown) {
         calls.push({ name: "finalizeEmailVerificationStart", input });
@@ -522,8 +526,12 @@ test("Apple sign-in start and callback consume route buckets before provider eff
     payload: { ...idem, client_kind: "web", redirect_uri: redirect },
   });
   assert.equal(start.statusCode, 200, start.body);
-  assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit", "beginApple"]);
+  assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit", "beginApple", "consumeRateLimit"]);
   assert.equal((calls[0]?.input as { bucketKind?: unknown }).bucketKind, "apple_start");
+  assert.deepEqual(calls.filter(({ name }) => name === "consumeRateLimit").map(({ input }) => {
+    const rate = input as { dimensions?: unknown; accountIdentifier?: unknown };
+    return [rate.dimensions, rate.accountIdentifier];
+  }), [["client", "route:apple_start:web"], ["account", "oauth_01"]]);
   calls.length = 0;
   const flowCookie = ([] as string[]).concat(start.headers["set-cookie"] ?? [])
     .find((value) => value.startsWith("core_agent_apple_flow="));
@@ -534,8 +542,12 @@ test("Apple sign-in start and callback consume route buckets before provider eff
     payload: appleCallbackPayload("apple_sign_in", { schema_version: 1, idempotency_key: idem.idempotency_key, client_kind: "web", transaction_id: "oauth_01", authorization_code: "opaque-code", state: state! }),
   });
   assert.equal(callback.statusCode, 200, callback.body);
-  assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit", "completeApple", "issueSession"]);
+  assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit", "consumeRateLimit", "completeApple", "issueSession"]);
   assert.equal((calls[0]?.input as { bucketKind?: unknown }).bucketKind, "apple_callback");
+  assert.deepEqual(calls.filter(({ name }) => name === "consumeRateLimit").map(({ input }) => {
+    const rate = input as { dimensions?: unknown; accountIdentifier?: unknown };
+    return [rate.dimensions, rate.accountIdentifier];
+  }), [["client", "route:apple_sign_in_callback"], ["account", "oauth_01"]]);
   await app.close();
 });
 
@@ -649,7 +661,8 @@ test("native Apple sign-in and link callbacks use stable route buckets before pr
     assert.equal(limited.statusCode, 429, `${route}: ${limited.body}`);
     assert.equal(independent.statusCode, 200, `${route}: ${independent.body}`);
     const rates = calls.filter(({ name, input }) => name === "consumeRateLimit"
-      && (input as { bucketKind?: unknown }).bucketKind === "apple_callback")
+      && (input as { bucketKind?: unknown; dimensions?: unknown }).bucketKind === "apple_callback"
+      && (input as { dimensions?: unknown }).dimensions === "client")
       .map(({ input }) => input as { accountIdentifier: string; clientIdentifier: string });
     assert.equal(new Set(rates.map(({ accountIdentifier }) => accountIdentifier)).size, 1);
     assert.notEqual(rates[0]?.clientIdentifier, rates[2]?.clientIdentifier);
@@ -712,6 +725,8 @@ test("email signup reserves one durable idempotent binding before its provider e
   assert.equal(binding.normalizedEmail, "student@example.test");
   assert.equal(binding.clientKind, "web");
   assert.equal(binding.deviceLabel, "Browser");
+  assert(binding.passwordProof instanceof Uint8Array);
+  assert.equal([...binding.passwordProof].every((byte) => byte === 0), true);
   assert.equal((calls.find(({ name }) => name === "finalizeEmailVerificationStart")?.input as Record<string, unknown>)
     .expectedProviderSubject, "subject_01");
   await app.close();
@@ -793,6 +808,8 @@ test("invitation email registration reserves its provider start idempotently", a
   assert.equal(binding.normalizedEmail, "invited@example.test");
   assert.equal(binding.clientKind, "web");
   assert.equal(binding.deviceLabel, "Invitation Browser");
+  assert(binding.passwordProof instanceof Uint8Array);
+  assert.equal([...binding.passwordProof].every((byte) => byte === 0), true);
   assert.equal(binding.invitationSecret, "i".repeat(43));
   assert.equal(first.json().verification_id, "verification_01");
   await app.close();
@@ -1188,6 +1205,9 @@ test("existing invitation acceptance uses Core Session authority and rejects pro
   };
   assert.equal(command.authority?.actorId, "actor_server");
   assert.equal(command.verifiedSubject, undefined);
+  assert.deepEqual(calls.map(({ name }) => name).slice(0, 4), [
+    "consumeRateLimit", "executeAuthorityCommand", "consumeRateLimit", "authenticateSession",
+  ]);
   const rates = calls.filter(({ name }) => name === "consumeRateLimit").map(({ input }) => input as {
     readonly accountIdentifier?: unknown; readonly dimensions?: unknown;
   });
@@ -1271,6 +1291,10 @@ test("Apple link start derives actor/email server-side after Session and recent 
   assert.equal(providerInput.authenticatedActorId, "actor_server");
   assert.equal(providerInput.email, "current@example.test");
   assert.equal(providerInput.password, "correct-horse");
+  assert.deepEqual(calls.filter(({ name }) => name === "consumeRateLimit").map(({ input }) => {
+    const rate = input as { dimensions?: unknown; accountIdentifier?: unknown };
+    return [rate.dimensions, rate.accountIdentifier];
+  }), [["client", "route:apple_link:web"], ["account", "actor_server"]]);
   assert.equal("accessToken" in providerInput, false);
   assert.equal("provider_proof" in providerInput, false);
   await app.close();
@@ -1285,9 +1309,17 @@ test("Apple link callback consumes its independent callback rate limit before pr
     payload: appleCallbackPayload("apple_link", { schema_version: 1, idempotency_key: idem.idempotency_key, client_kind: "iphone", transaction_id: "oauth_link", authorization_code: "opaque-code", state: "state-link", nonce: "nonce-link", pkce_code_verifier: "v".repeat(43) }),
   });
   assert.equal(response.statusCode, 200);
-  assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit", "authenticateSession", "requireRecentReauthentication", "linkApple", "executeProtectedAuthorityCommand"]);
+  assert.deepEqual(calls.map(({ name }) => name), [
+    "consumeRateLimit", "authenticateSession", "consumeRateLimit", "requireRecentReauthentication",
+    "linkApple", "readAppleLinkSettlement", "executeProtectedAuthorityCommand",
+  ]);
   const rate = calls[0]?.input as Record<string, unknown>;
   assert.equal(rate.bucketKind, "apple_callback");
+  assert.equal(rate.dimensions, "client");
+  assert.deepEqual(calls.filter(({ name }) => name === "consumeRateLimit").map(({ input }) => {
+    const value = input as { dimensions?: unknown; accountIdentifier?: unknown };
+    return [value.dimensions, value.accountIdentifier];
+  }), [["client", "route:apple_link_callback"], ["account", "actor_server"]]);
   const durable = calls.at(-1)?.input as { payload?: unknown };
   assert.deepEqual(durable.payload, {
     schema_version: 1, idempotency_key: idem.idempotency_key,

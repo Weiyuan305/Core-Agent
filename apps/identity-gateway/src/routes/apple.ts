@@ -18,6 +18,7 @@ import {
   assertExactRedirect,
   clearAppleFlowCookie,
   issueAppleFlowCookie,
+  issueAppleLinkSettlementCookie,
   readAppleFlowCookie,
   requireMutationCredentials,
   requireNativeSessionCredential,
@@ -132,6 +133,7 @@ async function consumePreAuthRateLimit(
     bucketKind,
     accountIdentifier: routeKey,
     clientIdentifier: request.identityContext.clientIdentifier,
+    dimensions: "client",
   });
   if (retryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", retryAfterMs);
 }
@@ -143,6 +145,11 @@ export async function registerAppleRoutes(app: FastifyInstance, dependencies: Id
     assertExactRedirect(body.client_kind, body.redirect_uri, dependencies.config);
     await consumePreAuthRateLimit(request, dependencies, "apple_start", `route:apple_start:${body.client_kind}`);
     const start = await dependencies.provider.beginApple(request.body as never);
+    const accountRetryAfterMs = await dependencies.operations.consumeRateLimit({
+      bucketKind: "apple_start", accountIdentifier: start.transaction_id,
+      clientIdentifier: request.identityContext.clientIdentifier, dimensions: "account",
+    });
+    if (accountRetryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", accountRetryAfterMs);
     authorizationState(start, dependencies.config.providerUrl, body.redirect_uri);
     if (body.client_kind === "web") {
       issueFlowCookie(reply, dependencies, start, body.redirect_uri, "sign_in");
@@ -159,6 +166,11 @@ export async function registerAppleRoutes(app: FastifyInstance, dependencies: Id
     const callback = body.client_kind === "web"
       ? canonicalWebAppleCallback(request, reply, dependencies, body, "sign_in")
       : body;
+    const accountRetryAfterMs = await dependencies.operations.consumeRateLimit({
+      bucketKind: "apple_callback", accountIdentifier: callback.transaction_id,
+      clientIdentifier: request.identityContext.clientIdentifier, dimensions: "account",
+    });
+    if (accountRetryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", accountRetryAfterMs);
     const subject = await dependencies.provider.completeApple(callback);
     const issued = await dependencies.operations.issueSession(subject, body.client_kind, body.device_label, {
       idempotencyKey: body.idempotency_key,
@@ -175,7 +187,10 @@ export async function registerAppleRoutes(app: FastifyInstance, dependencies: Id
     assertExactRedirect(body.client_kind, body.redirect_uri, dependencies.config);
     await consumePreAuthRateLimit(request, dependencies, "apple_link", `route:apple_link:${body.client_kind}`);
     const authority = await authenticateClientMutation(request, dependencies, body.client_kind);
-    const retryAfterMs = await dependencies.operations.consumeRateLimit({ bucketKind: "reauthenticate", accountIdentifier: authority.actorId, clientIdentifier: request.identityContext.clientIdentifier });
+    const retryAfterMs = await dependencies.operations.consumeRateLimit({
+      bucketKind: "apple_link", accountIdentifier: authority.actorId,
+      clientIdentifier: request.identityContext.clientIdentifier, dimensions: "account",
+    });
     if (retryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", retryAfterMs);
     await dependencies.operations.requireRecentReauthentication(authority);
     const email = await dependencies.operations.loadNormalizedEmail(authority);
@@ -198,11 +213,30 @@ export async function registerAppleRoutes(app: FastifyInstance, dependencies: Id
     assertAppleCallbackPayloadHash(body, "apple_link");
     await consumePreAuthRateLimit(request, dependencies, "apple_callback", "route:apple_link_callback");
     const authority = await authenticateClientMutation(request, dependencies, body.client_kind);
+    const accountRetryAfterMs = await dependencies.operations.consumeRateLimit({
+      bucketKind: "apple_callback", accountIdentifier: authority.actorId,
+      clientIdentifier: request.identityContext.clientIdentifier, dimensions: "account",
+    });
+    if (accountRetryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", accountRetryAfterMs);
     await dependencies.operations.requireRecentReauthentication(authority);
     const callback = body.client_kind === "web"
       ? canonicalWebAppleCallback(request, reply, dependencies, body, "link")
       : body;
     const subject = await dependencies.provider.linkApple({ ...callback, authenticatedActorId: authority.actorId });
+    const settlementNotAfter = await dependencies.operations.readAppleLinkSettlement({
+      transactionId: callback.transaction_id,
+      actorId: authority.actorId,
+      payloadHash: body.payload_hash,
+    });
+    if (body.client_kind === "web") {
+      const sealed = request.cookies[APPLE_FLOW_COOKIE_NAME];
+      if (sealed === undefined) throw new IdentityGatewayFailure("AUTH_INVALID");
+      const binding = readAppleFlowCookie(dependencies.flowCookieKey, sealed, dependencies.now());
+      issueAppleLinkSettlementCookie(reply, sealAppleFlowCookie(dependencies.flowCookieKey, {
+        ...binding,
+        settlementNotAfter,
+      }));
+    }
     const result = await dependencies.operations.executeProtectedAuthorityCommand({
       kind: "apple_identity_link",
       payload: {

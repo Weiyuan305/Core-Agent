@@ -47,13 +47,19 @@ export interface IdentityGatewayOperations {
   readonly beginEmailVerification: (input: {
     readonly idempotencyKey: string;
     readonly payloadHash: string;
+    readonly passwordProof: Uint8Array;
     readonly normalizedEmail: string;
     readonly clientKind: ProviderClientKind;
     readonly deviceLabel?: string;
     readonly invitationSecret?: string;
-  }) => Promise<{ readonly verificationId: string; readonly kind: "reserved" | "in_progress" | "finalized_replay" }>;
+  }) => Promise<{
+    readonly verificationId: string;
+    readonly kind: "reserved" | "in_progress" | "finalized_replay";
+    readonly providerStartAttempt: number;
+  }>;
   readonly finalizeEmailVerificationStart: (input: {
     readonly verificationId: string;
+    readonly providerStartAttempt: number;
   } & (
     | { readonly outcome: "failed" }
     | { readonly outcome: "finalized"; readonly expectedProviderSubject: string }
@@ -136,6 +142,11 @@ export interface IdentityGatewayOperations {
   /** Implementations must use Task 6's caller-owned transaction guard. */
   readonly requireRecentReauthentication: (authority: GatewayAuthenticatedSession) => Promise<void>;
   readonly loadNormalizedEmail: (authority: GatewayAuthenticatedSession) => Promise<string>;
+  readonly readAppleLinkSettlement: (input: {
+    readonly transactionId: string;
+    readonly actorId: string;
+    readonly payloadHash: string;
+  }) => Promise<string>;
   /** Protected durable implementations recheck authority and mutate in one caller-owned transaction. */
   readonly executeAuthorityCommand: (input: {
     readonly kind: string;

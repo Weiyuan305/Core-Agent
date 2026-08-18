@@ -51,20 +51,26 @@ function deliverSession(reply: FastifyReply, issued: GatewayIssuedSession, expec
 
 async function completeReservedEmailProviderStart(
   dependencies: IdentityGatewayRouteDependencies,
-  binding: { readonly verificationId: string },
+  binding: { readonly verificationId: string; readonly providerStartAttempt: number },
   credential: { readonly email: string; readonly password: string },
 ): Promise<void> {
+  if (!Number.isSafeInteger(binding.providerStartAttempt) || binding.providerStartAttempt! < 1) {
+    throw new IdentityGatewayFailure("INTERNAL_ERROR");
+  }
   try {
     const started = await dependencies.provider.signUpEmail(credential);
     await dependencies.operations.finalizeEmailVerificationStart({
       verificationId: binding.verificationId,
+      providerStartAttempt: binding.providerStartAttempt!,
       outcome: "finalized",
       expectedProviderSubject: started.expectedProviderSubject,
     });
   } catch (error) {
     if (error instanceof ProviderFailure && error.code !== "AUTH_PROVIDER_UNAVAILABLE") {
       await dependencies.operations.finalizeEmailVerificationStart({
-        verificationId: binding.verificationId, outcome: "failed",
+        verificationId: binding.verificationId,
+        providerStartAttempt: binding.providerStartAttempt!,
+        outcome: "failed",
       });
     }
     throw error;
@@ -78,13 +84,20 @@ export async function registerEmailRoutes(app: FastifyInstance, dependencies: Id
     const normalizedEmail = body.email.toLowerCase();
     rateLimitFailure(await dependencies.operations.consumeRateLimit({ bucketKind: "signup", accountIdentifier: normalizedEmail, clientIdentifier: request.identityContext.clientIdentifier }));
     const idempotency = request.body as { idempotency_key: string; payload_hash: string; device_label?: string };
-    const binding = await dependencies.operations.beginEmailVerification({
-      idempotencyKey: idempotency.idempotency_key,
-      payloadHash: idempotency.payload_hash,
-      normalizedEmail,
-      clientKind: body.client_kind,
-      ...(idempotency.device_label === undefined ? {} : { deviceLabel: idempotency.device_label }),
-    });
+    const passwordProof = Buffer.from(body.password, "utf8");
+    let binding: Awaited<ReturnType<typeof dependencies.operations.beginEmailVerification>>;
+    try {
+      binding = await dependencies.operations.beginEmailVerification({
+        idempotencyKey: idempotency.idempotency_key,
+        payloadHash: idempotency.payload_hash,
+        passwordProof,
+        normalizedEmail,
+        clientKind: body.client_kind,
+        ...(idempotency.device_label === undefined ? {} : { deviceLabel: idempotency.device_label }),
+      });
+    } finally {
+      passwordProof.fill(0);
+    }
     if (binding.kind === "in_progress") throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
     if (binding.kind === "reserved") {
       await completeReservedEmailProviderStart(dependencies, binding, { email: normalizedEmail, password: body.password });
@@ -210,10 +223,15 @@ export async function registerEmailRoutes(app: FastifyInstance, dependencies: Id
     rateLimitFailure(await dependencies.operations.consumeRateLimit({
       bucketKind: "reset_complete", accountIdentifier: "route:password_reset_completion",
       clientIdentifier: request.identityContext.clientIdentifier,
+      dimensions: "client",
     }));
     const sealed = request.cookies[RECOVERY_COOKIE_NAME];
     if (sealed === undefined) throw new IdentityGatewayFailure("AUTH_INVALID");
     const binding = readRecoveryCookie(dependencies.flowCookieKey, sealed, dependencies.now());
+    rateLimitFailure(await dependencies.operations.consumeRateLimit({
+      bucketKind: "reset_complete", accountIdentifier: binding.transactionId,
+      clientIdentifier: request.identityContext.clientIdentifier, dimensions: "account",
+    }));
     const body = request.body as {
       schema_version: 1; idempotency_key: string; payload_hash: string;
       authorization_code: string; new_password: string;

@@ -15,6 +15,7 @@ export const CSRF_HEADER_NAME = "x-core-agent-csrf";
 export const CORE_SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 const flowMaxAgeSeconds = 5 * 60;
 export const PASSWORD_RESET_SETTLEMENT_SECONDS = 30 * 60;
+export const APPLE_LINK_SETTLEMENT_SECONDS = 30 * 60;
 const recoveryCookieMaxAgeSeconds = flowMaxAgeSeconds + PASSWORD_RESET_SETTLEMENT_SECONDS;
 
 export interface RecoveryCookieBinding {
@@ -29,6 +30,7 @@ export interface AppleFlowCookieBinding {
   readonly state: string;
   readonly expiresAt: string;
   readonly flowKind: "sign_in" | "link";
+  readonly settlementNotAfter?: string;
 }
 
 function invalidRequest(): never {
@@ -142,6 +144,10 @@ export function issueAppleFlowCookie(reply: FastifyReply, value: string): void {
   flowCookie(reply, APPLE_FLOW_COOKIE_NAME, value, "/auth/v1");
 }
 
+export function issueAppleLinkSettlementCookie(reply: FastifyReply, value: string): void {
+  flowCookie(reply, APPLE_FLOW_COOKIE_NAME, value, "/auth/v1", flowMaxAgeSeconds + APPLE_LINK_SETTLEMENT_SECONDS);
+}
+
 export function clearAppleFlowCookie(reply: FastifyReply): void {
   clearFlowCookie(reply, APPLE_FLOW_COOKIE_NAME, "/auth/v1");
 }
@@ -226,13 +232,36 @@ export function readRecoveryCookie(key: Uint8Array, value: string, _now: Date): 
 }
 
 export function sealAppleFlowCookie(key: Uint8Array, binding: AppleFlowCookieBinding): string {
-  return seal(key, "apple", { transaction_id: binding.transactionId, state: binding.state, expires_at: binding.expiresAt, flow_kind: binding.flowKind });
+  return seal(key, "apple", {
+    transaction_id: binding.transactionId, state: binding.state,
+    expires_at: binding.expiresAt, flow_kind: binding.flowKind,
+    ...(binding.settlementNotAfter === undefined ? {} : { settlement_not_after: binding.settlementNotAfter }),
+  });
 }
 
 export function readAppleFlowCookie(key: Uint8Array, value: string, now: Date): AppleFlowCookieBinding {
   const parsed = open(key, "apple", value);
-  if (!exactRecord(parsed, ["transaction_id", "state", "expires_at", "flow_kind"]) || !boundedString(parsed.transaction_id) || !boundedString(parsed.state) || !boundedString(parsed.expires_at) || (parsed.flow_kind !== "sign_in" && parsed.flow_kind !== "link") || !strictFutureUtc(parsed.expires_at, now)) invalidAuthentication();
-  return { transactionId: parsed.transaction_id, state: parsed.state, expiresAt: parsed.expires_at, flowKind: parsed.flow_kind };
+  const hasSettlement = typeof parsed === "object" && parsed !== null
+    && Object.prototype.hasOwnProperty.call(parsed, "settlement_not_after");
+  const keys = hasSettlement
+    ? ["transaction_id", "state", "expires_at", "flow_kind", "settlement_not_after"]
+    : ["transaction_id", "state", "expires_at", "flow_kind"];
+  if (!exactRecord(parsed, keys) || !boundedString(parsed.transaction_id) || !boundedString(parsed.state)
+    || !boundedString(parsed.expires_at) || (parsed.flow_kind !== "sign_in" && parsed.flow_kind !== "link")) {
+    invalidAuthentication();
+  }
+  const authExpiry = strictUtc(parsed.expires_at);
+  const settlementNotAfter = hasSettlement && boundedString(parsed.settlement_not_after)
+    ? strictUtc(parsed.settlement_not_after) : undefined;
+  if (authExpiry === undefined || (!hasSettlement && authExpiry <= now.getTime())
+    || hasSettlement && (parsed.flow_kind !== "link" || settlementNotAfter === undefined || settlementNotAfter <= authExpiry)) {
+    invalidAuthentication();
+  }
+  return {
+    transactionId: parsed.transaction_id, state: parsed.state,
+    expiresAt: parsed.expires_at, flowKind: parsed.flow_kind,
+    ...(settlementNotAfter === undefined ? {} : { settlementNotAfter: new Date(settlementNotAfter).toISOString() }),
+  };
 }
 
 export function safeSecretEqual(left: string, right: string): boolean {

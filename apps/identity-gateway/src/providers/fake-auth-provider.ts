@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { types as utilTypes } from "node:util";
 
 import { strictUtcTimestampMilliseconds } from "@core-agent/runtime-core";
@@ -109,6 +109,16 @@ function readCredential(input: unknown): EmailCredentialInput {
   return { email: normalizeEmail(email), password };
 }
 
+function passwordBindingHmac(password: string): string {
+  const ownedPassword = Buffer.from(password, "utf8");
+  try {
+    return createHmac("sha256", "core-agent-fake-provider-start-hmac-v1")
+      .update("core-agent:apple-link-password:v1\0", "utf8").update(ownedPassword).digest("base64url");
+  } finally {
+    ownedPassword.fill(0);
+  }
+}
+
 function readProof(input: unknown): string {
   const accessToken = ownString(input, "accessToken");
   if (accessToken === undefined || accessToken.length === 0 || accessToken.length > 16_384) {
@@ -164,7 +174,7 @@ function readAppleStart(input: AppleAuthorizationInput, flowKind: "sign_in" | "l
     ...(callerNonce === undefined ? {} : { nonce: callerNonce }),
     ...(callerChallenge === undefined ? {} : { pkceChallenge: callerChallenge }),
   }));
-  return { idempotency, clientKind, redirectUri, callerNonce, callerChallenge };
+  return { idempotency, clientKind, redirectUri, deviceLabel, callerNonce, callerChallenge };
 }
 
 function copySubject(subject: VerifiedProviderSubject): VerifiedProviderSubject {
@@ -366,9 +376,22 @@ export class FakeAuthProvider implements AuthProviderAdapter {
   async reauthenticateAndBeginAppleLink(input: AppleLinkAuthorizationInput): Promise<AppleAuthorizationStart> {
     const actorId = ownString(input, "authenticatedActorId") ?? null;
     if (actorId === null) throw new ProviderFailure("AUTH_INVALID");
-    readAppleStart(input, "link");
-    const subject = await this.signInEmail(readCredential(input));
-    return this.#beginApple(input, "link", actorId, digest(subject.providerSubject));
+    const { idempotency, clientKind, redirectUri, deviceLabel, callerNonce, callerChallenge } = readAppleStart(input, "link");
+    const credential = readCredential(input);
+    const passwordProofHmac = passwordBindingHmac(credential.password);
+    const durablePayloadHash = canonicalProviderStartPayloadHash({
+      flowKind: "apple_link", idempotencyKey: idempotency.key, clientKind, redirectUri,
+      ...(deviceLabel === undefined ? {} : { deviceLabel }),
+      ...(callerNonce === undefined ? {} : { nonce: callerNonce }),
+      ...(callerChallenge === undefined ? {} : { pkceChallenge: callerChallenge }),
+      passwordProofHmac,
+    });
+    const startKey = `link:${actorId}:${idempotency.key}`;
+    const replay = this.#providerStarts.get(startKey);
+    if (replay !== undefined && replay.payloadHash !== durablePayloadHash) throw new ProviderFailure("AUTH_CONFLICT");
+    const subject = await this.signInEmail(credential);
+    if (replay !== undefined) return replay.response as AppleAuthorizationStart;
+    return this.#beginApple(input, "link", actorId, digest(subject.providerSubject), durablePayloadHash);
   }
 
   async completePasswordReset(input: PasswordResetCompletionInput): Promise<VerifiedProviderSubject> {
@@ -411,12 +434,14 @@ export class FakeAuthProvider implements AuthProviderAdapter {
     flowKind: "sign_in" | "link",
     actorId: string | null,
     providerSubjectDigest: string | null,
+    durablePayloadHash?: string,
   ): AppleAuthorizationStart {
     const { idempotency, clientKind, redirectUri, callerNonce, callerChallenge } = readAppleStart(input, flowKind);
     const startKey = `${flowKind}:${actorId ?? "anonymous"}:${idempotency.key}`;
+    const storedPayloadHash = durablePayloadHash ?? idempotency.payloadHash;
     const replay = this.#providerStarts.get(startKey);
     if (replay !== undefined) {
-      if (replay.payloadHash !== idempotency.payloadHash) throw new ProviderFailure("AUTH_CONFLICT");
+      if (replay.payloadHash !== storedPayloadHash) throw new ProviderFailure("AUTH_CONFLICT");
       return replay.response as AppleAuthorizationStart;
     }
     this.#transactionCounter += 1;
@@ -450,7 +475,7 @@ export class FakeAuthProvider implements AuthProviderAdapter {
       authorization_url: authorizationUrl.toString(),
       expires_at: new Date(expiresAt).toISOString(),
     });
-    this.#providerStarts.set(startKey, { payloadHash: idempotency.payloadHash, response });
+    this.#providerStarts.set(startKey, { payloadHash: storedPayloadHash, response });
     return response;
   }
 

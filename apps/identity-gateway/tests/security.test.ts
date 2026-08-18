@@ -376,6 +376,29 @@ test("Apple Web flow uses a distinct short-lived cookie and clears every termina
   await app.close();
 });
 
+test("Apple link cookie authenticates separate authorization and settlement deadlines", async () => {
+  const { readAppleFlowCookie, sealAppleFlowCookie } = await import("../src/security.js");
+  const authorizationOnly = sealAppleFlowCookie(flowKey, {
+    transactionId: "oauth_link_deadline", state: "state_link_deadline",
+    expiresAt: "2026-08-17T00:05:00.000Z", flowKind: "link",
+  });
+  assert.throws(() => readAppleFlowCookie(
+    flowKey, authorizationOnly, new Date("2026-08-17T00:05:00.000Z"),
+  ), /AUTH_INVALID/u);
+  const settlement = sealAppleFlowCookie(flowKey, {
+    transactionId: "oauth_link_deadline", state: "state_link_deadline",
+    expiresAt: "2026-08-17T00:05:00.000Z", flowKind: "link",
+    settlementNotAfter: "2026-08-17T00:34:00.000Z",
+  });
+  assert.deepEqual(readAppleFlowCookie(
+    flowKey, settlement, new Date("2026-08-17T00:34:00.000Z"),
+  ), {
+    transactionId: "oauth_link_deadline", state: "state_link_deadline",
+    expiresAt: "2026-08-17T00:05:00.000Z", flowKind: "link",
+    settlementNotAfter: "2026-08-17T00:34:00.000Z",
+  });
+});
+
 test("native Apple delivery returns the opaque secret once without any cookie", async () => {
   const app = await buildApp();
   const verifier = "v".repeat(43);
