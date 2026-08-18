@@ -1,1 +1,1 @@
-{"schema_key":"invitation-email-registration-response","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"status":"verification_pending"}}
+{"schema_key":"invitation-email-registration-response","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"verification_id":"verification_invitation_01","status":"verification_pending"}}

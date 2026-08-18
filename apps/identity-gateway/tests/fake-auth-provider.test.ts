@@ -6,6 +6,7 @@ import type {
   AppleLinkInput,
   AuthProviderAdapter,
 } from "../src/providers/auth-provider.js";
+import { canonicalProviderStartPayloadHash } from "../src/providers/auth-provider.js";
 import { FakeAuthProvider } from "../src/providers/fake-auth-provider.js";
 import { ProviderFailure } from "../src/providers/provider-errors.js";
 
@@ -200,7 +201,10 @@ test("deterministic fake validates one-time Apple sign-in and link transactions"
   const signInStart = await provider.beginApple({
     schema_version: 1,
     idempotency_key: "idem_fake_start",
-    payload_hash: payloadHash,
+    payload_hash: canonicalProviderStartPayloadHash({
+      flowKind: "apple_sign_in", idempotencyKey: "idem_fake_start", clientKind: "web",
+      redirectUri: "https://identity.example.test/auth/v1/apple/callback",
+    }),
     client_kind: "web",
     redirect_uri: "https://identity.example.test/auth/v1/apple/callback",
   });
@@ -222,7 +226,10 @@ test("deterministic fake validates one-time Apple sign-in and link transactions"
   const linkStart = await provider.reauthenticateAndBeginAppleLink({
     schema_version: 1,
     idempotency_key: "idem_fake_link_start",
-    payload_hash: payloadHash,
+    payload_hash: canonicalProviderStartPayloadHash({
+      flowKind: "apple_link", idempotencyKey: "idem_fake_link_start", clientKind: "web",
+      redirectUri: "https://identity.example.test/auth/v1/apple/callback",
+    }),
     client_kind: "web",
     redirect_uri: "https://identity.example.test/auth/v1/apple/callback",
     authenticatedActorId: "actor-1",
@@ -249,7 +256,10 @@ test("deterministic fake rejects an Apple link callback for a different provider
   const start = await provider.reauthenticateAndBeginAppleLink({
     schema_version: 1,
     idempotency_key: "idem_fake_link_conflict_start",
-    payload_hash: payloadHash,
+    payload_hash: canonicalProviderStartPayloadHash({
+      flowKind: "apple_link", idempotencyKey: "idem_fake_link_conflict_start", clientKind: "web",
+      redirectUri: "https://identity.example.test/auth/v1/apple/callback",
+    }),
     client_kind: "web",
     redirect_uri: "https://identity.example.test/auth/v1/apple/callback",
     authenticatedActorId: "actor-1",
@@ -274,7 +284,10 @@ test("deterministic fake rejects changed Apple callback authority before returni
   const start = await provider.beginApple({
     schema_version: 1,
     idempotency_key: "idem_fake_native_start",
-    payload_hash: payloadHash,
+    payload_hash: canonicalProviderStartPayloadHash({
+      flowKind: "apple_sign_in", idempotencyKey: "idem_fake_native_start", clientKind: "iphone",
+      redirectUri: "coreagent://auth/callback", nonce: "opaque-native-nonce", pkceChallenge: "a".repeat(43),
+    }),
     client_kind: "iphone",
     redirect_uri: "coreagent://auth/callback",
     nonce: "opaque-native-nonce",

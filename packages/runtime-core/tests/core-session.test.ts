@@ -72,7 +72,7 @@ interface Authenticated {
 type IssueCoreSession = (dependencies: SessionDependencies, input: IssueInput) => Promise<Issued>;
 type AuthenticateCoreSession = (
   dependencies: SessionDependencies,
-  input: { readonly sessionSecret: string; readonly csrfSecret?: string; readonly requireCsrf?: boolean },
+  input: { readonly sessionSecret: string; readonly csrfSecret?: string; readonly requireCsrf?: boolean; readonly advanceActivity?: boolean },
 ) => Promise<Authenticated>;
 type RevokeCoreSession = (
   dependencies: SessionDependencies,
@@ -122,6 +122,13 @@ type EstablishRecentReauthentication = (
   },
 ) => Promise<EstablishedReauthentication>;
 
+type EstablishRecentReauthenticationInTransaction = (
+  context: ReauthenticationTransactionContext,
+  input: CurrentSessionAuthorityInput & {
+    readonly verifiedPasswordSubject: VerifiedPasswordSubject;
+  },
+) => Promise<EstablishedReauthentication>;
+
 interface RecentReauthenticationAuthority {
   readonly session: CoreSession;
   readonly reauthenticatedAt: string;
@@ -136,7 +143,12 @@ type RequireRecentReauthentication = (
 type RevokeCoreSessionInTransaction = (
   dependencies: Pick<SessionDependencies, "databaseNow">,
   trx: Transaction<RuntimeDatabase>,
-  input: { readonly actorId: string; readonly sessionId: string; readonly reason: "user_sign_out" | "administrator_revoked" },
+  input: {
+    readonly actorId: string;
+    readonly sessionId: string;
+    readonly reason: "user_sign_out" | "administrator_revoked";
+    readonly expectedResourceVersion?: number;
+  },
 ) => Promise<CoreSession>;
 
 type WithDatabaseTransactionRetry = <T>(
@@ -611,6 +623,23 @@ test("successful activity advances idle expiry to min(now plus seven days, absol
   assert.equal(second.session.absolute_expires_at, new Date(createdAt.getTime() + 30 * dayMs).toISOString());
 });
 
+test("mutation authentication can preserve the Session version for the following caller-owned CAS", async () => {
+  const authenticateCoreSession = requiredFunction<AuthenticateCoreSession>("authenticateCoreSession");
+  const issued = await issue("session_mutation_cas");
+  const authenticated = await authenticateCoreSession(dependencies(new Date(createdAt.getTime() + 60_000)), {
+    sessionSecret: issued.sessionSecret,
+    csrfSecret: issued.csrfSecret,
+    requireCsrf: true,
+    advanceActivity: false,
+  });
+  assert.equal(authenticated.session.resource_version, issued.session.resource_version);
+  const row = await administratorPool.query(
+    "select resource_version::int, last_seen_at from core_sessions where session_id = $1",
+    [issued.session.session_id],
+  );
+  assert.deepEqual(row.rows, [{ resource_version: 1, last_seen_at: createdAt }]);
+});
+
 test("authentication validates independent web CSRF authority and current Actor plus AuthSubject authority", async () => {
   const authenticateCoreSession = requiredFunction<AuthenticateCoreSession>("authenticateCoreSession");
   const issued = await issue("session_csrf");
@@ -829,6 +858,21 @@ test("revocation rejects runtime reason and scope combinations that could broade
   assert.deepEqual(row.rows[0], { status: "active", revocation_reason: null });
 });
 
+test("transaction-scoped Session revocation enforces the caller's expected version", async () => {
+  const revokeInTransaction = requiredFunction<RevokeCoreSessionInTransaction>("revokeCoreSessionInTransaction");
+  const issued = await issue("session_revoke_expected_version");
+  await assert.rejects(identityDb.transaction().execute((trx) => revokeInTransaction({}, trx, {
+    actorId: issued.session.actor_id,
+    sessionId: issued.session.session_id,
+    reason: "administrator_revoked",
+    expectedResourceVersion: issued.session.resource_version + 1,
+  })), (error: unknown) => error instanceof DomainError && error.code === "RESOURCE_VERSION_CONFLICT");
+  assert.deepEqual((await administratorPool.query(
+    "select status, resource_version::int from core_sessions where session_id = $1",
+    [issued.session.session_id],
+  )).rows, [{ status: "active", resource_version: 1 }]);
+});
+
 test("verified password reauthentication durably establishes the exact 10-minute authority boundary", async () => {
   const establishRecentReauthentication = requiredFunction<EstablishRecentReauthentication>(
     "establishRecentReauthentication",
@@ -878,6 +922,27 @@ test("verified password reauthentication durably establishes the exact 10-minute
     recentReauthenticationFailure,
   );
   assert.equal(mutations, 0);
+});
+
+test("reauthentication establishment participates in a caller-owned transaction", async () => {
+  const establishInTransaction = requiredFunction<EstablishRecentReauthenticationInTransaction>(
+    "establishRecentReauthenticationInTransaction",
+  );
+  const issued = await issue("session_reauthentication_caller_transaction");
+  await assert.rejects(identityDb.transaction().execute(async (trx) => {
+    await establishInTransaction({ trx, databaseNow: async () => new Date(createdAt) }, {
+      actorId: issued.session.actor_id,
+      authSubjectId: issued.session.auth_subject_id,
+      sessionId: issued.session.session_id,
+      verifiedPasswordSubject: verifiedPasswordSubject(),
+    });
+    throw new Error("deliberate reauthentication rollback");
+  }), /deliberate reauthentication rollback/u);
+  const row = await administratorPool.query(
+    "select reauthenticated_at, resource_version::int from core_sessions where session_id = $1",
+    [issued.session.session_id],
+  );
+  assert.deepEqual(row.rows, [{ reauthenticated_at: null, resource_version: 1 }]);
 });
 
 test("external provider work stays outside retry while the durable Session command rechecks current authority", async () => {

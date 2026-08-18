@@ -50,15 +50,29 @@ export interface IdentityGatewayOperations {
     readonly normalizedEmail: string;
     readonly clientKind: ProviderClientKind;
     readonly deviceLabel?: string;
-  }) => Promise<{ readonly verificationId: string; readonly kind: "created" | "replay" }>;
+    readonly invitationSecret?: string;
+  }) => Promise<{ readonly verificationId: string; readonly kind: "reserved" | "in_progress" | "finalized_replay" }>;
+  readonly finalizeEmailVerificationStart: (input: {
+    readonly verificationId: string;
+    readonly outcome: "finalized" | "failed";
+  }) => Promise<void>;
+  readonly prepareEmailVerification: (input: {
+    readonly verificationId: string;
+  }) => Promise<{
+    readonly clientKind: ProviderClientKind;
+    readonly deviceLabel?: string;
+  }>;
   readonly completeEmailVerification: (input: {
     readonly verificationId: string;
     readonly verifiedSubject: VerifiedProviderSubject;
+    readonly idempotencyKey: string;
+    readonly payloadHash: string;
   }) => Promise<{
     readonly actorId: string;
     readonly authSubjectId: string;
     readonly clientKind: ProviderClientKind;
     readonly deviceLabel?: string;
+    readonly issuedSession: GatewayIssuedSession;
   }>;
   readonly consumeRateLimit: (input: {
     readonly bucketKind: "signup" | "login" | "reset" | "apple_callback" | "invitation_accept" | "reauthenticate";

@@ -379,6 +379,59 @@ test("consultant acceptance creates one Profile, admin acceptance creates none, 
   assert.equal((await administratorPool.query("select count(*)::int as count from profiles where owner_actor_id = 'actor_admin_target'")).rows[0]?.count, 0);
 });
 
+test("invitation acceptance participates in a caller-owned transaction", async () => {
+  const createInvitation = requiredFunction<CommandFunction>("createInvitation");
+  const acceptInvitation = requiredFunction<CommandFunction>("acceptInvitation");
+  await seedCompany();
+  await seedActor("actor_consultant", "consultant@example.test");
+  const created = await createInvitation(dependencies(), adminContext(), command(createPayload()));
+
+  await assert.rejects(identityDb.transaction().execute(async (trx) => {
+    await acceptInvitation({ ...dependencies(), transaction: trx }, {
+      actorId: "actor_consultant", normalizedEmail: "consultant@example.test",
+      requestId: "request_rollback", traceId: "trace_rollback",
+    }, command(acceptPayload(created.invitation_secret as string)));
+    throw new Error("deliberate caller rollback");
+  }), /deliberate caller rollback/u);
+
+  assert.deepEqual((await administratorPool.query(
+    "select status, accepted_actor_id from identity_invitations where invitation_id = 'invitation_consultant_0001'",
+  )).rows, [{ status: "pending", accepted_actor_id: null }]);
+  assert.equal((await administratorPool.query(
+    "select count(*)::int as count from memberships where membership_id = 'membership_consultant_0001'",
+  )).rows[0]?.count, 0);
+  assert.equal((await administratorPool.query(
+    "select count(*)::int as count from profiles where owner_actor_id = 'actor_consultant'",
+  )).rows[0]?.count, 0);
+});
+
+test("verified invitation acceptance enforces the exact bound invitation digest", async () => {
+  const createInvitation = requiredFunction<CommandFunction>("createInvitation");
+  const acceptInvitation = requiredFunction<CommandFunction>("acceptInvitation");
+  await seedCompany();
+  await seedActor("actor_consultant", "consultant@example.test");
+  const created = await createInvitation(dependencies(), adminContext(), command(createPayload()));
+  const secret = created.invitation_secret as string;
+  const secretDigest = createHash("sha256").update(Buffer.from(secret, "base64url")).digest();
+
+  await assert.rejects(acceptInvitation({
+    ...dependencies(),
+    verifiedInvitationBinding: {
+      invitationId: "invitation_wrong", secretDigest, tenantId: "tenant_invitation",
+      expectedResourceVersion: 1, role: "consultant",
+    },
+  }, {
+    actorId: "actor_consultant", normalizedEmail: "consultant@example.test",
+    requestId: "request_bound", traceId: "trace_bound",
+  }, command(acceptPayload(secret))), (error: unknown) => (
+    error instanceof DomainError && error.code === "RESOURCE_NOT_FOUND"
+  ));
+
+  assert.equal((await administratorPool.query(
+    "select count(*)::int as count from memberships where membership_id = 'membership_consultant_0001'",
+  )).rows[0]?.count, 0);
+});
+
 test("accepted invitation replay by another Actor or provider-observed email conflicts", async () => {
   const createInvitation = requiredFunction<CommandFunction>("createInvitation");
   const acceptInvitation = requiredFunction<CommandFunction>("acceptInvitation");

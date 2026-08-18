@@ -13,6 +13,7 @@ import Type from "typebox";
 
 import type { GatewayIssuedSession, IdentityGatewayRouteDependencies } from "../app.js";
 import { IdentityGatewayFailure } from "../errors.js";
+import { ProviderFailure } from "../providers/provider-errors.js";
 import {
   assertClientTransport,
   issueRecoveryCookie,
@@ -49,6 +50,26 @@ function deliverSession(reply: FastifyReply, issued: GatewayIssuedSession, expec
   return { schema_version: 1, transport: "native", session: issued.session, session_secret: issued.sessionSecret };
 }
 
+async function completeReservedEmailProviderStart(
+  dependencies: IdentityGatewayRouteDependencies,
+  binding: { readonly verificationId: string },
+  credential: { readonly email: string; readonly password: string },
+): Promise<void> {
+  try {
+    await dependencies.provider.signUpEmail(credential);
+  } catch (error) {
+    if (error instanceof ProviderFailure && error.code !== "AUTH_PROVIDER_UNAVAILABLE") {
+      await dependencies.operations.finalizeEmailVerificationStart({
+        verificationId: binding.verificationId, outcome: "failed",
+      });
+    }
+    throw error;
+  }
+  await dependencies.operations.finalizeEmailVerificationStart({
+    verificationId: binding.verificationId, outcome: "finalized",
+  });
+}
+
 export async function registerEmailRoutes(app: FastifyInstance, dependencies: IdentityGatewayRouteDependencies): Promise<void> {
   app.post("/auth/v1/email/sign-up", { schema: { body: EmailSignUpRequestSchema, response: { 202: EmailSignUpResponseSchema } } }, async (request, reply) => {
     const body = request.body as { email: string; password: string; client_kind: "web" | "iphone" | "macos" };
@@ -63,7 +84,10 @@ export async function registerEmailRoutes(app: FastifyInstance, dependencies: Id
       clientKind: body.client_kind,
       ...(idempotency.device_label === undefined ? {} : { deviceLabel: idempotency.device_label }),
     });
-    if (binding.kind === "created") await dependencies.provider.signUpEmail({ email: normalizedEmail, password: body.password });
+    if (binding.kind === "in_progress") throw new IdentityGatewayFailure("AUTH_CONFLICT");
+    if (binding.kind === "reserved") {
+      await completeReservedEmailProviderStart(dependencies, binding, { email: normalizedEmail, password: body.password });
+    }
     return reply.code(202).send({ schema_version: 1, verification_id: binding.verificationId, status: "verification_pending" });
   });
 
@@ -84,16 +108,17 @@ export async function registerEmailRoutes(app: FastifyInstance, dependencies: Id
 
   app.post("/auth/v1/email/verification", { schema: { body: EmailVerificationRequestSchema, response: { 200: EmailVerificationResponseSchema } } }, async (request, reply) => {
     const body = request.body as { verification_id: string; verification_code: string };
-    const subject = await dependencies.provider.verifyEmail({ verificationCode: body.verification_code });
-    const binding = await dependencies.operations.completeEmailVerification({ verificationId: body.verification_id, verifiedSubject: subject });
+    const binding = await dependencies.operations.prepareEmailVerification({ verificationId: body.verification_id });
     assertClientTransport(request, binding.clientKind, dependencies.config);
+    const subject = await dependencies.provider.verifyEmail({ verificationCode: body.verification_code });
     const requestIdempotency = request.body as { idempotency_key: string; payload_hash: string };
-    const issued = await dependencies.operations.issueSession(subject, binding.clientKind, binding.deviceLabel, {
+    const completed = await dependencies.operations.completeEmailVerification({
+      verificationId: body.verification_id,
+      verifiedSubject: subject,
       idempotencyKey: requestIdempotency.idempotency_key,
       payloadHash: requestIdempotency.payload_hash,
-      operation: "email_verification",
     });
-    return deliverSession(reply, issued, binding.clientKind);
+    return deliverSession(reply, completed.issuedSession, binding.clientKind);
   });
 
   app.post("/auth/v1/password/reset/start", { schema: { body: PasswordResetRequestSchema, response: { 202: PasswordResetResponseSchema } } }, async (request, reply) => {
@@ -128,4 +153,4 @@ export async function registerEmailRoutes(app: FastifyInstance, dependencies: Id
   });
 }
 
-export { deliverSession };
+export { completeReservedEmailProviderStart, deliverSession };

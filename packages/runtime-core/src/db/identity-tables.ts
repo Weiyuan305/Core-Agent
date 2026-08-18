@@ -78,6 +78,10 @@ export interface EmailVerificationTransactionTable {
   normalized_email_hmac: Digest;
   binding_ciphertext: ColumnType<Buffer, Uint8Array, Uint8Array>;
   verified_provider_subject_hmac: ColumnType<Buffer | null, Uint8Array | null, Uint8Array | null>;
+  provider_start_status: "reserved" | "finalized" | "failed";
+  provider_start_attempt: number;
+  provider_start_finalized_at: Date | null;
+  provider_start_failed_at: Date | null;
   status: "pending" | "consumed" | "expired";
   expires_at: Date;
   consumed_at: Date | null;

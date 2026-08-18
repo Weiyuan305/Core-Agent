@@ -50,6 +50,8 @@ export interface AuthenticateCoreSessionInput {
   readonly sessionSecret: string;
   readonly csrfSecret?: string;
   readonly requireCsrf?: boolean;
+  /** Mutation callers preserve this version for a subsequent caller-owned CAS. */
+  readonly advanceActivity?: boolean;
 }
 
 export interface CoreSessionAuthSubjectAuthority {
@@ -70,6 +72,7 @@ export interface RevokeCoreSessionInput {
   readonly actorId: string;
   readonly sessionId: string;
   readonly reason: "user_sign_out" | "administrator_revoked";
+  readonly expectedResourceVersion?: number;
 }
 
 export type RevokeCoreSessionsInput =
@@ -181,7 +184,9 @@ export async function authenticateCoreSession(
   dependencies: CoreSessionDependencies,
   input: AuthenticateCoreSessionInput,
 ): Promise<AuthenticatedCoreSession> {
-  if (typeof input.sessionSecret !== "string" || input.requireCsrf !== undefined && typeof input.requireCsrf !== "boolean") {
+  if (typeof input.sessionSecret !== "string"
+    || input.requireCsrf !== undefined && typeof input.requireCsrf !== "boolean"
+    || input.advanceActivity !== undefined && typeof input.advanceActivity !== "boolean") {
     publicCoreSessionInvalid();
   }
   const authenticated = await withDatabaseTransactionRetry(dependencies.db, async (trx) => {
@@ -222,13 +227,14 @@ export async function authenticateCoreSession(
     }
     const authority = await loadActorIdentityAuthority(trx, discovered.actorId);
     if (authority.actorStatus !== "active") return undefined;
-    const nextIdleExpiry = new Date(Math.min(now.getTime() + 7 * dayMs, absoluteExpiry));
-    const updated = await updateCoreSessionActivity(trx, {
-      sessionId: stored.session.session_id,
-      now,
-      idleExpiresAt: nextIdleExpiry,
-      expectedResourceVersion: stored.session.resource_version,
-    });
+    const session = input.advanceActivity === false
+      ? stored.session
+      : (await updateCoreSessionActivity(trx, {
+        sessionId: stored.session.session_id,
+        now,
+        idleExpiresAt: new Date(Math.min(now.getTime() + 7 * dayMs, absoluteExpiry)),
+        expectedResourceVersion: stored.session.resource_version,
+      })).session;
     const authSubject: CoreSessionAuthSubjectAuthority = Object.freeze({
       authSubjectId: subjectRow.auth_subject_id,
       actorId: subjectRow.actor_id,
@@ -236,7 +242,7 @@ export async function authenticateCoreSession(
       identityKind: subjectRow.provider_identity_kind,
       status: subjectRow.status,
     });
-    return Object.freeze({ session: updated.session, authority, authSubject });
+    return Object.freeze({ session, authority, authSubject });
   });
   if (authenticated === undefined) publicCoreSessionInvalid();
   return authenticated;
@@ -260,6 +266,11 @@ async function revokeCoreSessionInLockedTransaction(
   if (actor === undefined) publicCoreSessionInvalid();
   const stored = await lockCoreSessionById(trx, input.actorId, input.sessionId);
   if (stored === undefined) publicCoreSessionInvalid();
+  if (input.expectedResourceVersion !== undefined && (
+    !Number.isSafeInteger(input.expectedResourceVersion)
+    || input.expectedResourceVersion < 1
+    || stored.session.resource_version !== input.expectedResourceVersion
+  )) throw new DomainError("RESOURCE_VERSION_CONFLICT", "Core Session version changed");
   if (stored.session.status === "revoked") return stored.session;
   const now = await databaseNow(dependencies, trx);
   const revoked = await revokeLockedCoreSession(trx, {

@@ -10,6 +10,7 @@ import type {
   AppleLinkInput,
   ProviderClientKind,
 } from "../src/providers/auth-provider.js";
+import { canonicalProviderStartPayloadHash } from "../src/providers/auth-provider.js";
 import { mapProviderFailure, ProviderFailure } from "../src/providers/provider-errors.js";
 import {
   SupabaseAuthProvider,
@@ -712,25 +713,52 @@ test("Supabase fails closed without invoking accessor-shaped result fields", asy
 });
 
 function webAppleStart() {
+  const idempotencyKey = "idem_apple_start";
   return {
     schema_version: 1 as const,
-    idempotency_key: "idem_apple_start",
-    payload_hash: payloadHash,
+    idempotency_key: idempotencyKey,
+    payload_hash: canonicalProviderStartPayloadHash({
+      flowKind: "apple_sign_in", idempotencyKey, clientKind: "web", redirectUri: callbackUri,
+    }),
     client_kind: "web" as const,
     redirect_uri: callbackUri,
   };
 }
 
 function nativeAppleStart(client_kind: "iphone" | "macos" = "iphone") {
+  const idempotencyKey = "idem_native_apple_start";
   return {
     schema_version: 1 as const,
-    idempotency_key: "idem_native_apple_start",
-    payload_hash: payloadHash,
+    idempotency_key: idempotencyKey,
+    payload_hash: canonicalProviderStartPayloadHash({
+      flowKind: "apple_sign_in", idempotencyKey, clientKind: client_kind,
+      redirectUri: nativeCallbackUri, nonce: nativeNonce, pkceChallenge: nativePkceChallenge,
+    }),
     client_kind,
     redirect_uri: nativeCallbackUri,
     nonce: nativeNonce,
     pkce_code_challenge: nativePkceChallenge,
     pkce_code_challenge_method: "S256" as const,
+  };
+}
+
+function webAppleLinkStart() {
+  return {
+    ...webAppleStart(),
+    payload_hash: canonicalProviderStartPayloadHash({
+      flowKind: "apple_link", idempotencyKey: "idem_apple_start",
+      clientKind: "web", redirectUri: callbackUri,
+    }),
+  };
+}
+
+function nativeAppleLinkStart(client_kind: "iphone" | "macos" = "iphone") {
+  return {
+    ...nativeAppleStart(client_kind),
+    payload_hash: canonicalProviderStartPayloadHash({
+      flowKind: "apple_link", idempotencyKey: "idem_native_apple_start", clientKind: client_kind,
+      redirectUri: nativeCallbackUri, nonce: nativeNonce, pkceChallenge: nativePkceChallenge,
+    }),
   };
 }
 
@@ -744,24 +772,48 @@ test("Supabase provider starts replay one idempotent effect", async () => {
   const reset = {
     email: "USER@EXAMPLE.TEST",
     idempotencyKey: "idem_password_reset",
-    payloadHash,
+    payloadHash: canonicalProviderStartPayloadHash({
+      flowKind: "password_reset", idempotencyKey: "idem_password_reset",
+      normalizedEmail: "user@example.test",
+    }),
   };
   const resetFirst = await harness.provider.beginPasswordReset(reset);
   const resetReplay = await harness.provider.beginPasswordReset(reset);
   assert.deepEqual(resetReplay, resetFirst);
   assert.equal(harness.methodCalls.filter(({ name }) => name === "resetPasswordForEmail").length, 1);
+  await expectFailure(() => harness.provider.beginPasswordReset({
+    ...reset, email: "changed@example.test",
+  }), "AUTH_CALLBACK_INVALID");
+  assert.equal(harness.methodCalls.filter(({ name }) => name === "resetPasswordForEmail").length, 1);
 
   const linkHarness = createHarness();
-  const linkInput = { ...webAppleStart(), idempotency_key: "idem_apple_link_start", authenticatedActorId: "actor-1", ...credential };
+  const linkInput = {
+    ...webAppleStart(),
+    idempotency_key: "idem_apple_link_start",
+    payload_hash: canonicalProviderStartPayloadHash({
+      flowKind: "apple_link", idempotencyKey: "idem_apple_link_start",
+      clientKind: "web", redirectUri: callbackUri,
+    }),
+    authenticatedActorId: "actor-1", ...credential,
+  };
   const linkFirst = await linkHarness.provider.reauthenticateAndBeginAppleLink(linkInput);
   const linkReplay = await linkHarness.provider.reauthenticateAndBeginAppleLink(linkInput);
   assert.deepEqual(linkReplay, linkFirst);
   assert.equal(linkHarness.methodCalls.filter(({ name }) => name === "signInWithPassword").length, 1);
   assert.equal(linkHarness.methodCalls.filter(({ name }) => name === "linkIdentity").length, 1);
+  await expectFailure(() => linkHarness.provider.reauthenticateAndBeginAppleLink({
+    ...linkInput, device_label: "changed without a new payload hash",
+  }), "AUTH_CALLBACK_INVALID");
+  assert.equal(linkHarness.methodCalls.filter(({ name }) => name === "signInWithPassword").length, 1);
+  assert.equal(linkHarness.methodCalls.filter(({ name }) => name === "linkIdentity").length, 1);
 
   await expectFailure(() => harness.provider.beginApple({
     ...webAppleStart(), payload_hash: `sha256:${"b".repeat(64)}`,
-  }), "AUTH_CONFLICT");
+  }), "AUTH_CALLBACK_INVALID");
+  await expectFailure(() => harness.provider.beginApple({
+    ...webAppleStart(), device_label: "changed without a new payload hash",
+  }), "AUTH_CALLBACK_INVALID");
+  assert.equal(harness.methodCalls.filter(({ name }) => name === "signInWithOAuth").length, 1);
 
   const concurrent = createHarness();
   const attempts = await Promise.allSettled([
@@ -997,7 +1049,7 @@ test("Supabase Apple callback rejects expired, tampered, accessor, and Proxy tra
 test("Supabase Apple link reauthenticates and starts on one transient client without provider proof", async () => {
   const harness = createHarness();
   const start = await harness.provider.reauthenticateAndBeginAppleLink({
-    ...webAppleStart(), authenticatedActorId: "actor-1", ...credential,
+    ...webAppleLinkStart(), authenticatedActorId: "actor-1", ...credential,
   });
   assert.equal(harness.clientCalls.length, 1);
   assert.equal(harness.store.records.get(start.transaction_id)?.flow_kind, "apple_link");
@@ -1022,7 +1074,7 @@ test("Supabase Apple link reauthenticates and starts on one transient client wit
 
   const native = createHarness();
   const nativeStart = await native.provider.reauthenticateAndBeginAppleLink({
-    ...nativeAppleStart(), authenticatedActorId: "actor-1", ...credential,
+    ...nativeAppleLinkStart(), authenticatedActorId: "actor-1", ...credential,
   });
   const nativeAuthorizationUrl = new URL(nativeStart.authorization_url);
   assert.equal(nativeAuthorizationUrl.searchParams.get("state"), "4fd0445c-badc-4bdb-bc0f-7af9b821c7ec");
@@ -1036,7 +1088,7 @@ test("Supabase Apple link reauthenticates and starts on one transient client wit
 
   const changed = createHarness();
   const changedStart = await changed.provider.reauthenticateAndBeginAppleLink({
-    ...nativeAppleStart(), authenticatedActorId: "actor-1", ...credential,
+    ...nativeAppleLinkStart(), authenticatedActorId: "actor-1", ...credential,
   });
   await expectFailure(() => changed.provider.linkApple({
     ...callbackFromStart(changedStart, "iphone"),
@@ -1047,7 +1099,7 @@ test("Supabase Apple link reauthenticates and starts on one transient client wit
 
   const conflicting = createHarness({ exchangedProviderSubject: "different-provider-subject" });
   const conflictingStart = await conflicting.provider.reauthenticateAndBeginAppleLink({
-    ...webAppleStart(), authenticatedActorId: "actor-1", ...credential,
+    ...webAppleLinkStart(), authenticatedActorId: "actor-1", ...credential,
   });
   await expectFailure(() => conflicting.provider.linkApple({
     ...callbackFromStart(conflictingStart), authenticatedActorId: "actor-1",
@@ -1121,7 +1173,7 @@ test("installed Supabase 2.112.2 Apple link uses only its operation-local passwo
     });
 
     const start = await provider.reauthenticateAndBeginAppleLink({
-      ...nativeAppleStart(),
+      ...nativeAppleLinkStart(),
       authenticatedActorId: "actor-1",
       ...credential,
     });
@@ -1164,7 +1216,7 @@ test("installed Supabase 2.112.2 Apple link uses only its operation-local passwo
       now: () => new Date(fixedNow),
     });
     const webStart = await webProvider.reauthenticateAndBeginAppleLink({
-      ...webAppleStart(),
+      ...webAppleLinkStart(),
       authenticatedActorId: "actor-1",
       ...credential,
     });

@@ -211,6 +211,12 @@ export {
   type VerifiedAuthSubjectInput,
 } from "./services/identity/register-b2c.js";
 export {
+  registerInvitedIdentity,
+  type InvitedIdentityRegistrationResult,
+  type RegisterInvitedIdentityCommand,
+  type RegisterInvitedIdentityDependencies,
+} from "./services/identity/register-invited-identity.js";
+export {
   loadActorIdentityAuthority,
   type ActorIdentityAuthority,
 } from "./repositories/identity/identity-authority.js";
@@ -226,11 +232,17 @@ export {
 } from "./repositories/identity/public-rate-limits.js";
 export {
   beginEmailVerificationTransaction,
+  canonicalEmailVerificationStartPayloadHash,
   consumeEmailVerificationTransaction,
+  finalizeEmailVerificationTransactionStart,
+  prepareEmailVerificationTransaction,
   type BeginEmailVerificationTransactionInput,
   type BegunEmailVerificationTransaction,
+  type ExpiredEmailVerificationTransaction,
   type ConsumedEmailVerificationBinding,
+  type PreparedEmailVerificationBinding,
   type EmailVerificationProtector,
+  type EmailVerificationStartPayloadFacts,
   type EmailVerificationTransactionDependencies,
 } from "./repositories/identity/email-verification-transactions.js";
 export {
@@ -251,6 +263,7 @@ export {
 } from "./services/identity/core-session.js";
 export {
   establishRecentReauthentication,
+  establishRecentReauthenticationInTransaction,
   requireRecentReauthentication,
   type CurrentCoreSessionAuthorityInput,
   type EstablishedReauthentication,

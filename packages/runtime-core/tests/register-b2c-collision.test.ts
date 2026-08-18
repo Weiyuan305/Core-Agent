@@ -13,6 +13,7 @@ import {
   type RegisterB2cCommand,
   type RegisterB2cDependencies,
 } from "../src/services/identity/register-b2c.js";
+import { registerInvitedIdentityTestInternals } from "../src/services/identity/register-invited-identity.js";
 
 function command(): RegisterB2cCommand {
   const withoutHash = {
@@ -128,4 +129,35 @@ test("registerB2c maps only own-data exact identity collision constraints", asyn
         && !Object.prototype.hasOwnProperty.call(error, "cause"),
     );
   }
+});
+
+test("invited registration applies the same bounded collision classification without accessors", () => {
+  let codeReads = 0;
+  let constraintReads = 0;
+  const accessorError = Object.defineProperties(new Error("opaque invited registration failure"), {
+    code: { get() { codeReads += 1; return "23505"; } },
+    constraint: { get() { constraintReads += 1; return "auth_subjects_provider_provider_subject_key"; } },
+  });
+  assert.throws(
+    () => registerInvitedIdentityTestInternals.rethrowRegistrationError(accessorError),
+    (error: unknown) => error === accessorError,
+  );
+  assert.deepEqual({ codeReads, constraintReads }, { codeReads: 0, constraintReads: 0 });
+
+  for (const constraint of [
+    "auth_subjects_provider_provider_subject_key",
+    "private_identity_pii_normalized_email_hmac_key",
+  ]) {
+    assert.throws(
+      () => registerInvitedIdentityTestInternals.rethrowRegistrationError(Object.assign(new Error("opaque"), {
+        code: "23505", constraint,
+      })),
+      (error: unknown) => error instanceof DomainError && error.code === "IDEMPOTENCY_CONFLICT",
+    );
+  }
+  const unrelated = Object.assign(new Error("opaque"), { code: "23505", constraint: "actors_pkey" });
+  assert.throws(
+    () => registerInvitedIdentityTestInternals.rethrowRegistrationError(unrelated),
+    (error: unknown) => error === unrelated,
+  );
 });

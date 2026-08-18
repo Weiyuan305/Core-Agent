@@ -11,6 +11,11 @@
     "status": {
       "const": "verification_pending",
       "type": "string"
+    },
+    "verification_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
     }
   },
   "required": [

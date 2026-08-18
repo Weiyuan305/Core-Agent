@@ -28,6 +28,7 @@ export interface CurrentCoreSessionAuthorityInput {
 
 export interface EstablishRecentReauthenticationInput extends CurrentCoreSessionAuthorityInput {
   readonly verifiedPasswordSubject: VerifiedAuthSubjectInput;
+  readonly expectedResourceVersion?: number;
 }
 
 export interface EstablishedReauthentication {
@@ -175,28 +176,44 @@ function matchesVerifiedPasswordSubject(
 }
 
 /** Persists a verified password reauthentication against current Core authority. */
+export async function establishRecentReauthenticationInTransaction(
+  context: ReauthenticationTransactionContext,
+  input: EstablishRecentReauthenticationInput,
+): Promise<EstablishedReauthentication> {
+  const locked = await lockCurrentCoreSessionAuthority(context, context.trx, input);
+  if (input.expectedResourceVersion !== undefined && (
+    !Number.isSafeInteger(input.expectedResourceVersion)
+    || input.expectedResourceVersion < 1
+    || locked.session.resource_version !== input.expectedResourceVersion
+  )) throw new DomainError("RESOURCE_VERSION_CONFLICT", "Core Session version changed");
+  if (!matchesVerifiedPasswordSubject(locked.authSubject, input.verifiedPasswordSubject)) {
+    requireReauthentication();
+  }
+  const updated = await updateCoreSessionReauthentication(context.trx, {
+    sessionId: locked.session.session_id,
+    now: locked.now,
+    expectedResourceVersion: locked.session.resource_version,
+  });
+  const reauthenticatedAt = locked.now.getTime();
+  return Object.freeze({
+    schema_version: 1,
+    reauthenticated_at: locked.now.toISOString(),
+    valid_until: new Date(validityBoundary(updated.session, reauthenticatedAt)).toISOString(),
+    session_resource_version: updated.session.resource_version,
+  });
+}
+
+/** Persists a verified password reauthentication against current Core authority. */
 export async function establishRecentReauthentication(
   dependencies: ReauthenticationDependencies,
   input: EstablishRecentReauthenticationInput,
 ): Promise<EstablishedReauthentication> {
-  return withDatabaseTransactionRetry(dependencies.db, async (trx) => {
-    const locked = await lockCurrentCoreSessionAuthority(dependencies, trx, input);
-    if (!matchesVerifiedPasswordSubject(locked.authSubject, input.verifiedPasswordSubject)) {
-      requireReauthentication();
-    }
-    const updated = await updateCoreSessionReauthentication(trx, {
-      sessionId: locked.session.session_id,
-      now: locked.now,
-      expectedResourceVersion: locked.session.resource_version,
-    });
-    const reauthenticatedAt = locked.now.getTime();
-    return Object.freeze({
-      schema_version: 1,
-      reauthenticated_at: locked.now.toISOString(),
-      valid_until: new Date(validityBoundary(updated.session, reauthenticatedAt)).toISOString(),
-      session_resource_version: updated.session.resource_version,
-    });
-  });
+  return withDatabaseTransactionRetry(dependencies.db, (trx) => (
+    establishRecentReauthenticationInTransaction({
+      trx,
+      ...(dependencies.databaseNow === undefined ? {} : { databaseNow: dependencies.databaseNow }),
+    }, input)
+  ));
 }
 
 /**

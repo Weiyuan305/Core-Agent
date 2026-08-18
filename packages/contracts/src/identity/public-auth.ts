@@ -263,6 +263,7 @@ export const InvitationEmailRegistrationRequestSchema = request("invitation-emai
 });
 export const InvitationEmailRegistrationResponseSchema = response("invitation-email-registration-response", {
   schema_version: SchemaVersionSchema,
+  verification_id: Type.Optional(OpaqueIdSchema),
   status: Type.Literal("verification_pending"),
 });
 

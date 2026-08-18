@@ -453,6 +453,64 @@ test("registerB2c creates only the personal identity graph and replays byte-equi
   });
 });
 
+test("registerInvitedIdentity composes in a caller-owned transaction without self authority", async () => {
+  const module = await import("../src/index.js") as Record<string, unknown>;
+  assert.equal(typeof module.registerInvitedIdentity, "function");
+  const registerInvitedIdentity = module.registerInvitedIdentity as (...args: unknown[]) => Promise<{ actor_id: string; auth_subject_id: string }>;
+  await identityDb.insertInto("tenants").values({
+    tenant_id: "tenant_invited_registration",
+    schema_version: 1,
+    resource_version: 1,
+    tenant_mode: "b2b",
+    display_name: "Invited Company",
+    status: "active",
+    created_at: now,
+    updated_at: now,
+  }).execute();
+  const withoutHash = {
+    schema_version: 1 as const,
+    idempotency_key: "register-invited-identity-0001",
+    tenant_id: "tenant_invited_registration",
+    auth_subject: {
+      provider: "supabase" as const,
+      providerSubject: "supabase-invited-0001",
+      identityKind: "email_password" as const,
+      normalizedEmail: "invited@example.test",
+      verifiedAt: "2026-08-14T01:00:00.000Z",
+    },
+    display_name: "Invited User",
+  };
+  const invitedCommand = { ...withoutHash, payload_hash: canonicalPayloadHash(withoutHash) };
+  const first = await identityDb.transaction().execute((trx) => registerInvitedIdentity({
+    db: identityDb,
+    transaction: trx,
+    now: () => new Date(now),
+    privatePii: dependencies().privatePii,
+  }, context, invitedCommand));
+  const replay = await identityDb.transaction().execute((trx) => registerInvitedIdentity({
+    db: identityDb,
+    transaction: trx,
+    now: () => new Date(now),
+    privatePii: dependencies().privatePii,
+  }, context, invitedCommand));
+  assert.deepEqual(replay, first);
+  assert.equal(await tableCount("actors"), 1);
+  assert.equal(await tableCount("auth_subjects"), 1);
+  assert.equal(await tableCount("private_identity_pii"), 1);
+  assert.equal(await tableCount("memberships"), 0);
+  assert.equal(await tableCount("profiles"), 0);
+  assert.equal(await tableCount("tenants"), 1, "the service must not create a personal Tenant");
+  await assert.rejects(identityDb.transaction().execute((trx) => registerInvitedIdentity({
+    db: identityDb,
+    transaction: trx,
+    now: () => new Date(now),
+    privatePii: dependencies().privatePii,
+  }, context, {
+    ...invitedCommand,
+    auth_subject: { ...invitedCommand.auth_subject, providerSubject: "supabase-invited-conflict" },
+  })), (error: unknown) => error instanceof DomainError && error.code === "INVALID_REQUEST");
+});
+
 test("registerB2c maps provider-subject uniqueness to one opaque fixed DomainError", async () => {
   const providerSubject = "provider-subject-collision-sentinel";
   const first = command({

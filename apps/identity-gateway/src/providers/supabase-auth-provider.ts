@@ -22,6 +22,7 @@ import type {
   PasswordResetStartInput,
   VerifiedProviderSubject,
 } from "./auth-provider.js";
+import { canonicalProviderStartPayloadHash } from "./auth-provider.js";
 import {
   mapProviderFailure,
   ProviderFailure,
@@ -366,6 +367,19 @@ function readStartIdempotency(input: unknown): { readonly key: string; readonly 
   return { key, payloadHash };
 }
 
+function assertCanonicalStartPayloadHash(supplied: string, expected: string): void {
+  const suppliedBytes = Buffer.from(supplied, "utf8");
+  const expectedBytes = Buffer.from(expected, "utf8");
+  try {
+    if (suppliedBytes.byteLength !== expectedBytes.byteLength || !timingSafeEqual(suppliedBytes, expectedBytes)) {
+      throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+    }
+  } finally {
+    suppliedBytes.fill(0);
+    expectedBytes.fill(0);
+  }
+}
+
 function idempotentStartTransactionId(flowKind: string, actorId: string | null, key: string): string {
   return `oauth_${sha256Base64Url(`core-agent:provider-start:v1:${flowKind}:${actorId ?? "anonymous"}:${key}`).slice(0, 32)}`;
 }
@@ -690,6 +704,13 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       throw new ProviderFailure("AUTH_INVALID");
     }
     const idempotency = typeof input === "string" ? undefined : readStartIdempotency(input);
+    if (idempotency !== undefined) {
+      assertCanonicalStartPayloadHash(idempotency.payloadHash, canonicalProviderStartPayloadHash({
+        flowKind: "password_reset",
+        idempotencyKey: idempotency.key,
+        normalizedEmail: normalizeEmail(email),
+      }));
+    }
     const transactionId = idempotency === undefined
       ? `oauth_${encodeOpaque(this.#randomBytes(18))}`
       : idempotentStartTransactionId("password_reset", null, idempotency.key);
@@ -786,6 +807,16 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
   ): Promise<AppleAuthorizationStart> {
     const parsed = this.#parseAppleStart(input);
     const idempotency = readStartIdempotency(input);
+    const deviceLabel = ownString(input, "device_label");
+    assertCanonicalStartPayloadHash(idempotency.payloadHash, canonicalProviderStartPayloadHash({
+      flowKind,
+      idempotencyKey: idempotency.key,
+      clientKind: parsed.clientKind,
+      redirectUri: parsed.redirectUri,
+      ...(deviceLabel === undefined ? {} : { deviceLabel }),
+      ...(parsed.nonce === null ? {} : { nonce: parsed.nonce }),
+      ...(parsed.pkceChallenge === null ? {} : { pkceChallenge: parsed.pkceChallenge }),
+    }));
     const transactionId = idempotentStartTransactionId(flowKind, actorId, idempotency.key);
     const state = transactionId;
     const nonce = parsed.nonce ?? encodeOpaque(this.#randomBytes(32));

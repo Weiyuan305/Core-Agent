@@ -74,6 +74,8 @@ const identityColumnShape = {
   email_verification_transactions: [
     "email_verification_transaction_id:text:NO", "start_idempotency_key:text:NO", "start_payload_hash:text:NO",
     "normalized_email_hmac:bytea:NO", "binding_ciphertext:bytea:NO", "verified_provider_subject_hmac:bytea:YES",
+    "provider_start_status:text:NO", "provider_start_attempt:int4:NO", "provider_start_finalized_at:timestamptz:YES",
+    "provider_start_failed_at:timestamptz:YES",
     "status:text:NO", "expires_at:timestamptz:NO", "consumed_at:timestamptz:YES",
     "created_at:timestamptz:NO", "updated_at:timestamptz:NO",
   ],
@@ -373,6 +375,10 @@ test("empty database migrates exactly to schema version 12 with durable email ve
     "normalized_email_hmac",
     "binding_ciphertext",
     "verified_provider_subject_hmac",
+    "provider_start_status",
+    "provider_start_attempt",
+    "provider_start_finalized_at",
+    "provider_start_failed_at",
     "status",
     "expires_at",
     "consumed_at",
@@ -482,6 +488,43 @@ test("schema 12 upgrades schema 10 through password reset and email verification
     )).rows[0]?.count, 1);
   } finally {
     await rm(v10Directory, { recursive: true, force: true });
+  }
+});
+
+test("schema 12 reconverges a dirty recorded schema 11 and preserves password-reset rows", async () => {
+  const v11Directory = await mkdtemp(join(tmpdir(), "core-agent-v11-migrations-"));
+  try {
+    await cp(migrationsDirectory, v11Directory, { recursive: true });
+    await applyMigrationPrefix(v11Directory, 11);
+    assert.equal(await readSchemaVersion(db), 11);
+    await pool.query(`insert into oauth_transactions (
+      oauth_transaction_id, provider, flow_kind, actor_id, client_kind,
+      state_digest, nonce_digest, pkce_verifier_ciphertext, redirect_uri,
+      status, expires_at, consumed_at, created_at, updated_at
+    ) values (
+      'oauth_v11_dirty_password_reset', 'supabase', 'password_reset', null, 'web',
+      decode(repeat('11', 32), 'hex'), decode(repeat('12', 32), 'hex'), decode('13', 'hex'),
+      'https://app.example.test/auth/reset', 'pending', now() + interval '10 minutes', null, now(), now()
+    )`);
+    await pool.query("grant select on table private_identity_pii to core_agent_app");
+    await pool.query("grant select on table conversations to core_agent_identity");
+
+    await applyMigrations(pool, migrationsDirectory);
+    assert.equal(await readSchemaVersion(db), 12);
+    assert.equal((await pool.query(
+      "select count(*)::int as count from oauth_transactions where oauth_transaction_id = 'oauth_v11_dirty_password_reset'",
+    )).rows[0]?.count, 1);
+    const privileges = (await pool.query<{ app_private_read: boolean; identity_conversation_read: boolean; identity_email_update: boolean }>(`
+      select
+        has_table_privilege('core_agent_app', 'private_identity_pii', 'select') as app_private_read,
+        has_table_privilege('core_agent_identity', 'conversations', 'select') as identity_conversation_read,
+        has_table_privilege('core_agent_identity', 'email_verification_transactions', 'update') as identity_email_update
+    `)).rows[0];
+    assert.deepEqual(privileges, {
+      app_private_read: false, identity_conversation_read: false, identity_email_update: true,
+    });
+  } finally {
+    await rm(v11Directory, { recursive: true, force: true });
   }
 });
 

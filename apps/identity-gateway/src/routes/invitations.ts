@@ -10,11 +10,11 @@ import {
 } from "@core-agent/contracts";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 
-import type { GatewayAuthenticatedSession, IdentityGatewayRouteDependencies } from "../app.js";
+import type { GatewayAuthenticatedSession, GatewayIssuedSession, IdentityGatewayRouteDependencies } from "../app.js";
 import { IdentityGatewayFailure } from "../errors.js";
 import { assertClientTransport, requireMutationCredentials } from "../security.js";
 import { canonicalWebAppleCallback } from "./apple.js";
-import { deliverSession } from "./email.js";
+import { completeReservedEmailProviderStart, deliverSession } from "./email.js";
 
 async function authenticateMutation(request: FastifyRequest, dependencies: IdentityGatewayRouteDependencies): Promise<GatewayAuthenticatedSession> {
   const credential = requireMutationCredentials(request);
@@ -46,9 +46,13 @@ export async function registerInvitationRoutes(app: FastifyInstance, dependencie
       normalizedEmail,
       clientKind: body.client_kind,
       ...(body.device_label === undefined ? {} : { deviceLabel: body.device_label }),
+      invitationSecret: String(body.invitation_secret),
     });
-    if (binding.kind === "created") await dependencies.provider.signUpEmail({ email: normalizedEmail, password: body.password });
-    return reply.code(202).send({ schema_version: 1, status: "verification_pending" });
+    if (binding.kind === "in_progress") throw new IdentityGatewayFailure("AUTH_CONFLICT");
+    if (binding.kind === "reserved") {
+      await completeReservedEmailProviderStart(dependencies, binding, { email: normalizedEmail, password: body.password });
+    }
+    return reply.code(202).send({ schema_version: 1, verification_id: binding.verificationId, status: "verification_pending" });
   });
 
   app.post("/auth/v1/invitations/accept", { schema: { body: InvitationAcceptanceRequestSchema, response: { 200: InvitationAcceptanceResponseSchema } } }, async (request, reply) => {
@@ -67,14 +71,15 @@ export async function registerInvitationRoutes(app: FastifyInstance, dependencie
         } as never, "sign_in")
         : body.authentication_proof as never);
     const { authentication_proof: _authenticationProof, device_label: _deviceLabel, ...durablePayload } = body;
-    const result = await dependencies.operations.executeAuthorityCommand({ kind: "invitation_accept", payload: durablePayload, verifiedSubject: subject });
-    const issued = await dependencies.operations.issueSession(subject, body.authentication_proof.client_kind, body.device_label, {
-      idempotencyKey: body.idempotency_key as string,
-      payloadHash: body.payload_hash as string,
-      operation: "invitation_accept",
-    });
-    const delivery = deliverSession(reply, issued, body.authentication_proof.client_kind) as Record<string, unknown>;
-    return { ...(result as object), ...delivery };
+    const result = await dependencies.operations.executeAuthorityCommand({
+      kind: "invitation_accept",
+      payload: { ...durablePayload, device_label: body.device_label, client_kind: body.authentication_proof.client_kind },
+      verifiedSubject: subject,
+    }) as Record<string, unknown> & { issuedSession?: GatewayIssuedSession };
+    if (result.issuedSession === undefined) throw new IdentityGatewayFailure("INTERNAL_ERROR");
+    const { issuedSession, ...publicResult } = result;
+    const delivery = deliverSession(reply, issuedSession, body.authentication_proof.client_kind) as Record<string, unknown>;
+    return { ...publicResult, ...delivery };
   });
 
   app.post("/auth/v1/invitations/revoke", { schema: { body: InvitationRevokeRequestSchema, response: { 200: InvitationRevokeResponseSchema } } }, async (request) => {

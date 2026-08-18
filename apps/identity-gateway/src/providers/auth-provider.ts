@@ -1,4 +1,4 @@
-import type { VerifiedAuthSubjectInput } from "@core-agent/runtime-core";
+import { canonicalPayloadHash, type VerifiedAuthSubjectInput } from "@core-agent/runtime-core";
 import type {
   AppleAuthorizationCallbackRequest,
   AppleAuthorizationStartRequest,
@@ -9,6 +9,42 @@ import type {
 
 export type VerifiedProviderSubject = VerifiedAuthSubjectInput;
 export type ProviderClientKind = "web" | "iphone" | "macos";
+
+export type ProviderStartPayloadFacts =
+  | {
+    readonly flowKind: "password_reset";
+    readonly idempotencyKey: string;
+    readonly normalizedEmail: string;
+  }
+  | {
+    readonly flowKind: "apple_sign_in" | "apple_link";
+    readonly idempotencyKey: string;
+    readonly clientKind: ProviderClientKind;
+    readonly redirectUri: string;
+    readonly deviceLabel?: string;
+    readonly nonce?: string;
+    readonly pkceChallenge?: string;
+  };
+
+export function canonicalProviderStartPayloadHash(input: ProviderStartPayloadFacts): string {
+  return canonicalPayloadHash({
+    schema_version: 1,
+    flow_kind: input.flowKind,
+    idempotency_key: input.idempotencyKey,
+    ...(input.flowKind === "password_reset" ? {
+      normalized_email: input.normalizedEmail,
+    } : {
+      client_kind: input.clientKind,
+      redirect_uri: input.redirectUri,
+      ...(input.deviceLabel === undefined ? {} : { device_label: input.deviceLabel }),
+      ...(input.nonce === undefined ? {} : { nonce: input.nonce }),
+      ...(input.pkceChallenge === undefined ? {} : {
+        pkce_code_challenge: input.pkceChallenge,
+        pkce_code_challenge_method: "S256",
+      }),
+    }),
+  });
+}
 
 export interface EmailCredentialInput {
   readonly email: string;

@@ -186,7 +186,7 @@ test("every public auth response is closed and provider-neutral", () => {
     ["session revoke", SessionRevokeResponseSchema, { schema_version: 1, session_id: "session_01", status: "revoked", resource_version: 8 }],
     ["reauthentication", ReauthenticationResponseSchema, { schema_version: 1, reauthenticated_at: timestamp, valid_until: timestamp, session_resource_version: 8 }],
     ["invitation inspect", InvitationInspectResponseSchema, { schema_version: 1, invitation_id: "invitation_01", tenant_id: "tenant_01", role: "consultant", status: "pending", expires_at: timestamp, resource_version: 1 }],
-    ["invitation email registration", InvitationEmailRegistrationResponseSchema, { schema_version: 1, status: "verification_pending" }],
+    ["invitation email registration", InvitationEmailRegistrationResponseSchema, { schema_version: 1, verification_id: "verification_invitation_01", status: "verification_pending" }],
     ["invitation acceptance", InvitationAcceptanceResponseSchema, { schema_version: 1, transport: "web_cookie", role: "consultant", tenant_id: "tenant_01", invitation_resource_version: 2, membership_id: "membership_01", membership_resource_version: 2, profile_id: "profile_01", profile_resource_version: 1, session: sessionView }],
     ["invitation revoke", InvitationRevokeResponseSchema, { schema_version: 1, invitation_id: "invitation_01", status: "revoked", resource_version: 2 }],
     ["company creation", CompanyCreateResponseSchema, { schema_version: 1, tenant_id: "tenant_01", tenant_resource_version: 1, administrator_invitation_id: "invitation_01", administrator_invitation_resource_version: 1, administrator_invitation_secret: invitationSecret }],
@@ -620,7 +620,12 @@ test("invitation registration stays pending until final verified-email acceptanc
     client_kind: "web",
   };
   assert.equal(register.Check(registration), true);
-  assert.equal(pending.Check({ schema_version: 1, status: "verification_pending" }), true);
+  assert.equal(pending.Check({
+    schema_version: 1,
+    verification_id: "verification_invitation_01",
+    status: "verification_pending",
+  }), true);
+  assert.equal(pending.Check({ schema_version: 1, status: "verification_pending" }), true, "0.6 remains additive while the Gateway always returns the binding");
   assert.equal(pending.Check({ schema_version: 1, status: "verification_pending", session: {} }), false);
   assert.equal(pending.Check({ schema_version: 1, status: "verification_pending", tenant_id: "tenant_01" }), false);
   assert.equal(accept.Check({

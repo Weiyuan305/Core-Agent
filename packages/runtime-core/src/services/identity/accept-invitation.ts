@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { sql, type Kysely } from "kysely";
+import { sql, type Kysely, type Transaction } from "kysely";
 
 import type { RuntimeDatabase } from "../../db/database.js";
 import { withDatabaseTransactionRetry } from "../../db/transaction-retry.js";
@@ -17,6 +17,7 @@ import {
   constantTimeDigestMatches,
   deriveIdentityCommandId,
   invitationEmailHmac,
+  lockInvitationByDigest,
   lockInvitationBySecret,
   publicInvitationNotFound,
 } from "../../repositories/identity/invitations.js";
@@ -39,6 +40,16 @@ export interface AcceptInvitationContext {
 
 export interface AcceptInvitationDependencies {
   readonly db: Kysely<RuntimeDatabase>;
+  /** Caller-owned transaction composes acceptance with registration and Session issuance. */
+  readonly transaction?: Transaction<RuntimeDatabase>;
+  /** Exact credential already verified and encrypted by the email-verification transaction. */
+  readonly verifiedInvitationBinding?: {
+    readonly invitationId: string;
+    readonly secretDigest: Uint8Array;
+    readonly tenantId: string;
+    readonly expectedResourceVersion: number;
+    readonly role: "admin" | "consultant";
+  };
   readonly emailHmacKey: Uint8Array;
   readonly consultantProfile: {
     readonly providerConfigId: string;
@@ -147,7 +158,7 @@ export async function acceptInvitation(
     || dependencies.consultantProfile.modelId.length > 255
   ) throw new DomainError("INTERNAL_ERROR", "Consultant Profile configuration is invalid");
 
-  return withDatabaseTransactionRetry(dependencies.db, async (trx) => {
+  const execute = async (trx: Transaction<RuntimeDatabase>): Promise<AcceptInvitationResult> => {
     const now = dependencies.now?.() ?? new Date();
     const actor = await trx.selectFrom("actors").select("status")
       .where("actor_id", "=", context.actorId).forUpdate().executeTakeFirst();
@@ -155,7 +166,15 @@ export async function acceptInvitation(
     const tenant = await trx.selectFrom("tenants").select(["tenant_mode", "status"])
       .where("tenant_id", "=", input.tenant_id).forUpdate().executeTakeFirst();
     if (tenant?.tenant_mode !== "b2b" || tenant.status !== "active") publicInvitationNotFound();
-    const invitation = await lockInvitationBySecret(trx, input.invitation_code);
+    const invitation = dependencies.verifiedInvitationBinding === undefined
+      ? await lockInvitationBySecret(trx, input.invitation_code)
+      : await lockInvitationByDigest(trx, dependencies.verifiedInvitationBinding.secretDigest);
+    if (dependencies.verifiedInvitationBinding !== undefined && (
+      invitation.invitationId !== dependencies.verifiedInvitationBinding.invitationId
+      || invitation.tenantId !== dependencies.verifiedInvitationBinding.tenantId
+      || invitation.resourceVersion !== dependencies.verifiedInvitationBinding.expectedResourceVersion
+      || invitation.role !== dependencies.verifiedInvitationBinding.role
+    )) publicInvitationNotFound();
     if (invitation.tenantId !== input.tenant_id) publicInvitationNotFound();
     const privatePii = await trx.selectFrom("private_identity_pii").select("normalized_email_hmac")
       .where("actor_id", "=", context.actorId).executeTakeFirst();
@@ -260,5 +279,8 @@ export async function acceptInvitation(
       resultRef: invitation.membershipId, response: expected, updatedAt: now,
     });
     return expected;
-  }, { isolationLevel: "serializable" });
+  };
+  return dependencies.transaction === undefined
+    ? withDatabaseTransactionRetry(dependencies.db, execute, { isolationLevel: "serializable" })
+    : execute(dependencies.transaction);
 }

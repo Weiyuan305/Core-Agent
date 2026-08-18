@@ -17,6 +17,7 @@ import type {
   PasswordResetStartInput,
   VerifiedProviderSubject,
 } from "./auth-provider.js";
+import { canonicalProviderStartPayloadHash } from "./auth-provider.js";
 import { ProviderFailure } from "./provider-errors.js";
 
 export interface FakeAuthProviderSubject {
@@ -59,7 +60,12 @@ function digest(value: string): string {
 function constantTimeEqual(left: string, right: string): boolean {
   const leftBytes = Buffer.from(left, "utf8");
   const rightBytes = Buffer.from(right, "utf8");
-  return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
+  try {
+    return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
+  } finally {
+    leftBytes.fill(0);
+    rightBytes.fill(0);
+  }
 }
 
 function pkceChallenge(verifier: string): string {
@@ -119,6 +125,42 @@ function readIdempotency(input: unknown): { readonly key: string; readonly paylo
     throw new ProviderFailure("AUTH_INVALID");
   }
   return { key, payloadHash };
+}
+
+function assertFakeStartHash(supplied: string, expected: string): void {
+  if (!constantTimeEqual(supplied, expected)) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+}
+
+function readAppleStart(input: AppleAuthorizationInput, flowKind: "sign_in" | "link") {
+  const idempotency = readIdempotency(input);
+  const clientKind = readClientKind(ownData(input, "client_kind"));
+  const redirectUri = ownString(input, "redirect_uri");
+  const deviceLabel = ownString(input, "device_label");
+  const callerNonce = ownString(input, "nonce");
+  const callerChallenge = ownString(input, "pkce_code_challenge");
+  const callerMethod = ownString(input, "pkce_code_challenge_method");
+  if (clientKind === undefined || redirectUri === undefined || redirectUri.length === 0) {
+    throw new ProviderFailure("AUTH_INVALID");
+  }
+  if (clientKind === "web") {
+    if (callerNonce !== undefined || callerChallenge !== undefined || callerMethod !== undefined) {
+      throw new ProviderFailure("AUTH_INVALID");
+    }
+  } else if (callerNonce === undefined || callerNonce.length < 8
+    || callerChallenge === undefined || !/^[A-Za-z0-9_-]{43}$/u.test(callerChallenge)
+    || callerMethod !== "S256") {
+    throw new ProviderFailure("AUTH_INVALID");
+  }
+  assertFakeStartHash(idempotency.payloadHash, canonicalProviderStartPayloadHash({
+    flowKind: flowKind === "sign_in" ? "apple_sign_in" : "apple_link",
+    idempotencyKey: idempotency.key,
+    clientKind,
+    redirectUri,
+    ...(deviceLabel === undefined ? {} : { deviceLabel }),
+    ...(callerNonce === undefined ? {} : { nonce: callerNonce }),
+    ...(callerChallenge === undefined ? {} : { pkceChallenge: callerChallenge }),
+  }));
+  return { idempotency, clientKind, redirectUri, callerNonce, callerChallenge };
 }
 
 function copySubject(subject: VerifiedProviderSubject): VerifiedProviderSubject {
@@ -236,6 +278,11 @@ export class FakeAuthProvider implements AuthProviderAdapter {
       throw new ProviderFailure("AUTH_INVALID");
     }
     const idempotency = typeof input === "string" ? undefined : readIdempotency(input);
+    if (idempotency !== undefined) assertFakeStartHash(idempotency.payloadHash, canonicalProviderStartPayloadHash({
+      flowKind: "password_reset",
+      idempotencyKey: idempotency.key,
+      normalizedEmail: normalizeEmail(email),
+    }));
     const startKey = idempotency === undefined ? undefined : `password_reset:${idempotency.key}`;
     const replay = startKey === undefined ? undefined : this.#providerStarts.get(startKey);
     if (replay !== undefined) {
@@ -274,6 +321,7 @@ export class FakeAuthProvider implements AuthProviderAdapter {
   async reauthenticateAndBeginAppleLink(input: AppleLinkAuthorizationInput): Promise<AppleAuthorizationStart> {
     const actorId = ownString(input, "authenticatedActorId") ?? null;
     if (actorId === null) throw new ProviderFailure("AUTH_INVALID");
+    readAppleStart(input, "link");
     const subject = await this.signInEmail(readCredential(input));
     return this.#beginApple(input, "link", actorId, digest(subject.providerSubject));
   }
@@ -316,31 +364,13 @@ export class FakeAuthProvider implements AuthProviderAdapter {
     actorId: string | null,
     providerSubjectDigest: string | null,
   ): AppleAuthorizationStart {
-    const idempotency = readIdempotency(input);
+    const { idempotency, clientKind, redirectUri, callerNonce, callerChallenge } = readAppleStart(input, flowKind);
     const startKey = `${flowKind}:${actorId ?? "anonymous"}:${idempotency.key}`;
     const replay = this.#providerStarts.get(startKey);
     if (replay !== undefined) {
       if (replay.payloadHash !== idempotency.payloadHash) throw new ProviderFailure("AUTH_CONFLICT");
       return replay.response as AppleAuthorizationStart;
     }
-    const clientKind = readClientKind(ownData(input, "client_kind"));
-    const redirectUri = ownString(input, "redirect_uri");
-    if (clientKind === undefined || redirectUri === undefined || redirectUri.length === 0) {
-      throw new ProviderFailure("AUTH_INVALID");
-    }
-    const callerNonce = ownString(input, "nonce");
-    const callerChallenge = ownString(input, "pkce_code_challenge");
-    const callerMethod = ownString(input, "pkce_code_challenge_method");
-    if (clientKind === "web") {
-      if (callerNonce !== undefined || callerChallenge !== undefined || callerMethod !== undefined) {
-        throw new ProviderFailure("AUTH_INVALID");
-      }
-    } else if (callerNonce === undefined || callerNonce.length < 8
-      || callerChallenge === undefined || !/^[A-Za-z0-9_-]{43}$/u.test(callerChallenge)
-      || callerMethod !== "S256") {
-      throw new ProviderFailure("AUTH_INVALID");
-    }
-
     this.#transactionCounter += 1;
     const transactionId = `oauth_fake_${this.#transactionCounter.toString().padStart(4, "0")}`;
     const state = transactionId;

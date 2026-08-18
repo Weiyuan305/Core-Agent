@@ -3,6 +3,8 @@ import test from "node:test";
 
 import Fastify, { type FastifyInstance } from "fastify";
 
+import { ProviderFailure } from "../src/providers/provider-errors.js";
+
 const host = "identity.example.test";
 const origin = "https://app.example.test";
 const redirect = `${origin}/auth/apple/callback`;
@@ -10,18 +12,27 @@ const secret = "s".repeat(43);
 const csrf = "c".repeat(43);
 const idem = { schema_version: 1, idempotency_key: "idem_01", payload_hash: `sha256:${"a".repeat(64)}` };
 
-async function buildApp(calls: Array<{ name: string; input: unknown }>): Promise<FastifyInstance> {
+async function buildApp(
+  calls: Array<{ name: string; input: unknown }>,
+  options: { readonly failFirstEmailStart?: boolean; readonly failFinalizedCompletion?: boolean } = {},
+): Promise<FastifyInstance> {
   const path = "../src/app.ts";
   const module = await import(path).catch(() => undefined) as undefined | { buildIdentityGatewayApp(input: Record<string, unknown>): Promise<FastifyInstance> };
   if (module === undefined) return Fastify();
   const subject = { provider: "supabase" as const, providerSubject: "subject_01", identityKind: "email_password" as const, normalizedEmail: "current@example.test", verifiedAt: "2026-08-17T00:00:00.000Z" };
-  let emailVerificationStarted = false;
+  let emailVerificationState: "reserved" | "finalized" | "failed" | undefined;
+  let emailStartCalls = 0;
   return module.buildIdentityGatewayApp({
     config: { publicOrigins: new Set([origin]), cookieHost: host, publicBaseUrl: `https://${host}`, providerUrl: "https://apple.example.test", appleWebRedirectUris: new Set([redirect]), appleNativeRedirectUris: new Set(["coreagent://auth/apple/callback"]), passwordResetRedirectUri: `${origin}/auth/password/reset/callback`, publicAuthEnabled: true },
     flowCookieKey: Buffer.alloc(32, 0x34),
     now: () => new Date("2026-08-17T00:00:00.000Z"),
     provider: {
-      async signUpEmail(input: unknown) { calls.push({ name: "signUpEmail", input }); return { kind: "verification_pending" as const }; },
+      async signUpEmail(input: unknown) {
+        calls.push({ name: "signUpEmail", input });
+        emailStartCalls += 1;
+        if (options.failFirstEmailStart === true && emailStartCalls === 1) throw new ProviderFailure("AUTH_INVALID");
+        return { kind: "verification_pending" as const };
+      },
       async verifyEmail(input: unknown) { calls.push({ name: "verifyEmail", input }); return subject; },
       async signInEmail(input: unknown) { calls.push({ name: "signInEmail", input }); return subject; },
       async beginApple(input: unknown) { calls.push({ name: "beginApple", input }); return { transaction_id: "oauth_01", authorization_url: `https://apple.example.test/auth/v1/authorize?state=state_01&redirect_to=${encodeURIComponent((input as { redirect_uri: string }).redirect_uri)}`, expires_at: "2026-08-17T00:05:00.000Z" }; },
@@ -41,7 +52,14 @@ async function buildApp(calls: Array<{ name: string; input: unknown }>): Promise
         calls.push({ name: "executeAuthorityCommand", input });
         const kind = (input as { kind?: unknown }).kind;
         if (kind === "reauthenticate") return { schema_version: 1, reauthenticated_at: "2026-08-17T00:00:00.000Z", valid_until: "2026-08-17T00:10:00.000Z", session_resource_version: 2 };
-        if (kind === "invitation_accept") return { schema_version: 1, tenant_id: "tenant_01", invitation_resource_version: 2, membership_id: "membership_01", membership_resource_version: 1, role: "admin" };
+        if (kind === "invitation_accept") return {
+          schema_version: 1, tenant_id: "tenant_01", invitation_resource_version: 2,
+          membership_id: "membership_01", membership_resource_version: 1, role: "admin",
+          issuedSession: {
+            session: { schema_version: 1, actor_id: "actor_server", actor_resource_version: 1, session_id: "session_invitation", session_resource_version: 1, client_kind: "web", idle_expires_at: "2026-08-18T00:00:00.000Z", absolute_expires_at: "2026-09-16T00:00:00.000Z", reauthentication_required: false },
+            sessionSecret: secret, csrfSecret: csrf,
+          },
+        };
         return { schema_version: 1 };
       },
       async executeProtectedAuthorityCommand(input: unknown) {
@@ -53,13 +71,37 @@ async function buildApp(calls: Array<{ name: string; input: unknown }>): Promise
       },
       async beginEmailVerification(input: unknown) {
         calls.push({ name: "beginEmailVerification", input });
-        const kind = emailVerificationStarted ? "replay" as const : "created" as const;
-        emailVerificationStarted = true;
+        const kind = emailVerificationState === undefined || emailVerificationState === "failed"
+          ? "reserved" as const
+          : emailVerificationState === "finalized" ? "finalized_replay" as const : "in_progress" as const;
+        if (kind === "reserved") emailVerificationState = "reserved";
         return { verificationId: "verification_01", kind };
+      },
+      async finalizeEmailVerificationStart(input: unknown) {
+        calls.push({ name: "finalizeEmailVerificationStart", input });
+        const outcome = (input as { outcome: "finalized" | "failed" }).outcome;
+        if (options.failFinalizedCompletion === true && outcome === "finalized") {
+          throw new Error("unknown finalization outcome");
+        }
+        emailVerificationState = outcome;
+      },
+      async prepareEmailVerification(input: unknown) {
+        calls.push({ name: "prepareEmailVerification", input });
+        return { clientKind: "web" as const, deviceLabel: "Browser" };
       },
       async completeEmailVerification(input: unknown) {
         calls.push({ name: "completeEmailVerification", input });
-        return { actorId: "actor_server", authSubjectId: "auth_server", clientKind: "web" as const, deviceLabel: "Browser" };
+        return {
+          actorId: "actor_server",
+          authSubjectId: "auth_server",
+          clientKind: "web" as const,
+          deviceLabel: "Browser",
+          issuedSession: {
+            session: { schema_version: 1, actor_id: "actor_server", actor_resource_version: 1, session_id: "session_01", session_resource_version: 1, client_kind: "web" as const, idle_expires_at: "2026-08-18T00:00:00.000Z", absolute_expires_at: "2026-09-16T00:00:00.000Z", reauthentication_required: false },
+            sessionSecret: secret,
+            csrfSecret: csrf,
+          },
+        };
       },
     },
   });
@@ -108,13 +150,55 @@ test("email signup reserves one durable idempotent binding before its provider e
   assert.equal(replay.statusCode, 202);
   assert.deepEqual(first.json(), replay.json());
   assert.deepEqual(calls.map(({ name }) => name), [
-    "consumeRateLimit", "beginEmailVerification", "signUpEmail",
+    "consumeRateLimit", "beginEmailVerification", "signUpEmail", "finalizeEmailVerificationStart",
     "consumeRateLimit", "beginEmailVerification",
   ]);
   const binding = calls.find(({ name }) => name === "beginEmailVerification")?.input as Record<string, unknown>;
   assert.equal(binding.normalizedEmail, "student@example.test");
   assert.equal(binding.clientKind, "web");
   assert.equal(binding.deviceLabel, "Browser");
+  await app.close();
+});
+
+test("a definite email provider-start failure is marked failed and one retry performs the provider start again", async () => {
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const app = await buildApp(calls, { failFirstEmailStart: true });
+  const payload = { ...idem, email: "student@example.test", password: "correct-horse", client_kind: "web" };
+  const failed = await app.inject({
+    method: "POST", url: "/auth/v1/email/sign-up",
+    headers: { host, origin, "content-type": "application/json" }, payload,
+  });
+  const retried = await app.inject({
+    method: "POST", url: "/auth/v1/email/sign-up",
+    headers: { host, origin, "content-type": "application/json" }, payload,
+  });
+  assert.equal(failed.statusCode, 401);
+  assert.equal(retried.statusCode, 202);
+  assert.deepEqual(calls.filter(({ name }) => name === "signUpEmail").length, 2);
+  assert.deepEqual(calls.filter(({ name }) => name === "finalizeEmailVerificationStart").map(({ input }) => (
+    (input as { outcome: string }).outcome
+  )), ["failed", "finalized"]);
+  await app.close();
+});
+
+test("an unknown email start-finalization outcome stays reserved and never repeats the provider effect", async () => {
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const app = await buildApp(calls, { failFinalizedCompletion: true });
+  const payload = { ...idem, email: "student@example.test", password: "correct-horse", client_kind: "web" };
+  const first = await app.inject({
+    method: "POST", url: "/auth/v1/email/sign-up",
+    headers: { host, origin, "content-type": "application/json" }, payload,
+  });
+  const retry = await app.inject({
+    method: "POST", url: "/auth/v1/email/sign-up",
+    headers: { host, origin, "content-type": "application/json" }, payload,
+  });
+  assert.equal(first.statusCode, 500);
+  assert.equal(retry.statusCode, 409);
+  assert.equal(calls.filter(({ name }) => name === "signUpEmail").length, 1);
+  assert.deepEqual(calls.filter(({ name }) => name === "finalizeEmailVerificationStart").map(({ input }) => (
+    (input as { outcome: string }).outcome
+  )), ["finalized"]);
   await app.close();
 });
 
@@ -134,13 +218,15 @@ test("invitation email registration reserves its provider start idempotently", a
   assert.equal(first.statusCode, 202);
   assert.equal(replay.statusCode, 202);
   assert.deepEqual(calls.map(({ name }) => name), [
-    "consumeRateLimit", "beginEmailVerification", "signUpEmail",
+    "consumeRateLimit", "beginEmailVerification", "signUpEmail", "finalizeEmailVerificationStart",
     "consumeRateLimit", "beginEmailVerification",
   ]);
   const binding = calls.find(({ name }) => name === "beginEmailVerification")?.input as Record<string, unknown>;
   assert.equal(binding.normalizedEmail, "invited@example.test");
   assert.equal(binding.clientKind, "web");
   assert.equal(binding.deviceLabel, "Invitation Browser");
+  assert.equal(binding.invitationSecret, "i".repeat(43));
+  assert.equal(first.json().verification_id, "verification_01");
   await app.close();
 });
 
@@ -155,14 +241,35 @@ test("email verification verifies the provider subject, registers Task 3, and is
   });
   assert.equal(response.statusCode, 200);
   assert.equal(response.json().transport, "web_cookie");
-  assert.deepEqual(calls.map(({ name }) => name), ["verifyEmail", "completeEmailVerification", "issueSession"]);
-  const providerInput = calls[0]?.input as Record<string, unknown>;
+  assert.deepEqual(calls.map(({ name }) => name), ["prepareEmailVerification", "verifyEmail", "completeEmailVerification"]);
+  const providerInput = calls[1]?.input as Record<string, unknown>;
   assert.deepEqual(providerInput, { verificationCode: "opaque-email-token-hash" });
-  const issued = calls[2]?.input as { clientKind?: unknown };
-  assert.equal(issued.clientKind, "web");
-  assert.deepEqual((issued as { idempotency?: unknown }).idempotency, {
-    idempotencyKey: idem.idempotency_key, payloadHash: idem.payload_hash, operation: "email_verification",
+  const completion = calls[2]?.input as { idempotencyKey?: unknown; payloadHash?: unknown };
+  assert.equal(completion.idempotencyKey, idem.idempotency_key);
+  assert.equal(completion.payloadHash, idem.payload_hash);
+  await app.close();
+});
+
+test("email verification rejects a cross-mode request before any provider effect and remains retryable", async () => {
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const app = await buildApp(calls);
+  const nativeAttempt = await app.inject({
+    method: "POST",
+    url: "/auth/v1/email/verification",
+    headers: { host, "content-type": "application/json" },
+    payload: { ...idem, verification_id: "verification_01", verification_code: "opaque-email-token-hash" },
   });
+  assert.equal(nativeAttempt.statusCode, 400);
+  assert.deepEqual(calls.map(({ name }) => name), ["prepareEmailVerification"]);
+  calls.length = 0;
+  const webRetry = await app.inject({
+    method: "POST",
+    url: "/auth/v1/email/verification",
+    headers: { host, origin, "content-type": "application/json" },
+    payload: { ...idem, verification_id: "verification_01", verification_code: "opaque-email-token-hash" },
+  });
+  assert.equal(webRetry.statusCode, 200);
+  assert.deepEqual(calls.map(({ name }) => name), ["prepareEmailVerification", "verifyEmail", "completeEmailVerification"]);
   await app.close();
 });
 
@@ -333,11 +440,9 @@ test("durable commands receive verified facts but never passwords or provider pr
   const acceptanceCommand = calls.find(({ name, input }) => name === "executeAuthorityCommand" && (input as { kind?: unknown }).kind === "invitation_accept")?.input as { payload?: unknown; verifiedSubject?: unknown };
   assert.equal(JSON.stringify(acceptanceCommand.payload).includes(proof), false);
   assert.equal(acceptanceCommand.verifiedSubject === undefined, false);
-  const issue = calls.find(({ name }) => name === "issueSession")?.input as { deviceLabel?: unknown; idempotency?: unknown };
-  assert.equal(issue.deviceLabel, "Invitation Browser");
-  assert.deepEqual(issue.idempotency, {
-    idempotencyKey: idem.idempotency_key, payloadHash: idem.payload_hash, operation: "invitation_accept",
-  });
+  assert.equal(calls.some(({ name }) => name === "issueSession"), false,
+    "acceptance and its one-time Session secret must be one atomic authority operation");
+  assert.equal(acceptance.json().issuedSession, undefined);
   await app.close();
 });
 

@@ -112,6 +112,38 @@ async function invitationBySecret(
   };
 }
 
+export async function lockInvitationByDigest(
+  trx: Transaction<RuntimeDatabase>, digest: Uint8Array,
+): Promise<StoredInvitationCredential> {
+  const candidate = Buffer.from(digest);
+  const wellFormed = candidate.byteLength === 32;
+  const lookup = wellFormed ? candidate : createHash("sha256").update(candidate).digest();
+  const row = await trx.selectFrom("identity_invitations")
+    .select([
+      "invitation_id", "tenant_id", "membership_id", "invited_by_actor_id", "role",
+      "secret_digest", "normalized_email_hmac", "status", "expires_at",
+      "accepted_actor_id", "resource_version",
+    ])
+    .where("secret_digest", "=", lookup)
+    .forUpdate()
+    .executeTakeFirst();
+  const stored = row === undefined ? Buffer.alloc(32) : Buffer.from(row.secret_digest);
+  const matches = timingSafeEqual(lookup, stored);
+  if (!wellFormed || !matches || row === undefined) invitationNotFound();
+  return {
+    invitationId: row.invitation_id,
+    tenantId: row.tenant_id,
+    membershipId: row.membership_id,
+    invitedByActorId: row.invited_by_actor_id,
+    role: row.role,
+    normalizedEmailHmac: Buffer.from(row.normalized_email_hmac),
+    status: row.status,
+    expiresAt: row.expires_at,
+    acceptedActorId: row.accepted_actor_id,
+    resourceVersion: safeVersion(row.resource_version),
+  };
+}
+
 export async function lockInvitationBySecret(
   trx: Transaction<RuntimeDatabase>, secret: string,
 ): Promise<StoredInvitationCredential> {

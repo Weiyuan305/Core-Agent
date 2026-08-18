@@ -11,12 +11,25 @@ create table email_verification_transactions (
     check (octet_length(binding_ciphertext) between 33 and 65536),
   verified_provider_subject_hmac bytea
     check (verified_provider_subject_hmac is null or octet_length(verified_provider_subject_hmac) = 32),
+  provider_start_status text not null
+    constraint email_verification_provider_start_status_check
+    check (provider_start_status in ('reserved', 'finalized', 'failed')),
+  provider_start_attempt integer not null default 1
+    constraint email_verification_provider_start_attempt_check
+    check (provider_start_attempt between 1 and 100),
+  provider_start_finalized_at timestamptz,
+  provider_start_failed_at timestamptz,
   status text not null check (status in ('pending', 'consumed', 'expired')),
   expires_at timestamptz not null,
   consumed_at timestamptz,
   created_at timestamptz not null,
   updated_at timestamptz not null,
   check (expires_at > created_at),
+  constraint email_verification_provider_start_state_check check (
+    (provider_start_status = 'reserved' and provider_start_finalized_at is null and provider_start_failed_at is null)
+    or (provider_start_status = 'finalized' and provider_start_finalized_at is not null and provider_start_failed_at is null)
+    or (provider_start_status = 'failed' and provider_start_finalized_at is null and provider_start_failed_at is not null)
+  ),
   check ((status = 'consumed') = (consumed_at is not null)),
   check (updated_at >= created_at)
 );
