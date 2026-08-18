@@ -16,8 +16,13 @@ import {
 import { Pool } from "pg";
 
 import { buildIdentityGatewayApp } from "../../src/app.js";
-import type { AuthProviderAdapter, VerifiedProviderSubject } from "../../src/providers/auth-provider.js";
+import {
+  canonicalProviderStartPayloadHash,
+  type AuthProviderAdapter,
+  type VerifiedProviderSubject,
+} from "../../src/providers/auth-provider.js";
 import { ProviderFailure } from "../../src/providers/provider-errors.js";
+import { SupabaseAuthProvider, type SupabaseClientFactory } from "../../src/providers/supabase-auth-provider.js";
 import { sealRecoveryCookie } from "../../src/security.js";
 import { buildProductionIdentityGateway, identityGatewayServerTestInternals } from "../../src/server.js";
 
@@ -1984,6 +1989,245 @@ test("production composition atomically verifies email, registers Task 3, issues
     } finally {
       await rm(secretDirectory, { recursive: true, force: true });
     }
+  } finally {
+    await db.destroy();
+  }
+});
+
+test("production Fastify and Supabase adapter settle expired and concurrent provider-started password resets", async () => {
+  const pool = new Pool({ connectionString: databaseUrl });
+  const db = createRuntimeDatabase(pool);
+  await pool.query("drop schema public cascade; create schema public");
+  await applyMigrations(pool, migrations);
+  const key = Buffer.alloc(32, 0x7a);
+  const piiProtector = identityGatewayServerTestInternals.aesProtector(key, "round-nine-private-pii");
+  const operations = identityGatewayServerTestInternals.productionOperations(db, key, piiProtector);
+  const providerStore = identityGatewayServerTestInternals.oauthStore(db);
+  const providerProtector = identityGatewayServerTestInternals.aesProtector(Buffer.alloc(32, 0x7b), "oauth-transaction");
+  const flowCookieKey = Buffer.alloc(32, 0x7c);
+  const normalizedEmail = "round-nine-reset@example.test";
+  const providerSubject = "provider_round_nine_reset";
+  let gatewayNow = (await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now;
+  let providerEvidenceAt = "2020-01-01T00:00:00.000Z";
+  let providerUpdates = 0;
+  let providerInspections = 0;
+  let providerExchanges = 0;
+  let blockExchange = false;
+  let releaseExchange!: () => void;
+  let signalExchangeStarted!: () => void;
+  let exchangeRelease = Promise.resolve();
+  let exchangeStarted = Promise.resolve();
+  const resetBarrier = () => {
+    blockExchange = true;
+    exchangeRelease = new Promise<void>((resolve) => { releaseExchange = resolve; });
+    exchangeStarted = new Promise<void>((resolve) => { signalExchangeStarted = resolve; });
+  };
+  const providerUser = (updatedAt: string) => ({
+    id: providerSubject,
+    email: normalizedEmail,
+    email_confirmed_at: "2026-08-01T00:00:00.000Z",
+    updated_at: updatedAt,
+    app_metadata: { provider: "email" },
+  });
+  const clientFactory: SupabaseClientFactory = (_url, _key, options) => {
+    const authOptions = (options as { readonly auth: {
+      readonly storageKey: string;
+      readonly storage: {
+        getItem(key: string): Promise<string | null> | string | null;
+        setItem(key: string, value: string): Promise<void> | void;
+      };
+    } }).auth;
+    return { auth: {
+      async resetPasswordForEmail() {
+        await authOptions.storage.setItem(`${authOptions.storageKey}-flows-code-verifier`, JSON.stringify(["roundnineflow"]));
+        await authOptions.storage.setItem(
+          `${authOptions.storageKey}-flow-roundnineflow-code-verifier`, JSON.stringify(`${"r".repeat(43)}/recovery`),
+        );
+        return { data: {}, error: null };
+      },
+      async exchangeCodeForSession() {
+        providerExchanges += 1;
+        if (blockExchange) {
+          signalExchangeStarted();
+          await exchangeRelease;
+          blockExchange = false;
+        }
+        return { data: {
+          user: providerUser(providerEvidenceAt),
+          session: { access_token: "provider-access-not-returned", refresh_token: "provider-refresh-not-returned" },
+        }, error: null };
+      },
+      admin: {
+        async updateUserById() {
+          providerUpdates += 1;
+          providerEvidenceAt = (await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now.toISOString();
+          gatewayNow = new Date(providerEvidenceAt);
+          return { data: { user: providerUser(providerEvidenceAt) }, error: null };
+        },
+        async getUserById() {
+          providerInspections += 1;
+          return { data: { user: providerUser(providerEvidenceAt) }, error: null };
+        },
+      },
+    } } as never;
+  };
+  const provider = new SupabaseAuthProvider({
+    supabaseUrl: "https://provider.example.test",
+    publishableKey: "round-nine-publishable-key",
+    serviceRoleKey: "round-nine-service-role-key",
+    appleRedirectUris: ["https://app.example.test/auth/apple/callback", "coreagent://auth/apple/callback"],
+    passwordResetRedirectUri: "https://app.example.test/auth/password/reset/callback",
+    emailVerificationRedirectUri: "https://identity.example.test/auth/v1/email/verification",
+    transactionStore: providerStore,
+    transactionProtector: providerProtector,
+    createClient: clientFactory,
+    now: () => new Date(gatewayNow),
+    randomBytes: (length) => Uint8Array.from({ length }, (_, index) => (index + 17) % 256),
+  });
+  const config = {
+    publicOrigins: new Set(["https://app.example.test"]), cookieHost: "identity.example.test",
+    publicBaseUrl: "https://identity.example.test", providerUrl: "https://provider.example.test",
+    appleWebRedirectUris: new Set(["https://app.example.test/auth/apple/callback"]),
+    appleNativeRedirectUris: new Set(["coreagent://auth/apple/callback"]),
+    passwordResetRedirectUri: "https://app.example.test/auth/password/reset/callback",
+    publicAuthEnabled: true,
+  };
+  const headers = {
+    host: "identity.example.test", origin: "https://app.example.test", "content-type": "application/json",
+  };
+  const completionPayload = (idempotencyKey: string) => {
+    const facts = {
+      schema_version: 1 as const, idempotency_key: idempotencyKey,
+      authorization_code: "round-nine-one-time-code", new_password: "round-nine-replacement-password",
+    };
+    return {
+      ...facts,
+      payload_hash: canonicalPayloadHash({
+        schema_version: facts.schema_version, idempotency_key: facts.idempotency_key,
+        reset_code_digest: sensitiveDigest(facts.authorization_code),
+        new_value_digest: sensitiveDigest(facts.new_password),
+      }),
+    };
+  };
+  const startProviderReset = async (idempotencyKey: string) => {
+    const expectedSubject = await operations.preparePasswordReset(normalizedEmail);
+    const binding = await provider.beginPasswordReset({
+      email: normalizedEmail, idempotencyKey,
+      payloadHash: canonicalProviderStartPayloadHash({ flowKind: "password_reset", idempotencyKey, normalizedEmail }),
+      expectedSubject,
+    });
+    return {
+      binding,
+      cookie: `core_agent_recovery=${sealRecoveryCookie(flowCookieKey, {
+        transactionId: binding.transaction_id, state: binding.state, expiresAt: binding.expires_at,
+      })}`,
+    };
+  };
+  try {
+    const verification = await operations.beginEmailVerification({
+      idempotencyKey: "round-nine-registration", payloadHash: canonicalEmailVerificationStartPayloadHash({
+        idempotencyKey: "round-nine-registration", normalizedEmail, clientKind: "web", flowKind: "b2c",
+      }), normalizedEmail, clientKind: "web",
+    });
+    await operations.finalizeEmailVerificationStart({
+      verificationId: verification.verificationId, outcome: "finalized", expectedProviderSubject: providerSubject,
+    });
+    await operations.admitEmailVerificationProviderAttempt({
+      verificationId: verification.verificationId, verificationProofDigest: `sha256:${"d".repeat(64)}`,
+    });
+    gatewayNow = (await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now;
+    const verifiedSubject = {
+      provider: "supabase" as const, providerSubject, identityKind: "email_password" as const,
+      normalizedEmail, verifiedAt: gatewayNow.toISOString(),
+    };
+    await operations.checkpointEmailVerification({ verificationId: verification.verificationId, verifiedSubject });
+    const registered = await operations.completeEmailVerification({
+      verificationId: verification.verificationId,
+      idempotencyKey: "round-nine-registration-session", payloadHash: `sha256:${"e".repeat(64)}`,
+    });
+
+    const concurrentSession = await issueCoreSession({ db }, {
+      sessionId: "session_round_nine_concurrent", actorId: registered.actorId,
+      authSubjectId: registered.authSubjectId, clientKind: "iphone",
+    });
+    const concurrentPayload = completionPayload("round-nine-concurrent-completion");
+    const concurrentStart = await startProviderReset("round-nine-concurrent-start");
+    let failCoreOnce = true;
+    const concurrentApp = await buildIdentityGatewayApp({
+      config, provider, flowCookieKey, now: () => new Date(gatewayNow),
+      operations: {
+        ...operations,
+        async executeAuthorityCommand(input) {
+          if (input.kind === "password_reset_completed" && failCoreOnce) {
+            failCoreOnce = false;
+            throw new Error("forced round-nine post-provider Core rollback");
+          }
+          return operations.executeAuthorityCommand(input);
+        },
+      },
+    });
+    resetBarrier();
+    const winnerRequest = concurrentApp.inject({
+      method: "POST", url: "/auth/v1/password/reset/complete",
+      headers: { ...headers, cookie: concurrentStart.cookie }, payload: concurrentPayload,
+    });
+    await exchangeStarted;
+    gatewayNow = (await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now;
+    const loser = await concurrentApp.inject({
+      method: "POST", url: "/auth/v1/password/reset/complete",
+      headers: { ...headers, cookie: concurrentStart.cookie }, payload: concurrentPayload,
+    });
+    assert.equal(loser.statusCode, 503, loser.body);
+    assert.doesNotMatch(String(loser.headers["set-cookie"] ?? ""), /core_agent_recovery=;[^\n]*Max-Age=0/u);
+    assert.equal(providerUpdates, 0);
+    releaseExchange();
+    const winner = await winnerRequest;
+    assert.equal(winner.statusCode, 500, winner.body);
+    assert.doesNotMatch(String(winner.headers["set-cookie"] ?? ""), /core_agent_recovery=;[^\n]*Max-Age=0/u);
+    assert.equal(providerExchanges, 1);
+    assert.equal(providerUpdates, 1);
+    assert.equal((await pool.query("select status from core_sessions where session_id = $1", [concurrentSession.session.session_id])).rows[0]?.status, "active");
+    const loserRetry = await concurrentApp.inject({
+      method: "POST", url: "/auth/v1/password/reset/complete",
+      headers: { ...headers, cookie: concurrentStart.cookie }, payload: concurrentPayload,
+    });
+    assert.equal(loserRetry.statusCode, 200, loserRetry.body);
+    assert.equal(providerExchanges, 1);
+    assert.equal(providerUpdates, 1);
+    assert.equal((await pool.query("select status from core_sessions where session_id = $1", [concurrentSession.session.session_id])).rows[0]?.status, "revoked");
+    assert.equal((await pool.query("select status from oauth_transactions where oauth_transaction_id = $1", [concurrentStart.binding.transaction_id])).rows[0]?.status, "consumed");
+    assert.equal(providerInspections >= 1, true);
+    await concurrentApp.close();
+
+    const expiredPayload = completionPayload("round-nine-expired-completion");
+    const expiredStart = await startProviderReset("round-nine-expired-start");
+    await providerStore.beginPasswordResetCompletion!({
+      transactionId: expiredStart.binding.transaction_id,
+      payloadHash: expiredPayload.payload_hash,
+      settlementNotAfter: new Date(Date.parse(expiredStart.binding.expires_at) + 30 * 60_000).toISOString(),
+    });
+    await pool.query(`with bounds as (select clock_timestamp() - interval '31 minutes' as started_at)
+      update oauth_transactions set provider_completion_started_at = bounds.started_at,
+        provider_settlement_expires_at = bounds.started_at + interval '30 minutes', updated_at = bounds.started_at
+      from bounds where oauth_transaction_id = $1`, [expiredStart.binding.transaction_id]);
+    gatewayNow = (await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now;
+    const expiredApp = await buildIdentityGatewayApp({ config, provider, operations, flowCookieKey, now: () => new Date(gatewayNow) });
+    const expiredResponse = await expiredApp.inject({
+      method: "POST", url: "/auth/v1/password/reset/complete",
+      headers: { ...headers, cookie: expiredStart.cookie }, payload: expiredPayload,
+    });
+    assert.equal(expiredResponse.statusCode, 401, expiredResponse.body);
+    assert.match(String(expiredResponse.headers["set-cookie"]), /core_agent_recovery=;[^\n]*Max-Age=0/u);
+    assert.deepEqual((await pool.query(`select status, provider_completion_status,
+      provider_completion_started_at, expected_provider_subject_ciphertext, provider_subject_ciphertext,
+      provider_completion_payload_hash, provider_settlement_expires_at, provider_completed_at, provider_evidence_at
+      from oauth_transactions where oauth_transaction_id = $1`, [expiredStart.binding.transaction_id])).rows[0], {
+      status: "expired", provider_completion_status: "pending", provider_completion_started_at: null,
+      expected_provider_subject_ciphertext: null, provider_subject_ciphertext: null,
+      provider_completion_payload_hash: null, provider_settlement_expires_at: null,
+      provider_completed_at: null, provider_evidence_at: null,
+    });
+    await expiredApp.close();
   } finally {
     await db.destroy();
   }

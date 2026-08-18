@@ -216,7 +216,7 @@ export async function registerEmailRoutes(app: FastifyInstance, dependencies: Id
       new_value_digest: `sha256:${createHash("sha256").update(body.new_password, "utf8").digest("hex")}`,
     });
     if (body.payload_hash !== expectedPayloadHash) throw new IdentityGatewayFailure("INVALID_REQUEST");
-    const subject = await dependencies.provider.completePasswordReset({
+    const completion = await dependencies.provider.completePasswordReset({
       binding: {
         transaction_id: binding.transactionId, state: binding.state, expires_at: binding.expiresAt,
         settlement_not_after: binding.settlementNotAfter,
@@ -225,10 +225,25 @@ export async function registerEmailRoutes(app: FastifyInstance, dependencies: Id
       new_password: body.new_password,
       payloadHash: expectedPayloadHash,
     });
+    if ("kind" in completion) {
+      if (completion.kind !== "password_reset_settlement_checkpoint") {
+        throw new IdentityGatewayFailure("INTERNAL_ERROR");
+      }
+      const settlement = await dependencies.operations.executeAuthorityCommand({
+        kind: "password_reset_settlement_checkpoint",
+        payload: {
+          idempotency_key: body.idempotency_key,
+          payload_hash: body.payload_hash,
+          transaction_id: binding.transactionId,
+        },
+      }) as { readonly kind?: unknown };
+      if (settlement.kind === "in_progress") throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+      throw new IdentityGatewayFailure("INTERNAL_ERROR");
+    }
     await dependencies.operations.executeAuthorityCommand({
       kind: "password_reset_completed",
       payload: { idempotency_key: body.idempotency_key, payload_hash: body.payload_hash, transaction_id: binding.transactionId },
-      verifiedSubject: subject,
+      verifiedSubject: completion,
     });
     clearRecoveryCookie(reply);
     return { schema_version: 1, accepted: true };

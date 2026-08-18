@@ -25,7 +25,7 @@
     ]
   },
   "identityGatewayPostgres": {
-    "testCount": 1
+    "testCount": 2
   },
   "controlPlaneApiPostgres": {
     "testCount": 14

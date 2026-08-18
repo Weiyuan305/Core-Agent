@@ -108,6 +108,10 @@ export interface PasswordResetCompletionInput {
   readonly payloadHash: string;
 }
 
+export interface PasswordResetSettlementCheckpoint {
+  readonly kind: "password_reset_settlement_checkpoint";
+}
+
 export interface AuthProviderAdapter {
   signUpEmail(input: EmailCredentialInput): Promise<{
     readonly kind: "verification_pending";
@@ -122,7 +126,7 @@ export interface AuthProviderAdapter {
   verifyCurrentSubject(input: ProviderProof): Promise<VerifiedProviderSubject>;
   reauthenticatePassword(input: EmailCredentialInput): Promise<VerifiedProviderSubject>;
   beginPasswordReset(input: PasswordResetStartInput): Promise<PasswordResetStart>;
-  completePasswordReset(input: PasswordResetCompletionInput): Promise<VerifiedProviderSubject>;
+  completePasswordReset(input: PasswordResetCompletionInput): Promise<VerifiedProviderSubject | PasswordResetSettlementCheckpoint>;
   linkApple(input: AppleLinkInput): Promise<VerifiedProviderSubject>;
   revokeCurrentProviderSession(input: ProviderProof): Promise<void>;
   deleteProviderSubject(providerSubject: string): Promise<void>;

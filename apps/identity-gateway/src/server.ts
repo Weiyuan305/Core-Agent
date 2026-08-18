@@ -841,6 +841,41 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
           }
         }, { isolationLevel: "serializable" });
       }
+      if (input.kind === "password_reset_settlement_checkpoint") {
+        const payload = input.payload as { idempotency_key: string; payload_hash: string; transaction_id: string };
+        const settlement = await withDatabaseTransactionRetry(db, async (trx) => {
+          const transaction = await trx.selectFrom("oauth_transactions").selectAll()
+            .where("oauth_transaction_id", "=", payload.transaction_id).forUpdate().executeTakeFirst();
+          if (transaction === undefined || transaction.flow_kind !== "password_reset"
+            || transaction.status !== "pending"
+            || (transaction.provider_completion_status !== "provider_started"
+              && transaction.provider_completion_status !== "provider_completed")
+            || transaction.provider_subject_ciphertext === null
+            || transaction.provider_completion_payload_hash !== payload.payload_hash
+            || transaction.provider_settlement_expires_at === null) {
+            throw new DomainError("UNAUTHENTICATED", "Password-reset settlement checkpoint is invalid");
+          }
+          const now = (await sql<{ now: Date }>`select clock_timestamp() as now`.execute(trx)).rows[0]?.now;
+          if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
+            throw new DomainError("INTERNAL_ERROR", "Password-reset database clock is unavailable");
+          }
+          if (transaction.provider_settlement_expires_at.getTime() > now.getTime()) {
+            return { kind: "in_progress" as const };
+          }
+          await trx.updateTable("oauth_transactions").set({
+            status: "expired", pkce_verifier_ciphertext: Buffer.from([0]),
+            provider_completion_status: "pending", provider_completion_started_at: null,
+            expected_provider_subject_ciphertext: null, provider_subject_ciphertext: null,
+            provider_completion_payload_hash: null, provider_settlement_expires_at: null,
+            provider_completed_at: null, provider_evidence_at: null, updated_at: now,
+          }).where("oauth_transaction_id", "=", payload.transaction_id).executeTakeFirstOrThrow();
+          return { kind: "expired" as const };
+        }, { isolationLevel: "serializable" });
+        if (settlement.kind === "expired") {
+          throw new DomainError("UNAUTHENTICATED", "Password-reset settlement authority expired");
+        }
+        return settlement;
+      }
       if (input.kind === "password_reset_completed" && input.verifiedSubject !== undefined) {
         const payload = input.payload as { idempotency_key: string; payload_hash: string; transaction_id: string };
         const settlement = await withDatabaseTransactionRetry(db, async (trx) => {
@@ -849,6 +884,7 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
           if (transaction === undefined || transaction.flow_kind !== "password_reset"
             || transaction.status !== "pending" || transaction.provider_completion_status !== "provider_completed"
             || transaction.provider_subject_ciphertext === null
+            || transaction.provider_completion_payload_hash !== payload.payload_hash
             || transaction.provider_settlement_expires_at === null) {
             throw new DomainError("UNAUTHENTICATED", "Password-reset completion authority is invalid");
           }

@@ -19,6 +19,7 @@ import type {
   ProviderClientKind,
   ProviderProof,
   PasswordResetCompletionInput,
+  PasswordResetSettlementCheckpoint,
   PasswordResetStart,
   PasswordResetStartInput,
   VerifiedProviderSubject,
@@ -198,6 +199,10 @@ interface ProviderStartMetadata {
 }
 
 const oauthTransactionTtlMs = 5 * 60 * 1_000;
+// A loser may observe the pre-effect admin timestamp while the admitted provider
+// update is still running. Only this bounded fresh interval is retryable; stale,
+// mismatched, malformed, and future evidence remain terminal.
+const passwordResetProviderEffectLeaseMs = 30 * 1_000;
 const transientRefreshPlaceholder = "core-agent-transient-proof";
 const utf8 = new TextEncoder();
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
@@ -1182,7 +1187,9 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
     return this.#completeAppleTransaction(parsed, "apple_link", actorId);
   }
 
-  async completePasswordReset(input: PasswordResetCompletionInput): Promise<VerifiedProviderSubject> {
+  async completePasswordReset(
+    input: PasswordResetCompletionInput,
+  ): Promise<VerifiedProviderSubject | PasswordResetSettlementCheckpoint> {
     const binding = ownData(input, "binding");
     const transactionId = ownString(binding, "transaction_id");
     const authorizationCode = ownString(input, "authorization_code");
@@ -1247,12 +1254,23 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
         storage.clear();
       }
     };
-    const checkpointEvidence = async (subject: VerifiedProviderSubject, evidenceAt: string, startedAt: string | undefined): Promise<void> => {
+    const checkpointEvidence = async (
+      subject: VerifiedProviderSubject,
+      evidenceAt: string,
+      startedAt: string | undefined,
+      allowFreshInProgress = false,
+    ): Promise<void> => {
       const startedTimestamp = startedAt === undefined ? undefined : strictUtcMilliseconds(startedAt);
       const evidenceTimestamp = strictUtcMilliseconds(evidenceAt);
       const now = this.#now().getTime();
-      if (startedTimestamp === undefined || evidenceTimestamp === undefined
-        || evidenceTimestamp < startedTimestamp || evidenceTimestamp > now) {
+      if (startedTimestamp === undefined || evidenceTimestamp === undefined || startedTimestamp > now
+        || evidenceTimestamp > now) {
+        throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+      }
+      if (evidenceTimestamp < startedTimestamp) {
+        if (allowFreshInProgress && now < startedTimestamp + passwordResetProviderEffectLeaseMs) {
+          throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+        }
         throw new ProviderFailure("AUTH_CALLBACK_INVALID");
       }
       await safeProviderCall(() => checkpointCompletion.call(this.#transactionStore, {
@@ -1274,13 +1292,15 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       const settlementExpiresAt = transaction.providerSettlementExpiresAt === undefined
         ? undefined : strictUtcMilliseconds(transaction.providerSettlementExpiresAt);
       if (transaction.providerSubjectCiphertext === undefined || transaction.providerCompletionPayloadHash !== payloadHash
-        || settlementExpiresAt === undefined || settlementExpiresAt > bindingSettlementNotAfter
-        || settlementExpiresAt <= this.#now().getTime()) {
+        || settlementExpiresAt === undefined || settlementExpiresAt > bindingSettlementNotAfter) {
         throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+      }
+      if (settlementExpiresAt <= this.#now().getTime()) {
+        return Object.freeze({ kind: "password_reset_settlement_checkpoint" as const });
       }
       const subject = await this.#readPasswordResetSubject(transaction.providerSubjectCiphertext);
       const recoveredEvidence = await inspectEvidence(subject);
-      await checkpointEvidence(subject, recoveredEvidence, transaction.providerCompletionStartedAt);
+      await checkpointEvidence(subject, recoveredEvidence, transaction.providerCompletionStartedAt, true);
       return subject;
     }
 

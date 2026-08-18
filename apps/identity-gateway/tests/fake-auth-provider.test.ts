@@ -149,12 +149,13 @@ test("deterministic fake implements the closed adapter and returns only verified
   }), "AUTH_INVALID");
   const binding = await provider.beginPasswordReset(resetStartInput(credential.email, "provider-subject-1"));
   assert.equal(binding.expires_at, "2026-08-17T01:07:03.000Z");
-  assert.equal((await provider.completePasswordReset({
+  const completedReset = await provider.completePasswordReset({
     binding: resetCompletionBinding(binding),
     authorization_code: "fake-recovery-code",
     new_password: "a new sufficiently long password",
     payloadHash: `sha256:${"a".repeat(64)}`,
-  })).providerSubject, "provider-subject-1");
+  });
+  assert.equal("providerSubject" in completedReset ? completedReset.providerSubject : undefined, "provider-subject-1");
   await expectFailure(() => provider.signInEmail(credential), "AUTH_INVALID");
   assert.equal((await provider.signInEmail({
     email: credential.email,
