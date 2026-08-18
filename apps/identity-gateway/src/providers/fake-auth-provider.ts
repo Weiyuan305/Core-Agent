@@ -21,6 +21,7 @@ import type {
 } from "./auth-provider.js";
 import { canonicalProviderStartPayloadHash } from "./auth-provider.js";
 import { ProviderFailure } from "./provider-errors.js";
+import { isOAuthProofString, isPkceCodeVerifier } from "../oauth-proof.js";
 
 export interface FakeAuthProviderSubject {
   readonly email: string;
@@ -159,7 +160,7 @@ function readAppleStart(input: AppleAuthorizationInput, flowKind: "sign_in" | "l
     if (callerNonce !== undefined || callerChallenge !== undefined || callerMethod !== undefined) {
       throw new ProviderFailure("AUTH_INVALID");
     }
-  } else if (callerNonce === undefined || callerNonce.length < 8
+  } else if (!isOAuthProofString(callerNonce)
     || callerChallenge === undefined || !/^[A-Za-z0-9_-]{43}$/u.test(callerChallenge)
     || callerMethod !== "S256") {
     throw new ProviderFailure("AUTH_INVALID");
@@ -494,11 +495,10 @@ export class FakeAuthProvider implements AuthProviderAdapter {
     const nonce = ownString(input, "nonce");
     const verifier = ownString(input, "pkce_code_verifier");
     const clientKind = readClientKind(ownData(input, "client_kind"));
-    if (transactionId === undefined || authorizationCode === undefined || authorizationCode.length === 0
-      || state === undefined || clientKind === undefined
+    if (transactionId === undefined || !isOAuthProofString(authorizationCode)
+      || !isOAuthProofString(state) || clientKind === undefined
       || (clientKind === "web" && (nonce !== undefined || verifier !== undefined))
-      || (clientKind !== "web" && (nonce === undefined || nonce.length < 8
-        || verifier === undefined || !/^[A-Za-z0-9._~-]{43}$/u.test(verifier)))) {
+      || (clientKind !== "web" && (!isOAuthProofString(nonce) || !isPkceCodeVerifier(verifier)))) {
       throw new ProviderFailure("AUTH_CALLBACK_INVALID");
     }
     const transaction = this.#transactions.get(transactionId);

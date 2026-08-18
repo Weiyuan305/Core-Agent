@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import type {
@@ -370,6 +371,119 @@ test("deterministic fake rejects changed Apple callback authority before returni
     pkce_code_verifier: "b".repeat(43),
     client_kind: "iphone",
   }), "AUTH_CALLBACK_INVALID");
+});
+
+test("deterministic fake native Apple proofs use Unicode code points and RFC 7636 verifier bounds", async () => {
+  const unicodeNonce = "😀".repeat(4_096);
+  for (const verifierLength of [43, 44, 128]) {
+    const provider = createProvider();
+    const verifier = "v".repeat(verifierLength);
+    const challenge = createHash("sha256").update(verifier).digest("base64url");
+    const idempotencyKey = `idem_fake_native_${verifierLength}`;
+    const start = await provider.beginApple({
+      schema_version: 1,
+      idempotency_key: idempotencyKey,
+      payload_hash: canonicalProviderStartPayloadHash({
+        flowKind: "apple_sign_in", idempotencyKey, clientKind: "iphone",
+        redirectUri: "coreagent://auth/callback", nonce: unicodeNonce, pkceChallenge: challenge,
+      }),
+      client_kind: "iphone",
+      redirect_uri: "coreagent://auth/callback",
+      nonce: unicodeNonce,
+      pkce_code_challenge: challenge,
+      pkce_code_challenge_method: "S256",
+    });
+    assert.equal((await provider.completeApple({
+      schema_version: 1,
+      idempotency_key: `idem_fake_native_callback_${verifierLength}`,
+      payload_hash: payloadHash,
+      transaction_id: start.transaction_id,
+      authorization_code: "fake-native-authorization-code",
+      state: start.transaction_id,
+      nonce: unicodeNonce,
+      pkce_code_verifier: verifier,
+      client_kind: "iphone",
+    })).identityKind, "apple");
+  }
+
+  for (const invalidVerifier of ["v".repeat(42), "v".repeat(129), `${"v".repeat(42)}!`]) {
+    const provider = createProvider();
+    const challenge = createHash("sha256").update(invalidVerifier).digest("base64url");
+    const idempotencyKey = `idem_fake_invalid_${invalidVerifier.length}_${invalidVerifier.at(-1)}`;
+    const start = await provider.beginApple({
+      schema_version: 1,
+      idempotency_key: idempotencyKey,
+      payload_hash: canonicalProviderStartPayloadHash({
+        flowKind: "apple_sign_in", idempotencyKey, clientKind: "iphone",
+        redirectUri: "coreagent://auth/callback", nonce: "native-nonce-proof", pkceChallenge: challenge,
+      }),
+      client_kind: "iphone",
+      redirect_uri: "coreagent://auth/callback",
+      nonce: "native-nonce-proof",
+      pkce_code_challenge: challenge,
+      pkce_code_challenge_method: "S256",
+    });
+    await expectFailure(() => provider.completeApple({
+      schema_version: 1,
+      idempotency_key: "idem_fake_invalid_callback",
+      payload_hash: payloadHash,
+      transaction_id: start.transaction_id,
+      authorization_code: "fake-native-authorization-code",
+      state: start.transaction_id,
+      nonce: "native-nonce-proof",
+      pkce_code_verifier: invalidVerifier,
+      client_kind: "iphone",
+    }), "AUTH_CALLBACK_INVALID");
+  }
+
+  const oversizedNonce = "😀".repeat(4_097);
+  const idempotencyKey = "idem_fake_oversized_nonce";
+  await expectFailure(() => createProvider().beginApple({
+    schema_version: 1,
+    idempotency_key: idempotencyKey,
+    payload_hash: canonicalProviderStartPayloadHash({
+      flowKind: "apple_sign_in", idempotencyKey, clientKind: "iphone",
+      redirectUri: "coreagent://auth/callback", nonce: oversizedNonce, pkceChallenge: "a".repeat(43),
+    }),
+    client_kind: "iphone",
+    redirect_uri: "coreagent://auth/callback",
+    nonce: oversizedNonce,
+    pkce_code_challenge: "a".repeat(43),
+    pkce_code_challenge_method: "S256",
+  }), "AUTH_INVALID");
+
+  const stateProvider = createProvider();
+  const stateVerifier = "v".repeat(43);
+  const stateChallenge = createHash("sha256").update(stateVerifier).digest("base64url");
+  const stateIdempotencyKey = "idem_fake_oversized_state";
+  const stateStart = await stateProvider.beginApple({
+    schema_version: 1,
+    idempotency_key: stateIdempotencyKey,
+    payload_hash: canonicalProviderStartPayloadHash({
+      flowKind: "apple_sign_in", idempotencyKey: stateIdempotencyKey, clientKind: "iphone",
+      redirectUri: "coreagent://auth/callback", nonce: "native-nonce-proof", pkceChallenge: stateChallenge,
+    }),
+    client_kind: "iphone",
+    redirect_uri: "coreagent://auth/callback",
+    nonce: "native-nonce-proof",
+    pkce_code_challenge: stateChallenge,
+    pkce_code_challenge_method: "S256",
+  });
+  const stateCallback = {
+    schema_version: 1 as const,
+    idempotency_key: "idem_fake_state_callback",
+    payload_hash: payloadHash,
+    transaction_id: stateStart.transaction_id,
+    authorization_code: "fake-native-authorization-code",
+    state: stateStart.transaction_id,
+    nonce: "native-nonce-proof",
+    pkce_code_verifier: stateVerifier,
+    client_kind: "iphone" as const,
+  };
+  await expectFailure(() => stateProvider.completeApple({
+    ...stateCallback, state: "😀".repeat(4_097),
+  }), "AUTH_CALLBACK_INVALID");
+  assert.equal((await stateProvider.completeApple(stateCallback)).identityKind, "apple");
 });
 
 test("deterministic fake revokes the current proof and deletes a provider subject", async () => {

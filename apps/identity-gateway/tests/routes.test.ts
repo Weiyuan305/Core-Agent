@@ -127,6 +127,7 @@ async function buildApp(
       readonly clientIdentifier?: unknown;
     }) => number | null;
     readonly trustedProxyAddresses?: ReadonlySet<string>;
+    readonly invitationSessionClientKind?: "web" | "iphone" | "macos";
   } = {},
 ): Promise<FastifyInstance> {
   const path = "../src/app.ts";
@@ -210,7 +211,7 @@ async function buildApp(
           schema_version: 1, tenant_id: "tenant_01", invitation_resource_version: 2,
           membership_id: "membership_01", membership_resource_version: 1, role: "admin",
           issuedSession: {
-            session: { schema_version: 1, actor_id: "actor_server", actor_resource_version: 1, session_id: "session_invitation", session_resource_version: 1, client_kind: "web", idle_expires_at: "2026-08-18T00:00:00.000Z", absolute_expires_at: "2026-09-16T00:00:00.000Z", reauthentication_required: false },
+            session: { schema_version: 1, actor_id: "actor_server", actor_resource_version: 1, session_id: "session_invitation", session_resource_version: 1, client_kind: options.invitationSessionClientKind ?? "web", idle_expires_at: "2026-08-18T00:00:00.000Z", absolute_expires_at: "2026-09-16T00:00:00.000Z", reauthentication_required: false },
             sessionSecret: secret, csrfSecret: csrf,
           },
         };
@@ -1677,6 +1678,100 @@ test("Apple invitation proof preflight matches the exact 4096-character OAuth bo
     },
   });
   assert.throws(() => assertInvitationAcceptancePayloadHash(oversizedUnicodePayload), /INVALID_REQUEST/u);
+});
+
+test("native Apple route families accept Unicode OAuth proofs and RFC 7636 verifier lengths", async () => {
+  const unicodeProof = "😀".repeat(4_096);
+  const nativeRedirect = "coreagent://auth/apple/callback";
+
+  for (const [url, extra] of [
+    ["/auth/v1/apple/start", {}],
+    ["/auth/v1/apple/link/start", { password: "correct-horse" }],
+  ] as const) {
+    const calls: Array<{ name: string; input: unknown }> = [];
+    const app = await buildApp(calls);
+    const response = await app.inject({
+      method: "POST", url,
+      headers: {
+        host, "content-type": "application/json",
+        ...(url.includes("/link/") ? { authorization: `Bearer ${secret}` } : {}),
+      },
+      payload: {
+        ...idem, ...extra, client_kind: "iphone", redirect_uri: nativeRedirect,
+        nonce: unicodeProof, pkce_code_challenge: "a".repeat(43), pkce_code_challenge_method: "S256",
+      },
+    });
+    assert.equal(response.statusCode, 200, `${url}: ${response.body}`);
+    assert.equal(calls.some(({ name }) => name === (url.includes("/link/")
+      ? "reauthenticateAndBeginAppleLink" : "beginApple")), true);
+    await app.close();
+  }
+
+  for (const [url, verifierLength] of [
+    ["/auth/v1/apple/callback", 44],
+    ["/auth/v1/apple/link/callback", 128],
+  ] as const) {
+    const calls: Array<{ name: string; input: unknown }> = [];
+    const app = await buildApp(calls);
+    const facts = {
+      schema_version: 1 as const,
+      idempotency_key: `idem_native_route_${verifierLength}`,
+      client_kind: "iphone" as const,
+      transaction_id: url.includes("/link/") ? "oauth_link" : "oauth_native",
+      authorization_code: "opaque-native-authorization-code",
+      state: unicodeProof,
+      nonce: unicodeProof,
+      pkce_code_verifier: "v".repeat(verifierLength),
+    };
+    const response = await app.inject({
+      method: "POST", url,
+      headers: {
+        host, "content-type": "application/json",
+        ...(url.includes("/link/") ? { authorization: `Bearer ${secret}` } : {}),
+      },
+      payload: appleCallbackPayload(url.includes("/link/") ? "apple_link" : "apple_sign_in", facts),
+    });
+    assert.equal(response.statusCode, 200, `${url}: ${response.body}`);
+    assert.equal(calls.some(({ name }) => name === (url.includes("/link/") ? "linkApple" : "completeApple")), true);
+    await app.close();
+  }
+
+  const invitationCalls: Array<{ name: string; input: unknown }> = [];
+  const invitationApp = await buildApp(invitationCalls, { invitationSessionClientKind: "macos" });
+  const invitation = await invitationApp.inject({
+    method: "POST", url: "/auth/v1/invitations/accept",
+    headers: { host, "content-type": "application/json" },
+    payload: invitationAcceptancePayload({
+      schema_version: 1, idempotency_key: "idem_native_invitation_boundary",
+      expected_resource_version: 1, invitation_secret: "i".repeat(43),
+      authentication_proof: {
+        kind: "apple", client_kind: "macos", transaction_id: "oauth_invitation_native",
+        authorization_code: unicodeProof, state: unicodeProof, nonce: unicodeProof,
+        pkce_code_verifier: "v".repeat(44),
+      },
+    }),
+  });
+  assert.equal(invitation.statusCode, 200, invitation.body);
+  assert.equal(invitationCalls.some(({ name }) => name === "completeApple"), true);
+  await invitationApp.close();
+
+  for (const invalidVerifier of ["v".repeat(42), "v".repeat(129), `${"v".repeat(42)}!`]) {
+    const calls: Array<{ name: string; input: unknown }> = [];
+    const app = await buildApp(calls);
+    const facts = {
+      schema_version: 1 as const, idempotency_key: "idem_invalid_verifier_route", client_kind: "iphone" as const,
+      transaction_id: "oauth_invalid_verifier", authorization_code: "opaque-native-authorization-code",
+      state: "opaque-native-state", nonce: "opaque-native-nonce", pkce_code_verifier: invalidVerifier,
+    };
+    const response = await app.inject({
+      method: "POST", url: "/auth/v1/apple/callback",
+      headers: { host, "content-type": "application/json" },
+      payload: appleCallbackPayload("apple_sign_in", facts),
+    });
+    assert.equal(response.statusCode, 400, response.body);
+    assert.equal(calls.some(({ name }) => name === "completeApple"), false);
+    await app.close();
+  }
 });
 
 test("management mutation delegates one transaction-scoped reauth plus durable command", async () => {

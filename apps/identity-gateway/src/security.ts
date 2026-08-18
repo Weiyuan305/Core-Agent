@@ -5,6 +5,9 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 
 import type { IdentityGatewayConfig } from "./config.js";
 import { IdentityGatewayFailure } from "./errors.js";
+import { isOAuthProofString, isPkceCodeVerifier } from "./oauth-proof.js";
+
+export { isOAuthProofString } from "./oauth-proof.js";
 
 export const MAX_IDENTITY_BODY_BYTES = 64 * 1024;
 export const CORE_SESSION_COOKIE_NAME = "core_agent_session";
@@ -21,8 +24,6 @@ export const PASSWORD_RESET_SETTLEMENT_SECONDS = 30 * 60;
 export const APPLE_LINK_SETTLEMENT_SECONDS = 30 * 60;
 const recoveryCookieMaxAgeSeconds = flowMaxAgeSeconds + PASSWORD_RESET_SETTLEMENT_SECONDS;
 const APPLE_FLOW_COOKIE_MAX_HEADER_BYTES = 2_048;
-const MAX_OAUTH_PROOF_CODE_POINTS = 4_096;
-const MAX_OAUTH_PROOF_UTF8_BYTES = MAX_OAUTH_PROOF_CODE_POINTS * 4;
 
 export interface RecoveryCookieBinding {
   readonly transactionId: string;
@@ -219,16 +220,6 @@ function exactRecord(value: unknown, keys: readonly string[]): value is Record<s
 
 function boundedString(value: unknown): value is string {
   return typeof value === "string" && value.length >= 1 && value.length <= 2_048;
-}
-
-export function isOAuthProofString(value: unknown): value is string {
-  if (typeof value !== "string") return false;
-  let codePoints = 0;
-  for (const _character of value) {
-    codePoints += 1;
-    if (codePoints > MAX_OAUTH_PROOF_CODE_POINTS) return false;
-  }
-  return codePoints >= 8 && Buffer.byteLength(value, "utf8") <= MAX_OAUTH_PROOF_UTF8_BYTES;
 }
 
 function appleFlowStateDigest(key: Uint8Array, flowKind: "sign_in" | "link", state: string): string {
@@ -478,7 +469,7 @@ export function assertInvitationAcceptancePayloadHash(body: {
     if (expectedKeys === undefined || !exactRecord(proof, expectedKeys)
       || !boundedString(proof.transaction_id) || !isOAuthProofString(proof.authorization_code)
       || !isOAuthProofString(proof.state)
-      || (clientKind !== "web" && (!isOAuthProofString(nonce) || !boundedString(pkceCodeVerifier)))) {
+      || (clientKind !== "web" && (!isOAuthProofString(nonce) || !isPkceCodeVerifier(pkceCodeVerifier)))) {
       invalidRequest();
     }
     canonicalProof = {

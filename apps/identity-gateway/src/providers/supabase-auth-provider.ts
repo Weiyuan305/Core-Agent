@@ -33,6 +33,7 @@ import {
   ProviderFailure,
   type ProviderFailureCode,
 } from "./provider-errors.js";
+import { isOAuthProofString, isPkceCodeVerifier } from "../oauth-proof.js";
 
 interface TransientStorage {
   getItem(key: string): Promise<string | null>;
@@ -1475,7 +1476,7 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       }
       return { clientKind, redirectUri, nonce: null, pkceChallenge: null };
     }
-    if (nonce === undefined || nonce.length < 8 || nonce.length > 4_096
+    if (!isOAuthProofString(nonce)
       || challenge === undefined || !/^[A-Za-z0-9_-]{43}$/u.test(challenge) || method !== "S256") {
       throw new ProviderFailure("AUTH_CALLBACK_INVALID");
     }
@@ -1491,12 +1492,11 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
     const clientKind = readClientKind(ownData(input, "client_kind"));
     const idempotency = readStartIdempotency(input);
     if (transactionId === undefined || transactionId.length === 0 || transactionId.length > 256
-      || authorizationCode === undefined || authorizationCode.length === 0 || authorizationCode.length > 8_192
-      || state === undefined || state.length === 0 || state.length > 4_096
+      || !isOAuthProofString(authorizationCode)
+      || !isOAuthProofString(state)
       || clientKind === undefined
       || (clientKind === "web" && (nonce !== undefined || verifier !== undefined))
-      || (clientKind !== "web" && (nonce === undefined || nonce.length < 8 || nonce.length > 4_096
-        || verifier === undefined || !/^[A-Za-z0-9._~-]{43}$/u.test(verifier)))) {
+      || (clientKind !== "web" && (!isOAuthProofString(nonce) || !isPkceCodeVerifier(verifier)))) {
       throw new ProviderFailure("AUTH_CALLBACK_INVALID");
     }
     return {

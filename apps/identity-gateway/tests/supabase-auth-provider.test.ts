@@ -966,6 +966,39 @@ function nativeAppleStart(client_kind: "iphone" | "macos" = "iphone") {
   };
 }
 
+function nativeAppleStartWithProof(
+  verifier: string,
+  nonce = nativeNonce,
+  clientKind: "iphone" | "macos" = "iphone",
+) {
+  const idempotencyKey = `idem_native_apple_${clientKind}_${verifier.length}`;
+  const challenge = createHash("sha256").update(verifier).digest("base64url");
+  return {
+    schema_version: 1 as const,
+    idempotency_key: idempotencyKey,
+    payload_hash: canonicalProviderStartPayloadHash({
+      flowKind: "apple_sign_in", idempotencyKey, clientKind,
+      redirectUri: nativeCallbackUri, nonce, pkceChallenge: challenge,
+    }),
+    client_kind: clientKind,
+    redirect_uri: nativeCallbackUri,
+    nonce,
+    pkce_code_challenge: challenge,
+    pkce_code_challenge_method: "S256" as const,
+  };
+}
+
+function nativeAppleLinkStartWithProof(verifier: string, nonce = nativeNonce) {
+  const start = nativeAppleStartWithProof(verifier, nonce);
+  return {
+    ...start,
+    payload_hash: canonicalProviderStartPayloadHash({
+      flowKind: "apple_link", idempotencyKey: start.idempotency_key, clientKind: start.client_kind,
+      redirectUri: start.redirect_uri, nonce, pkceChallenge: start.pkce_code_challenge,
+    }),
+  };
+}
+
 function webAppleLinkStart() {
   return {
     ...webAppleStart(),
@@ -1143,6 +1176,51 @@ test("Supabase Apple native binds caller nonce and exact S256 challenge before e
     pkce_code_verifier: "x".repeat(43),
   }), "AUTH_CALLBACK_INVALID");
   assert.equal(wrong.methodCalls.some((call) => call.name === "exchangeCodeForSession"), false);
+});
+
+test("Supabase native Apple proofs use Unicode code points and RFC 7636 verifier bounds", async () => {
+  const unicodeProof = "😀".repeat(4_096);
+  for (const verifierLength of [43, 44, 128]) {
+    const verifier = "v".repeat(verifierLength);
+    const harness = createHarness();
+    const start = await harness.provider.beginApple(nativeAppleStartWithProof(verifier, unicodeProof));
+    const transaction = harness.store.records.get(start.transaction_id);
+    assert(transaction !== undefined);
+    harness.store.records.set(start.transaction_id, {
+      ...transaction,
+      state_digest: sha256ForTest(unicodeProof),
+    });
+    const subject = await harness.provider.completeApple({
+      ...callbackFromStart(start, "iphone"),
+      state: unicodeProof,
+      nonce: unicodeProof,
+      pkce_code_verifier: verifier,
+    });
+    assert.equal(subject.identityKind, "apple");
+    assert.deepEqual(harness.exchangedVerifiers, [verifier]);
+  }
+
+  for (const invalidVerifier of ["v".repeat(42), "v".repeat(129), `${"v".repeat(42)}!`]) {
+    const harness = createHarness();
+    const start = await harness.provider.beginApple(nativeAppleStartWithProof(invalidVerifier));
+    await expectFailure(() => harness.provider.completeApple({
+      ...callbackFromStart(start, "iphone"),
+      pkce_code_verifier: invalidVerifier,
+    }), "AUTH_CALLBACK_INVALID");
+    assert.equal(harness.methodCalls.some((call) => call.name === "exchangeCodeForSession"), false);
+  }
+
+  const oversizedNonce = "😀".repeat(4_097);
+  await expectFailure(
+    () => createHarness().provider.beginApple(nativeAppleStartWithProof("v".repeat(43), oversizedNonce)),
+    "AUTH_CALLBACK_INVALID",
+  );
+  const stateHarness = createHarness();
+  const stateStart = await stateHarness.provider.beginApple(nativeAppleStart());
+  await expectFailure(() => stateHarness.provider.completeApple({
+    ...callbackFromStart(stateStart, "iphone"), state: "😀".repeat(4_097),
+  }), "AUTH_CALLBACK_INVALID");
+  assert.equal((await stateHarness.provider.completeApple(callbackFromStart(stateStart, "iphone"))).identityKind, "apple");
 });
 
 test("Supabase Apple rejects Web/native cross-shapes and mismatched state/client before exchange", async () => {
@@ -1448,8 +1526,10 @@ test("installed Supabase 2.112.2 Apple link uses only its operation-local passwo
       now: () => new Date(fixedNow),
     });
 
+    const installedNativeVerifier = "n".repeat(44);
+    const installedNativeStart = nativeAppleLinkStartWithProof(installedNativeVerifier);
     const start = await provider.reauthenticateAndBeginAppleLink({
-      ...nativeAppleLinkStart(),
+      ...installedNativeStart,
       authenticatedActorId: "actor-1",
       ...credential,
     });
@@ -1459,7 +1539,7 @@ test("installed Supabase 2.112.2 Apple link uses only its operation-local passwo
     );
     assert(authorizationRequest !== undefined);
     const authorizationRequestUrl = new URL(authorizationRequest.url);
-    assert.equal(authorizationRequestUrl.searchParams.get("code_challenge"), nativePkceChallenge);
+    assert.equal(authorizationRequestUrl.searchParams.get("code_challenge"), installedNativeStart.pkce_code_challenge);
     assert.equal(authorizationRequestUrl.searchParams.get("code_challenge_method"), "S256");
     assert.equal(authorizationRequestUrl.searchParams.has("state"), false);
     assert.equal(authorizationRequest.headers.get("authorization"), `Bearer ${accessToken}`);
@@ -1478,6 +1558,14 @@ test("installed Supabase 2.112.2 Apple link uses only its operation-local passwo
     assert.equal(envelopeText.includes(credential.password), false);
     assert.equal(JSON.stringify(start).includes(accessToken), false);
     assert.equal(JSON.stringify(start).includes(credential.password), false);
+    const installedLinkedSubject = await provider.linkApple({
+      ...callbackFromStart(start, "iphone"),
+      pkce_code_verifier: installedNativeVerifier,
+      authenticatedActorId: "actor-1",
+    });
+    assert.equal("kind" in installedLinkedSubject, false);
+    if ("kind" in installedLinkedSubject) throw new Error("unexpected installed-SDK native Apple link observation");
+    assert.equal(installedLinkedSubject.providerSubject, "provider-subject-1");
 
     const webStore = new MemoryTransactionStore();
     const webRequestOffset = serverRequests.length;
