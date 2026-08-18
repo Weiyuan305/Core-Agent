@@ -1223,6 +1223,7 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
     if (transaction.flowKind !== "password_reset" || transaction.actorId !== null
       || transaction.clientKind !== "web" || transaction.redirectUri !== this.#passwordResetRedirectUri
       || transaction.expiresAt !== bindingExpiresAt
+      || bindingSettlementNotAfter !== transaction.expiresAt + 30 * 60 * 1_000
       || !equalDigest(transaction.stateDigest, sha256(state))) {
       throw new ProviderFailure("AUTH_CALLBACK_INVALID");
     }
@@ -1264,8 +1265,7 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       const settlementExpiresAt = transaction.providerSettlementExpiresAt === undefined
         ? undefined : strictUtcMilliseconds(transaction.providerSettlementExpiresAt);
       if (transaction.providerSubjectCiphertext === undefined || transaction.providerCompletionPayloadHash !== payloadHash
-        || settlementExpiresAt === undefined || settlementExpiresAt > bindingSettlementNotAfter
-        || settlementExpiresAt <= this.#now().getTime()) {
+        || settlementExpiresAt === undefined || settlementExpiresAt > bindingSettlementNotAfter) {
         throw new ProviderFailure("AUTH_CALLBACK_INVALID");
       }
       return this.#readPasswordResetSubject(transaction.providerSubjectCiphertext);
@@ -1296,9 +1296,7 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       transactionId, payloadHash, settlementNotAfter: bindingSettlementNotAfterText,
     }));
     if (started.kind === "existing") {
-      const recoveredEvidence = await inspectEvidence(expectedSubject);
-      await checkpointEvidence(expectedSubject, recoveredEvidence, started.startedAt);
-      return expectedSubject;
+      throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
     }
     const { client, storage, storageKey } = this.#newClient(undefined, transactionId);
     try {

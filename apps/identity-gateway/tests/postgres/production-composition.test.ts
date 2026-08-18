@@ -18,6 +18,7 @@ import { Pool } from "pg";
 import { buildIdentityGatewayApp } from "../../src/app.js";
 import type { AuthProviderAdapter, VerifiedProviderSubject } from "../../src/providers/auth-provider.js";
 import { ProviderFailure } from "../../src/providers/provider-errors.js";
+import { sealRecoveryCookie } from "../../src/security.js";
 import { buildProductionIdentityGateway, identityGatewayServerTestInternals } from "../../src/server.js";
 
 const databaseUrl = process.env.CONTROL_PLANE_TEST_DATABASE_URL;
@@ -1740,6 +1741,215 @@ test("production composition atomically verifies email, registers Task 3, issues
       "select status from oauth_transactions where oauth_transaction_id = $1", [resetTransactionId],
     )).rows[0]?.status, "consumed");
     await resetApp.close();
+
+    const expiredResetTransactionId = "oauth_composition_password_reset_expired_settlement";
+    const expiredResetState = "composition-password-reset-expired-state";
+    const expiredResetNow = (await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now;
+    const expiredAuthorizationAt = new Date(expiredResetNow.getTime() - 31 * 60_000);
+    const expiredProviderCompletedAt = new Date(expiredAuthorizationAt.getTime() + 60_000);
+    const expiredResetFacts = {
+      schema_version: 1 as const, idempotency_key: "composition-password-reset-expired-complete",
+      authorization_code: "composition-expired-reset-code", new_password: "expired-replacement-password-value",
+    };
+    const expiredResetPayload = {
+      ...expiredResetFacts,
+      payload_hash: canonicalPayloadHash({
+        schema_version: expiredResetFacts.schema_version, idempotency_key: expiredResetFacts.idempotency_key,
+        reset_code_digest: sensitiveDigest(expiredResetFacts.authorization_code),
+        new_value_digest: sensitiveDigest(expiredResetFacts.new_password),
+      }),
+    };
+    await pool.query(`insert into oauth_transactions (
+      oauth_transaction_id, provider, flow_kind, actor_id, client_kind, state_digest, nonce_digest,
+      pkce_verifier_ciphertext, redirect_uri, status, expires_at, consumed_at, created_at, updated_at,
+      provider_completion_status, provider_completion_started_at, expected_provider_subject_ciphertext,
+      provider_subject_ciphertext, provider_completion_payload_hash, provider_settlement_expires_at,
+      provider_completed_at, provider_evidence_at
+    ) values ($1, 'supabase', 'password_reset', null, 'web', $2, $3, $4, $5, 'pending',
+      $6, null, $6, $7, 'provider_completed', $6, $8, $9, $10, $6::timestamptz + interval '30 minutes',
+      $7, $7)`, [
+      expiredResetTransactionId, createHash("sha256").update(expiredResetState, "utf8").digest(),
+      Buffer.alloc(32, 0x71), Buffer.alloc(33, 0x72), onboardingConfig.passwordResetRedirectUri,
+      expiredAuthorizationAt, expiredProviderCompletedAt, Buffer.alloc(33, 0x73), Buffer.alloc(33, 0x74),
+      expiredResetPayload.payload_hash,
+    ]);
+    const expiredFlowKey = Buffer.alloc(32, 0x75);
+    const expiredRecoveryCookie = sealRecoveryCookie(expiredFlowKey, {
+      transactionId: expiredResetTransactionId, state: expiredResetState,
+      expiresAt: expiredAuthorizationAt.toISOString(),
+    });
+    let expiredProviderCalls = 0;
+    const expiredResetApp = await buildIdentityGatewayApp({
+      config: onboardingConfig,
+      provider: {
+        ...provider,
+        async completePasswordReset() {
+          expiredProviderCalls += 1;
+          return verifiedSubject;
+        },
+      },
+      operations, flowCookieKey: expiredFlowKey, now: () => expiredResetNow,
+    });
+    const expiredSettlement = await expiredResetApp.inject({
+      method: "POST", url: "/auth/v1/password/reset/complete",
+      headers: { ...publicHeaders, cookie: `core_agent_recovery=${expiredRecoveryCookie}` },
+      payload: expiredResetPayload,
+    });
+    assert.equal(expiredSettlement.statusCode, 401, expiredSettlement.body);
+    assert.equal(expiredProviderCalls, 1, "signed expired settlement must reach durable Core terminalization");
+    assert.match(String(expiredSettlement.headers["set-cookie"]), /core_agent_recovery=;[^\n]*Max-Age=0/u);
+    assert.deepEqual((await pool.query(`select status, provider_completion_status,
+      provider_completion_started_at, expected_provider_subject_ciphertext,
+      provider_subject_ciphertext, provider_completion_payload_hash,
+      provider_settlement_expires_at, provider_completed_at, provider_evidence_at
+      from oauth_transactions where oauth_transaction_id = $1`, [expiredResetTransactionId])).rows[0], {
+      status: "expired", provider_completion_status: "pending", provider_completion_started_at: null,
+      expected_provider_subject_ciphertext: null, provider_subject_ciphertext: null,
+      provider_completion_payload_hash: null, provider_settlement_expires_at: null,
+      provider_completed_at: null, provider_evidence_at: null,
+    });
+    await expiredResetApp.close();
+
+    const concurrentSession = await issueCoreSession({ db }, {
+      sessionId: "session_composition_password_reset_concurrent", actorId: registered.actorId,
+      authSubjectId: registered.authSubjectId, clientKind: "iphone",
+    });
+    const concurrentTransactionId = "oauth_composition_password_reset_concurrent";
+    const concurrentState = "composition-password-reset-concurrent-state";
+    let concurrentNow = (await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now;
+    let releaseWinner!: () => void;
+    let markWinnerStarted!: () => void;
+    const winnerRelease = new Promise<void>((resolve) => { releaseWinner = resolve; });
+    const winnerStarted = new Promise<void>((resolve) => { markWinnerStarted = resolve; });
+    let concurrentProviderEffects = 0;
+    const concurrentProvider: AuthProviderAdapter = {
+      ...provider,
+      async beginPasswordReset() {
+        const expiresAt = new Date(concurrentNow.getTime() + 5 * 60_000);
+        await pool.query(`insert into oauth_transactions (
+          oauth_transaction_id, provider, flow_kind, actor_id, client_kind, state_digest, nonce_digest,
+          pkce_verifier_ciphertext, redirect_uri, status, expires_at, consumed_at, created_at, updated_at,
+          provider_completion_status, provider_completion_started_at, expected_provider_subject_ciphertext,
+          provider_subject_ciphertext, provider_completion_payload_hash, provider_settlement_expires_at,
+          provider_completed_at, provider_evidence_at
+        ) values ($1, 'supabase', 'password_reset', null, 'web', $2, $3, $4, $5, 'pending',
+          $6, null, $7, $7, 'pending', null, $8, null, null, null, null, null)`, [
+          concurrentTransactionId, createHash("sha256").update(concurrentState, "utf8").digest(),
+          Buffer.alloc(32, 0x76), Buffer.alloc(33, 0x77), onboardingConfig.passwordResetRedirectUri,
+          expiresAt, concurrentNow, Buffer.alloc(33, 0x78),
+        ]);
+        return { transaction_id: concurrentTransactionId, state: concurrentState, expires_at: expiresAt.toISOString() };
+      },
+      async completePasswordReset(input) {
+        const client = await pool.connect();
+        let disposition: "winner" | "in_progress" | "completed";
+        try {
+          await client.query("begin");
+          const row = (await client.query<{ provider_completion_status: string }>(
+            "select provider_completion_status from oauth_transactions where oauth_transaction_id = $1 for update",
+            [concurrentTransactionId],
+          )).rows[0];
+          if (row?.provider_completion_status === "pending") {
+            const startedAt = (await client.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now;
+            await client.query(`update oauth_transactions set provider_completion_status = 'provider_started',
+              provider_completion_started_at = $2, provider_subject_ciphertext = expected_provider_subject_ciphertext,
+              provider_completion_payload_hash = $3, provider_settlement_expires_at = $2::timestamptz + interval '30 minutes',
+              updated_at = $2 where oauth_transaction_id = $1`, [concurrentTransactionId, startedAt, input.payloadHash]);
+            disposition = "winner";
+          } else if (row?.provider_completion_status === "provider_started") {
+            disposition = "in_progress";
+          } else if (row?.provider_completion_status === "provider_completed") {
+            disposition = "completed";
+          } else {
+            throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+          }
+          await client.query("commit");
+        } catch (error) {
+          await client.query("rollback").catch(() => undefined);
+          throw error;
+        } finally {
+          client.release();
+        }
+        if (disposition === "in_progress") throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+        if (disposition === "completed") return verifiedSubject;
+        markWinnerStarted();
+        await winnerRelease;
+        concurrentProviderEffects += 1;
+        const completedAt = (await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now;
+        await pool.query(`update oauth_transactions set provider_completion_status = 'provider_completed',
+          provider_completed_at = $2, provider_evidence_at = $2, updated_at = $2
+          where oauth_transaction_id = $1`, [concurrentTransactionId, completedAt]);
+        return verifiedSubject;
+      },
+    };
+    let failConcurrentCoreOnce = true;
+    const concurrentResetApp = await buildIdentityGatewayApp({
+      config: onboardingConfig, provider: concurrentProvider, flowCookieKey: Buffer.alloc(32, 0x79),
+      operations: {
+        ...operations,
+        async executeAuthorityCommand(input) {
+          if (input.kind === "password_reset_completed" && failConcurrentCoreOnce) {
+            failConcurrentCoreOnce = false;
+            throw new Error("simulated concurrent winner Core rollback");
+          }
+          return operations.executeAuthorityCommand(input);
+        },
+      },
+      now: () => concurrentNow,
+    });
+    const concurrentResetStartResponse = await concurrentResetApp.inject({
+      method: "POST", url: "/auth/v1/password/reset/start", headers: publicHeaders,
+      payload: {
+        schema_version: 1, idempotency_key: "composition-password-reset-concurrent-start",
+        payload_hash: `sha256:${"9".repeat(64)}`, email: verifiedSubject.normalizedEmail,
+      },
+    });
+    assert.equal(concurrentResetStartResponse.statusCode, 202, concurrentResetStartResponse.body);
+    const concurrentCookie = ([] as string[]).concat(concurrentResetStartResponse.headers["set-cookie"] ?? [])
+      .find((value) => value.startsWith("core_agent_recovery="))!.split(";", 1)[0]!;
+    const concurrentFacts = {
+      schema_version: 1 as const, idempotency_key: "composition-password-reset-concurrent-complete",
+      authorization_code: "composition-concurrent-reset-code", new_password: "concurrent-replacement-password-value",
+    };
+    const concurrentPayload = {
+      ...concurrentFacts,
+      payload_hash: canonicalPayloadHash({
+        schema_version: concurrentFacts.schema_version, idempotency_key: concurrentFacts.idempotency_key,
+        reset_code_digest: sensitiveDigest(concurrentFacts.authorization_code),
+        new_value_digest: sensitiveDigest(concurrentFacts.new_password),
+      }),
+    };
+    const winnerRequest = concurrentResetApp.inject({
+      method: "POST", url: "/auth/v1/password/reset/complete",
+      headers: { ...publicHeaders, cookie: concurrentCookie }, payload: concurrentPayload,
+    });
+    await winnerStarted;
+    const loserResponse = await concurrentResetApp.inject({
+      method: "POST", url: "/auth/v1/password/reset/complete",
+      headers: { ...publicHeaders, cookie: concurrentCookie }, payload: concurrentPayload,
+    });
+    assert.equal(loserResponse.statusCode, 503, loserResponse.body);
+    assert.doesNotMatch(String(loserResponse.headers["set-cookie"] ?? ""), /core_agent_recovery=;[^\n]*Max-Age=0/u);
+    assert.equal(concurrentProviderEffects, 0);
+    releaseWinner();
+    const winnerResponse = await winnerRequest;
+    assert.equal(winnerResponse.statusCode, 500, winnerResponse.body);
+    assert.doesNotMatch(String(winnerResponse.headers["set-cookie"] ?? ""), /core_agent_recovery=;[^\n]*Max-Age=0/u);
+    assert.equal(concurrentProviderEffects, 1);
+    assert.equal((await pool.query("select status from core_sessions where session_id = $1",
+      [concurrentSession.session.session_id])).rows[0]?.status, "active");
+    concurrentNow = new Date(concurrentNow.getTime() + 1_000);
+    const loserRetry = await concurrentResetApp.inject({
+      method: "POST", url: "/auth/v1/password/reset/complete",
+      headers: { ...publicHeaders, cookie: concurrentCookie }, payload: concurrentPayload,
+    });
+    assert.equal(loserRetry.statusCode, 200, loserRetry.body);
+    assert.equal(concurrentProviderEffects, 1);
+    assert.equal((await pool.query("select status from core_sessions where session_id = $1",
+      [concurrentSession.session.session_id])).rows[0]?.status, "revoked");
+    assert.equal((await pool.query("select status from oauth_transactions where oauth_transaction_id = $1",
+      [concurrentTransactionId])).rows[0]?.status, "consumed");
+    await concurrentResetApp.close();
 
     const secretDirectory = await mkdtemp(join(tmpdir(), "identity-gateway-secrets-"));
     try {

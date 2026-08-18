@@ -209,16 +209,16 @@ export function sealRecoveryCookie(key: Uint8Array, binding: Omit<RecoveryCookie
   });
 }
 
-export function readRecoveryCookie(key: Uint8Array, value: string, now: Date): RecoveryCookieBinding {
+export function readRecoveryCookie(key: Uint8Array, value: string, _now: Date): RecoveryCookieBinding {
   const parsed = open(key, "recovery", value);
   if (!exactRecord(parsed, ["transaction_id", "state", "expires_at", "settlement_not_after"])
     || !boundedString(parsed.transaction_id) || !boundedString(parsed.state)
     || !boundedString(parsed.expires_at) || !boundedString(parsed.settlement_not_after)) invalidAuthentication();
   const authorizationExpiry = strictUtc(parsed.expires_at);
   const settlementNotAfter = strictUtc(parsed.settlement_not_after);
+  // Authenticate the deadline but let the database clock durably terminalize an expired checkpoint.
   if (authorizationExpiry === undefined || settlementNotAfter === undefined
-    || settlementNotAfter !== authorizationExpiry + PASSWORD_RESET_SETTLEMENT_SECONDS * 1_000
-    || settlementNotAfter <= now.getTime()) invalidAuthentication();
+    || settlementNotAfter !== authorizationExpiry + PASSWORD_RESET_SETTLEMENT_SECONDS * 1_000) invalidAuthentication();
   return {
     transactionId: parsed.transaction_id, state: parsed.state, expiresAt: parsed.expires_at,
     settlementNotAfter: parsed.settlement_not_after,

@@ -1606,6 +1606,24 @@ test("Supabase password recovery settlement uses its bounded post-provider deadl
   }
 });
 
+test("Supabase returns a durable completed reset subject at settlement expiry for Core terminalization", async () => {
+  let now = new Date(fixedNow);
+  const harness = createHarness({ now: () => new Date(now) });
+  const binding = await harness.provider.beginPasswordReset(passwordResetStartInput());
+  const input = {
+    binding: passwordResetCompletionBinding(binding), authorization_code: "one-time-recovery-code",
+    new_password: "new correct horse battery staple", payloadHash: resetCompletionPayloadHash,
+  } satisfies PasswordResetCompletionInput;
+  const completed = await harness.provider.completePasswordReset(input);
+  now = new Date(fixedNow.getTime() + 30 * 60 * 1_000);
+
+  const terminalizationSubject = await harness.provider.completePasswordReset(input);
+
+  assert.deepEqual(terminalizationSubject, completed);
+  assert.equal(harness.methodCalls.filter((call) => call.name === "exchangeCodeForSession").length, 1);
+  assert.equal(harness.methodCalls.filter((call) => call.name === "updateUserById").length, 1);
+});
+
 test("Supabase password recovery crash before admin update is not falsely recovered and allows a new start", async () => {
   let providerBodyGetterCalls = 0;
   const adminError = Object.defineProperties({}, {
@@ -1659,7 +1677,7 @@ test("Supabase password recovery losing concurrent provider-start admission perf
   await expectFailure(() => harness.provider.completePasswordReset({
     binding: passwordResetCompletionBinding(binding), authorization_code: "one-time-recovery-code",
     new_password: "new correct horse battery staple", payloadHash: resetCompletionPayloadHash,
-  }), "AUTH_CALLBACK_INVALID");
+  }), "AUTH_PROVIDER_UNAVAILABLE");
   assert.equal(harness.methodCalls.some((call) => call.name === "exchangeCodeForSession"), false);
   assert.equal(harness.methodCalls.some((call) => call.name === "updateUserById"), false);
 });

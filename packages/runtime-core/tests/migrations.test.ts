@@ -559,6 +559,49 @@ test("schema 12 reconverges a dirty recorded schema 11 and preserves password-re
   }
 });
 
+test("schema 12 preserves a consumed schema-11 password-reset row with a valid terminal state", async () => {
+  const v11Directory = await mkdtemp(join(tmpdir(), "core-agent-v11-consumed-migrations-"));
+  try {
+    await cp(migrationsDirectory, v11Directory, { recursive: true });
+    await applyMigrationPrefix(v11Directory, 11);
+    assert.equal(await readSchemaVersion(db), 11);
+    const consumedAt = new Date("2026-08-17T00:04:00.000Z");
+    await pool.query(`insert into oauth_transactions (
+      oauth_transaction_id, provider, flow_kind, actor_id, client_kind,
+      state_digest, nonce_digest, pkce_verifier_ciphertext, redirect_uri,
+      status, expires_at, consumed_at, created_at, updated_at
+    ) values (
+      'oauth_v11_consumed_password_reset', 'supabase', 'password_reset', null, 'web',
+      decode(repeat('21', 32), 'hex'), decode(repeat('22', 32), 'hex'), decode('23', 'hex'),
+      'https://app.example.test/auth/reset', 'consumed', '2026-08-17T00:05:00.000Z', $1,
+      '2026-08-17T00:00:00.000Z', $1
+    )`, [consumedAt]);
+
+    await applyMigrations(pool, migrationsDirectory);
+
+    assert.equal(await readSchemaVersion(db), 12);
+    assert.deepEqual((await pool.query(`select status, consumed_at,
+      provider_completion_status, expected_provider_subject_ciphertext,
+      provider_subject_ciphertext, provider_completion_payload_hash,
+      provider_settlement_expires_at, provider_completed_at, provider_evidence_at
+      from oauth_transactions where oauth_transaction_id = 'oauth_v11_consumed_password_reset'`
+    )).rows[0], {
+      status: "consumed", consumed_at: consumedAt, provider_completion_status: "pending",
+      expected_provider_subject_ciphertext: null, provider_subject_ciphertext: null,
+      provider_completion_payload_hash: null, provider_settlement_expires_at: null,
+      provider_completed_at: null, provider_evidence_at: null,
+    });
+    await assert.rejects(
+      pool.query(`update oauth_transactions
+        set expected_provider_subject_ciphertext = decode(repeat('24', 33), 'hex')
+        where oauth_transaction_id = 'oauth_v11_consumed_password_reset'`),
+      /oauth_transactions_provider_completion_state_check/u,
+    );
+  } finally {
+    await rm(v11Directory, { recursive: true, force: true });
+  }
+});
+
 test("schema 11 catalog rejection rolls back its constraint change and migration record", async () => {
   const v10Directory = await mkdtemp(join(tmpdir(), "core-agent-v10-rollback-base-"));
   const invalidDirectory = await mkdtemp(join(tmpdir(), "core-agent-v11-rollback-"));

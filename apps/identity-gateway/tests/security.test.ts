@@ -316,9 +316,13 @@ test("recovery cookie authenticates separate authorization and bounded settlemen
     readRecoveryCookie(flowKey, sealed, new Date("2026-08-17T00:34:59.999Z")),
     atAuthorizationBoundary,
   );
-  assert.throws(
-    () => readRecoveryCookie(flowKey, sealed, new Date("2026-08-17T00:35:00.000Z")),
-    /AUTH_INVALID/u,
+  assert.deepEqual(
+    readRecoveryCookie(flowKey, sealed, new Date("2026-08-17T00:35:00.000Z")),
+    atAuthorizationBoundary,
+  );
+  assert.deepEqual(
+    readRecoveryCookie(flowKey, sealed, new Date("2026-08-18T00:00:00.000Z")),
+    atAuthorizationBoundary,
   );
 });
 
