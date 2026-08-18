@@ -407,6 +407,28 @@ test("Apple link cookie authenticates separate authorization and settlement dead
   ), /AUTH_INVALID/u);
 });
 
+test("Apple flow cookie round-trips the exact OAuth state bound without widening ordinary fields", async () => {
+  const { readAppleFlowCookie, sealAppleFlowCookie } = await import("../src/security.js");
+  const now = new Date("2026-08-17T00:00:00.000Z");
+  for (const stateLength of [2_049, 4_096]) {
+    const state = "s".repeat(stateLength);
+    const sealed = sealAppleFlowCookie(flowKey, {
+      transactionId: "oauth_state_boundary", state,
+      expiresAt: "2026-08-17T00:05:00.000Z", flowKind: "sign_in",
+    });
+    assert.equal(readAppleFlowCookie(flowKey, sealed, now).state, state, `${stateLength} state characters`);
+  }
+  assert.throws(() => sealAppleFlowCookie(flowKey, {
+    transactionId: "oauth_state_boundary", state: "s".repeat(4_097),
+    expiresAt: "2026-08-17T00:05:00.000Z", flowKind: "sign_in",
+  }), /AUTH_INVALID/u);
+  const ordinaryFieldOverflow = sealAppleFlowCookie(flowKey, {
+    transactionId: "t".repeat(2_049), state: "opaque_state",
+    expiresAt: "2026-08-17T00:05:00.000Z", flowKind: "sign_in",
+  });
+  assert.throws(() => readAppleFlowCookie(flowKey, ordinaryFieldOverflow, now), /AUTH_INVALID/u);
+});
+
 test("native Apple delivery returns the opaque secret once without any cookie", async () => {
   const app = await buildApp();
   const verifier = "v".repeat(43);

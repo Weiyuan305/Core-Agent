@@ -257,6 +257,29 @@ test("Apple and invitation proofs use closed Web and native PKCE variants", () =
   assert.equal(accept.Check({ ...common, authentication_proof: { kind: "email_password", client_kind: "web", email: "invitee@example.test", password: "correct-horse" } }), false);
   assert.equal(accept.Check({ ...common, authentication_proof: { kind: "apple", client_kind: "web", transaction_id: "oauth_01", authorization_code: "opaque_code", state: "opaque_state" } }), true);
   assert.equal(accept.Check({ ...common, authentication_proof: { kind: "apple", client_kind: "macos", transaction_id: "oauth_01", authorization_code: "opaque_code", state: "opaque_state", nonce: "opaque_native_nonce", pkce_code_verifier: "b".repeat(43) } }), true);
+  for (const proofLength of [2_049, 4_096]) {
+    const proof = "o".repeat(proofLength);
+    assert.equal(accept.Check({
+      ...common,
+      authentication_proof: {
+        kind: "apple", client_kind: "web", transaction_id: "oauth_01",
+        authorization_code: proof, state: proof,
+      },
+    }), true, `Web OAuth proof accepts ${proofLength} characters`);
+    assert.equal(accept.Check({
+      ...common,
+      authentication_proof: {
+        kind: "apple", client_kind: "iphone", transaction_id: "oauth_01",
+        authorization_code: proof, state: proof, nonce: proof, pkce_code_verifier: "b".repeat(43),
+      },
+    }), true, `native OAuth proof accepts ${proofLength} characters`);
+  }
+  const oversizedProof = "o".repeat(4_097);
+  for (const authenticationProof of [
+    { kind: "apple", client_kind: "web", transaction_id: "oauth_01", authorization_code: oversizedProof, state: "opaque_state" },
+    { kind: "apple", client_kind: "web", transaction_id: "oauth_01", authorization_code: "opaque_code", state: oversizedProof },
+    { kind: "apple", client_kind: "iphone", transaction_id: "oauth_01", authorization_code: "opaque_code", state: "opaque_state", nonce: oversizedProof, pkce_code_verifier: "b".repeat(43) },
+  ]) assert.equal(accept.Check({ ...common, authentication_proof: authenticationProof }), false);
 });
 
 test("Apple link start contains current password and released start fields without provider authority", () => {

@@ -170,7 +170,10 @@ function seal(key: Uint8Array, purpose: "recovery" | "apple", value: object): st
 }
 
 function open(key: Uint8Array, purpose: "recovery" | "apple", value: string): unknown {
-  if (!/^v1\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{1,4096}\.[A-Za-z0-9_-]{22}$/u.test(value)) invalidAuthentication();
+  const sealedValuePattern = purpose === "apple"
+    ? /^v1\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{1,12288}\.[A-Za-z0-9_-]{22}$/u
+    : /^v1\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{1,4096}\.[A-Za-z0-9_-]{22}$/u;
+  if (!sealedValuePattern.test(value)) invalidAuthentication();
   const fields = value.split(".");
   try {
     const iv = Buffer.from(fields[1]!, "base64url");
@@ -194,6 +197,10 @@ function exactRecord(value: unknown, keys: readonly string[]): value is Record<s
 
 function boundedString(value: unknown): value is string {
   return typeof value === "string" && value.length >= 1 && value.length <= 2_048;
+}
+
+function oauthProofString(value: unknown): value is string {
+  return typeof value === "string" && value.length >= 8 && value.length <= 4_096;
 }
 
 function strictFutureUtc(value: string, now: Date): boolean {
@@ -235,6 +242,7 @@ export function readRecoveryCookie(key: Uint8Array, value: string, _now: Date): 
 }
 
 export function sealAppleFlowCookie(key: Uint8Array, binding: AppleFlowCookieBinding): string {
+  if (!oauthProofString(binding.state)) invalidAuthentication();
   return seal(key, "apple", {
     transaction_id: binding.transactionId, state: binding.state,
     expires_at: binding.expiresAt, flow_kind: binding.flowKind,
@@ -249,7 +257,7 @@ export function readAppleFlowCookie(key: Uint8Array, value: string, now: Date): 
   const keys = hasSettlement
     ? ["transaction_id", "state", "expires_at", "flow_kind", "settlement_not_after"]
     : ["transaction_id", "state", "expires_at", "flow_kind"];
-  if (!exactRecord(parsed, keys) || !boundedString(parsed.transaction_id) || !boundedString(parsed.state)
+  if (!exactRecord(parsed, keys) || !boundedString(parsed.transaction_id) || !oauthProofString(parsed.state)
     || !boundedString(parsed.expires_at) || (parsed.flow_kind !== "sign_in" && parsed.flow_kind !== "link")) {
     invalidAuthentication();
   }
@@ -402,9 +410,9 @@ export function assertInvitationAcceptancePayloadHash(body: {
         ? ["kind", "client_kind", "transaction_id", "authorization_code", "state", "nonce", "pkce_code_verifier"]
         : undefined;
     if (expectedKeys === undefined || !exactRecord(proof, expectedKeys)
-      || !boundedString(proof.transaction_id) || !boundedString(proof.authorization_code)
-      || !boundedString(proof.state)
-      || (clientKind !== "web" && (!boundedString(nonce) || !boundedString(pkceCodeVerifier)))) {
+      || !boundedString(proof.transaction_id) || !oauthProofString(proof.authorization_code)
+      || !oauthProofString(proof.state)
+      || (clientKind !== "web" && (!oauthProofString(nonce) || !boundedString(pkceCodeVerifier)))) {
       invalidRequest();
     }
     canonicalProof = {

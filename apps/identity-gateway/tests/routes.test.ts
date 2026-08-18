@@ -1607,6 +1607,57 @@ test("Apple invitation proof hashing is canonical and rejects non-closed proof o
   await app.close();
 });
 
+test("Apple invitation proof preflight matches the exact 4096-character OAuth bounds", () => {
+  for (const proofLength of [2_049, 4_096]) {
+    const proofValue = "o".repeat(proofLength);
+    const webProof = {
+      kind: "apple", client_kind: "web", transaction_id: "oauth_boundary",
+      authorization_code: proofValue, state: proofValue,
+    };
+    const reorderedWebProof = {
+      state: proofValue, authorization_code: proofValue,
+      transaction_id: "oauth_boundary", client_kind: "web", kind: "apple",
+    };
+    const webPayload = invitationAcceptancePayload({
+      schema_version: 1, idempotency_key: `idem_web_boundary_${proofLength}`,
+      expected_resource_version: 1, invitation_secret: "i".repeat(43),
+      authentication_proof: webProof,
+    });
+    const reorderedWebPayload = invitationAcceptancePayload({
+      schema_version: 1, idempotency_key: `idem_web_boundary_${proofLength}`,
+      expected_resource_version: 1, invitation_secret: "i".repeat(43),
+      authentication_proof: reorderedWebProof,
+    });
+    assert.equal(webPayload.payload_hash, reorderedWebPayload.payload_hash);
+    assert.doesNotThrow(() => assertInvitationAcceptancePayloadHash(webPayload));
+    assert.doesNotThrow(() => assertInvitationAcceptancePayloadHash(reorderedWebPayload));
+
+    const nativePayload = invitationAcceptancePayload({
+      schema_version: 1, idempotency_key: `idem_native_boundary_${proofLength}`,
+      expected_resource_version: 1, invitation_secret: "i".repeat(43),
+      authentication_proof: {
+        kind: "apple", client_kind: "macos", transaction_id: "oauth_boundary",
+        authorization_code: proofValue, state: proofValue, nonce: proofValue,
+        pkce_code_verifier: "v".repeat(43),
+      },
+    });
+    assert.doesNotThrow(() => assertInvitationAcceptancePayloadHash(nativePayload));
+  }
+
+  const oversized = "o".repeat(4_097);
+  for (const authenticationProof of [
+    { kind: "apple", client_kind: "web", transaction_id: "oauth_boundary", authorization_code: oversized, state: "opaque_state" },
+    { kind: "apple", client_kind: "web", transaction_id: "oauth_boundary", authorization_code: "opaque_code", state: oversized },
+    { kind: "apple", client_kind: "iphone", transaction_id: "oauth_boundary", authorization_code: "opaque_code", state: "opaque_state", nonce: oversized, pkce_code_verifier: "v".repeat(43) },
+  ]) {
+    const payload = invitationAcceptancePayload({
+      schema_version: 1, idempotency_key: "idem_oversized_oauth_proof",
+      expected_resource_version: 1, invitation_secret: "i".repeat(43), authentication_proof: authenticationProof,
+    });
+    assert.throws(() => assertInvitationAcceptancePayloadHash(payload), /INVALID_REQUEST/u);
+  }
+});
+
 test("management mutation delegates one transaction-scoped reauth plus durable command", async () => {
   const calls: Array<{ name: string; input: unknown }> = [];
   const app = await buildApp(calls);
