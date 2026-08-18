@@ -12,6 +12,7 @@ const {
   AppleAuthorizationStartResponseSchema,
   AppleIdentityLinkRequestSchema,
   AppleIdentityLinkStartRequestSchema,
+  AppleIdentityLinkStartResponseSchema,
   AppleIdentityLinkResponseSchema,
   AuthSessionViewSchema,
   AuthSubjectSchema,
@@ -181,7 +182,10 @@ test("every public auth response is closed and provider-neutral", () => {
     ["email verification", EmailVerificationResponseSchema, { schema_version: 1, transport: "web_cookie", session: sessionView }],
     ["email sign-in", EmailSignInResponseSchema, { schema_version: 1, transport: "web_cookie", session: sessionView }],
     ["password reset", PasswordResetResponseSchema, { schema_version: 1, accepted: true }],
-    ["Apple start", AppleAuthorizationStartResponseSchema, { schema_version: 1, transaction_id: "oauth_01", authorization_url: "https://appleid.apple.com/auth/authorize", expires_at: timestamp }],
+    ["Apple Web start", AppleAuthorizationStartResponseSchema, { schema_version: 1, authorization_url: "https://appleid.apple.com/auth/authorize" }],
+    ["Apple native start", AppleAuthorizationStartResponseSchema, { schema_version: 1, transaction_id: "oauth_01", authorization_url: "https://appleid.apple.com/auth/authorize", expires_at: timestamp }],
+    ["Apple Web link start", AppleIdentityLinkStartResponseSchema, { schema_version: 1, authorization_url: "https://appleid.apple.com/auth/authorize" }],
+    ["Apple native link start", AppleIdentityLinkStartResponseSchema, { schema_version: 1, transaction_id: "oauth_link_01", authorization_url: "https://appleid.apple.com/auth/authorize", expires_at: timestamp }],
     ["Apple callback", AppleAuthorizationCallbackResponseSchema, { schema_version: 1, transport: "web_cookie", session: sessionView }],
     ["Apple link", AppleIdentityLinkResponseSchema, { schema_version: 1, auth_subject_id: "auth_01", linked: true }],
     ["session inspect", SessionInspectResponseSchema, { schema_version: 1, session: sessionView }],
@@ -232,6 +236,37 @@ test("sign-up stays verification-pending and Session delivery is transport-speci
   assert.equal(signin.Check({ schema_version: 1, transport: "web_cookie", session: { ...nativeSession, client_kind: "web" }, session_secret: "a".repeat(43) }), false);
   assert.equal(signin.Check({ schema_version: 1, transport: "native", session: nativeSession, session_secret: "a".repeat(43) }), true);
   assert.equal(signin.Check({ schema_version: 1, transport: "native", session: nativeSession }), false);
+});
+
+test("Apple start responses are closed Web/native unions for sign-in and identity linking", () => {
+  const web = {
+    schema_version: 1,
+    authorization_url: "https://appleid.apple.com/auth/authorize",
+  };
+  const native = {
+    ...web,
+    transaction_id: "oauth_01",
+    expires_at: timestamp,
+  };
+  const authorizationUrlOfLength = (length: number): string => (
+    `https://appleid.apple.com/${"a".repeat(length - "https://appleid.apple.com/".length)}`
+  );
+  for (const [name, schema] of [
+    ["AppleAuthorizationStartResponseSchema", AppleAuthorizationStartResponseSchema],
+    ["AppleIdentityLinkStartResponseSchema", AppleIdentityLinkStartResponseSchema],
+  ] as const) {
+    const validator = compileRequired(name, schema);
+    assert.equal(validator.Check(web), true, `${name}: Web`);
+    assert.equal(validator.Check(native), true, `${name}: native`);
+    assert.equal(validator.Check({ ...web, transaction_id: "oauth_01" }), false, `${name}: partial native`);
+    assert.equal(validator.Check({ ...native, expires_at: undefined }), false, `${name}: missing native expiry`);
+    assert.equal(validator.Check({ ...web, provider_state: "forbidden" }), false, `${name}: closed Web`);
+    assert.equal(validator.Check({ ...native, provider_state: "forbidden" }), false, `${name}: closed native`);
+    assert.equal(validator.Check({ ...web, authorization_url: authorizationUrlOfLength(2_048) }), true,
+      `${name}: 2048-character URL`);
+    assert.equal(validator.Check({ ...web, authorization_url: authorizationUrlOfLength(2_049) }), false,
+      `${name}: 2049-character URL`);
+  }
 });
 
 test("Apple and invitation proofs use closed Web and native PKCE variants", () => {

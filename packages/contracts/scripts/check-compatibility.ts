@@ -359,6 +359,10 @@ function compareAnyOf(
     )
   ) return [];
   if (before === undefined) {
+    if (after.some((branch) => (
+      isJsonSchema(branch)
+      && compareSchemaAssertions(previous, branch, `${path}.anyOf`).length === 0
+    ))) return [];
     return after.includes(true)
       ? []
       : [change("union_narrowed", `${path}.anyOf`, previous.anyOf, current.anyOf)];

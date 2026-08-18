@@ -2,9 +2,11 @@ import {
   AppleAuthorizationCallbackRequestSchema,
   AppleAuthorizationCallbackResponseSchema,
   AppleAuthorizationStartRequestSchema,
+  AppleAuthorizationStartResponseSchema,
   AppleIdentityLinkRequestSchema,
   AppleIdentityLinkResponseSchema,
   AppleIdentityLinkStartRequestSchema,
+  AppleIdentityLinkStartResponseSchema,
 } from "@core-agent/contracts";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
@@ -34,6 +36,7 @@ import {
   sealAppleFlowCookie,
   safeSecretEqual,
 } from "../security.js";
+import { isProviderAuthorizationUrl } from "../oauth-proof.js";
 import { deliverSession } from "./email.js";
 
 type AppleStartBody = {
@@ -49,6 +52,9 @@ type AppleStartBody = {
 type AppleCallbackBody = AppleAuthorizationCallback & { readonly device_label?: string };
 
 function authorizationState(start: AppleAuthorizationStart, providerUrl: string, redirectUri: string): string {
+  if (!isProviderAuthorizationUrl(start.authorization_url)) {
+    throw new IdentityGatewayFailure("AUTH_PROVIDER_UNAVAILABLE");
+  }
   let parsed: URL;
   try {
     parsed = new URL(start.authorization_url);
@@ -181,7 +187,7 @@ async function consumePreAuthRateLimit(
 }
 
 export async function registerAppleRoutes(app: FastifyInstance, dependencies: IdentityGatewayRouteDependencies): Promise<void> {
-  app.post("/auth/v1/apple/start", { schema: { body: AppleAuthorizationStartRequestSchema } }, async (request, reply) => {
+  app.post("/auth/v1/apple/start", { schema: { body: AppleAuthorizationStartRequestSchema, response: { 200: AppleAuthorizationStartResponseSchema } } }, async (request, reply) => {
     const body = request.body as AppleStartBody;
     assertClientTransport(request, body.client_kind, dependencies.config);
     assertExactRedirect(body.client_kind, body.redirect_uri, dependencies.config);
@@ -224,7 +230,7 @@ export async function registerAppleRoutes(app: FastifyInstance, dependencies: Id
     return deliverSession(reply, issued, body.client_kind);
   });
 
-  app.post("/auth/v1/apple/link/start", { schema: { body: AppleIdentityLinkStartRequestSchema } }, async (request, reply) => {
+  app.post("/auth/v1/apple/link/start", { schema: { body: AppleIdentityLinkStartRequestSchema, response: { 200: AppleIdentityLinkStartResponseSchema } } }, async (request, reply) => {
     const body = request.body as AppleStartBody & { readonly password: string };
     assertClientTransport(request, body.client_kind, dependencies.config);
     assertExactRedirect(body.client_kind, body.redirect_uri, dependencies.config);

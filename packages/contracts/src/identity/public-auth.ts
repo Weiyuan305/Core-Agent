@@ -93,6 +93,21 @@ function sessionDelivery<const Extra extends TProperties>(id: string, extra: Ext
   ], { $id: `core-agent://v1/${id}` });
 }
 
+function appleAuthorizationStartResponse(id: string) {
+  return Type.Union([
+    Type.Object({
+      schema_version: SchemaVersionSchema,
+      authorization_url: RedirectUriSchema,
+    }, { additionalProperties: false }),
+    Type.Object({
+      schema_version: SchemaVersionSchema,
+      transaction_id: OpaqueIdSchema,
+      authorization_url: RedirectUriSchema,
+      expires_at: UtcTimestampSchema,
+    }, { additionalProperties: false }),
+  ], { $id: `core-agent://v1/${id}` });
+}
+
 const WebAppleCallbackFields = {
   client_kind: Type.Literal("web"),
   transaction_id: OpaqueIdSchema,
@@ -169,12 +184,9 @@ export const AppleAuthorizationStartRequestSchema = Type.Union([
     device_label: Type.Optional(DeviceLabelSchema),
   }, { additionalProperties: false }),
 ], { $id: "core-agent://v1/apple-authorization-start-request" });
-export const AppleAuthorizationStartResponseSchema = response("apple-authorization-start-response", {
-  schema_version: SchemaVersionSchema,
-  transaction_id: OpaqueIdSchema,
-  authorization_url: RedirectUriSchema,
-  expires_at: UtcTimestampSchema,
-});
+export const AppleAuthorizationStartResponseSchema = appleAuthorizationStartResponse(
+  "apple-authorization-start-response",
+);
 
 export const AppleAuthorizationCallbackRequestSchema = Type.Union([
   Type.Object({ ...IdempotencyRequestProperties, ...WebAppleCallbackFields }, { additionalProperties: false }),
@@ -203,6 +215,9 @@ export const AppleIdentityLinkStartRequestSchema = Type.Union([
     device_label: Type.Optional(DeviceLabelSchema),
   }, { additionalProperties: false }),
 ], { $id: "core-agent://v1/apple-identity-link-start-request" });
+export const AppleIdentityLinkStartResponseSchema = appleAuthorizationStartResponse(
+  "apple-identity-link-start-response",
+);
 export const AppleIdentityLinkRequestSchema = Type.Union([
   Type.Object({ ...IdempotencyRequestProperties, ...WebAppleCallbackFields }, { additionalProperties: false }),
   Type.Object({ ...IdempotencyRequestProperties, ...NativeAppleCallbackFields }, { additionalProperties: false }),
@@ -619,6 +634,7 @@ export type AppleAuthorizationStartResponse = Static<typeof AppleAuthorizationSt
 export type AppleAuthorizationCallbackRequest = Static<typeof AppleAuthorizationCallbackRequestSchema>;
 export type AppleAuthorizationCallbackResponse = Static<typeof AppleAuthorizationCallbackResponseSchema>;
 export type AppleIdentityLinkStartRequest = Static<typeof AppleIdentityLinkStartRequestSchema>;
+export type AppleIdentityLinkStartResponse = Static<typeof AppleIdentityLinkStartResponseSchema>;
 export type AppleIdentityLinkRequest = Static<typeof AppleIdentityLinkRequestSchema>;
 export type AppleIdentityLinkResponse = Static<typeof AppleIdentityLinkResponseSchema>;
 export type SessionInspectRequest = Static<typeof SessionInspectRequestSchema>;

@@ -1,0 +1,1 @@
+{"schema_key":"apple-identity-link-start-response","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"authorization_url":"https://appleid.apple.com/auth/authorize"}}

@@ -28,6 +28,7 @@ import type {
   VerifiedProviderSubject,
 } from "./auth-provider.js";
 import { canonicalProviderStartPayloadHash } from "./auth-provider.js";
+import { isProviderAuthorizationUrl } from "../oauth-proof.js";
 import {
   mapProviderFailure,
   ProviderFailure,
@@ -882,7 +883,7 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       const authorizationUrl = ownString(parsed, "authorizationUrl");
       if ((kind !== "start_reservation" && kind !== "web" && kind !== "native" && kind !== "password_reset")
         || payloadHash === undefined || !/^sha256:[a-f0-9]{64}$/u.test(payloadHash)
-        || authorizationUrl !== undefined && (authorizationUrl.length < 1 || authorizationUrl.length > 8_192)) {
+        || authorizationUrl !== undefined && !isProviderAuthorizationUrl(authorizationUrl)) {
         throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
       }
       return { kind, payloadHash, ...(authorizationUrl === undefined ? {} : { authorizationUrl }) };
@@ -1189,10 +1190,14 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
           authorizationUrl.searchParams.set("code_challenge_method", "S256");
         }
       }
+      const finalAuthorizationUrl = authorizationUrl.toString();
+      if (!isProviderAuthorizationUrl(finalAuthorizationUrl)) {
+        throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+      }
       const replayEnvelope = {
         ...envelope,
         startPayloadHash: durableStartPayloadHash,
-        authorizationUrl: authorizationUrl.toString(),
+        authorizationUrl: finalAuthorizationUrl,
       };
       verifierBytes = utf8.encode(JSON.stringify(replayEnvelope));
       const ciphertext = copyBytes(await safeProviderCall(
@@ -1207,7 +1212,7 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       await this.#completeProviderStart(transaction, reservation.kind);
       return Object.freeze({
         transaction_id: transactionId,
-        authorization_url: authorizationUrl.toString(),
+        authorization_url: finalAuthorizationUrl,
         expires_at: expiresAt,
       });
     } finally {

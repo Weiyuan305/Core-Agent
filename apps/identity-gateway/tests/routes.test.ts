@@ -3,8 +3,10 @@ import test from "node:test";
 
 import { createHash } from "node:crypto";
 
+import * as Contracts from "@core-agent/contracts";
 import { canonicalPayloadHash } from "@core-agent/runtime-core";
 import Fastify, { type FastifyInstance } from "fastify";
+import Schema from "typebox/schema";
 
 import { ProviderFailure } from "../src/providers/provider-errors.js";
 import { assertInvitationAcceptancePayloadHash } from "../src/security.js";
@@ -128,6 +130,8 @@ async function buildApp(
     }) => number | null;
     readonly trustedProxyAddresses?: ReadonlySet<string>;
     readonly invitationSessionClientKind?: "web" | "iphone" | "macos";
+    readonly appleStartResponse?: (input: unknown) => unknown;
+    readonly appleLinkStartResponse?: (input: unknown) => unknown;
   } = {},
 ): Promise<FastifyInstance> {
   const path = "../src/app.ts";
@@ -164,8 +168,8 @@ async function buildApp(
         return subject;
       },
       async signInEmail(input: unknown) { calls.push({ name: "signInEmail", input }); return subject; },
-      async beginApple(input: unknown) { calls.push({ name: "beginApple", input }); return { transaction_id: "oauth_01", authorization_url: `https://apple.example.test/auth/v1/authorize?state=state_01&redirect_to=${encodeURIComponent((input as { redirect_uri: string }).redirect_uri)}`, expires_at: "2026-08-17T00:05:00.000Z" }; },
-      async reauthenticateAndBeginAppleLink(input: unknown) { calls.push({ name: "reauthenticateAndBeginAppleLink", input }); return { transaction_id: "oauth_link", authorization_url: `https://apple.example.test/auth/v1/authorize?state=state_link&redirect_to=${encodeURIComponent((input as { redirect_uri: string }).redirect_uri)}`, expires_at: "2026-08-17T00:05:00.000Z" }; },
+      async beginApple(input: unknown) { calls.push({ name: "beginApple", input }); return (options.appleStartResponse?.(input) ?? { transaction_id: "oauth_01", authorization_url: `https://apple.example.test/auth/v1/authorize?state=state_01&redirect_to=${encodeURIComponent((input as { redirect_uri: string }).redirect_uri)}`, expires_at: "2026-08-17T00:05:00.000Z" }) as never; },
+      async reauthenticateAndBeginAppleLink(input: unknown) { calls.push({ name: "reauthenticateAndBeginAppleLink", input }); return (options.appleLinkStartResponse?.(input) ?? { transaction_id: "oauth_link", authorization_url: `https://apple.example.test/auth/v1/authorize?state=state_link&redirect_to=${encodeURIComponent((input as { redirect_uri: string }).redirect_uri)}`, expires_at: "2026-08-17T00:05:00.000Z" }) as never; },
       async completeApple(input: unknown) { calls.push({ name: "completeApple", input }); return subject; }, async linkApple(input: unknown) { calls.push({ name: "linkApple", input }); return subject; },
       async beginPasswordReset(input: unknown) { calls.push({ name: "beginPasswordReset", input }); return { transaction_id: "reset_01", state: "state_reset", expires_at: "2026-08-17T00:05:00.000Z" }; },
       async completePasswordReset(input: unknown) { calls.push({ name: "completePasswordReset", input }); return subject; }, async verifyCurrentSubject() { return subject; },
@@ -564,6 +568,134 @@ test("Apple sign-in start and callback consume route buckets before provider eff
     return [rate.dimensions, rate.accountIdentifier];
   }), [["client", "route:apple_sign_in_callback"], ["account", "oauth_01"]]);
   await app.close();
+});
+
+test("Apple sign-in and link start serialize exact mode-specific Contracts", async () => {
+  const responseSchemas = Contracts as unknown as Record<string, unknown>;
+  const signIn = Schema.Compile(responseSchemas.AppleAuthorizationStartResponseSchema as never);
+  assert.notEqual(responseSchemas.AppleIdentityLinkStartResponseSchema, undefined,
+    "AppleIdentityLinkStartResponseSchema must be exported");
+  const link = Schema.Compile(responseSchemas.AppleIdentityLinkStartResponseSchema as never);
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const app = await buildApp(calls, {
+    appleStartResponse(input) {
+      return {
+        transaction_id: "oauth_01",
+        authorization_url: `https://apple.example.test/auth/v1/authorize?state=state_01&redirect_to=${encodeURIComponent((input as { redirect_uri: string }).redirect_uri)}`,
+        expires_at: "2026-08-17T00:05:00.000Z",
+        provider_token: "must-not-serialize",
+      };
+    },
+    appleLinkStartResponse(input) {
+      return {
+        transaction_id: "oauth_link",
+        authorization_url: `https://apple.example.test/auth/v1/authorize?state=state_link&redirect_to=${encodeURIComponent((input as { redirect_uri: string }).redirect_uri)}`,
+        expires_at: "2026-08-17T00:05:00.000Z",
+        provider_token: "must-not-serialize",
+      };
+    },
+  });
+  const cases = [
+    {
+      name: "sign-in Web", schema: signIn, url: "/auth/v1/apple/start",
+      headers: { host, origin, "content-type": "application/json" },
+      payload: { ...idem, client_kind: "web", redirect_uri: redirect },
+      expectedKeys: ["authorization_url", "schema_version"],
+    },
+    {
+      name: "sign-in native", schema: signIn, url: "/auth/v1/apple/start",
+      headers: { host, "content-type": "application/json" },
+      payload: { ...idem, client_kind: "iphone", redirect_uri: "coreagent://auth/apple/callback", nonce: "native_nonce_01", pkce_code_challenge: "a".repeat(43), pkce_code_challenge_method: "S256" },
+      expectedKeys: ["authorization_url", "expires_at", "schema_version", "transaction_id"],
+    },
+    {
+      name: "link Web", schema: link, url: "/auth/v1/apple/link/start",
+      headers: { host, origin, "content-type": "application/json", cookie: `core_agent_session=${secret}; core_agent_csrf=${csrf}`, "x-core-agent-csrf": csrf },
+      payload: { ...idem, password: "correct-horse", client_kind: "web", redirect_uri: redirect },
+      expectedKeys: ["authorization_url", "schema_version"],
+    },
+    {
+      name: "link native", schema: link, url: "/auth/v1/apple/link/start",
+      headers: { host, authorization: `Bearer ${secret}`, "content-type": "application/json" },
+      payload: { ...idem, password: "correct-horse", client_kind: "iphone", redirect_uri: "coreagent://auth/apple/callback", nonce: "native_nonce_01", pkce_code_challenge: "a".repeat(43), pkce_code_challenge_method: "S256" },
+      expectedKeys: ["authorization_url", "expires_at", "schema_version", "transaction_id"],
+    },
+  ] as const;
+  for (const scenario of cases) {
+    const response = await app.inject({
+      method: "POST", url: scenario.url, headers: scenario.headers, payload: scenario.payload,
+    });
+    assert.equal(response.statusCode, 200, `${scenario.name}: ${response.body}`);
+    const body: unknown = response.json();
+    assert.equal(scenario.schema.Check(body), true, scenario.name);
+    assert.deepEqual(Object.keys(body as object).sort(), scenario.expectedKeys, scenario.name);
+    assert.equal(response.body.includes("must-not-serialize"), false, scenario.name);
+  }
+  await app.close();
+});
+
+test("Apple start response schemas reject missing native fields from both provider paths", async () => {
+  for (const [url, option] of [
+    ["/auth/v1/apple/start", "appleStartResponse"],
+    ["/auth/v1/apple/link/start", "appleLinkStartResponse"],
+  ] as const) {
+    const calls: Array<{ name: string; input: unknown }> = [];
+    const app = await buildApp(calls, {
+      [option](input: unknown) {
+        return {
+          transaction_id: "oauth_missing_expiry",
+          authorization_url: `https://apple.example.test/auth/v1/authorize?state=state_01&redirect_to=${encodeURIComponent((input as { redirect_uri: string }).redirect_uri)}`,
+        };
+      },
+    });
+    const link = url.includes("/link/");
+    const response = await app.inject({
+      method: "POST", url,
+      headers: { host, authorization: `Bearer ${secret}`, "content-type": "application/json" },
+      payload: {
+        ...idem, ...(link ? { password: "correct-horse" } : {}), client_kind: "iphone",
+        redirect_uri: "coreagent://auth/apple/callback", nonce: "native_nonce_01",
+        pkce_code_challenge: "a".repeat(43), pkce_code_challenge_method: "S256",
+      },
+    });
+    assert.equal(response.statusCode, 500, `${url}: ${response.body}`);
+    assert.equal(response.body.includes("oauth_missing_expiry"), false);
+    await app.close();
+  }
+});
+
+test("Apple start routes reject provider authorization URLs above the 2048 contract bound", async () => {
+  const oversizedAuthorizationUrl = (redirectUri: string): string => (
+    `https://apple.example.test/auth/v1/authorize?state=state_01&redirect_to=${encodeURIComponent(redirectUri)}&padding=${"x".repeat(2_048)}`
+  );
+  for (const [url, option] of [
+    ["/auth/v1/apple/start", "appleStartResponse"],
+    ["/auth/v1/apple/link/start", "appleLinkStartResponse"],
+  ] as const) {
+    const calls: Array<{ name: string; input: unknown }> = [];
+    const app = await buildApp(calls, {
+      [option](input: unknown) {
+        return {
+          transaction_id: "oauth_oversized_url",
+          authorization_url: oversizedAuthorizationUrl((input as { redirect_uri: string }).redirect_uri),
+          expires_at: "2026-08-17T00:05:00.000Z",
+        };
+      },
+    });
+    const link = url.includes("/link/");
+    const response = await app.inject({
+      method: "POST", url,
+      headers: { host, authorization: `Bearer ${secret}`, "content-type": "application/json" },
+      payload: {
+        ...idem, ...(link ? { password: "correct-horse" } : {}), client_kind: "iphone",
+        redirect_uri: "coreagent://auth/apple/callback", nonce: "native_nonce_01",
+        pkce_code_challenge: "a".repeat(43), pkce_code_challenge_method: "S256",
+      },
+    });
+    assert.equal(response.statusCode, 503, `${url}: ${response.body}`);
+    assert.equal(response.body.includes("oauth_oversized_url"), false);
+    await app.close();
+  }
 });
 
 test("Apple sign-in start account limiting precedes every provider and durable start effect", async () => {

@@ -66,6 +66,7 @@ test("registry publishes exactly the planned v1 contracts", () => {
     "apple-authorization-callback-request",
     "apple-authorization-callback-response",
     "apple-identity-link-start-request",
+    "apple-identity-link-start-response",
     "apple-identity-link-request",
     "apple-identity-link-response",
     "auth-session-view",

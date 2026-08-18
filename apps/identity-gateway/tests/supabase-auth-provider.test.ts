@@ -1183,12 +1183,13 @@ test("Supabase native Apple proofs use Unicode code points and RFC 7636 verifier
   for (const verifierLength of [43, 44, 128]) {
     const verifier = "v".repeat(verifierLength);
     const harness = createHarness();
-    const start = await harness.provider.beginApple(nativeAppleStartWithProof(verifier, unicodeProof));
+    const start = await harness.provider.beginApple(nativeAppleStartWithProof(verifier));
     const transaction = harness.store.records.get(start.transaction_id);
     assert(transaction !== undefined);
     harness.store.records.set(start.transaction_id, {
       ...transaction,
       state_digest: sha256ForTest(unicodeProof),
+      nonce_digest: sha256ForTest(unicodeProof),
     });
     const subject = await harness.provider.completeApple({
       ...callbackFromStart(start, "iphone"),
@@ -1199,6 +1200,11 @@ test("Supabase native Apple proofs use Unicode code points and RFC 7636 verifier
     assert.equal(subject.identityKind, "apple");
     assert.deepEqual(harness.exchangedVerifiers, [verifier]);
   }
+
+  await expectFailure(
+    () => createHarness().provider.beginApple(nativeAppleStartWithProof("v".repeat(43), unicodeProof)),
+    "AUTH_PROVIDER_UNAVAILABLE",
+  );
 
   for (const invalidVerifier of ["v".repeat(42), "v".repeat(129), `${"v".repeat(42)}!`]) {
     const harness = createHarness();
@@ -1446,7 +1452,7 @@ test("Supabase Apple link returns a closed durable observation for an admitted i
   assert.equal(harness.methodCalls.some((call) => call.name === "exchangeCodeForSession"), false);
 });
 
-test("installed Supabase 2.112.2 native Apple link validates provider state by OAuth code points", async () => {
+test("installed Supabase 2.112.2 native Apple link validates proof syntax and the final authorization URL bound", async () => {
   const runtimePackage = createRequire(import.meta.url)("@supabase/supabase-js/package.json") as {
     readonly version?: unknown;
   };
@@ -1455,6 +1461,11 @@ test("installed Supabase 2.112.2 native Apple link validates provider state by O
   const originalFetch = globalThis.fetch;
   const serverRequests: Request[] = [];
   let linkProviderState = "4fd0445c-badc-4bdb-bc0f-7af9b821c7ec";
+  const stateForAuthorizationUrlLength = (length: number): string => {
+    const empty = new URL("https://appleid.apple.com/auth/authorize");
+    empty.searchParams.set("state", "");
+    return "s".repeat(length - empty.toString().length);
+  };
   const accessToken = [
     Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url"),
     Buffer.from(JSON.stringify({ exp: 4_102_444_800 })).toString("base64url"),
@@ -1518,7 +1529,9 @@ test("installed Supabase 2.112.2 native Apple link validates provider state by O
     for (const scenario of [
       { state: "s".repeat(7), verifier: "n".repeat(44), accepted: false },
       { state: "s".repeat(8), verifier: "n".repeat(44), accepted: true },
-      { state: "😀".repeat(4_096), verifier: "n".repeat(128), accepted: true },
+      { state: stateForAuthorizationUrlLength(2_048), verifier: "n".repeat(44), accepted: true },
+      { state: stateForAuthorizationUrlLength(2_049), verifier: "n".repeat(44), accepted: false },
+      { state: "😀".repeat(4_096), verifier: "n".repeat(128), accepted: false },
       { state: "😀".repeat(4_097), verifier: "n".repeat(128), accepted: false },
     ]) {
       linkProviderState = scenario.state;
@@ -1553,8 +1566,18 @@ test("installed Supabase 2.112.2 native Apple link validates provider state by O
       assert.equal(authorizationRequestUrl.searchParams.has("state"), false);
       assert.equal(authorizationRequest.headers.get("authorization"), `Bearer ${accessToken}`);
       assert.equal(authorizationRequest.headers.get("apikey"), "publishable-key-not-secret");
-      if (!scenario.accepted) continue;
+      if (!scenario.accepted) {
+        const reserved = [...store.records.values()];
+        assert.equal(reserved.length, 1);
+        const reservationText = new TextDecoder().decode(
+          await protector.decrypt(reserved[0]!.pkce_verifier_ciphertext),
+        );
+        assert.equal((JSON.parse(reservationText) as { kind?: unknown }).kind, "start_reservation",
+          "invalid provider output must not durably complete the start");
+        continue;
+      }
       assert(start !== undefined);
+      assert.equal(start.authorization_url.length <= 2_048, true);
       const appleAuthorizationUrl = new URL(start.authorization_url);
       assert.equal(appleAuthorizationUrl.searchParams.get("state"), scenario.state);
       assert.notEqual(appleAuthorizationUrl.searchParams.get("state"), start.transaction_id);

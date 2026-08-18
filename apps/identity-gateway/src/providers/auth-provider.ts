@@ -2,7 +2,6 @@ import { canonicalPayloadHash, type VerifiedAuthSubjectInput } from "@core-agent
 import type {
   AppleAuthorizationCallbackRequest,
   AppleAuthorizationStartRequest,
-  AppleAuthorizationStartResponse,
   AppleIdentityLinkRequest,
   AppleIdentityLinkStartRequest,
 } from "@core-agent/contracts";
@@ -65,10 +64,11 @@ export interface ProviderProof {
 }
 
 export type AppleAuthorizationInput = AppleAuthorizationStartRequest;
-export type AppleAuthorizationStart = Pick<
-  AppleAuthorizationStartResponse,
-  "transaction_id" | "authorization_url" | "expires_at"
->;
+export interface AppleAuthorizationStart {
+  readonly transaction_id: string;
+  readonly authorization_url: string;
+  readonly expires_at: string;
+}
 export type AppleAuthorizationCallback = AppleAuthorizationCallbackRequest;
 
 export type AppleLinkAuthorizationInput = AppleIdentityLinkStartRequest & {

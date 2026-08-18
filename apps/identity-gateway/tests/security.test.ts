@@ -446,11 +446,11 @@ test("Apple flow cookie stores only a fixed purpose digest at the Unicode OAuth 
   assert.throws(() => readAppleFlowCookie(flowKey, ordinaryFieldOverflow, now), /AUTH_INVALID/u);
 });
 
-test("Web Apple max ASCII and Unicode states use a compact real Set-Cookie to Cookie round trip", async () => {
+test("Web Apple bounded ASCII and Unicode states use a compact real Set-Cookie to Cookie round trip", async () => {
   const cookieHeaderLengths: number[] = [];
   for (const [label, state] of [
-    ["ascii", "s".repeat(4_096)],
-    ["unicode", "😀".repeat(4_096)],
+    ["ascii", "s".repeat(1_024)],
+    ["unicode", "😀".repeat(128)],
   ] as const) {
     const boundedProvider = provider();
     let completedState: string | undefined;

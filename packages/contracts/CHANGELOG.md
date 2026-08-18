@@ -5,6 +5,10 @@
 - Add the closed Apple identity link-start request with current password and the
   released Web/native Apple start fields. Email, provider tokens, provider proofs,
   and caller-supplied authority remain excluded.
+- Publish distinct closed Apple sign-in and identity-link start response unions:
+  Web exposes only the authorization URL, while native additionally receives the
+  transaction identifier and exact expiry. Authorization URLs remain bounded to
+  2,048 characters.
 - Append the immutable 0.6.0 schema release without modifying older snapshots.
 
 ## 0.5.0 - 2026-08-10

@@ -2,5 +2,5 @@
   "package_version": "0.6.0",
   "wire_schema_version": 1,
   "change_level": "minor",
-  "reason": "Add the password-reauthenticated Apple identity link-start request without changing accepted public-auth schemas"
+  "reason": "Add closed mode-specific Apple sign-in and identity-link start request/response contracts"
 }

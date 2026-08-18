@@ -301,6 +301,37 @@ test("allows supported constraint relaxation", () => {
   );
 });
 
+test("allows a closed response object to become a union that preserves the exact old branch", () => {
+  const native = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      schema_version: { const: 1 },
+      authorization_url: { type: "string", maxLength: 2_048 },
+      transaction_id: { type: "string" },
+      expires_at: { type: "string" },
+    },
+    required: ["schema_version", "authorization_url", "transaction_id", "expires_at"],
+  };
+  assert.deepEqual(compareSchemas(
+    { $id: "urn:start-response", ...native },
+    {
+      $id: "urn:start-response",
+      anyOf: [
+        {
+          type: "object", additionalProperties: false,
+          properties: {
+            schema_version: { const: 1 },
+            authorization_url: { type: "string", maxLength: 2_048 },
+          },
+          required: ["schema_version", "authorization_url"],
+        },
+        native,
+      ],
+    },
+  ), []);
+});
+
 test("applies open and closed object property compatibility in the correct direction", () => {
   assert.deepEqual(
     compareSchemas(
