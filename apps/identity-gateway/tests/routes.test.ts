@@ -63,6 +63,8 @@ async function buildApp(
     readonly failFinalizedCompletion?: boolean;
     readonly failFirstCheckpoint?: boolean;
     readonly failFirstEmailCompletion?: boolean;
+    readonly failAuthentication?: boolean;
+    readonly rateLimitAfter?: number;
   } = {},
 ): Promise<FastifyInstance> {
   const path = "../src/app.ts";
@@ -75,6 +77,8 @@ async function buildApp(
   let checkpointedSubject: typeof subject | undefined;
   let checkpointCalls = 0;
   let completionCalls = 0;
+  let rateLimitCalls = 0;
+  let providerAttemptStarted = false;
   return module.buildIdentityGatewayApp({
     config: { publicOrigins: new Set([origin]), cookieHost: host, publicBaseUrl: `https://${host}`, providerUrl: "https://apple.example.test", appleWebRedirectUris: new Set([redirect]), appleNativeRedirectUris: new Set(["coreagent://auth/apple/callback"]), passwordResetRedirectUri: `${origin}/auth/password/reset/callback`, publicAuthEnabled: true },
     flowCookieKey: Buffer.alloc(32, 0x34),
@@ -86,7 +90,12 @@ async function buildApp(
         if (options.failFirstEmailStart === true && emailStartCalls === 1) throw new ProviderFailure("AUTH_INVALID");
         return { kind: "verification_pending" as const, expectedProviderSubject: "subject_01" };
       },
-      async verifyEmail(input: unknown) { calls.push({ name: "verifyEmail", input }); providerEmailVerified = true; return subject; },
+      async verifyEmail(input: unknown) {
+        calls.push({ name: "verifyEmail", input });
+        if (providerEmailVerified) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+        providerEmailVerified = true;
+        return subject;
+      },
       async recoverVerifiedEmailSubject(input: unknown) {
         calls.push({ name: "recoverVerifiedEmailSubject", input });
         if (!providerEmailVerified) throw new ProviderFailure("AUTH_EMAIL_UNVERIFIED");
@@ -101,10 +110,15 @@ async function buildApp(
       async reauthenticatePassword() { return subject; }, async revokeCurrentProviderSession() {}, async deleteProviderSubject() {},
     },
     operations: {
-      async consumeRateLimit(input: unknown) { calls.push({ name: "consumeRateLimit", input }); return null; },
+      async consumeRateLimit(input: unknown) {
+        calls.push({ name: "consumeRateLimit", input });
+        rateLimitCalls += 1;
+        return options.rateLimitAfter !== undefined && rateLimitCalls > options.rateLimitAfter ? 60_000 : null;
+      },
       async issueSession(_subject: unknown, clientKind: "web" | "iphone" | "macos", deviceLabel?: string, idempotency?: unknown) { calls.push({ name: "issueSession", input: { clientKind, deviceLabel, idempotency } }); return { session: { schema_version: 1, actor_id: "actor_server", actor_resource_version: 1, session_id: "session_01", session_resource_version: 1, client_kind: clientKind, idle_expires_at: "2026-08-18T00:00:00.000Z", absolute_expires_at: "2026-09-16T00:00:00.000Z", reauthentication_required: false }, sessionSecret: secret, csrfSecret: csrf }; },
       async authenticateSession(input: unknown) {
         calls.push({ name: "authenticateSession", input });
+        if (options.failAuthentication === true) throw new ProviderFailure("AUTH_INVALID");
         const credential = input as { sessionSecret?: unknown; requireCsrf?: unknown };
         const clientKind = credential.requireCsrf === true
           ? "web"
@@ -159,6 +173,32 @@ async function buildApp(
             ? { kind: "pending" as const, expectedProviderSubject: "subject_01" }
             : { kind: "verified" as const, subject: checkpointedSubject },
         };
+      },
+      async admitEmailVerificationProviderAttempt(input: unknown) {
+        calls.push({ name: "admitEmailVerificationProviderAttempt", input });
+        const kind = providerAttemptStarted ? "recovery" as const : "started" as const;
+        providerAttemptStarted = true;
+        return {
+          kind,
+          expectedProviderSubject: "subject_01",
+          expectedNormalizedEmail: "current@example.test",
+          verificationStartedAt: "2026-08-17T00:00:00.000Z",
+          recoveryNotAfter: "2026-08-17T00:01:00.000Z",
+        };
+      },
+      async readEmailVerificationProviderRecovery(input: unknown) {
+        calls.push({ name: "readEmailVerificationProviderRecovery", input });
+        return {
+          kind: "recovery" as const,
+          expectedProviderSubject: "subject_01",
+          expectedNormalizedEmail: "current@example.test",
+          verificationStartedAt: "2026-08-17T00:00:00.000Z",
+          recoveryNotAfter: "2026-08-17T00:01:00.000Z",
+        };
+      },
+      async releaseEmailVerificationProviderAttempt(input: unknown) {
+        calls.push({ name: "releaseEmailVerificationProviderAttempt", input });
+        providerAttemptStarted = false;
       },
       async checkpointEmailVerification(input: unknown) {
         calls.push({ name: "checkpointEmailVerification", input });
@@ -216,6 +256,32 @@ test("password reset normalizes one account identifier for rate limit and provid
     idempotencyKey: idem.idempotency_key,
     payloadHash: idem.payload_hash,
   });
+  await app.close();
+});
+
+test("Apple sign-in start and callback consume route buckets before provider effects", async () => {
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const app = await buildApp(calls);
+  const start = await app.inject({
+    method: "POST", url: "/auth/v1/apple/start",
+    headers: { host, origin, "content-type": "application/json" },
+    payload: { ...idem, client_kind: "web", redirect_uri: redirect },
+  });
+  assert.equal(start.statusCode, 200, start.body);
+  assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit", "beginApple"]);
+  assert.equal((calls[0]?.input as { bucketKind?: unknown }).bucketKind, "apple_start");
+  calls.length = 0;
+  const flowCookie = ([] as string[]).concat(start.headers["set-cookie"] ?? [])
+    .find((value) => value.startsWith("core_agent_apple_flow="));
+  const state = new URL(start.json().authorization_url).searchParams.get("state");
+  const callback = await app.inject({
+    method: "POST", url: "/auth/v1/apple/callback",
+    headers: { host, origin, "content-type": "application/json", cookie: flowCookie!.split(";", 1)[0]! },
+    payload: { ...idem, client_kind: "web", transaction_id: "oauth_01", authorization_code: "opaque-code", state },
+  });
+  assert.equal(callback.statusCode, 200, callback.body);
+  assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit", "completeApple", "issueSession"]);
+  assert.equal((calls[0]?.input as { bucketKind?: unknown }).bucketKind, "apple_callback");
   await app.close();
 });
 
@@ -323,7 +389,7 @@ test("email verification verifies the provider subject, registers Task 3, and is
   assert.equal(response.statusCode, 200);
   assert.equal(response.json().transport, "web_cookie");
   assert.deepEqual(calls.map(({ name }) => name), [
-    "prepareEmailVerification", "recoverVerifiedEmailSubject", "verifyEmail",
+    "prepareEmailVerification", "admitEmailVerificationProviderAttempt", "verifyEmail",
     "checkpointEmailVerification", "completeEmailVerification",
   ]);
   const providerInput = calls[2]?.input as Record<string, unknown>;
@@ -356,7 +422,7 @@ test("email verification rejects a cross-mode request before any provider effect
   });
   assert.equal(webRetry.statusCode, 200);
   assert.deepEqual(calls.map(({ name }) => name), [
-    "prepareEmailVerification", "recoverVerifiedEmailSubject", "verifyEmail",
+    "prepareEmailVerification", "admitEmailVerificationProviderAttempt", "verifyEmail",
     "checkpointEmailVerification", "completeEmailVerification",
   ]);
   await app.close();
@@ -401,8 +467,15 @@ test("email verification recovers an OTP consumed before its durable checkpoint"
   });
   assert.equal(first.statusCode, 500);
   assert.equal(retry.statusCode, 200, retry.body);
-  assert.equal(calls.filter(({ name }) => name === "verifyEmail").length, 1);
-  assert.equal(calls.filter(({ name }) => name === "recoverVerifiedEmailSubject").length, 2);
+  assert.equal(calls.filter(({ name }) => name === "verifyEmail").length, 2);
+  assert.equal(calls.filter(({ name }) => name === "recoverVerifiedEmailSubject").length, 1);
+  const recovery = calls.find(({ name }) => name === "recoverVerifiedEmailSubject")?.input;
+  assert.deepEqual(recovery, {
+    expectedProviderSubject: "subject_01",
+    expectedNormalizedEmail: "current@example.test",
+    verificationStartedAt: "2026-08-17T00:00:00.000Z",
+    recoveryNotAfter: "2026-08-17T00:01:00.000Z",
+  });
   assert.equal(calls.filter(({ name }) => name === "completeEmailVerification").length, 1);
   await app.close();
 });
@@ -428,7 +501,7 @@ test("email verification skips its one-use provider proof after a durable checkp
   assert.equal(first.statusCode, 500);
   assert.equal(retry.statusCode, 200, retry.body);
   assert.equal(calls.filter(({ name }) => name === "verifyEmail").length, 1);
-  assert.equal(calls.filter(({ name }) => name === "recoverVerifiedEmailSubject").length, 1);
+  assert.equal(calls.filter(({ name }) => name === "recoverVerifiedEmailSubject").length, 0);
   assert.equal(calls.filter(({ name }) => name === "checkpointEmailVerification").length, 1);
   assert.equal(calls.filter(({ name }) => name === "completeEmailVerification").length, 2);
   await app.close();
@@ -443,6 +516,7 @@ test("reauthentication accepts exact native bearer transport and unlocks native 
       idempotency_key: `idem_native_reauth_${clientKind}`,
       expected_resource_version: 1,
       password: "correct-horse",
+      client_kind: clientKind,
     };
     const reauthenticationPayload = {
       ...reauthentication,
@@ -450,6 +524,7 @@ test("reauthentication accepts exact native bearer transport and unlocks native 
         schema_version: reauthentication.schema_version,
         idempotency_key: reauthentication.idempotency_key,
         expected_resource_version: reauthentication.expected_resource_version,
+        client_kind: reauthentication.client_kind,
         reauthentication_proof_digest: digest(reauthentication.password),
       }),
     };
@@ -484,6 +559,89 @@ test("reauthentication accepts exact native bearer transport and unlocks native 
   }
 });
 
+test("native Session transport rejects Web and cross-native stored modes before authority or provider effects", async () => {
+  for (const [requestedKind, sessionSecret] of [
+    ["iphone", "m".repeat(43)],
+    ["macos", "i".repeat(43)],
+  ] as const) {
+    const calls: Array<{ name: string; input: unknown }> = [];
+    const app = await buildApp(calls);
+    const facts = {
+      schema_version: 1 as const,
+      idempotency_key: `idem_native_mode_mismatch_${requestedKind}`,
+      expected_resource_version: 1,
+      password: "correct-horse",
+      client_kind: requestedKind,
+    };
+    const response = await app.inject({
+      method: "POST", url: "/auth/v1/reauthenticate",
+      headers: { host, authorization: `Bearer ${sessionSecret}`, "content-type": "application/json" },
+      payload: {
+        ...facts,
+        payload_hash: canonicalPayloadHash({
+          schema_version: facts.schema_version,
+          idempotency_key: facts.idempotency_key,
+          expected_resource_version: facts.expected_resource_version,
+          client_kind: facts.client_kind,
+          reauthentication_proof_digest: digest(facts.password),
+        }),
+      },
+    });
+    assert.equal(response.statusCode, 401, response.body);
+    assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit", "authenticateSession"]);
+    await app.close();
+  }
+
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const app = await buildApp(calls);
+  const link = await app.inject({
+    method: "POST", url: "/auth/v1/apple/link/start",
+    headers: { host, authorization: `Bearer ${"m".repeat(43)}`, "content-type": "application/json" },
+    payload: {
+      ...idem, password: "correct-horse", client_kind: "iphone",
+      redirect_uri: "coreagent://auth/apple/callback", nonce: "native_nonce_01",
+      pkce_code_challenge: "a".repeat(43), pkce_code_challenge_method: "S256",
+    },
+  });
+  assert.equal(link.statusCode, 401, link.body);
+  assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit", "authenticateSession"]);
+  await app.close();
+});
+
+test("pre-auth route rate limits count invalid Sessions before authentication and provider effects", async () => {
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const app = await buildApp(calls, { failAuthentication: true, rateLimitAfter: 1 });
+  const facts = {
+    schema_version: 1 as const,
+    idempotency_key: "idem_invalid_native_rate",
+    expected_resource_version: 1,
+    password: "correct-horse",
+    client_kind: "iphone" as const,
+  };
+  const payload = {
+    ...facts,
+    payload_hash: canonicalPayloadHash({
+      schema_version: facts.schema_version,
+      idempotency_key: facts.idempotency_key,
+      expected_resource_version: facts.expected_resource_version,
+      client_kind: facts.client_kind,
+      reauthentication_proof_digest: digest(facts.password),
+    }),
+  };
+  const first = await app.inject({
+    method: "POST", url: "/auth/v1/reauthenticate",
+    headers: { host, authorization: `Bearer ${"i".repeat(43)}`, "content-type": "application/json" }, payload,
+  });
+  const limited = await app.inject({
+    method: "POST", url: "/auth/v1/reauthenticate",
+    headers: { host, authorization: `Bearer ${"i".repeat(43)}`, "content-type": "application/json" }, payload,
+  });
+  assert.equal(first.statusCode, 401, first.body);
+  assert.equal(limited.statusCode, 429, limited.body);
+  assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit", "authenticateSession", "consumeRateLimit"]);
+  await app.close();
+});
+
 test("reauthentication rejects changed password before authentication or provider and native cookie mixing", async () => {
   const calls: Array<{ name: string; input: unknown }> = [];
   const app = await buildApp(calls);
@@ -516,7 +674,7 @@ test("reauthentication rejects changed password before authentication or provide
     payload: { ...original, payload_hash: payloadHash },
   });
   assert.equal(mixed.statusCode, 400);
-  assert.deepEqual(calls, []);
+  assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit"]);
   await app.close();
 });
 
@@ -587,7 +745,10 @@ test("Apple link start derives actor/email server-side after Session and recent 
     payload: { ...idem, password: "correct-horse", client_kind: "web", redirect_uri: redirect },
   });
   assert.equal(response.statusCode, 200);
-  assert.deepEqual(calls.map(({ name }) => name), ["authenticateSession", "consumeRateLimit", "requireRecentReauthentication", "loadNormalizedEmail", "reauthenticateAndBeginAppleLink"]);
+  assert.deepEqual(calls.map(({ name }) => name), [
+    "consumeRateLimit", "authenticateSession", "consumeRateLimit",
+    "requireRecentReauthentication", "loadNormalizedEmail", "reauthenticateAndBeginAppleLink",
+  ]);
   const providerInput = calls.at(-1)?.input as Record<string, unknown>;
   assert.equal(providerInput.authenticatedActorId, "actor_server");
   assert.equal(providerInput.email, "current@example.test");
@@ -606,8 +767,8 @@ test("Apple link callback consumes its independent callback rate limit before pr
     payload: { ...idem, client_kind: "iphone", transaction_id: "oauth_link", authorization_code: "opaque-code", state: "state-link", nonce: "nonce-link", pkce_code_verifier: "v".repeat(43) },
   });
   assert.equal(response.statusCode, 200);
-  assert.deepEqual(calls.map(({ name }) => name), ["authenticateSession", "consumeRateLimit", "requireRecentReauthentication", "executeProtectedAuthorityCommand"]);
-  const rate = calls[1]?.input as Record<string, unknown>;
+  assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit", "authenticateSession", "requireRecentReauthentication", "executeProtectedAuthorityCommand"]);
+  const rate = calls[0]?.input as Record<string, unknown>;
   assert.equal(rate.bucketKind, "apple_callback");
   const durable = calls.at(-1)?.input as { payload?: unknown };
   assert.deepEqual(durable.payload, idem);
@@ -639,8 +800,11 @@ test("native Apple link start authenticates with one opaque bearer and never set
   });
   assert.equal(response.statusCode, 200);
   assert.equal(response.headers["set-cookie"], undefined);
-  assert.deepEqual(calls.map(({ name }) => name), ["authenticateSession", "consumeRateLimit", "requireRecentReauthentication", "loadNormalizedEmail", "reauthenticateAndBeginAppleLink"]);
-  const authentication = calls[0]?.input as Record<string, unknown>;
+  assert.deepEqual(calls.map(({ name }) => name), [
+    "consumeRateLimit", "authenticateSession", "consumeRateLimit",
+    "requireRecentReauthentication", "loadNormalizedEmail", "reauthenticateAndBeginAppleLink",
+  ]);
+  const authentication = calls[1]?.input as Record<string, unknown>;
   assert.equal(authentication.sessionSecret, secret);
   assert.equal(authentication.requireCsrf, false);
   await app.close();

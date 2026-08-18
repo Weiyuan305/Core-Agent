@@ -112,11 +112,28 @@ async function authenticateClientMutation(
   dependencies: IdentityGatewayRouteDependencies,
   clientKind: "web" | "iphone" | "macos",
 ): Promise<GatewayAuthenticatedSession> {
-  if (clientKind === "web") return authenticateMutation(request, dependencies);
-  return dependencies.operations.authenticateSession({
-    sessionSecret: requireNativeSessionCredential(request),
-    requireCsrf: false,
+  const authority = clientKind === "web"
+    ? await authenticateMutation(request, dependencies)
+    : await dependencies.operations.authenticateSession({
+      sessionSecret: requireNativeSessionCredential(request),
+      requireCsrf: false,
+    });
+  if (authority.session.client_kind !== clientKind) throw new IdentityGatewayFailure("AUTH_INVALID");
+  return authority;
+}
+
+async function consumePreAuthRateLimit(
+  request: FastifyRequest,
+  dependencies: IdentityGatewayRouteDependencies,
+  bucketKind: "apple_start" | "apple_link" | "apple_callback",
+  routeKey: string,
+): Promise<void> {
+  const retryAfterMs = await dependencies.operations.consumeRateLimit({
+    bucketKind,
+    accountIdentifier: routeKey,
+    clientIdentifier: request.identityContext.clientIdentifier,
   });
+  if (retryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", retryAfterMs);
 }
 
 export async function registerAppleRoutes(app: FastifyInstance, dependencies: IdentityGatewayRouteDependencies): Promise<void> {
@@ -124,6 +141,7 @@ export async function registerAppleRoutes(app: FastifyInstance, dependencies: Id
     const body = request.body as AppleStartBody;
     assertClientTransport(request, body.client_kind, dependencies.config);
     assertExactRedirect(body.client_kind, body.redirect_uri, dependencies.config);
+    await consumePreAuthRateLimit(request, dependencies, "apple_start", `route:apple_start:${body.client_kind}`);
     const start = await dependencies.provider.beginApple(request.body as never);
     authorizationState(start, dependencies.config.providerUrl, body.redirect_uri);
     if (body.client_kind === "web") {
@@ -136,8 +154,7 @@ export async function registerAppleRoutes(app: FastifyInstance, dependencies: Id
   app.post("/auth/v1/apple/callback", { schema: { body: AppleAuthorizationCallbackRequestSchema, response: { 200: AppleAuthorizationCallbackResponseSchema } } }, async (request, reply) => {
     const body = request.body as AppleCallbackBody;
     assertClientTransport(request, body.client_kind, dependencies.config);
-    const retryAfterMs = await dependencies.operations.consumeRateLimit({ bucketKind: "apple_callback", accountIdentifier: body.transaction_id, clientIdentifier: request.identityContext.clientIdentifier });
-    if (retryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", retryAfterMs);
+    await consumePreAuthRateLimit(request, dependencies, "apple_callback", body.transaction_id);
     const callback = body.client_kind === "web"
       ? canonicalWebAppleCallback(request, reply, dependencies, body, "sign_in")
       : body;
@@ -154,6 +171,7 @@ export async function registerAppleRoutes(app: FastifyInstance, dependencies: Id
     const body = request.body as AppleStartBody & { readonly password: string };
     assertClientTransport(request, body.client_kind, dependencies.config);
     assertExactRedirect(body.client_kind, body.redirect_uri, dependencies.config);
+    await consumePreAuthRateLimit(request, dependencies, "apple_link", `route:apple_link:${body.client_kind}`);
     const authority = await authenticateClientMutation(request, dependencies, body.client_kind);
     const retryAfterMs = await dependencies.operations.consumeRateLimit({ bucketKind: "reauthenticate", accountIdentifier: authority.actorId, clientIdentifier: request.identityContext.clientIdentifier });
     if (retryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", retryAfterMs);
@@ -175,9 +193,8 @@ export async function registerAppleRoutes(app: FastifyInstance, dependencies: Id
   app.post("/auth/v1/apple/link/callback", { schema: { body: AppleIdentityLinkRequestSchema, response: { 200: AppleIdentityLinkResponseSchema } } }, async (request, reply) => {
     const body = request.body as AppleCallbackBody;
     assertClientTransport(request, body.client_kind, dependencies.config);
+    await consumePreAuthRateLimit(request, dependencies, "apple_callback", body.transaction_id);
     const authority = await authenticateClientMutation(request, dependencies, body.client_kind);
-    const retryAfterMs = await dependencies.operations.consumeRateLimit({ bucketKind: "apple_callback", accountIdentifier: body.transaction_id, clientIdentifier: request.identityContext.clientIdentifier });
-    if (retryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", retryAfterMs);
     await dependencies.operations.requireRecentReauthentication(authority);
     const callback = body.client_kind === "web"
       ? canonicalWebAppleCallback(request, reply, dependencies, body, "link")

@@ -115,7 +115,7 @@ const schemaManifestEntries = [
   [9, "agent_run_failure_code", "5c67f4d0bb65a25cf331acd122e3ae1ba48ef287f34e2cd97844e96b1f95af95"],
   [10, "identity_authority", "eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381"],
   [11, "password_reset_transactions", "fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393"],
-  [12, "email_verification_transactions", "734a609cd7fb0eee84727820fc562b791ea48bba2fcad0494396bd33f8aaeb45"],
+  [12, "email_verification_transactions", "7545113387693ca0a944dd09033df0941333bfbbc9e8f23d3d622b84a6155bf8"],
 ] as const;
 
 const schemaManifests = new Map<number, SchemaManifest>(schemaManifestEntries.map(([version, name, checksum]) => [
@@ -331,6 +331,16 @@ const oauthFlowKindConstraintBase: ConstraintShape = {
   definition: "CHECK (flow_kind = ANY (ARRAY['apple_sign_in'::text, 'apple_link'::text]))",
 };
 
+const publicRateLimitBucketConstraintBase: ConstraintShape = {
+  schema: "public",
+  relation: "public_rate_limits",
+  relkind: "r",
+  name: "public_rate_limits_bucket_kind_check",
+  type: "c",
+  validated: true,
+  definition: "CHECK (bucket_kind = ANY (ARRAY['signup'::text, 'login'::text, 'reset'::text, 'apple_callback'::text, 'invitation_accept'::text, 'reauthenticate'::text]))",
+};
+
 schemaManifests.set(10, {
   ...schemaManifests.get(10)!,
   objects: ownedTables([
@@ -342,7 +352,7 @@ schemaManifests.set(10, {
   routines: schema10Routines,
   routineAcls: schema10Routines.flatMap(([kind, name]) => ["PUBLIC", "core_agent_app", "core_agent_identity"].map((grantee) =>
     ["revoke", "public", name, kind, "", grantee, "EXECUTE", false] as const)),
-  constraints: [oauthFlowKindConstraintBase],
+  constraints: [oauthFlowKindConstraintBase, publicRateLimitBucketConstraintBase],
   validateAndConverge: convergeSchema10Acls,
 });
 
@@ -379,6 +389,9 @@ schemaManifests.set(12, {
     [schema12Table, "verified_provider_subject_hmac", "bytea", false, ""],
     [schema12Table, "verified_subject_ciphertext", "bytea", false, ""],
     [schema12Table, "provider_verification_status", "text", true, "'pending'::text"],
+    [schema12Table, "provider_verification_started_at", "timestamp with time zone", false, ""],
+    [schema12Table, "provider_verification_attempt_expires_at", "timestamp with time zone", false, ""],
+    [schema12Table, "provider_verification_proof_hmac", "bytea", false, ""],
     [schema12Table, "provider_verified_at", "timestamp with time zone", false, ""],
     [schema12Table, "provider_start_status", "text", true, ""],
     [schema12Table, "provider_start_attempt", "integer", true, "1"],
@@ -395,12 +408,13 @@ schemaManifests.set(12, {
     [schema12Table, "email_verification_transacti_expected_provider_subject_ci_check", "c", true, "CHECK (expected_provider_subject_ciphertext IS NULL OR octet_length(expected_provider_subject_ciphertext) >= 33 AND octet_length(expected_provider_subject_ciphertext) <= 65536)"],
     [schema12Table, "email_verification_transacti_expected_provider_subject_hm_check", "c", true, "CHECK (expected_provider_subject_hmac IS NULL OR octet_length(expected_provider_subject_hmac) = 32)"],
     [schema12Table, "email_verification_transacti_provider_verification_status_check", "c", true, "CHECK (provider_verification_status = ANY (ARRAY['pending'::text, 'verified'::text]))"],
+    [schema12Table, "email_verification_transacti_provider_verification_proof__check", "c", true, "CHECK (provider_verification_proof_hmac IS NULL OR octet_length(provider_verification_proof_hmac) = 32)"],
     [schema12Table, "email_verification_transacti_verified_provider_subject_hm_check", "c", true, "CHECK (verified_provider_subject_hmac IS NULL OR octet_length(verified_provider_subject_hmac) = 32)"],
     [schema12Table, "email_verification_transactio_verified_subject_ciphertext_check", "c", true, "CHECK (verified_subject_ciphertext IS NULL OR octet_length(verified_subject_ciphertext) >= 33 AND octet_length(verified_subject_ciphertext) <= 65536)"],
     [schema12Table, "email_verification_provider_start_attempt_check", "c", true, "CHECK (provider_start_attempt >= 1 AND provider_start_attempt <= 100)"],
     [schema12Table, "email_verification_provider_start_state_check", "c", true, "CHECK (provider_start_status = 'reserved'::text AND provider_start_finalized_at IS NULL AND provider_start_failed_at IS NULL AND expected_provider_subject_hmac IS NULL AND expected_provider_subject_ciphertext IS NULL OR provider_start_status = 'finalized'::text AND provider_start_finalized_at IS NOT NULL AND provider_start_failed_at IS NULL AND expected_provider_subject_hmac IS NOT NULL AND expected_provider_subject_ciphertext IS NOT NULL OR provider_start_status = 'failed'::text AND provider_start_finalized_at IS NULL AND provider_start_failed_at IS NOT NULL AND expected_provider_subject_hmac IS NULL AND expected_provider_subject_ciphertext IS NULL)"],
     [schema12Table, "email_verification_provider_start_status_check", "c", true, "CHECK (provider_start_status = ANY (ARRAY['reserved'::text, 'finalized'::text, 'failed'::text]))"],
-    [schema12Table, "email_verification_provider_verification_state_check", "c", true, "CHECK (provider_verification_status = 'pending'::text AND verified_provider_subject_hmac IS NULL AND verified_subject_ciphertext IS NULL AND provider_verified_at IS NULL OR provider_verification_status = 'verified'::text AND verified_provider_subject_hmac IS NOT NULL AND verified_subject_ciphertext IS NOT NULL AND provider_verified_at IS NOT NULL)"],
+    [schema12Table, "email_verification_provider_verification_state_check", "c", true, "CHECK (provider_verification_status = 'pending'::text AND verified_provider_subject_hmac IS NULL AND verified_subject_ciphertext IS NULL AND provider_verified_at IS NULL AND (provider_verification_started_at IS NULL AND provider_verification_attempt_expires_at IS NULL AND provider_verification_proof_hmac IS NULL OR provider_verification_started_at IS NOT NULL AND provider_verification_attempt_expires_at IS NOT NULL AND provider_verification_proof_hmac IS NOT NULL AND provider_verification_attempt_expires_at > provider_verification_started_at AND provider_verification_attempt_expires_at <= expires_at) OR provider_verification_status = 'verified'::text AND verified_provider_subject_hmac IS NOT NULL AND verified_subject_ciphertext IS NOT NULL AND provider_verified_at IS NOT NULL AND provider_verification_started_at IS NOT NULL AND provider_verification_attempt_expires_at IS NOT NULL AND provider_verification_proof_hmac IS NOT NULL AND provider_verification_attempt_expires_at > provider_verification_started_at AND provider_verification_attempt_expires_at <= expires_at AND provider_verified_at >= provider_verification_started_at)"],
     [schema12Table, "email_verification_transactions_binding_ciphertext_check", "c", true, "CHECK (octet_length(binding_ciphertext) >= 33 AND octet_length(binding_ciphertext) <= 65536)"],
     [schema12Table, "email_verification_transactions_check", "c", true, "CHECK (expires_at > created_at)"],
     [schema12Table, "email_verification_transactions_check1", "c", true, "CHECK (status <> 'consumed'::text OR provider_verification_status = 'verified'::text)"],
@@ -419,6 +433,14 @@ schemaManifests.set(12, {
     [schema12Table, "email_verification_transactions_start_idempotency_key_key", "CREATE UNIQUE INDEX email_verification_transactions_start_idempotency_key_key ON public.email_verification_transactions USING btree (start_idempotency_key)"],
   ],
   relationAcls: schema12RelationAcls,
+  constraintAmendments: [{
+    action: "replace",
+    before: publicRateLimitBucketConstraintBase,
+    after: {
+      ...publicRateLimitBucketConstraintBase,
+      definition: "CHECK (bucket_kind = ANY (ARRAY['signup'::text, 'login'::text, 'reset'::text, 'apple_start'::text, 'apple_link'::text, 'apple_callback'::text, 'invitation_accept'::text, 'reauthenticate'::text]))",
+    },
+  }],
 });
 
 function quoteIdentifier(value: string): string {

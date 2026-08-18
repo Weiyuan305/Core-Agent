@@ -48,6 +48,7 @@ test("durable email verification converges starts across restart and consumes ex
   const begin = module.beginEmailVerificationTransaction as (dependencies: unknown, input: unknown) => Promise<{ kind: string; verificationId: string; expiresAt: string }>;
   const finalize = module.finalizeEmailVerificationTransactionStart as (dependencies: unknown, input: unknown) => Promise<void>;
   const prepare = module.prepareEmailVerificationTransaction as (dependencies: unknown, input: unknown) => Promise<{ clientKind: string; deviceLabel?: string; flowKind: string; invitationId?: string; providerVerification: unknown }>;
+  const admit = module.admitEmailVerificationProviderAttempt as (dependencies: unknown, input: unknown) => Promise<{ kind: string }>;
   const checkpoint = module.checkpointEmailVerificationTransaction as (dependencies: unknown, input: unknown) => Promise<void>;
   const consume = module.consumeEmailVerificationTransaction as (dependencies: unknown, input: unknown) => Promise<{ clientKind: string; deviceLabel?: string; verifiedSubject: unknown }>;
   let randomCalls = 0;
@@ -146,6 +147,10 @@ test("durable email verification converges starts across restart and consumes ex
     normalizedEmail: "student@example.test",
     verifiedAt: "2026-08-18T00:00:00.000Z",
   };
+  assert.equal((await admit(dependencies, {
+    verificationId: first.verificationId,
+    verificationProofDigest: `sha256:${"9".repeat(64)}`,
+  })).kind, "started");
   await checkpoint(dependencies, { verificationId: first.verificationId, verifiedSubject });
   assert.deepEqual(await prepare(restartedDependencies, { verificationId: first.verificationId }), {
     normalizedEmail: "student@example.test", clientKind: "web", deviceLabel: "Browser", flowKind: "b2c",
@@ -302,4 +307,94 @@ test("concurrent first email starts admit one durable reservation without raw un
     "select count(*)::int as count from email_verification_transactions where start_idempotency_key = $1",
     [input.idempotencyKey],
   )).rows[0]?.count, 1);
+});
+
+test("provider verification attempt is durably timed, HMAC-bound, leased once, and recoverable after restart", async () => {
+  const module = await import("../src/index.js") as Record<string, unknown>;
+  const begin = module.beginEmailVerificationTransaction as (
+    dependencies: unknown, input: unknown,
+  ) => Promise<{ verificationId: string }>;
+  const finalize = module.finalizeEmailVerificationTransactionStart as (
+    dependencies: unknown, input: unknown,
+  ) => Promise<void>;
+  const admit = module.admitEmailVerificationProviderAttempt as (
+    dependencies: unknown, input: unknown,
+  ) => Promise<Record<string, unknown>>;
+  const release = module.releaseEmailVerificationProviderAttempt as (
+    dependencies: unknown, input: unknown,
+  ) => Promise<void>;
+  assert.equal(typeof admit, "function");
+  assert.equal(typeof release, "function");
+
+  let clock = new Date(now);
+  const dependencies = {
+    db, hmacKey, protector, ttlMs: 10 * 60_000, verificationAttemptLeaseMs: 30_000,
+    databaseNow: async () => new Date(clock),
+    randomBytes: (length: number) => Buffer.alloc(length, 0x61),
+  };
+  const input = {
+    idempotencyKey: "provider-attempt-start",
+    payloadHash: canonicalPayloadHash({
+      schema_version: 1, flow_kind: "b2c", idempotency_key: "provider-attempt-start",
+      normalized_email: "attempt@example.test", client_kind: "web",
+    }),
+    normalizedEmail: "attempt@example.test", clientKind: "web", flow: { kind: "b2c" },
+  };
+  const started = await begin(dependencies, input);
+  await finalize(dependencies, {
+    verificationId: started.verificationId,
+    outcome: "finalized",
+    expectedProviderSubject: "provider_attempt_subject",
+  });
+  const attemptInput = {
+    verificationId: started.verificationId,
+    verificationProofDigest: `sha256:${"4".repeat(64)}`,
+  };
+  const concurrent = await Promise.all(Array.from({ length: 8 }, () => admit(dependencies, attemptInput)));
+  assert.equal(concurrent.filter(({ kind }) => kind === "started").length, 1);
+  assert.equal(concurrent.filter(({ kind }) => kind === "in_progress").length, 7);
+  const first = concurrent.find(({ kind }) => kind === "started")!;
+  assert.deepEqual(first, {
+    kind: "started",
+    expectedProviderSubject: "provider_attempt_subject",
+    expectedNormalizedEmail: "attempt@example.test",
+    verificationStartedAt: "2026-08-18T00:00:00.000Z",
+    recoveryNotAfter: "2026-08-18T00:00:00.000Z",
+  });
+  const stored = (await pool.query<{
+    provider_verification_started_at: Date | null;
+    provider_verification_attempt_expires_at: Date | null;
+    proof_hmac: string | null;
+    leaked: string;
+  }>(`select provider_verification_started_at, provider_verification_attempt_expires_at,
+      encode(provider_verification_proof_hmac, 'hex') as proof_hmac,
+      encode(provider_verification_proof_hmac, 'escape') as leaked
+    from email_verification_transactions where email_verification_transaction_id = $1`,
+  [started.verificationId])).rows[0]!;
+  assert.equal(stored.provider_verification_started_at?.toISOString(), now.toISOString());
+  assert.equal(stored.provider_verification_attempt_expires_at?.toISOString(), "2026-08-18T00:00:30.000Z");
+  assert.equal(stored.proof_hmac?.length, 64);
+  assert.equal(stored.leaked.includes(attemptInput.verificationProofDigest), false);
+
+  clock = new Date("2026-08-18T00:00:30.001Z");
+  assert.deepEqual(await admit({ ...dependencies }, attemptInput), {
+    kind: "recovery",
+    expectedProviderSubject: "provider_attempt_subject",
+    expectedNormalizedEmail: "attempt@example.test",
+    verificationStartedAt: "2026-08-18T00:00:00.000Z",
+    recoveryNotAfter: "2026-08-18T00:00:30.001Z",
+  });
+  await release(dependencies, attemptInput);
+  const released = (await pool.query<{
+    provider_verification_started_at: Date | null;
+    provider_verification_attempt_expires_at: Date | null;
+    provider_verification_proof_hmac: Buffer | null;
+  }>(`select provider_verification_started_at, provider_verification_attempt_expires_at,
+      provider_verification_proof_hmac from email_verification_transactions
+      where email_verification_transaction_id = $1`, [started.verificationId])).rows[0]!;
+  assert.deepEqual(released, {
+    provider_verification_started_at: null,
+    provider_verification_attempt_expires_at: null,
+    provider_verification_proof_hmac: null,
+  });
 });

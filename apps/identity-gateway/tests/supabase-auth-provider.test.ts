@@ -97,12 +97,17 @@ const protector: TransactionProtector = {
   },
 };
 
-function user(provider: "email" | "apple" = "email", id = "provider-subject-1"): unknown {
+function user(
+  provider: "email" | "apple" = "email",
+  id = "provider-subject-1",
+  email = "User@Example.Test",
+  emailConfirmedAt: unknown = "2026-08-01T00:00:00.000Z",
+): unknown {
   let unknownGetterCalls = 0;
   const value = Object.defineProperties({}, {
     id: { value: id, enumerable: true },
-    email: { value: "User@Example.Test", enumerable: true },
-    email_confirmed_at: { value: "2026-08-01T00:00:00.000Z", enumerable: true },
+    email: { value: email, enumerable: true },
+    email_confirmed_at: { value: emailConfirmedAt, enumerable: true },
     app_metadata: { value: Object.freeze({ provider }), enumerable: true },
     access_token: {
       enumerable: true,
@@ -129,6 +134,8 @@ function createHarness(input: {
   readonly adminUpdateError?: unknown;
   readonly adminUpdateData?: unknown;
   readonly exchangedProviderSubject?: string;
+  readonly adminUser?: unknown;
+  readonly verifyOtpError?: unknown;
 } = {}): Harness {
   const store = new MemoryTransactionStore();
   const clientCalls: Harness["clientCalls"] = [];
@@ -167,7 +174,9 @@ function createHarness(input: {
       },
       verifyOtp: async (request: unknown) => {
         methodCalls.push({ name: "verifyOtp", arguments: [request] });
-        return { data: { user: user(), session: { access_token: providerAccessToken, refresh_token: providerRefreshToken } }, error: null };
+        return input.verifyOtpError === undefined
+          ? { data: { user: user(), session: { access_token: providerAccessToken, refresh_token: providerRefreshToken } }, error: null }
+          : { data: null, error: input.verifyOtpError };
       },
       signInWithPassword: async (request: unknown) => {
         methodCalls.push({ name: "signInWithPassword", arguments: [request] });
@@ -242,7 +251,7 @@ function createHarness(input: {
       admin: {
         getUserById: async (...arguments_: unknown[]) => {
           methodCalls.push({ name: "getUserById", arguments: arguments_ });
-          return { data: { user: user("email", String(arguments_[0])) }, error: null };
+          return { data: { user: input.adminUser ?? user("email", String(arguments_[0])) }, error: null };
         },
         updateUserById: async (...arguments_: unknown[]) => {
           methodCalls.push({ name: "updateUserById", arguments: arguments_ });
@@ -393,7 +402,12 @@ test("Supabase signup uses the exact email callback and verification exchanges o
   };
   const provider = harness.provider as unknown as {
     verifyEmail?: (input: { verificationCode: string; expectedProviderSubject: string }) => Promise<unknown>;
-    recoverVerifiedEmailSubject?: (input: { expectedProviderSubject: string }) => Promise<unknown>;
+    recoverVerifiedEmailSubject?: (input: {
+      expectedProviderSubject: string;
+      expectedNormalizedEmail: string;
+      verificationStartedAt: string;
+      recoveryNotAfter: string;
+    }) => Promise<unknown>;
   };
   assert.equal(typeof provider.verifyEmail, "function");
   const verified = await provider.verifyEmail!({
@@ -412,6 +426,9 @@ test("Supabase signup uses the exact email callback and verification exchanges o
   ]);
   assert.deepEqual(await provider.recoverVerifiedEmailSubject!({
     expectedProviderSubject: signup.expectedProviderSubject,
+    expectedNormalizedEmail: "user@example.test",
+    verificationStartedAt: "2026-08-01T00:00:00.000Z",
+    recoveryNotAfter: "2026-08-01T00:00:00.000Z",
   }), verified);
   assert.deepEqual(harness.methodCalls.find((call) => call.name === "getUserById")?.arguments, [
     signup.expectedProviderSubject,
@@ -426,7 +443,12 @@ test("Supabase email verification and recovery bind one exact expected provider 
   const harness = createHarness();
   const provider = harness.provider as unknown as {
     verifyEmail(input: { verificationCode: string; expectedProviderSubject: string }): Promise<unknown>;
-    recoverVerifiedEmailSubject(input: { expectedProviderSubject: string }): Promise<unknown>;
+    recoverVerifiedEmailSubject(input: {
+      expectedProviderSubject: string;
+      expectedNormalizedEmail: string;
+      verificationStartedAt: string;
+      recoveryNotAfter: string;
+    }): Promise<unknown>;
   };
   await expectFailure(() => provider.verifyEmail({
     verificationCode: "opaque-email-token-hash",
@@ -434,7 +456,48 @@ test("Supabase email verification and recovery bind one exact expected provider 
   }), "AUTH_CALLBACK_INVALID");
   await expectFailure(() => provider.recoverVerifiedEmailSubject({
     expectedProviderSubject: "",
+    expectedNormalizedEmail: "user@example.test",
+    verificationStartedAt: "2026-08-17T02:00:00.000Z",
+    recoveryNotAfter: "2026-08-17T02:00:01.000Z",
   }), "AUTH_CALLBACK_INVALID");
+});
+
+test("Supabase recovery accepts only an own exact confirmation timestamp caused by the durable attempt", async () => {
+  const recovery = {
+    expectedProviderSubject: "provider-subject-1",
+    expectedNormalizedEmail: "user@example.test",
+    verificationStartedAt: "2026-08-17T02:00:00.000Z",
+    recoveryNotAfter: "2026-08-17T02:00:01.000Z",
+  };
+  const old = createHarness({
+    adminUser: user("email", recovery.expectedProviderSubject, "user@example.test", "2026-08-17T01:59:59.999Z"),
+  });
+  await expectFailure(() => old.provider.recoverVerifiedEmailSubject(recovery), "AUTH_CALLBACK_INVALID");
+
+  const current = createHarness({
+    verifyOtpError: Object.freeze({ status: 403, code: "otp_expired" }),
+    adminUser: user("email", recovery.expectedProviderSubject, "USER@EXAMPLE.TEST", "2026-08-17T02:00:00.500Z"),
+  });
+  await expectFailure(() => current.provider.verifyEmail({
+    verificationCode: "one-use-token-hash",
+    expectedProviderSubject: recovery.expectedProviderSubject,
+  }), "AUTH_INVALID");
+  assert.deepEqual(await current.provider.recoverVerifiedEmailSubject(recovery), {
+    provider: "supabase",
+    providerSubject: recovery.expectedProviderSubject,
+    identityKind: "email_password",
+    normalizedEmail: recovery.expectedNormalizedEmail,
+    verifiedAt: "2026-08-17T02:00:00.500Z",
+  });
+
+  for (const adminUser of [
+    user("email", recovery.expectedProviderSubject, "other@example.test", "2026-08-17T02:00:00.500Z"),
+    user("email", recovery.expectedProviderSubject, "user@example.test", "2026-08-17T02:00:01.001Z"),
+    user("email", recovery.expectedProviderSubject, "user@example.test", "not-a-timestamp"),
+  ]) {
+    const invalid = createHarness({ adminUser });
+    await expectFailure(() => invalid.provider.recoverVerifiedEmailSubject(recovery), "AUTH_CALLBACK_INVALID");
+  }
 });
 
 test("Supabase provider-subject deletion is idempotent without reading a provider body", async () => {

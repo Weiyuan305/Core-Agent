@@ -82,6 +82,9 @@ export interface EmailVerificationTransactionTable {
   verified_provider_subject_hmac: ColumnType<Buffer | null, Uint8Array | null, Uint8Array | null>;
   verified_subject_ciphertext: ColumnType<Buffer | null, Uint8Array | null, Uint8Array | null>;
   provider_verification_status: "pending" | "verified";
+  provider_verification_started_at: Date | null;
+  provider_verification_attempt_expires_at: Date | null;
+  provider_verification_proof_hmac: ColumnType<Buffer | null, Uint8Array | null, Uint8Array | null>;
   provider_verified_at: Date | null;
   provider_start_status: "reserved" | "finalized" | "failed";
   provider_start_attempt: number;

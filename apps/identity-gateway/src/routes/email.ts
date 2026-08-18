@@ -8,6 +8,7 @@ import {
   PasswordResetRequestSchema,
   PasswordResetResponseSchema,
 } from "@core-agent/contracts";
+import { createHash } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import Type from "typebox";
 
@@ -123,29 +124,53 @@ export async function registerEmailRoutes(app: FastifyInstance, dependencies: Id
     if (providerVerification.kind === "verified") {
       subject = providerVerification.subject;
     } else {
-      try {
-        subject = await dependencies.provider.recoverVerifiedEmailSubject({
-          expectedProviderSubject: providerVerification.expectedProviderSubject,
-        });
-      } catch (error) {
-        if (!(error instanceof ProviderFailure) || error.code !== "AUTH_EMAIL_UNVERIFIED") throw error;
+      const verificationProofDigest = `sha256:${createHash("sha256").update(body.verification_code, "utf8").digest("hex")}`;
+      const attempt = await dependencies.operations.admitEmailVerificationProviderAttempt({
+        verificationId: body.verification_id,
+        verificationProofDigest,
+      });
+      if (attempt.kind === "in_progress") throw new IdentityGatewayFailure("AUTH_CONFLICT");
+      if (attempt.kind === "verified") {
+        subject = attempt.subject;
+      } else {
+        let verificationFailure: unknown;
         try {
           subject = await dependencies.provider.verifyEmail({
             verificationCode: body.verification_code,
-            expectedProviderSubject: providerVerification.expectedProviderSubject,
+            expectedProviderSubject: attempt.expectedProviderSubject,
           });
-        } catch (verificationError) {
-          if (!(verificationError instanceof ProviderFailure)
-            || verificationError.code !== "AUTH_CALLBACK_INVALID") throw verificationError;
-          subject = await dependencies.provider.recoverVerifiedEmailSubject({
-            expectedProviderSubject: providerVerification.expectedProviderSubject,
+        } catch (error) {
+          verificationFailure = error;
+          const recovery = await dependencies.operations.readEmailVerificationProviderRecovery({
+            verificationId: body.verification_id,
+            verificationProofDigest,
           });
+          try {
+            subject = await dependencies.provider.recoverVerifiedEmailSubject({
+              expectedProviderSubject: recovery.expectedProviderSubject,
+              expectedNormalizedEmail: recovery.expectedNormalizedEmail,
+              verificationStartedAt: recovery.verificationStartedAt,
+              recoveryNotAfter: recovery.recoveryNotAfter,
+            });
+          } catch (recoveryError) {
+            if (verificationFailure instanceof ProviderFailure
+              && verificationFailure.code === "AUTH_CALLBACK_INVALID"
+              && recoveryError instanceof ProviderFailure
+              && (recoveryError.code === "AUTH_CALLBACK_INVALID" || recoveryError.code === "AUTH_EMAIL_UNVERIFIED")) {
+              await dependencies.operations.releaseEmailVerificationProviderAttempt({
+                verificationId: body.verification_id,
+                verificationProofDigest,
+              });
+              throw verificationFailure;
+            }
+            throw recoveryError;
+          }
         }
+        await dependencies.operations.checkpointEmailVerification({
+          verificationId: body.verification_id,
+          verifiedSubject: subject,
+        });
       }
-      await dependencies.operations.checkpointEmailVerification({
-        verificationId: body.verification_id,
-        verifiedSubject: subject,
-      });
     }
     const requestIdempotency = request.body as { idempotency_key: string; payload_hash: string };
     const completed = await dependencies.operations.completeEmailVerification({

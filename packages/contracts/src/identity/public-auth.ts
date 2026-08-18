@@ -231,6 +231,7 @@ export const SessionRevokeResponseSchema = response("session-revoke-response", {
 export const ReauthenticationRequestSchema = request("reauthentication-request", {
   ...VersionedWriteProperties,
   password: PasswordSchema,
+  client_kind: Type.Optional(CoreSessionClientKindSchema),
 });
 export const ReauthenticationResponseSchema = response("reauthentication-response", {
   schema_version: SchemaVersionSchema,

@@ -24,7 +24,7 @@ const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..",
 const hmacKey = createHash("sha256").update("task6-public-rate-limit-hmac-key", "utf8").digest();
 let identityDb: Kysely<RuntimeDatabase>;
 
-type BucketKind = "signup" | "login" | "reset" | "apple_callback" | "invitation_accept" | "reauthenticate";
+type BucketKind = "signup" | "login" | "reset" | "apple_start" | "apple_link" | "apple_callback" | "invitation_accept" | "reauthenticate";
 interface ConsumeInput {
   readonly bucketKind: BucketKind;
   readonly accountIdentifier: string;
@@ -115,10 +115,10 @@ test.after(async () => {
   await administratorPool.end();
 });
 
-test("public fixed-window rate limits persist only account and IP-device HMACs in six separate buckets", async () => {
+test("public fixed-window rate limits persist only account and IP-device HMACs in eight separate buckets", async () => {
   const consumePublicRateLimit = requiredFunction<ConsumePublicRateLimit>("consumePublicRateLimit");
   const buckets: BucketKind[] = [
-    "signup", "login", "reset", "apple_callback", "invitation_accept", "reauthenticate",
+    "signup", "login", "reset", "apple_start", "apple_link", "apple_callback", "invitation_accept", "reauthenticate",
   ];
   for (const bucketKind of buckets) {
     assert.equal(await consumePublicRateLimit({ db: identityDb, hmacKey }, input({ bucketKind })), null);

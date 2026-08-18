@@ -61,6 +61,14 @@ export async function registerInvitationRoutes(app: FastifyInstance, dependencie
     assertClientTransport(request, body.authentication_proof.client_kind, dependencies.config);
     const retryAfterMs = await dependencies.operations.consumeRateLimit({ bucketKind: "invitation_accept", accountIdentifier: body.invitation_secret, clientIdentifier: request.identityContext.clientIdentifier });
     if (retryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", retryAfterMs);
+    if (body.authentication_proof.kind === "apple") {
+      const appleRetryAfterMs = await dependencies.operations.consumeRateLimit({
+        bucketKind: "apple_callback",
+        accountIdentifier: String((body.authentication_proof as Record<string, unknown>).transaction_id),
+        clientIdentifier: request.identityContext.clientIdentifier,
+      });
+      if (appleRetryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", appleRetryAfterMs);
+    }
     const subject = body.authentication_proof.kind === "email_password"
       ? await dependencies.provider.verifyCurrentSubject({ accessToken: body.authentication_proof.verification_proof! })
       : await dependencies.provider.completeApple(body.authentication_proof.client_kind === "web"

@@ -245,6 +245,7 @@ export function assertReauthenticationPayloadHash(body: {
   readonly payload_hash: string;
   readonly expected_resource_version: number;
   readonly password: string;
+  readonly client_kind?: "web" | "iphone" | "macos";
 }): void {
   assertCanonicalHash(body.payload_hash, reauthenticationDurableFacts(body));
 }
@@ -254,16 +255,19 @@ export function reauthenticationDurableFacts(body: {
   readonly idempotency_key: string;
   readonly expected_resource_version: number;
   readonly password: string;
+  readonly client_kind?: "web" | "iphone" | "macos";
 }): Readonly<{
   schema_version: 1;
   idempotency_key: string;
   expected_resource_version: number;
+  client_kind?: "web" | "iphone" | "macos";
   reauthentication_proof_digest: string;
 }> {
   return Object.freeze({
     schema_version: body.schema_version,
     idempotency_key: body.idempotency_key,
     expected_resource_version: body.expected_resource_version,
+    ...(body.client_kind === undefined ? {} : { client_kind: body.client_kind }),
     reauthentication_proof_digest: sensitiveFactDigest(body.password),
   });
 }

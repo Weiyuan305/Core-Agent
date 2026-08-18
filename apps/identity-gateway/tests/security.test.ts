@@ -65,8 +65,11 @@ function operations() {
         csrfSecret,
       };
     },
-    async authenticateSession() {
-      return { session, actorId: "actor_01", authSubjectId: "auth_01" };
+    async authenticateSession(input: { requireCsrf?: boolean } = {}) {
+      return {
+        session: { ...session, client_kind: input.requireCsrf === false ? "iphone" as const : "web" as const },
+        actorId: "actor_01", authSubjectId: "auth_01",
+      };
     },
     async requireRecentReauthentication() {},
     async loadNormalizedEmail() { return "student@example.test"; },

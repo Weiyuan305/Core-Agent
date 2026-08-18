@@ -58,6 +58,9 @@ export interface EmailVerificationInput {
 
 export interface EmailVerificationRecoveryInput {
   readonly expectedProviderSubject: string;
+  readonly expectedNormalizedEmail: string;
+  readonly verificationStartedAt: string;
+  readonly recoveryNotAfter: string;
 }
 
 export interface ProviderProof {

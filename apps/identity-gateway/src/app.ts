@@ -62,6 +62,34 @@ export interface IdentityGatewayOperations {
     readonly verificationId: string;
     readonly verifiedSubject: VerifiedProviderSubject;
   }) => Promise<void>;
+  readonly admitEmailVerificationProviderAttempt: (input: {
+    readonly verificationId: string;
+    readonly verificationProofDigest: string;
+  }) => Promise<
+    | { readonly kind: "in_progress" }
+    | { readonly kind: "verified"; readonly subject: VerifiedProviderSubject }
+    | {
+      readonly kind: "started" | "recovery";
+      readonly expectedProviderSubject: string;
+      readonly expectedNormalizedEmail: string;
+      readonly verificationStartedAt: string;
+      readonly recoveryNotAfter: string;
+    }
+  >;
+  readonly readEmailVerificationProviderRecovery: (input: {
+    readonly verificationId: string;
+    readonly verificationProofDigest: string;
+  }) => Promise<{
+    readonly kind: "started" | "recovery";
+    readonly expectedProviderSubject: string;
+    readonly expectedNormalizedEmail: string;
+    readonly verificationStartedAt: string;
+    readonly recoveryNotAfter: string;
+  }>;
+  readonly releaseEmailVerificationProviderAttempt: (input: {
+    readonly verificationId: string;
+    readonly verificationProofDigest: string;
+  }) => Promise<void>;
   readonly prepareEmailVerification: (input: {
     readonly verificationId: string;
   }) => Promise<{
@@ -83,7 +111,7 @@ export interface IdentityGatewayOperations {
     readonly issuedSession: GatewayIssuedSession;
   }>;
   readonly consumeRateLimit: (input: {
-    readonly bucketKind: "signup" | "login" | "reset" | "apple_callback" | "invitation_accept" | "reauthenticate";
+    readonly bucketKind: "signup" | "login" | "reset" | "apple_start" | "apple_link" | "apple_callback" | "invitation_accept" | "reauthenticate";
     readonly accountIdentifier: string;
     readonly clientIdentifier: string;
   }) => Promise<number | null>;

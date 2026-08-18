@@ -19,6 +19,10 @@ create table email_verification_transactions (
     check (verified_subject_ciphertext is null or octet_length(verified_subject_ciphertext) between 33 and 65536),
   provider_verification_status text not null default 'pending'
     check (provider_verification_status in ('pending', 'verified')),
+  provider_verification_started_at timestamptz,
+  provider_verification_attempt_expires_at timestamptz,
+  provider_verification_proof_hmac bytea
+    check (provider_verification_proof_hmac is null or octet_length(provider_verification_proof_hmac) = 32),
   provider_verified_at timestamptz,
   provider_start_status text not null
     constraint email_verification_provider_start_status_check
@@ -44,9 +48,23 @@ create table email_verification_transactions (
   ),
   constraint email_verification_provider_verification_state_check check (
     (provider_verification_status = 'pending' and verified_provider_subject_hmac is null
-      and verified_subject_ciphertext is null and provider_verified_at is null)
+      and verified_subject_ciphertext is null and provider_verified_at is null
+      and (
+        (provider_verification_started_at is null and provider_verification_attempt_expires_at is null
+          and provider_verification_proof_hmac is null)
+        or (provider_verification_started_at is not null and provider_verification_attempt_expires_at is not null
+          and provider_verification_proof_hmac is not null
+          and provider_verification_attempt_expires_at > provider_verification_started_at
+          and provider_verification_attempt_expires_at <= expires_at)
+      ))
     or (provider_verification_status = 'verified' and verified_provider_subject_hmac is not null
-      and verified_subject_ciphertext is not null and provider_verified_at is not null)
+      and verified_subject_ciphertext is not null and provider_verified_at is not null
+      and provider_verification_started_at is not null
+      and provider_verification_attempt_expires_at is not null
+      and provider_verification_proof_hmac is not null
+      and provider_verification_attempt_expires_at > provider_verification_started_at
+      and provider_verification_attempt_expires_at <= expires_at
+      and provider_verified_at >= provider_verification_started_at)
   ),
   check (status <> 'consumed' or provider_verification_status = 'verified'),
   check ((status = 'consumed') = (consumed_at is not null)),
@@ -62,3 +80,13 @@ revoke all on table email_verification_transactions
 
 grant select, insert, update on table email_verification_transactions
   to core_agent_identity;
+
+alter table public_rate_limits
+  drop constraint public_rate_limits_bucket_kind_check;
+
+alter table public_rate_limits
+  add constraint public_rate_limits_bucket_kind_check
+  check (bucket_kind in (
+    'signup', 'login', 'reset', 'apple_start', 'apple_link',
+    'apple_callback', 'invitation_accept', 'reauthenticate'
+  ));

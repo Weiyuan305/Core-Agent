@@ -329,6 +329,13 @@ function validEmail(email: string): boolean {
   return email.length >= 3 && email.length <= 320 && /^[^@\s]+@[^@\s]+$/u.test(email);
 }
 
+function strictUtcMilliseconds(value: string): number | undefined {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)) return undefined;
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== value) return undefined;
+  return timestamp;
+}
+
 function readCredential(input: unknown): EmailCredentialInput {
   const email = ownString(input, "email");
   const password = ownString(input, "password");
@@ -651,16 +658,32 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
 
   async recoverVerifiedEmailSubject(input: EmailVerificationRecoveryInput): Promise<VerifiedProviderSubject> {
     const expectedProviderSubject = ownString(input, "expectedProviderSubject");
+    const expectedNormalizedEmail = ownString(input, "expectedNormalizedEmail");
+    const verificationStartedAt = ownString(input, "verificationStartedAt");
+    const recoveryNotAfter = ownString(input, "recoveryNotAfter");
+    const verificationStartedTimestamp = verificationStartedAt === undefined
+      ? undefined : strictUtcMilliseconds(verificationStartedAt);
+    const recoveryNotAfterTimestamp = recoveryNotAfter === undefined
+      ? undefined : strictUtcMilliseconds(recoveryNotAfter);
     if (expectedProviderSubject === undefined || expectedProviderSubject.length < 1
-      || expectedProviderSubject.length > 1_024) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+      || expectedProviderSubject.length > 1_024 || expectedNormalizedEmail === undefined
+      || expectedNormalizedEmail !== normalizeEmail(expectedNormalizedEmail) || !validEmail(expectedNormalizedEmail)
+      || verificationStartedTimestamp === undefined || recoveryNotAfterTimestamp === undefined
+      || verificationStartedTimestamp > recoveryNotAfterTimestamp) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
     const { client, storage } = this.#newClient(this.#serviceRoleKey);
     try {
       const data = requireResultData(await safeProviderCall(
         () => client.auth.admin.getUserById(expectedProviderSubject),
         "AUTH_PROVIDER_UNAVAILABLE",
       ));
-      const subject = copySubject(ownData(data, "user"), "email_password");
-      if (!constantTimeStringEqual(subject.providerSubject, expectedProviderSubject)) {
+      const providerUser = ownData(data, "user");
+      const confirmedAt = ownString(providerUser, "email_confirmed_at");
+      const confirmedTimestamp = confirmedAt === undefined ? undefined : strictUtcMilliseconds(confirmedAt);
+      if (confirmedTimestamp === undefined || confirmedTimestamp < verificationStartedTimestamp
+        || confirmedTimestamp > recoveryNotAfterTimestamp) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+      const subject = copySubject(providerUser, "email_password");
+      if (!constantTimeStringEqual(subject.providerSubject, expectedProviderSubject)
+        || !constantTimeStringEqual(subject.normalizedEmail, expectedNormalizedEmail)) {
         throw new ProviderFailure("AUTH_CALLBACK_INVALID");
       }
       return subject;

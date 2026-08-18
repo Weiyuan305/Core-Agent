@@ -232,11 +232,15 @@ export {
 } from "./repositories/identity/public-rate-limits.js";
 export {
   beginEmailVerificationTransaction,
+  admitEmailVerificationProviderAttempt,
   canonicalEmailVerificationStartPayloadHash,
   checkpointEmailVerificationTransaction,
   consumeEmailVerificationTransaction,
   finalizeEmailVerificationTransactionStart,
   prepareEmailVerificationTransaction,
+  readEmailVerificationProviderRecovery,
+  releaseEmailVerificationProviderAttempt,
+  type AdmittedEmailVerificationProviderAttempt,
   type BeginEmailVerificationTransactionInput,
   type BegunEmailVerificationTransaction,
   type ExpiredEmailVerificationTransaction,

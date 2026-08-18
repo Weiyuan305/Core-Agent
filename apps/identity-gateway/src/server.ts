@@ -4,6 +4,7 @@ import { readFile, stat } from "node:fs/promises";
 import {
   assertSchemaVersion,
   acceptInvitation,
+  admitEmailVerificationProviderAttempt,
   authenticateCoreSession,
   beginIdempotentCommand,
   beginEmailVerificationTransaction,
@@ -26,7 +27,9 @@ import {
   lockInvitationByDigest,
   lockInvitationBySecret,
   prepareEmailVerificationTransaction,
+  readEmailVerificationProviderRecovery,
   readInvitationBySecret,
+  releaseEmailVerificationProviderAttempt,
   registerB2c,
   registerInvitedIdentityForVerifiedInvitation,
   removeConsultantRole,
@@ -326,6 +329,15 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
     async prepareEmailVerification(input) {
       return prepareEmailVerificationTransaction(verificationDependencies, input);
     },
+    async admitEmailVerificationProviderAttempt(input) {
+      return admitEmailVerificationProviderAttempt(verificationDependencies, input);
+    },
+    async readEmailVerificationProviderRecovery(input) {
+      return readEmailVerificationProviderRecovery(verificationDependencies, input);
+    },
+    async releaseEmailVerificationProviderAttempt(input) {
+      await releaseEmailVerificationProviderAttempt(verificationDependencies, input);
+    },
     async checkpointEmailVerification(input) {
       await checkpointEmailVerificationTransaction(verificationDependencies, input);
     },
@@ -532,6 +544,7 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
           payload_hash: string;
           expected_resource_version: number;
           reauthentication_proof_digest: string;
+          client_kind?: "web" | "iphone" | "macos";
         };
         const { payload_hash: suppliedHash, ...canonicalPayload } = payload;
         const computedHash = canonicalPayloadHash(canonicalPayload);
