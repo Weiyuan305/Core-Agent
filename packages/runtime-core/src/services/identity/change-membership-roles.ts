@@ -24,6 +24,7 @@ export interface MembershipRoleCommandContext {
 
 export interface MembershipRoleCommandDependencies {
   readonly db: Kysely<RuntimeDatabase>;
+  readonly transaction?: Transaction<RuntimeDatabase>;
   readonly consultantProfile: {
     readonly providerConfigId: string;
     readonly modelId: string;
@@ -252,7 +253,7 @@ async function prepareRoleMutation(
   const discovered = await dependencies.db.selectFrom("memberships").select("actor_id")
     .where("tenant_id", "=", context.tenantId).where("membership_id", "=", membershipId).executeTakeFirst();
   if (discovered === undefined) throw new DomainError("RESOURCE_NOT_FOUND", "Membership was not found");
-  return withDatabaseTransactionRetry(dependencies.db, async (trx) => {
+  const execute = async (trx: Transaction<RuntimeDatabase>) => {
     const now = dependencies.now?.() ?? new Date();
     await lockActors(trx, [context.actorId, discovered.actor_id]);
     const tenant = await trx.selectFrom("tenants").select(["tenant_mode", "status"])
@@ -274,7 +275,10 @@ async function prepareRoleMutation(
       throw new DomainError("INVALID_STATE_TRANSITION", "Only active Membership roles may change");
     }
     return work({ trx, now, adminMembershipId, membership });
-  }, { isolationLevel: "serializable" });
+  };
+  return dependencies.transaction === undefined
+    ? withDatabaseTransactionRetry(dependencies.db, execute, { isolationLevel: "serializable" })
+    : execute(dependencies.transaction);
 }
 
 export async function grantConsultantRole(
@@ -435,7 +439,7 @@ export async function suspendMembership(
     .where("tenant_id", "=", command.tenant_id).where("membership_id", "=", command.membership_id).executeTakeFirst();
   if (discovered === undefined) throw new DomainError("RESOURCE_NOT_FOUND", "Membership was not found");
   const operation = "identity.membership.suspend";
-  return withDatabaseTransactionRetry(dependencies.db, async (trx) => {
+  const execute = async (trx: Transaction<RuntimeDatabase>): Promise<MembershipMutationResult> => {
     const now = dependencies.now?.() ?? new Date();
     await lockActors(trx, [context.actorId, discovered.actor_id]);
     const tenant = await trx.selectFrom("tenants").select(["tenant_mode", "status"])
@@ -489,5 +493,8 @@ export async function suspendMembership(
       resultRef: command.membership_id, response: result, updatedAt: now,
     });
     return result;
-  }, { isolationLevel: "serializable" });
+  };
+  return dependencies.transaction === undefined
+    ? withDatabaseTransactionRetry(dependencies.db, execute, { isolationLevel: "serializable" })
+    : execute(dependencies.transaction);
 }

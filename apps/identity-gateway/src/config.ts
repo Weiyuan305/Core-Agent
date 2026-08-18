@@ -11,6 +11,7 @@ export interface IdentityGatewayConfig {
   readonly appleWebRedirectUris: ReadonlySet<string>;
   readonly appleNativeRedirectUris: ReadonlySet<string>;
   readonly passwordResetRedirectUri: string;
+  readonly emailVerificationRedirectUri: string;
   readonly sessionHmacKeyRef: string;
   readonly piiHmacKeyRef: string;
   readonly signingKeyRef: string;
@@ -30,6 +31,7 @@ const allowedIdentityKeys = new Set([
   "IDENTITY_APPLE_WEB_REDIRECT_URIS",
   "IDENTITY_APPLE_NATIVE_REDIRECT_URIS",
   "IDENTITY_PASSWORD_RESET_REDIRECT_URI",
+  "IDENTITY_EMAIL_VERIFICATION_REDIRECT_URI",
   "IDENTITY_SESSION_HMAC_KEY_REF",
   "IDENTITY_PII_HMAC_KEY_REF",
   "IDENTITY_SIGNING_KEY_REF",
@@ -87,13 +89,20 @@ function exactUrlList(value: string, protocols: ReadonlySet<string>, production:
 }
 
 function reference(value: string): string {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,1023}$/u.test(value) || value === "." || value === "..") invalidConfiguration();
+  if (!/^(?:\/[A-Za-z0-9]|[A-Za-z0-9])[A-Za-z0-9._:/-]{0,1023}$/u.test(value) || value === "." || value === "..") invalidConfiguration();
   return value;
 }
 
 function databaseUrl(value: string): string {
-  const parsed = exactUrl(value, new Set(["postgres:", "postgresql:"]), false);
-  if (parsed.pathname.length < 2) invalidConfiguration();
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    invalidConfiguration();
+  }
+  if ((parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:")
+    || parsed.password !== "" || parsed.hash !== "" || parsed.pathname.length < 2
+    || parsed.username.length > 255) invalidConfiguration();
   return value;
 }
 
@@ -147,6 +156,13 @@ export function loadIdentityGatewayConfig(environment: NodeJS.ProcessEnv): Ident
       const value = required(environment, "IDENTITY_PASSWORD_RESET_REDIRECT_URI");
       const parsed = exactUrl(value, new Set(["https:", "http:"]), production);
       if (parsed.search !== "" || parsed.toString() !== value) invalidConfiguration();
+      return value;
+    })(),
+    emailVerificationRedirectUri: (() => {
+      const value = required(environment, "IDENTITY_EMAIL_VERIFICATION_REDIRECT_URI");
+      const parsed = exactUrl(value, new Set(["https:", "http:"]), production);
+      if (parsed.origin !== configuredPublicBaseUrl || parsed.search !== ""
+        || parsed.pathname !== "/auth/v1/email/verification" || parsed.toString() !== value) invalidConfiguration();
       return value;
     })(),
     sessionHmacKeyRef: reference(required(environment, "IDENTITY_SESSION_HMAC_KEY_REF")),

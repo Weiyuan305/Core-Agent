@@ -5,6 +5,7 @@ import test from "node:test";
 
 import type {
   AppleAuthorizationCallback,
+  AppleAuthorizationStart,
   AppleLinkAuthorizationInput,
   AppleLinkInput,
   ProviderClientKind,
@@ -59,6 +60,21 @@ class MemoryTransactionStore implements OAuthTransactionStore {
     const record = this.records.get(transactionId);
     this.records.delete(transactionId);
     return record;
+  }
+
+  async reserveStart(record: OAuthTransactionRecord): Promise<boolean> {
+    if (this.records.has(record.oauth_transaction_id)) return false;
+    this.records.set(record.oauth_transaction_id, record);
+    return true;
+  }
+
+  async completeStart(record: OAuthTransactionRecord): Promise<void> {
+    assert.equal(this.records.has(record.oauth_transaction_id), true);
+    this.records.set(record.oauth_transaction_id, record);
+  }
+
+  async loadStart(transactionId: string): Promise<OAuthTransactionRecord | undefined> {
+    return this.records.get(transactionId);
   }
 }
 
@@ -147,6 +163,10 @@ function createHarness(input: {
       signUp: async (request: unknown) => {
         methodCalls.push({ name: "signUp", arguments: [request] });
         return { data: { user: user(), session: null }, error: null };
+      },
+      verifyOtp: async (request: unknown) => {
+        methodCalls.push({ name: "verifyOtp", arguments: [request] });
+        return { data: { user: user(), session: { access_token: providerAccessToken, refresh_token: providerRefreshToken } }, error: null };
       },
       signInWithPassword: async (request: unknown) => {
         methodCalls.push({ name: "signInWithPassword", arguments: [request] });
@@ -244,7 +264,7 @@ function createHarness(input: {
       publishableKey: "publishable-key-not-secret",
       serviceRoleKey,
       appleRedirectUris: [callbackUri, nativeCallbackUri],
-      passwordResetRedirectUri: passwordResetCallbackUri,
+      passwordResetRedirectUri: passwordResetCallbackUri, emailVerificationRedirectUri: "https://identity.example.test/auth/v1/email/verification",
       transactionStore: store,
       transactionProtector: input.transactionProtector ?? protector,
       createClient: factory,
@@ -293,7 +313,7 @@ function callbackFromStart(
     payload_hash: payloadHash,
     transaction_id: start.transaction_id,
     authorization_code: "one-time-authorization-code",
-    state: start.transaction_id,
+    state: new URL(start.authorization_url).searchParams.get("state") ?? start.transaction_id,
     client_kind: clientKind,
   };
   return (clientKind === "web" ? base : {
@@ -357,6 +377,27 @@ test("Supabase email, proof, reset, current-session revoke, and deletion use fre
   assert.equal(harness.clientCalls.at(-1)?.key, serviceRoleKey);
 });
 
+test("Supabase signup uses the exact email callback and verification exchanges only a token hash", async () => {
+  const harness = createHarness();
+  await harness.provider.signUpEmail(credential);
+  const provider = harness.provider as unknown as { verifyEmail?: (input: { verificationCode: string }) => Promise<unknown> };
+  assert.equal(typeof provider.verifyEmail, "function");
+  const verified = await provider.verifyEmail!({ verificationCode: "opaque-email-token-hash" });
+  assert.deepEqual(verified, {
+    provider: "supabase",
+    providerSubject: "provider-subject-1",
+    identityKind: "email_password",
+    normalizedEmail: "user@example.test",
+    verifiedAt: "2026-08-01T00:00:00.000Z",
+  });
+  assert.deepEqual(harness.methodCalls.find((call) => call.name === "verifyOtp")?.arguments, [
+    { token_hash: "opaque-email-token-hash", type: "email" },
+  ]);
+  const signUp = harness.methodCalls.find((call) => call.name === "signUp")?.arguments[0] as { options?: { emailRedirectTo?: unknown } };
+  assert.equal(signUp.options?.emailRedirectTo, "https://identity.example.test/auth/v1/email/verification");
+  assert.equal(JSON.stringify(harness.methodCalls).includes(providerAccessToken), false);
+});
+
 test("Supabase provider-subject deletion is idempotent without reading a provider body", async () => {
   let bodyGetterCalls = 0;
   const missing = Object.defineProperties({}, {
@@ -382,7 +423,7 @@ test("Supabase provider-subject deletion is idempotent without reading a provide
     publishableKey: "publishable-key-not-secret",
     serviceRoleKey,
     appleRedirectUris: [callbackUri],
-    passwordResetRedirectUri: callbackUri,
+    passwordResetRedirectUri: callbackUri, emailVerificationRedirectUri: "https://identity.example.test/auth/v1/email/verification",
     transactionStore: new MemoryTransactionStore(),
     transactionProtector: protector,
     createClient: factory,
@@ -419,7 +460,7 @@ test("Supabase copies only allowlisted own user facts and validates confirmed em
     publishableKey: "publishable-key-not-secret",
     serviceRoleKey,
     appleRedirectUris: [callbackUri],
-    passwordResetRedirectUri: callbackUri,
+    passwordResetRedirectUri: callbackUri, emailVerificationRedirectUri: "https://identity.example.test/auth/v1/email/verification",
     transactionStore: new MemoryTransactionStore(),
     transactionProtector: protector,
     createClient: unverifiedFactory,
@@ -451,7 +492,7 @@ test("Supabase maps only status/code and never reads or exposes provider bodies"
     publishableKey: "publishable-key-not-secret",
     serviceRoleKey,
     appleRedirectUris: [callbackUri],
-    passwordResetRedirectUri: callbackUri,
+    passwordResetRedirectUri: callbackUri, emailVerificationRedirectUri: "https://identity.example.test/auth/v1/email/verification",
     transactionStore: new MemoryTransactionStore(),
     transactionProtector: protector,
     createClient: factory,
@@ -514,7 +555,7 @@ test("Supabase error mapping does not execute proxy property or prototype traps"
     publishableKey: "publishable-key-not-secret",
     serviceRoleKey,
     appleRedirectUris: [callbackUri],
-    passwordResetRedirectUri: callbackUri,
+    passwordResetRedirectUri: callbackUri, emailVerificationRedirectUri: "https://identity.example.test/auth/v1/email/verification",
     transactionStore: new MemoryTransactionStore(),
     transactionProtector: protector,
     createClient: factory,
@@ -550,7 +591,7 @@ test("Supabase rejects Proxy config, store, and result inputs without invoking s
     publishableKey: "publishable-key-not-secret",
     serviceRoleKey,
     appleRedirectUris: [callbackUri],
-    passwordResetRedirectUri: callbackUri,
+    passwordResetRedirectUri: callbackUri, emailVerificationRedirectUri: "https://identity.example.test/auth/v1/email/verification",
     transactionStore: new Proxy({}, traps),
     transactionProtector: protector,
   });
@@ -562,7 +603,7 @@ test("Supabase rejects Proxy config, store, and result inputs without invoking s
     publishableKey: "publishable-key-not-secret",
     serviceRoleKey,
     appleRedirectUris: revokedRedirects.proxy,
-    passwordResetRedirectUri: callbackUri,
+    passwordResetRedirectUri: callbackUri, emailVerificationRedirectUri: "https://identity.example.test/auth/v1/email/verification",
     transactionStore: new MemoryTransactionStore(),
     transactionProtector: protector,
   });
@@ -573,7 +614,7 @@ test("Supabase rejects Proxy config, store, and result inputs without invoking s
     publishableKey: "publishable-key-not-secret",
     serviceRoleKey,
     appleRedirectUris: [callbackUri],
-    passwordResetRedirectUri: callbackUri,
+    passwordResetRedirectUri: callbackUri, emailVerificationRedirectUri: "https://identity.example.test/auth/v1/email/verification",
     transactionStore: new MemoryTransactionStore(),
     transactionProtector: protector,
     createClient: () => ({
@@ -600,7 +641,7 @@ test("Supabase bounds client-construction failures without inspecting error prot
     publishableKey: "publishable-key-not-secret",
     serviceRoleKey,
     appleRedirectUris: [callbackUri],
-    passwordResetRedirectUri: callbackUri,
+    passwordResetRedirectUri: callbackUri, emailVerificationRedirectUri: "https://identity.example.test/auth/v1/email/verification",
     transactionStore: new MemoryTransactionStore(),
     transactionProtector: protector,
     createClient: () => {
@@ -619,7 +660,7 @@ test("Supabase bounds synchronous provider-port failures", async () => {
     publishableKey: "publishable-key-not-secret",
     serviceRoleKey,
     appleRedirectUris: [callbackUri],
-    passwordResetRedirectUri: callbackUri,
+    passwordResetRedirectUri: callbackUri, emailVerificationRedirectUri: "https://identity.example.test/auth/v1/email/verification",
     transactionStore: new MemoryTransactionStore(),
     transactionProtector: protector,
     createClient: () => ({
@@ -660,7 +701,7 @@ test("Supabase fails closed without invoking accessor-shaped result fields", asy
     publishableKey: "publishable-key-not-secret",
     serviceRoleKey,
     appleRedirectUris: [callbackUri],
-    passwordResetRedirectUri: callbackUri,
+    passwordResetRedirectUri: callbackUri, emailVerificationRedirectUri: "https://identity.example.test/auth/v1/email/verification",
     transactionStore: new MemoryTransactionStore(),
     transactionProtector: protector,
     createClient: factory,
@@ -693,6 +734,46 @@ function nativeAppleStart(client_kind: "iphone" | "macos" = "iphone") {
   };
 }
 
+test("Supabase provider starts replay one idempotent effect", async () => {
+  const harness = createHarness();
+  const appleFirst = await harness.provider.beginApple(webAppleStart());
+  const appleReplay = await harness.provider.beginApple(webAppleStart());
+  assert.deepEqual(appleReplay, appleFirst);
+  assert.equal(harness.methodCalls.filter(({ name }) => name === "signInWithOAuth").length, 1);
+
+  const reset = {
+    email: "USER@EXAMPLE.TEST",
+    idempotencyKey: "idem_password_reset",
+    payloadHash,
+  };
+  const resetFirst = await harness.provider.beginPasswordReset(reset);
+  const resetReplay = await harness.provider.beginPasswordReset(reset);
+  assert.deepEqual(resetReplay, resetFirst);
+  assert.equal(harness.methodCalls.filter(({ name }) => name === "resetPasswordForEmail").length, 1);
+
+  const linkHarness = createHarness();
+  const linkInput = { ...webAppleStart(), idempotency_key: "idem_apple_link_start", authenticatedActorId: "actor-1", ...credential };
+  const linkFirst = await linkHarness.provider.reauthenticateAndBeginAppleLink(linkInput);
+  const linkReplay = await linkHarness.provider.reauthenticateAndBeginAppleLink(linkInput);
+  assert.deepEqual(linkReplay, linkFirst);
+  assert.equal(linkHarness.methodCalls.filter(({ name }) => name === "signInWithPassword").length, 1);
+  assert.equal(linkHarness.methodCalls.filter(({ name }) => name === "linkIdentity").length, 1);
+
+  await expectFailure(() => harness.provider.beginApple({
+    ...webAppleStart(), payload_hash: `sha256:${"b".repeat(64)}`,
+  }), "AUTH_CONFLICT");
+
+  const concurrent = createHarness();
+  const attempts = await Promise.allSettled([
+    concurrent.provider.beginApple(webAppleStart()),
+    concurrent.provider.beginApple(webAppleStart()),
+  ]);
+  assert.equal(attempts.filter(({ status }) => status === "fulfilled").length, 1);
+  assert.equal(concurrent.methodCalls.filter(({ name }) => name === "signInWithOAuth").length, 1);
+  const completed = attempts.find((attempt): attempt is PromiseFulfilledResult<AppleAuthorizationStart> => attempt.status === "fulfilled")!.value;
+  assert.deepEqual(await concurrent.provider.beginApple(webAppleStart()), completed);
+});
+
 test("installed Supabase 2.112.2 default factory captures SDK PKCE state offline", async () => {
   const runtimePackage = createRequire(import.meta.url)("@supabase/supabase-js/package.json") as {
     readonly version?: unknown;
@@ -705,7 +786,7 @@ test("installed Supabase 2.112.2 default factory captures SDK PKCE state offline
     publishableKey: "publishable-key-not-secret",
     serviceRoleKey,
     appleRedirectUris: [callbackUri],
-    passwordResetRedirectUri: callbackUri,
+    passwordResetRedirectUri: callbackUri, emailVerificationRedirectUri: "https://identity.example.test/auth/v1/email/verification",
     transactionStore: store,
     transactionProtector: protector,
     now: () => new Date(fixedNow),
@@ -719,7 +800,8 @@ test("installed Supabase 2.112.2 default factory captures SDK PKCE state offline
   const authorizationUrl = new URL(start.authorization_url);
   assert.equal(authorizationUrl.origin, "https://example.supabase.co");
   assert.equal(authorizationUrl.pathname, "/auth/v1/authorize");
-  assert.equal(authorizationUrl.searchParams.has("state"), false);
+  assert.equal(authorizationUrl.searchParams.get("state"), start.transaction_id);
+  assert.equal(authorizationUrl.searchParams.get("redirect_to"), callbackUri);
   assert.match(authorizationUrl.searchParams.get("code_challenge") ?? "", /^[A-Za-z0-9_-]{43}$/u);
   const transaction = store.records.get(start.transaction_id);
   assert(transaction !== undefined);
@@ -753,7 +835,8 @@ test("Supabase Apple Web uses the released request/callback shape and trusted pr
     readonly options: { readonly queryParams: Record<string, unknown> };
   };
   assert.equal(Object.hasOwn(request.options.queryParams, "state"), false);
-  assert.notEqual(new URL(start.authorization_url).searchParams.get("state"), start.transaction_id);
+  assert.equal(new URL(start.authorization_url).searchParams.get("state"), start.transaction_id);
+  assert.equal(new URL(start.authorization_url).searchParams.get("redirect_to"), callbackUri);
   const callback = callbackFromStart(start);
   assert.equal("nonce" in callback, false);
   assert.equal((await harness.provider.completeApple(callback)).identityKind, "apple");
@@ -773,7 +856,8 @@ test("Supabase Apple native binds caller nonce and exact S256 challenge before e
     readonly options: { readonly queryParams: Record<string, unknown> };
   };
   assert.equal(Object.hasOwn(request.options.queryParams, "state"), false);
-  assert.notEqual(url.searchParams.get("state"), start.transaction_id);
+  assert.equal(url.searchParams.get("state"), start.transaction_id);
+  assert.equal(url.searchParams.get("redirect_to"), nativeCallbackUri);
 
   const subject = await harness.provider.completeApple(callbackFromStart(start, "iphone"));
   assert.equal(subject.identityKind, "apple");
@@ -841,7 +925,7 @@ test("Supabase Apple callback rejects expired, tampered, accessor, and Proxy tra
   }) as OAuthTransactionRecord;
   const accessorProvider = new SupabaseAuthProvider({
     supabaseUrl: "https://example.supabase.co", publishableKey: "publishable-key-not-secret",
-    serviceRoleKey, appleRedirectUris: [callbackUri], passwordResetRedirectUri: callbackUri,
+    serviceRoleKey, appleRedirectUris: [callbackUri], passwordResetRedirectUri: callbackUri, emailVerificationRedirectUri: "https://identity.example.test/auth/v1/email/verification",
     transactionStore: { async save() {}, async consume() { return accessorRecord; } },
     transactionProtector: protector, createClient: () => ({ auth: {} }) as never,
     now: () => new Date(fixedNow),
@@ -872,7 +956,7 @@ test("Supabase Apple callback rejects expired, tampered, accessor, and Proxy tra
     let clientCreations = 0;
     const malformedProvider = new SupabaseAuthProvider({
       supabaseUrl: "https://example.supabase.co", publishableKey: "publishable-key-not-secret",
-      serviceRoleKey, appleRedirectUris: [callbackUri], passwordResetRedirectUri: callbackUri,
+      serviceRoleKey, appleRedirectUris: [callbackUri], passwordResetRedirectUri: callbackUri, emailVerificationRedirectUri: "https://identity.example.test/auth/v1/email/verification",
       transactionStore: { async save() {}, async consume() { return malformedRecord; } },
       transactionProtector: protector,
       createClient: () => { clientCreations += 1; return { auth: {} } as never; },
@@ -901,7 +985,7 @@ test("Supabase Apple callback rejects expired, tampered, accessor, and Proxy tra
   };
   const proxyProvider = new SupabaseAuthProvider({
     supabaseUrl: "https://example.supabase.co", publishableKey: "publishable-key-not-secret",
-    serviceRoleKey, appleRedirectUris: [callbackUri], passwordResetRedirectUri: callbackUri,
+    serviceRoleKey, appleRedirectUris: [callbackUri], passwordResetRedirectUri: callbackUri, emailVerificationRedirectUri: "https://identity.example.test/auth/v1/email/verification",
     transactionStore: proxyStore, transactionProtector: protector, createClient: () => ({ auth: {} }) as never,
   });
   await expectFailure(() => proxyProvider.completeApple({
@@ -1030,7 +1114,7 @@ test("installed Supabase 2.112.2 Apple link uses only its operation-local passwo
       publishableKey: "publishable-key-not-secret",
       serviceRoleKey,
       appleRedirectUris: [nativeCallbackUri],
-      passwordResetRedirectUri: callbackUri,
+      passwordResetRedirectUri: callbackUri, emailVerificationRedirectUri: "https://identity.example.test/auth/v1/email/verification",
       transactionStore: store,
       transactionProtector: protector,
       now: () => new Date(fixedNow),
@@ -1074,7 +1158,7 @@ test("installed Supabase 2.112.2 Apple link uses only its operation-local passwo
       publishableKey: "publishable-key-not-secret",
       serviceRoleKey,
       appleRedirectUris: [callbackUri],
-      passwordResetRedirectUri: callbackUri,
+      passwordResetRedirectUri: callbackUri, emailVerificationRedirectUri: "https://identity.example.test/auth/v1/email/verification",
       transactionStore: webStore,
       transactionProtector: protector,
       now: () => new Date(fixedNow),

@@ -158,11 +158,11 @@ git commit -m "feat(contracts): add entitlement capability authority"
 
 ---
 
-### Task 2: Add catalog, Entitlement, seat, Snapshot, and projection storage in schema 12
+### Task 2: Add catalog, Entitlement, seat, Snapshot, and projection storage in schema 13
 
 **Files:**
 
-- Create: `packages/runtime-core/migrations/012_entitlement_capability_authority.sql`
+- Create: `packages/runtime-core/migrations/013_entitlement_capability_authority.sql`
 - Create: `packages/runtime-core/src/db/entitlement-tables.ts`
 - Modify: `packages/runtime-core/src/db/database.ts`
 - Modify: `packages/runtime-core/src/db/schema-version.ts`
@@ -172,18 +172,18 @@ git commit -m "feat(contracts): add entitlement capability authority"
 
 **Interfaces:**
 
-- Consumes: Identity schema 11 and existing migration/Worker tables.
-- Produces: schema 12, `EntitlementAuthorityTables`, immutable database constraints, and new Worker job kinds.
+- Consumes: Identity schema 12 and existing migration/Worker tables.
+- Produces: schema 13, `EntitlementAuthorityTables`, immutable database constraints, and new Worker job kinds.
 
 - [ ] **Step 1: Write failing migration and immutability tests**
 
-Prove schema 11 -> 12 and empty -> 12 migration, exact table/index/constraint inventory, tenant-scoped foreign keys, database-time validity, immutable reviewed/published rows, immutable snapshots, unique order identity, one active Assignment pair, and no seat oversubscription bypass through direct SQL.
+Prove schema 12 -> 13 and empty -> 13 migration, exact table/index/constraint inventory, tenant-scoped foreign keys, database-time validity, immutable reviewed/published rows, immutable snapshots, unique order identity, one active Assignment pair, and no seat oversubscription bypass through direct SQL.
 
 Attempt `UPDATE` and `DELETE` on reviewed Capability Version, published Pack Version/member, Tenant release history, and Snapshot rows; expect named fail-closed triggers. Current pointer updates remain allowed only through an expected-version function/service transaction.
 
 - [ ] **Step 2: Create exact global catalog tables**
 
-Migration 012 creates:
+Migration 013 creates:
 
 ```sql
 create table capabilities (
@@ -287,7 +287,7 @@ git commit -m "feat(entitlements): add capability authority schema"
 
 **Interfaces:**
 
-- Consumes: global platform authority from Identity, schema 12 catalog tables, expected versions, idempotency.
+- Consumes: global platform authority from Identity, schema 13 catalog tables, expected versions, idempotency.
 - Produces: draft/review/retire/block Capability and Pack commands plus immutable reviewed resources.
 
 - [ ] **Step 1: Write failing publication and hostile-input tests**
@@ -345,7 +345,7 @@ git commit -m "feat(entitlements): add reviewed capability catalog"
 
 **Interfaces:**
 
-- Consumes: reviewed Pack versions, real platform Actor/re-auth authority, tenant identity, schema 12.
+- Consumes: reviewed Pack versions, real platform Actor/re-auth authority, tenant identity, schema 13.
 - Produces: `selectTenantPackRelease`, grant/suspend/reactivate/revoke/expire Entitlement commands, and affected-Profile recomputation intents.
 
 - [ ] **Step 1: Write failing release/grant state-machine tests**
@@ -888,7 +888,7 @@ The script outputs redacted JSON with IDs hashed, states, generations, digests, 
 
 - [ ] **Step 4: Document operations, rollout, and rollback**
 
-Give exact commands and gates for contracts 0.6.0, schema 12, feature flags, catalog review, initial non-executing data, grant/revoke, release canary, projection health, conflict diagnosis, Worker retry, B2C idle, release rollback through a new generation, application rollback with mutations disabled, and confirmation that no real MCP is exposed.
+Give exact commands and gates for contracts 0.6.0, schema 13, feature flags, catalog review, initial non-executing data, grant/revoke, release canary, projection health, conflict diagnosis, Worker retry, B2C idle, release rollback through a new generation, application rollback with mutations disabled, and confirmation that no real MCP is exposed.
 
 - [ ] **Step 5: Run final acceptance**
 

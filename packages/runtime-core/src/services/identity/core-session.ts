@@ -24,6 +24,8 @@ import {
 
 export interface CoreSessionDependencies {
   readonly db: Kysely<RuntimeDatabase>;
+  /** Caller-owned transactions compose issuance with durable admission. */
+  readonly transaction?: Transaction<RuntimeDatabase>;
   readonly randomBytes?: CoreSessionRandomBytes;
   readonly databaseNow?: (trx: Transaction<RuntimeDatabase>) => Promise<Date>;
 }
@@ -129,7 +131,7 @@ export async function issueCoreSession(
     csrfCredential = input.clientKind === "web"
       ? issueOpaqueCoreSessionCredential(dependencies.randomBytes)
       : undefined;
-    const session = await withDatabaseTransactionRetry(dependencies.db, async (trx) => {
+    const execute = async (trx: Transaction<RuntimeDatabase>) => {
       const now = await databaseNow(dependencies, trx);
       const actor = await trx.selectFrom("actors").select("status")
         .where("actor_id", "=", input.actorId)
@@ -160,7 +162,10 @@ export async function issueCoreSession(
         absoluteExpiresAt,
       });
       return stored.session;
-    });
+    };
+    const session = dependencies.transaction === undefined
+      ? await withDatabaseTransactionRetry(dependencies.db, execute)
+      : await execute(dependencies.transaction);
     return Object.freeze({
       session,
       sessionSecret: sessionCredential.secret,

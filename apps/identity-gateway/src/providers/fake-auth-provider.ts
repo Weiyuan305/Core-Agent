@@ -9,10 +9,12 @@ import type {
   AppleLinkInput,
   AuthProviderAdapter,
   EmailCredentialInput,
+  EmailVerificationInput,
   ProviderClientKind,
   ProviderProof,
   PasswordResetCompletionInput,
   PasswordResetStart,
+  PasswordResetStartInput,
   VerifiedProviderSubject,
 } from "./auth-provider.js";
 import { ProviderFailure } from "./provider-errors.js";
@@ -109,6 +111,16 @@ function readClientKind(value: unknown): ProviderClientKind | undefined {
   return value === "web" || value === "iphone" || value === "macos" ? value : undefined;
 }
 
+function readIdempotency(input: unknown): { readonly key: string; readonly payloadHash: string } {
+  const key = ownString(input, "idempotency_key") ?? ownString(input, "idempotencyKey");
+  const payloadHash = ownString(input, "payload_hash") ?? ownString(input, "payloadHash");
+  if (key === undefined || key.length < 1 || key.length > 255
+    || payloadHash === undefined || !/^sha256:[a-f0-9]{64}$/u.test(payloadHash)) {
+    throw new ProviderFailure("AUTH_INVALID");
+  }
+  return { key, payloadHash };
+}
+
 function copySubject(subject: VerifiedProviderSubject): VerifiedProviderSubject {
   const provider = ownString(subject, "provider");
   const providerSubject = ownString(subject, "providerSubject");
@@ -149,6 +161,8 @@ export class FakeAuthProvider implements AuthProviderAdapter {
   readonly #subjects = new Map<string, StoredFakeSubject>();
   readonly #proofs = new Map<string, VerifiedProviderSubject>();
   readonly #transactions = new Map<string, FakeAppleTransaction>();
+  readonly #emailVerifications = new Map<string, VerifiedProviderSubject>();
+  readonly #providerStarts = new Map<string, { readonly payloadHash: string; readonly response: AppleAuthorizationStart | PasswordResetStart }>();
   readonly #appleSubject: VerifiedProviderSubject;
   readonly #now: () => Date;
   #transactionCounter = 0;
@@ -176,8 +190,25 @@ export class FakeAuthProvider implements AuthProviderAdapter {
   }
 
   async signUpEmail(input: EmailCredentialInput): Promise<{ readonly kind: "verification_pending" }> {
-    readCredential(input);
+    const credential = readCredential(input);
+    const subject = Object.freeze({
+      provider: "supabase" as const,
+      providerSubject: `fake-email-${digest(credential.email).slice(0, 24)}`,
+      identityKind: "email_password" as const,
+      normalizedEmail: credential.email,
+      verifiedAt: this.#now().toISOString(),
+    });
+    this.#emailVerifications.set("fake-email-verification-code", subject);
     return Object.freeze({ kind: "verification_pending" });
+  }
+
+  async verifyEmail(input: EmailVerificationInput): Promise<VerifiedProviderSubject> {
+    const verificationCode = ownString(input, "verificationCode");
+    if (verificationCode === undefined) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+    const subject = this.#emailVerifications.get(verificationCode);
+    if (subject === undefined) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+    this.#emailVerifications.delete(verificationCode);
+    return copySubject(subject);
   }
 
   async signInEmail(input: EmailCredentialInput): Promise<VerifiedProviderSubject> {
@@ -199,9 +230,17 @@ export class FakeAuthProvider implements AuthProviderAdapter {
     return this.signInEmail(input);
   }
 
-  async beginPasswordReset(email: string): Promise<PasswordResetStart> {
+  async beginPasswordReset(input: string | PasswordResetStartInput): Promise<PasswordResetStart> {
+    const email = typeof input === "string" ? input : ownString(input, "email");
     if (typeof email !== "string" || !validEmail(normalizeEmail(email))) {
       throw new ProviderFailure("AUTH_INVALID");
+    }
+    const idempotency = typeof input === "string" ? undefined : readIdempotency(input);
+    const startKey = idempotency === undefined ? undefined : `password_reset:${idempotency.key}`;
+    const replay = startKey === undefined ? undefined : this.#providerStarts.get(startKey);
+    if (replay !== undefined) {
+      if (replay.payloadHash !== idempotency!.payloadHash) throw new ProviderFailure("AUTH_CONFLICT");
+      return replay.response as PasswordResetStart;
     }
     this.#transactionCounter += 1;
     const transactionId = `password_reset_fake_${this.#transactionCounter.toString().padStart(4, "0")}`;
@@ -219,11 +258,13 @@ export class FakeAuthProvider implements AuthProviderAdapter {
       providerSubjectDigest: null,
       expiresAt,
     });
-    return Object.freeze({
+    const response = Object.freeze({
       transaction_id: transactionId,
       state,
       expires_at: new Date(expiresAt).toISOString(),
     });
+    if (startKey !== undefined) this.#providerStarts.set(startKey, { payloadHash: idempotency!.payloadHash, response });
+    return response;
   }
 
   async beginApple(input: AppleAuthorizationInput): Promise<AppleAuthorizationStart> {
@@ -275,6 +316,13 @@ export class FakeAuthProvider implements AuthProviderAdapter {
     actorId: string | null,
     providerSubjectDigest: string | null,
   ): AppleAuthorizationStart {
+    const idempotency = readIdempotency(input);
+    const startKey = `${flowKind}:${actorId ?? "anonymous"}:${idempotency.key}`;
+    const replay = this.#providerStarts.get(startKey);
+    if (replay !== undefined) {
+      if (replay.payloadHash !== idempotency.payloadHash) throw new ProviderFailure("AUTH_CONFLICT");
+      return replay.response as AppleAuthorizationStart;
+    }
     const clientKind = readClientKind(ownData(input, "client_kind"));
     const redirectUri = ownString(input, "redirect_uri");
     if (clientKind === undefined || redirectUri === undefined || redirectUri.length === 0) {
@@ -318,11 +366,13 @@ export class FakeAuthProvider implements AuthProviderAdapter {
       authorizationUrl.searchParams.set("code_challenge_method", "S256");
     }
 
-    return Object.freeze({
+    const response = Object.freeze({
       transaction_id: transactionId,
       authorization_url: authorizationUrl.toString(),
       expires_at: new Date(expiresAt).toISOString(),
     });
+    this.#providerStarts.set(startKey, { payloadHash: idempotency.payloadHash, response });
+    return response;
   }
 
   async completeApple(input: AppleAuthorizationCallback): Promise<VerifiedProviderSubject> {

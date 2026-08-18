@@ -29,6 +29,7 @@ export interface InvitationCommandContext {
 
 export interface InvitationCommandDependencies {
   readonly db: Kysely<RuntimeDatabase>;
+  readonly transaction?: Transaction<RuntimeDatabase>;
   readonly emailHmacKey: Uint8Array;
   readonly now?: () => Date;
   readonly randomBytes?: InvitationRandomBytes;
@@ -282,7 +283,7 @@ export async function createInvitation(
     membership_id: command.membership_id, status: "pending", resource_version: 1,
   });
   const operation = "identity.invitation.create";
-  return withDatabaseTransactionRetry(dependencies.db, async (trx) => {
+  const execute = async (trx: Transaction<RuntimeDatabase>): Promise<InvitationCommandResult> => {
     const now = dependencies.now?.() ?? new Date();
     const adminMembershipId = await lockCompanyAdmin(trx, context);
     const tenantTransaction: TenantTransaction = { tenantId: context.tenantId, trx };
@@ -344,7 +345,10 @@ export async function createInvitation(
       resultRef: command.invitation_id, response: storedResult, updatedAt: now,
     });
     return Object.freeze({ ...storedResult, invitation_secret: issued.secret });
-  }, { isolationLevel: "serializable" });
+  };
+  return dependencies.transaction === undefined
+    ? withDatabaseTransactionRetry(dependencies.db, execute, { isolationLevel: "serializable" })
+    : execute(dependencies.transaction);
 }
 
 export async function inspectInvitation(
@@ -457,7 +461,7 @@ export async function revokeInvitation(
   assertContext(context, command.tenant_id);
   assertPayloadHash(command);
   const operation = "identity.invitation.revoke";
-  return withDatabaseTransactionRetry(dependencies.db, async (trx) => {
+  const execute = async (trx: Transaction<RuntimeDatabase>): Promise<InvitationCommandResult> => {
     const now = dependencies.now?.() ?? new Date();
     const adminMembershipId = await lockCompanyAdmin(trx, context);
     const invitation = await trx.selectFrom("identity_invitations").selectAll()
@@ -498,5 +502,8 @@ export async function revokeInvitation(
       resultRef: command.invitation_id, response: result, updatedAt: now,
     });
     return result;
-  }, { isolationLevel: "serializable" });
+  };
+  return dependencies.transaction === undefined
+    ? withDatabaseTransactionRetry(dependencies.db, execute, { isolationLevel: "serializable" })
+    : execute(dependencies.transaction);
 }

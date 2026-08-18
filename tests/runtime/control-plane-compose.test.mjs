@@ -1024,6 +1024,7 @@ test("fresh CI-equivalent protects command output and proves cleanup after succe
   assert.deepEqual(expectedCounts.runtimeCorePostgres.suitePaths, runtimeCorePostgresSuites);
   for (const count of [
     expectedCounts.runtimeCorePostgres.testCount,
+    expectedCounts.identityGatewayPostgres.testCount,
     expectedCounts.controlPlaneApiPostgres.testCount,
     expectedCounts.integration.testCount,
   ]) assert(Number.isSafeInteger(count) && count > 0);
@@ -1036,7 +1037,7 @@ test("fresh CI-equivalent protects command output and proves cleanup after succe
   assert.match(text, /protectedRun\("npm", \["run", "test:postgres"\]/u);
   assert.match(text, /protectedRun\("npm", \["run", "test:integration"\]/u);
   assert.match(text, /database-ci-expected-counts\.json/u);
-  assert.match(text, /assertNodeTestSummaries\(postgresOutput, \[expectedCounts\.runtimeCorePostgres\.testCount, expectedCounts\.controlPlaneApiPostgres\.testCount\]\)/u);
+  assert.match(text, /expectedCounts\.runtimeCorePostgres\.testCount,[\s\S]*expectedCounts\.identityGatewayPostgres\.testCount,[\s\S]*expectedCounts\.controlPlaneApiPostgres\.testCount/u);
   assert.match(text, /assertNodeTestSummaries\(integrationOutput, \[expectedCounts\.integration\.testCount\]\)/u);
   assert.match(text, /protectedRun\("docker", \["logs", container\]/u);
   assert.match(text, /injectedOutputLeak/u);

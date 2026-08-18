@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 import {
   EmailSignInRequestSchema,
   EmailSignInResponseSchema,
@@ -41,8 +39,9 @@ function clientKind(body: unknown): "web" | "iphone" | "macos" {
   return value;
 }
 
-function deliverSession(reply: FastifyReply, issued: GatewayIssuedSession): unknown {
-  if (issued.session.client_kind === "web") {
+function deliverSession(reply: FastifyReply, issued: GatewayIssuedSession, expectedClientKind: "web" | "iphone" | "macos"): unknown {
+  if (issued.session.client_kind !== expectedClientKind) throw new IdentityGatewayFailure("INTERNAL_ERROR");
+  if (expectedClientKind === "web") {
     if (issued.csrfSecret === undefined) throw new IdentityGatewayFailure("INTERNAL_ERROR");
     issueWebSessionCookies(reply, issued.sessionSecret, issued.csrfSecret);
     return { schema_version: 1, transport: "web_cookie", session: issued.session };
@@ -54,29 +53,60 @@ export async function registerEmailRoutes(app: FastifyInstance, dependencies: Id
   app.post("/auth/v1/email/sign-up", { schema: { body: EmailSignUpRequestSchema, response: { 202: EmailSignUpResponseSchema } } }, async (request, reply) => {
     const body = request.body as { email: string; password: string; client_kind: "web" | "iphone" | "macos" };
     assertClientTransport(request, body.client_kind, dependencies.config);
-    rateLimitFailure(await dependencies.operations.consumeRateLimit({ bucketKind: "signup", accountIdentifier: body.email, clientIdentifier: request.identityContext.clientIdentifier }));
-    await dependencies.provider.signUpEmail({ email: body.email, password: body.password });
-    return reply.code(202).send({ schema_version: 1, verification_id: `verification_${randomUUID()}`, status: "verification_pending" });
+    const normalizedEmail = body.email.toLowerCase();
+    rateLimitFailure(await dependencies.operations.consumeRateLimit({ bucketKind: "signup", accountIdentifier: normalizedEmail, clientIdentifier: request.identityContext.clientIdentifier }));
+    const idempotency = request.body as { idempotency_key: string; payload_hash: string; device_label?: string };
+    const binding = await dependencies.operations.beginEmailVerification({
+      idempotencyKey: idempotency.idempotency_key,
+      payloadHash: idempotency.payload_hash,
+      normalizedEmail,
+      clientKind: body.client_kind,
+      ...(idempotency.device_label === undefined ? {} : { deviceLabel: idempotency.device_label }),
+    });
+    if (binding.kind === "created") await dependencies.provider.signUpEmail({ email: normalizedEmail, password: body.password });
+    return reply.code(202).send({ schema_version: 1, verification_id: binding.verificationId, status: "verification_pending" });
   });
 
   app.post("/auth/v1/email/sign-in", { schema: { body: EmailSignInRequestSchema, response: { 200: EmailSignInResponseSchema } } }, async (request, reply) => {
     const body = request.body as { email: string; password: string; client_kind: "web" | "iphone" | "macos"; device_label?: string };
     assertClientTransport(request, body.client_kind, dependencies.config);
-    rateLimitFailure(await dependencies.operations.consumeRateLimit({ bucketKind: "login", accountIdentifier: body.email, clientIdentifier: request.identityContext.clientIdentifier }));
-    const subject = await dependencies.provider.signInEmail({ email: body.email, password: body.password });
-    const issued = await dependencies.operations.issueSession(subject, body.client_kind, body.device_label);
-    return deliverSession(reply, issued);
+    const normalizedEmail = body.email.toLowerCase();
+    rateLimitFailure(await dependencies.operations.consumeRateLimit({ bucketKind: "login", accountIdentifier: normalizedEmail, clientIdentifier: request.identityContext.clientIdentifier }));
+    const subject = await dependencies.provider.signInEmail({ email: normalizedEmail, password: body.password });
+    const requestIdempotency = request.body as { idempotency_key: string; payload_hash: string };
+    const issued = await dependencies.operations.issueSession(subject, body.client_kind, body.device_label, {
+      idempotencyKey: requestIdempotency.idempotency_key,
+      payloadHash: requestIdempotency.payload_hash,
+      operation: "email_sign_in",
+    });
+    return deliverSession(reply, issued, body.client_kind);
   });
 
-  app.post("/auth/v1/email/verification", { schema: { body: EmailVerificationRequestSchema, response: { 200: EmailVerificationResponseSchema } } }, async (request) => {
-    return dependencies.operations.executeAuthorityCommand({ kind: "email_verification", payload: request.body });
+  app.post("/auth/v1/email/verification", { schema: { body: EmailVerificationRequestSchema, response: { 200: EmailVerificationResponseSchema } } }, async (request, reply) => {
+    const body = request.body as { verification_id: string; verification_code: string };
+    const subject = await dependencies.provider.verifyEmail({ verificationCode: body.verification_code });
+    const binding = await dependencies.operations.completeEmailVerification({ verificationId: body.verification_id, verifiedSubject: subject });
+    assertClientTransport(request, binding.clientKind, dependencies.config);
+    const requestIdempotency = request.body as { idempotency_key: string; payload_hash: string };
+    const issued = await dependencies.operations.issueSession(subject, binding.clientKind, binding.deviceLabel, {
+      idempotencyKey: requestIdempotency.idempotency_key,
+      payloadHash: requestIdempotency.payload_hash,
+      operation: "email_verification",
+    });
+    return deliverSession(reply, issued, binding.clientKind);
   });
 
   app.post("/auth/v1/password/reset/start", { schema: { body: PasswordResetRequestSchema, response: { 202: PasswordResetResponseSchema } } }, async (request, reply) => {
     assertClientTransport(request, "web", dependencies.config);
     const body = request.body as { email: string };
-    rateLimitFailure(await dependencies.operations.consumeRateLimit({ bucketKind: "reset", accountIdentifier: body.email, clientIdentifier: request.identityContext.clientIdentifier }));
-    const binding = await dependencies.provider.beginPasswordReset(body.email);
+    const normalizedEmail = body.email.toLowerCase();
+    rateLimitFailure(await dependencies.operations.consumeRateLimit({ bucketKind: "reset", accountIdentifier: normalizedEmail, clientIdentifier: request.identityContext.clientIdentifier }));
+    const idempotency = request.body as { idempotency_key: string; payload_hash: string };
+    const binding = await dependencies.provider.beginPasswordReset({
+      email: normalizedEmail,
+      idempotencyKey: idempotency.idempotency_key,
+      payloadHash: idempotency.payload_hash,
+    });
     issueRecoveryCookie(reply, sealRecoveryCookie(dependencies.flowCookieKey, { transactionId: binding.transaction_id, state: binding.state, expiresAt: binding.expires_at }));
     return reply.code(202).send({ schema_version: 1, accepted: true });
   });

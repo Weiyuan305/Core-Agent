@@ -44,7 +44,7 @@ test("current schema retains the version 8 exhausted Outbox recovery index", asy
   const migration = await readFile(join(migrationsDirectory, "008_outbox_exhausted_recovery_index.sql"), "utf8");
   const schemaVersion = await readFile(schemaVersionPath, "utf8");
 
-  assert.match(schemaVersion, /export const EXPECTED_SCHEMA_VERSION = 11;/);
+  assert.match(schemaVersion, /export const EXPECTED_SCHEMA_VERSION = 12;/);
   assert.match(migration, /create index outbox_exhausted_recovery_idx/i);
   assert.match(migration, /on outbox \(created_at, tenant_id, outbox_id\)/i);
   assert.match(migration, /include \(lease_owner, lease_expires_at\)/i);

@@ -51,6 +51,8 @@ export interface RegisterB2cContext {
 
 export interface RegisterB2cDependencies {
   readonly db: Kysely<RuntimeDatabase>;
+  /** Caller-owned transaction disables automatic retry for composed durable work. */
+  readonly transaction?: Transaction<RuntimeDatabase>;
   readonly defaultProfile: {
     readonly providerConfigId: string;
     readonly modelId: string;
@@ -233,7 +235,7 @@ export async function registerB2c(
   }
   const ids = deriveRegistrationIds(input.idempotency_key);
 
-  return serializable(dependencies.db, async (trx) => {
+  const execute = async (trx: Transaction<RuntimeDatabase>): Promise<B2cRegistrationResult> => {
     const now = dependencies.now?.() ?? new Date();
     if (!Number.isFinite(now.getTime())) throw new DomainError("INTERNAL_ERROR", "Registration clock is invalid");
     const nowIso = now.toISOString();
@@ -425,5 +427,8 @@ export async function registerB2c(
       updatedAt: now,
     });
     return response;
-  }).catch(rethrowRegistrationError);
+  };
+  return (dependencies.transaction === undefined
+    ? serializable(dependencies.db, execute)
+    : execute(dependencies.transaction)).catch(rethrowRegistrationError);
 }

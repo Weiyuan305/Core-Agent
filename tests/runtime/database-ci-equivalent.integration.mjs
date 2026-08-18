@@ -156,7 +156,11 @@ async function runCiEquivalentScenario({ injectedFailure = false, injectedOutput
       throw new Error("injected CI-equivalent output leak rejected");
     }
     const postgresOutput = protectedRun("npm", ["run", "test:postgres"], environment, credential, credentialFile);
-    assertNodeTestSummaries(postgresOutput, [expectedCounts.runtimeCorePostgres.testCount, expectedCounts.controlPlaneApiPostgres.testCount]);
+    assertNodeTestSummaries(postgresOutput, [
+      expectedCounts.runtimeCorePostgres.testCount,
+      expectedCounts.identityGatewayPostgres.testCount,
+      expectedCounts.controlPlaneApiPostgres.testCount,
+    ]);
     assert.match(postgresOutput, /schema 10 grants only the documented Identity Task 3-9 table-operation matrix/u);
     assert.match(postgresOutput, /real Identity login commits and atomically rolls back the Task 3 cross-table graph/u);
     assert.match(postgresOutput, /only a real platform_super_admin creates a B2B Tenant/u);

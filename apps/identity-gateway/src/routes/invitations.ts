@@ -13,6 +13,8 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { GatewayAuthenticatedSession, IdentityGatewayRouteDependencies } from "../app.js";
 import { IdentityGatewayFailure } from "../errors.js";
 import { assertClientTransport, requireMutationCredentials } from "../security.js";
+import { canonicalWebAppleCallback } from "./apple.js";
+import { deliverSession } from "./email.js";
 
 async function authenticateMutation(request: FastifyRequest, dependencies: IdentityGatewayRouteDependencies): Promise<GatewayAuthenticatedSession> {
   const credential = requireMutationCredentials(request);
@@ -26,13 +28,26 @@ export async function registerInvitationRoutes(app: FastifyInstance, dependencie
   });
 
   app.post("/auth/v1/invitations/register", { schema: { body: InvitationEmailRegistrationRequestSchema, response: { 202: InvitationEmailRegistrationResponseSchema } } }, async (request, reply) => {
-    const body = request.body as { email: string; password: string; client_kind: "web" | "iphone" | "macos" } & Record<string, unknown>;
+    const body = request.body as {
+      idempotency_key: string;
+      payload_hash: string;
+      email: string;
+      password: string;
+      client_kind: "web" | "iphone" | "macos";
+      device_label?: string;
+    } & Record<string, unknown>;
     assertClientTransport(request, body.client_kind, dependencies.config);
-    const retryAfterMs = await dependencies.operations.consumeRateLimit({ bucketKind: "signup", accountIdentifier: body.email, clientIdentifier: request.identityContext.clientIdentifier });
+    const normalizedEmail = body.email.toLowerCase();
+    const retryAfterMs = await dependencies.operations.consumeRateLimit({ bucketKind: "signup", accountIdentifier: normalizedEmail, clientIdentifier: request.identityContext.clientIdentifier });
     if (retryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", retryAfterMs);
-    await dependencies.provider.signUpEmail({ email: body.email, password: body.password });
-    const { password: _password, ...durablePayload } = body;
-    await dependencies.operations.executeAuthorityCommand({ kind: "invitation_email_registration", payload: durablePayload });
+    const binding = await dependencies.operations.beginEmailVerification({
+      idempotencyKey: body.idempotency_key,
+      payloadHash: body.payload_hash,
+      normalizedEmail,
+      clientKind: body.client_kind,
+      ...(body.device_label === undefined ? {} : { deviceLabel: body.device_label }),
+    });
+    if (binding.kind === "created") await dependencies.provider.signUpEmail({ email: normalizedEmail, password: body.password });
     return reply.code(202).send({ schema_version: 1, status: "verification_pending" });
   });
 
@@ -43,16 +58,23 @@ export async function registerInvitationRoutes(app: FastifyInstance, dependencie
     if (retryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", retryAfterMs);
     const subject = body.authentication_proof.kind === "email_password"
       ? await dependencies.provider.verifyCurrentSubject({ accessToken: body.authentication_proof.verification_proof! })
-      : await dependencies.provider.completeApple(body.authentication_proof as never);
+      : await dependencies.provider.completeApple(body.authentication_proof.client_kind === "web"
+        ? canonicalWebAppleCallback(request, reply, dependencies, {
+          ...(body.authentication_proof as unknown as Record<string, unknown>),
+          schema_version: body.schema_version as 1,
+          idempotency_key: body.idempotency_key as string,
+          payload_hash: body.payload_hash as `sha256:${string}`,
+        } as never, "sign_in")
+        : body.authentication_proof as never);
     const { authentication_proof: _authenticationProof, device_label: _deviceLabel, ...durablePayload } = body;
     const result = await dependencies.operations.executeAuthorityCommand({ kind: "invitation_accept", payload: durablePayload, verifiedSubject: subject });
-    const issued = await dependencies.operations.issueSession(subject, body.authentication_proof.client_kind);
-    if (issued.session.client_kind === "web") {
-      const { deliverSession } = await import("./email.js");
-      const delivery = deliverSession(reply, issued) as Record<string, unknown>;
-      return { ...(result as object), ...delivery };
-    }
-    return { ...(result as object), schema_version: 1, transport: "native", session: issued.session, session_secret: issued.sessionSecret };
+    const issued = await dependencies.operations.issueSession(subject, body.authentication_proof.client_kind, body.device_label, {
+      idempotencyKey: body.idempotency_key as string,
+      payloadHash: body.payload_hash as string,
+      operation: "invitation_accept",
+    });
+    const delivery = deliverSession(reply, issued, body.authentication_proof.client_kind) as Record<string, unknown>;
+    return { ...(result as object), ...delivery };
   });
 
   app.post("/auth/v1/invitations/revoke", { schema: { body: InvitationRevokeRequestSchema, response: { 200: InvitationRevokeResponseSchema } } }, async (request) => {

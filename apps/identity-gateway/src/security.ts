@@ -57,6 +57,21 @@ export function validatePublicTransport(request: FastifyRequest, config: Pick<Id
     || cookies.some((value) => value.includes(","))
     || authorization.some((value) => value.includes(","))
   ) invalidRequest();
+  const sensitiveCookies = new Set([
+    CORE_SESSION_COOKIE_NAME,
+    CORE_CSRF_COOKIE_NAME,
+    RECOVERY_COOKIE_NAME,
+    APPLE_FLOW_COOKIE_NAME,
+  ]);
+  if (cookies.length === 1) {
+    const seen = new Set<string>();
+    for (const pair of cookies[0]!.split(";")) {
+      const separator = pair.indexOf("=");
+      const name = separator < 0 ? pair.trim() : pair.slice(0, separator).trim();
+      if (sensitiveCookies.has(name) && seen.has(name)) invalidRequest();
+      if (sensitiveCookies.has(name)) seen.add(name);
+    }
+  }
   if (request.method !== "GET" && request.method !== "HEAD" && request.method !== "OPTIONS") {
     const contentTypes = rawHeaderValues(request, "content-type");
     if (contentTypes.length !== 1 || !/^application\/json(?:;\s*charset=utf-8)?$/iu.test(contentTypes[0]!)) invalidRequest();
@@ -120,11 +135,11 @@ export function clearRecoveryCookie(reply: FastifyReply): void {
 }
 
 export function issueAppleFlowCookie(reply: FastifyReply, value: string): void {
-  flowCookie(reply, APPLE_FLOW_COOKIE_NAME, value, "/auth/v1/apple");
+  flowCookie(reply, APPLE_FLOW_COOKIE_NAME, value, "/auth/v1");
 }
 
 export function clearAppleFlowCookie(reply: FastifyReply): void {
-  clearFlowCookie(reply, APPLE_FLOW_COOKIE_NAME, "/auth/v1/apple");
+  clearFlowCookie(reply, APPLE_FLOW_COOKIE_NAME, "/auth/v1");
 }
 
 function assertFlowKey(key: Uint8Array): Buffer {
@@ -168,13 +183,19 @@ function boundedString(value: unknown): value is string {
   return typeof value === "string" && value.length >= 1 && value.length <= 2_048;
 }
 
+function strictFutureUtc(value: string, now: Date): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)) return false;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value && timestamp > now.getTime();
+}
+
 export function sealRecoveryCookie(key: Uint8Array, binding: RecoveryCookieBinding): string {
   return seal(key, "recovery", { transaction_id: binding.transactionId, state: binding.state, expires_at: binding.expiresAt });
 }
 
 export function readRecoveryCookie(key: Uint8Array, value: string, now: Date): RecoveryCookieBinding {
   const parsed = open(key, "recovery", value);
-  if (!exactRecord(parsed, ["transaction_id", "state", "expires_at"]) || !boundedString(parsed.transaction_id) || !boundedString(parsed.state) || !boundedString(parsed.expires_at) || Date.parse(parsed.expires_at) <= now.getTime()) invalidAuthentication();
+  if (!exactRecord(parsed, ["transaction_id", "state", "expires_at"]) || !boundedString(parsed.transaction_id) || !boundedString(parsed.state) || !boundedString(parsed.expires_at) || !strictFutureUtc(parsed.expires_at, now)) invalidAuthentication();
   return { transactionId: parsed.transaction_id, state: parsed.state, expiresAt: parsed.expires_at };
 }
 
@@ -184,7 +205,7 @@ export function sealAppleFlowCookie(key: Uint8Array, binding: AppleFlowCookieBin
 
 export function readAppleFlowCookie(key: Uint8Array, value: string, now: Date): AppleFlowCookieBinding {
   const parsed = open(key, "apple", value);
-  if (!exactRecord(parsed, ["transaction_id", "state", "expires_at", "flow_kind"]) || !boundedString(parsed.transaction_id) || !boundedString(parsed.state) || !boundedString(parsed.expires_at) || (parsed.flow_kind !== "sign_in" && parsed.flow_kind !== "link") || Date.parse(parsed.expires_at) <= now.getTime()) invalidAuthentication();
+  if (!exactRecord(parsed, ["transaction_id", "state", "expires_at", "flow_kind"]) || !boundedString(parsed.transaction_id) || !boundedString(parsed.state) || !boundedString(parsed.expires_at) || (parsed.flow_kind !== "sign_in" && parsed.flow_kind !== "link") || !strictFutureUtc(parsed.expires_at, now)) invalidAuthentication();
   return { transactionId: parsed.transaction_id, state: parsed.state, expiresAt: parsed.expires_at, flowKind: parsed.flow_kind };
 }
 

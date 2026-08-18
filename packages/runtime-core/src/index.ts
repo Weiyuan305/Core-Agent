@@ -24,6 +24,7 @@ export type {
   AccountDeletionTable,
   AuthSubjectTable,
   CoreSessionTable,
+  EmailVerificationTransactionTable,
   IdentityAuthorityTables,
   IdentityInvitationTable,
   OauthTransactionTable,
@@ -223,6 +224,15 @@ export {
   type ConsumePublicRateLimitInput,
   type PublicRateLimitBucketKind,
 } from "./repositories/identity/public-rate-limits.js";
+export {
+  beginEmailVerificationTransaction,
+  consumeEmailVerificationTransaction,
+  type BeginEmailVerificationTransactionInput,
+  type BegunEmailVerificationTransaction,
+  type ConsumedEmailVerificationBinding,
+  type EmailVerificationProtector,
+  type EmailVerificationTransactionDependencies,
+} from "./repositories/identity/email-verification-transactions.js";
 export {
   authenticateCoreSession,
   issueCoreSession,

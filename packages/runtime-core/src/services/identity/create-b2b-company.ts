@@ -1,4 +1,4 @@
-import type { Kysely } from "kysely";
+import type { Kysely, Transaction } from "kysely";
 
 import type { RuntimeDatabase } from "../../db/database.js";
 import { withDatabaseTransactionRetry } from "../../db/transaction-retry.js";
@@ -40,6 +40,7 @@ export interface CreateB2bCompanyContext {
 
 export interface CreateB2bCompanyDependencies {
   readonly db: Kysely<RuntimeDatabase>;
+  readonly transaction?: Transaction<RuntimeDatabase>;
   readonly emailHmacKey: Uint8Array;
   readonly now?: () => Date;
   readonly randomBytes?: InvitationRandomBytes;
@@ -135,7 +136,7 @@ export async function createB2bCompany(
   const issuedSecret = issueInvitationSecret(dependencies.randomBytes);
   const storedResult = baseResult(input);
 
-  return withDatabaseTransactionRetry(dependencies.db, async (trx) => {
+  const execute = async (trx: Transaction<RuntimeDatabase>): Promise<CreateB2bCompanyResult> => {
     const now = dependencies.now?.() ?? new Date();
     if (!Number.isFinite(now.getTime())) throw new DomainError("INTERNAL_ERROR", "B2B company clock is invalid");
     const actor = await trx.selectFrom("actors").select("status")
@@ -314,5 +315,8 @@ export async function createB2bCompany(
       updatedAt: now,
     });
     return Object.freeze({ ...storedResult, invitation_secret: issuedSecret.secret });
-  }, { isolationLevel: "serializable" });
+  };
+  return dependencies.transaction === undefined
+    ? withDatabaseTransactionRetry(dependencies.db, execute, { isolationLevel: "serializable" })
+    : execute(dependencies.transaction);
 }

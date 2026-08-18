@@ -71,6 +71,20 @@ export interface OauthTransactionTable {
   updated_at: Date;
 }
 
+export interface EmailVerificationTransactionTable {
+  email_verification_transaction_id: string;
+  start_idempotency_key: string;
+  start_payload_hash: string;
+  normalized_email_hmac: Digest;
+  binding_ciphertext: ColumnType<Buffer, Uint8Array, Uint8Array>;
+  verified_provider_subject_hmac: ColumnType<Buffer | null, Uint8Array | null, Uint8Array | null>;
+  status: "pending" | "consumed" | "expired";
+  expires_at: Date;
+  consumed_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
 export interface CoreSessionTable {
   session_id: string;
   secret_digest: Digest;
@@ -119,6 +133,7 @@ export interface IdentityAuthorityTables {
   platform_role_assignments: PlatformRoleAssignmentTable;
   identity_invitations: IdentityInvitationTable;
   oauth_transactions: OauthTransactionTable;
+  email_verification_transactions: EmailVerificationTransactionTable;
   core_sessions: CoreSessionTable;
   account_deletions: AccountDeletionTable;
   public_rate_limits: PublicRateLimitTable;

@@ -115,6 +115,7 @@ const schemaManifestEntries = [
   [9, "agent_run_failure_code", "5c67f4d0bb65a25cf331acd122e3ae1ba48ef287f34e2cd97844e96b1f95af95"],
   [10, "identity_authority", "eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381"],
   [11, "password_reset_transactions", "fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393"],
+  [12, "email_verification_transactions", "23489ce458dba6209e8047c16060e032db9bb5cf090a2b2a05a03a165538dfb2"],
 ] as const;
 
 const schemaManifests = new Map<number, SchemaManifest>(schemaManifestEntries.map(([version, name, checksum]) => [
@@ -355,6 +356,51 @@ schemaManifests.set(11, {
       definition: "CHECK (flow_kind = ANY (ARRAY['apple_sign_in'::text, 'apple_link'::text, 'password_reset'::text]))",
     },
   }],
+});
+
+const schema12Table = "email_verification_transactions";
+const schema12IdentityGrants = ["SELECT", "INSERT", "UPDATE"] as const;
+const schema12RelationAcls: readonly RelationAclManifestEntry[] = [
+  ...schema12IdentityGrants.map((privilege) =>
+    ["grant", "public", schema12Table, "r", "core_agent_identity", privilege, false] as const),
+];
+
+schemaManifests.set(12, {
+  ...schemaManifests.get(12)!,
+  objects: ownedTables([schema12Table]),
+  columns: [
+    [schema12Table, "email_verification_transaction_id", "text", true, ""],
+    [schema12Table, "start_idempotency_key", "text", true, ""],
+    [schema12Table, "start_payload_hash", "text", true, ""],
+    [schema12Table, "normalized_email_hmac", "bytea", true, ""],
+    [schema12Table, "binding_ciphertext", "bytea", true, ""],
+    [schema12Table, "verified_provider_subject_hmac", "bytea", false, ""],
+    [schema12Table, "status", "text", true, ""],
+    [schema12Table, "expires_at", "timestamp with time zone", true, ""],
+    [schema12Table, "consumed_at", "timestamp with time zone", false, ""],
+    [schema12Table, "created_at", "timestamp with time zone", true, ""],
+    [schema12Table, "updated_at", "timestamp with time zone", true, ""],
+  ],
+  constraints: [
+    [schema12Table, "email_verification_transacti_email_verification_transacti_check", "c", true, "CHECK (char_length(email_verification_transaction_id) >= 1 AND char_length(email_verification_transaction_id) <= 255)"],
+    [schema12Table, "email_verification_transacti_verified_provider_subject_hm_check", "c", true, "CHECK (verified_provider_subject_hmac IS NULL OR octet_length(verified_provider_subject_hmac) = 32)"],
+    [schema12Table, "email_verification_transactions_binding_ciphertext_check", "c", true, "CHECK (octet_length(binding_ciphertext) >= 33 AND octet_length(binding_ciphertext) <= 65536)"],
+    [schema12Table, "email_verification_transactions_check", "c", true, "CHECK (expires_at > created_at)"],
+    [schema12Table, "email_verification_transactions_check1", "c", true, "CHECK ((status = 'consumed'::text) = (consumed_at IS NOT NULL))"],
+    [schema12Table, "email_verification_transactions_check2", "c", true, "CHECK (updated_at >= created_at)"],
+    [schema12Table, "email_verification_transactions_normalized_email_hmac_check", "c", true, "CHECK (octet_length(normalized_email_hmac) = 32)"],
+    [schema12Table, "email_verification_transactions_pkey", "p", true, "PRIMARY KEY (email_verification_transaction_id)"],
+    [schema12Table, "email_verification_transactions_start_idempotency_key_check", "c", true, "CHECK (char_length(start_idempotency_key) >= 1 AND char_length(start_idempotency_key) <= 255)"],
+    [schema12Table, "email_verification_transactions_start_idempotency_key_key", "u", true, "UNIQUE (start_idempotency_key)"],
+    [schema12Table, "email_verification_transactions_start_payload_hash_check", "c", true, "CHECK (start_payload_hash ~ '^sha256:[a-f0-9]{64}$'::text)"],
+    [schema12Table, "email_verification_transactions_status_check", "c", true, "CHECK (status = ANY (ARRAY['pending'::text, 'consumed'::text, 'expired'::text]))"],
+  ],
+  indexes: [
+    [schema12Table, "email_verification_transactions_pending_expiry_idx", "CREATE INDEX email_verification_transactions_pending_expiry_idx ON public.email_verification_transactions USING btree (expires_at, email_verification_transaction_id) WHERE (status = 'pending'::text)"],
+    [schema12Table, "email_verification_transactions_pkey", "CREATE UNIQUE INDEX email_verification_transactions_pkey ON public.email_verification_transactions USING btree (email_verification_transaction_id)"],
+    [schema12Table, "email_verification_transactions_start_idempotency_key_key", "CREATE UNIQUE INDEX email_verification_transactions_start_idempotency_key_key ON public.email_verification_transactions USING btree (start_idempotency_key)"],
+  ],
+  relationAcls: schema12RelationAcls,
 });
 
 function quoteIdentifier(value: string): string {

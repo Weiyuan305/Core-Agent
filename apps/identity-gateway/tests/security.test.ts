@@ -26,17 +26,18 @@ const session = Object.freeze({
 function provider() {
   return {
     async signUpEmail() { return { kind: "verification_pending" as const }; },
+    async verifyEmail() { throw new Error("not used"); },
     async signInEmail() {
       return { provider: "supabase" as const, providerSubject: "provider_subject", identityKind: "email_password" as const, normalizedEmail: "student@example.test", verifiedAt: "2026-08-17T00:00:00.000Z" };
     },
     async beginApple(input: Record<string, unknown>) {
-      return { transaction_id: "oauth_01", authorization_url: `https://apple.example.test/authorize?state=oauth_state_01&redirect_uri=${encodeURIComponent(String(input.redirect_uri))}`, expires_at: "2026-08-17T00:05:00.000Z" };
+      return { transaction_id: "oauth_01", authorization_url: `https://apple.example.test/auth/v1/authorize?state=oauth_state_01&redirect_uri=${encodeURIComponent(String(input.redirect_uri))}`, expires_at: "2026-08-17T00:05:00.000Z" };
     },
     async completeApple() {
       return { provider: "supabase" as const, providerSubject: "apple_subject", identityKind: "apple" as const, normalizedEmail: "relay@example.test", verifiedAt: "2026-08-17T00:00:00.000Z" };
     },
-    async reauthenticateAndBeginAppleLink() {
-      return { transaction_id: "oauth_link_01", authorization_url: "https://apple.example.test/authorize?state=oauth_link_state", expires_at: "2026-08-17T00:05:00.000Z" };
+    async reauthenticateAndBeginAppleLink(input: Record<string, unknown>) {
+      return { transaction_id: "oauth_link_01", authorization_url: `https://apple.example.test/auth/v1/authorize?state=oauth_link_state&redirect_to=${encodeURIComponent(String(input.redirect_uri))}`, expires_at: "2026-08-17T00:05:00.000Z" };
     },
     async linkApple() {
       return { provider: "supabase" as const, providerSubject: "apple_subject", identityKind: "apple" as const, normalizedEmail: "relay@example.test", verifiedAt: "2026-08-17T00:00:00.000Z" };
@@ -119,6 +120,23 @@ test("security rejects non-exact host/origin and duplicate sensitive headers", a
   await app.close();
 });
 
+test("security rejects duplicate sensitive cookie names inside one Cookie header before authentication", async () => {
+  let authenticationCalls = 0;
+  const base = operations();
+  const app = await buildApp({ operations: { ...base, async authenticateSession() { authenticationCalls += 1; return base.authenticateSession(); } } });
+  for (const cookie of [
+    `core_agent_session=${sessionSecret}; core_agent_session=${"x".repeat(43)}; core_agent_csrf=${csrfSecret}`,
+    `core_agent_session=${sessionSecret}; core_agent_csrf=${csrfSecret}; core_agent_csrf=${"x".repeat(43)}`,
+    "core_agent_apple_flow=one; core_agent_apple_flow=two",
+    "core_agent_recovery=one; core_agent_recovery=two",
+  ]) {
+    const response = await app.inject({ method: "POST", url: "/auth/v1/reauthenticate", headers: { ...jsonHeaders, cookie, "x-core-agent-csrf": csrfSecret }, payload: { ...idem, expected_resource_version: 1, password: "correct-horse" } });
+    assert.equal(response.statusCode, 400);
+  }
+  assert.equal(authenticationCalls, 0);
+  await app.close();
+});
+
 test("security requires JSON mutations and enforces the 64 KiB boundary", async () => {
   const app = await buildApp();
   const notJson = await app.inject({ method: "POST", url: "/auth/v1/email/sign-in", headers: { host, origin, "content-type": "text/plain" }, payload: "not-json" });
@@ -188,6 +206,78 @@ test("redirect security rejects an adapter authorization URL outside the configu
   await app.close();
 });
 
+test("redirect security accepts only the exact provider authorization endpoint and approved callback parameter", async () => {
+  for (const authorization_url of [
+    `https://apple.example.test/evil?state=oauth_state_01&redirect_to=${encodeURIComponent(webRedirect)}`,
+    `https://apple.example.test/auth/v1/authorize/extra?state=oauth_state_01&redirect_to=${encodeURIComponent(webRedirect)}`,
+    "https://apple.example.test/auth/v1/authorize?state=oauth_state_01&redirect_to=https%3A%2F%2Fevil.example.test%2Fcallback",
+    `https://apple.example.test/auth/v1/authorize?state=oauth_state_01&redirect_to=${encodeURIComponent(webRedirect)}&next=https%3A%2F%2Fevil.example.test`,
+  ]) {
+    const unsafeProvider = provider();
+    unsafeProvider.beginApple = async () => ({ transaction_id: "oauth_01", authorization_url, expires_at: "2026-08-17T00:05:00.000Z" });
+    const app = await buildApp({ provider: unsafeProvider });
+    const response = await app.inject({ method: "POST", url: "/auth/v1/apple/start", headers: jsonHeaders, payload: { ...idem, client_kind: "web", redirect_uri: webRedirect } });
+    assert.equal(response.statusCode, 503, authorization_url);
+    await app.close();
+  }
+});
+
+test("native Apple link accepts only Apple's exact endpoint with the provider callback", async () => {
+  const nativeProvider = provider();
+  nativeProvider.reauthenticateAndBeginAppleLink = async () => ({
+    transaction_id: "oauth_native_link",
+    authorization_url: `https://appleid.apple.com/auth/authorize?state=provider_state&redirect_uri=${encodeURIComponent("https://apple.example.test/auth/v1/callback")}`,
+    expires_at: "2026-08-17T00:05:00.000Z",
+  });
+  const app = await buildApp({ provider: nativeProvider });
+  const response = await app.inject({
+    method: "POST",
+    url: "/auth/v1/apple/link/start",
+    headers: { host, "content-type": "application/json", authorization: `Bearer ${sessionSecret}` },
+    payload: {
+      ...idem,
+      password: "correct-horse",
+      client_kind: "iphone",
+      redirect_uri: nativeRedirect,
+      nonce: "native-nonce-proof",
+      pkce_code_challenge: "a".repeat(43),
+      pkce_code_challenge_method: "S256",
+    },
+  });
+  assert.equal(response.statusCode, 200);
+  await app.close();
+
+  for (const authorizationUrl of [
+    `https://appleid.apple.com/auth/authorize/extra?state=provider_state&redirect_uri=${encodeURIComponent("https://apple.example.test/auth/v1/callback")}`,
+    `https://appleid.apple.com/auth/authorize?state=provider_state&redirect_uri=${encodeURIComponent("https://evil.example.test/callback")}`,
+    `https://appleid.apple.com/auth/authorize?state=provider_state&redirect_uri=${encodeURIComponent("https://apple.example.test/auth/v1/callback")}&next=${encodeURIComponent("https://evil.example.test")}`,
+  ]) {
+    const unsafeProvider = provider();
+    unsafeProvider.reauthenticateAndBeginAppleLink = async () => ({
+      transaction_id: "oauth_native_link",
+      authorization_url: authorizationUrl,
+      expires_at: "2026-08-17T00:05:00.000Z",
+    });
+    const unsafeApp = await buildApp({ provider: unsafeProvider });
+    const unsafe = await unsafeApp.inject({
+      method: "POST",
+      url: "/auth/v1/apple/link/start",
+      headers: { host, "content-type": "application/json", authorization: `Bearer ${sessionSecret}` },
+      payload: {
+        ...idem,
+        password: "correct-horse",
+        client_kind: "iphone",
+        redirect_uri: nativeRedirect,
+        nonce: "native-nonce-proof",
+        pkce_code_challenge: "a".repeat(43),
+        pkce_code_challenge_method: "S256",
+      },
+    });
+    assert.equal(unsafe.statusCode, 503, authorizationUrl);
+    await unsafeApp.close();
+  }
+});
+
 test("recovery cookie is dedicated, HttpOnly, and never exposes its binding or changes the configured redirect", async () => {
   const app = await buildApp();
   const response = await app.inject({ method: "POST", url: "/auth/v1/password/reset/start", headers: jsonHeaders, payload: { ...idem, email: "student@example.test" } });
@@ -204,9 +294,9 @@ test("Apple Web flow uses a distinct short-lived cookie and clears every termina
   const app = await buildApp();
   const start = await app.inject({ method: "POST", url: "/auth/v1/apple/start", headers: jsonHeaders, payload: { ...idem, client_kind: "web", redirect_uri: webRedirect } });
   assert.equal(start.statusCode, 200);
-  assert.deepEqual(start.json(), { schema_version: 1, authorization_url: `https://apple.example.test/authorize?state=oauth_state_01&redirect_uri=${encodeURIComponent(webRedirect)}` });
+  assert.deepEqual(start.json(), { schema_version: 1, authorization_url: `https://apple.example.test/auth/v1/authorize?state=oauth_state_01&redirect_uri=${encodeURIComponent(webRedirect)}` });
   const appleCookie = ([] as string[]).concat(start.headers["set-cookie"] ?? []).find((value) => value.startsWith("core_agent_apple_flow="));
-  assert.match(appleCookie ?? "", /Secure; HttpOnly; SameSite=Lax; Path=\/auth\/v1\/apple/u);
+  assert.match(appleCookie ?? "", /Secure; HttpOnly; SameSite=Lax; Path=\/auth\/v1(?:;|$)/u);
   assert.doesNotMatch(appleCookie ?? "", /core_agent_recovery/u);
 
   const cookiePair = appleCookie?.split(";", 1)[0] ?? "";
@@ -243,6 +333,27 @@ test("native Apple delivery returns the opaque secret once without any cookie", 
   await app.close();
 });
 
+test("native Apple callback failures never emit Set-Cookie", async () => {
+  const failingProvider = provider();
+  failingProvider.completeApple = async () => { throw Object.assign(new Error("invalid callback"), { code: "AUTH_CALLBACK_INVALID" }); };
+  const app = await buildApp({ provider: failingProvider });
+  const response = await app.inject({
+    method: "POST", url: "/auth/v1/apple/callback", headers: { host, "content-type": "application/json" },
+    payload: { ...idem, client_kind: "iphone", transaction_id: "oauth_missing", authorization_code: "opaque_code", state: "wrong_state", nonce: "native_nonce_01", pkce_code_verifier: "v".repeat(43) },
+  });
+  assert.equal(response.statusCode, 401);
+  assert.equal(response.headers["set-cookie"], undefined);
+  await app.close();
+});
+
+test("flow cookies reject non-strict UTC, invalid, and non-finite expiry timestamps", async () => {
+  const { readAppleFlowCookie, sealAppleFlowCookie } = await import("../src/security.js");
+  for (const expiresAt of ["2026-08-17", "2026-08-17T00:05:00+00:00", "not-a-date", "+275760-09-13T00:00:00.000Z"]) {
+    const sealed = sealAppleFlowCookie(flowKey, { transactionId: "oauth_01", state: "state_01", expiresAt, flowKind: "sign_in" });
+    assert.throws(() => readAppleFlowCookie(flowKey, sealed, new Date("2026-08-17T00:00:00.000Z")), /AUTH_INVALID/u, expiresAt);
+  }
+});
+
 test("security config rejects dynamic recovery redirects and unsafe production bind/origins", async () => {
   const configModulePath = "../src/config.ts";
   const { loadIdentityGatewayConfig } = await import(configModulePath);
@@ -258,6 +369,7 @@ test("security config rejects dynamic recovery redirects and unsafe production b
     IDENTITY_APPLE_WEB_REDIRECT_URIS: webRedirect,
     IDENTITY_APPLE_NATIVE_REDIRECT_URIS: nativeRedirect,
     IDENTITY_PASSWORD_RESET_REDIRECT_URI: `${origin}/auth/password/reset/callback`,
+    IDENTITY_EMAIL_VERIFICATION_REDIRECT_URI: `https://${host}/auth/v1/email/verification`,
     IDENTITY_SESSION_HMAC_KEY_REF: "secret/session-hmac",
     IDENTITY_PII_HMAC_KEY_REF: "secret/pii-hmac",
     IDENTITY_SIGNING_KEY_REF: "secret/signing-key",
@@ -267,6 +379,7 @@ test("security config rejects dynamic recovery redirects and unsafe production b
   assert.equal(loadIdentityGatewayConfig(valid).host, "127.0.0.1");
   for (const environment of [
     { ...valid, IDENTITY_PASSWORD_RESET_REDIRECT_URI: `${valid.IDENTITY_PASSWORD_RESET_REDIRECT_URI}?transaction=forged` },
+    { ...valid, IDENTITY_EMAIL_VERIFICATION_REDIRECT_URI: `${origin}/auth/v1/email/verification` },
     { ...valid, IDENTITY_PUBLIC_ORIGINS: "http://app.example.test" },
     { ...valid, IDENTITY_GATEWAY_HOST: "0.0.0.0" },
     { ...valid, IDENTITY_GATEWAY_HOST: "0.0.0.0", IDENTITY_GATEWAY_CONTAINER_BIND: "0" },
@@ -360,7 +473,7 @@ test("native Apple start copies only allowlisted adapter fields", async () => {
   const unsafeProvider = provider();
   unsafeProvider.beginApple = async () => ({
     transaction_id: "oauth_01",
-    authorization_url: "https://apple.example.test/authorize?state=oauth_state_01",
+    authorization_url: `https://apple.example.test/auth/v1/authorize?state=oauth_state_01&redirect_to=${encodeURIComponent(nativeRedirect)}`,
     expires_at: "2026-08-17T00:05:00.000Z",
     provider_token: "must-not-leave-the-gateway",
   });
@@ -375,7 +488,7 @@ test("native Apple start copies only allowlisted adapter fields", async () => {
   assert.deepEqual(response.json(), {
     schema_version: 1,
     transaction_id: "oauth_01",
-    authorization_url: "https://apple.example.test/authorize?state=oauth_state_01",
+    authorization_url: `https://apple.example.test/auth/v1/authorize?state=oauth_state_01&redirect_to=${encodeURIComponent(nativeRedirect)}`,
     expires_at: "2026-08-17T00:05:00.000Z",
   });
   await app.close();

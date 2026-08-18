@@ -44,6 +44,22 @@ export interface GatewayAuthenticatedSession {
 }
 
 export interface IdentityGatewayOperations {
+  readonly beginEmailVerification: (input: {
+    readonly idempotencyKey: string;
+    readonly payloadHash: string;
+    readonly normalizedEmail: string;
+    readonly clientKind: ProviderClientKind;
+    readonly deviceLabel?: string;
+  }) => Promise<{ readonly verificationId: string; readonly kind: "created" | "replay" }>;
+  readonly completeEmailVerification: (input: {
+    readonly verificationId: string;
+    readonly verifiedSubject: VerifiedProviderSubject;
+  }) => Promise<{
+    readonly actorId: string;
+    readonly authSubjectId: string;
+    readonly clientKind: ProviderClientKind;
+    readonly deviceLabel?: string;
+  }>;
   readonly consumeRateLimit: (input: {
     readonly bucketKind: "signup" | "login" | "reset" | "apple_callback" | "invitation_accept" | "reauthenticate";
     readonly accountIdentifier: string;
@@ -53,6 +69,11 @@ export interface IdentityGatewayOperations {
     subject: VerifiedProviderSubject,
     clientKind: ProviderClientKind,
     deviceLabel?: string,
+    idempotency?: {
+      readonly idempotencyKey: string;
+      readonly payloadHash: string;
+      readonly operation: "email_sign_in" | "email_verification" | "apple_sign_in" | "invitation_accept";
+    },
   ) => Promise<GatewayIssuedSession>;
   readonly authenticateSession: (input: {
     readonly sessionSecret: string;
@@ -151,8 +172,9 @@ export async function buildIdentityGatewayApp(dependencies: BuildIdentityGateway
       traceId: `trace_${randomUUID()}`,
     };
     const path = request.url.split("?", 1)[0];
-    if (path === "/auth/v1/apple/callback" || path === "/auth/v1/apple/link/callback") clearAppleFlowCookie(reply);
-    if (path === "/auth/v1/password/reset/complete") clearRecoveryCookie(reply);
+    if ((path === "/auth/v1/apple/callback" || path === "/auth/v1/apple/link/callback" || path === "/auth/v1/invitations/accept")
+      && request.cookies?.core_agent_apple_flow !== undefined) clearAppleFlowCookie(reply);
+    if (path === "/auth/v1/password/reset/complete" && request.cookies?.core_agent_recovery !== undefined) clearRecoveryCookie(reply);
     const mapped = mapIdentityGatewayError(error, identifiers);
     void reply.code(mapped.statusCode).type("application/json").send(mapped.envelope);
   });

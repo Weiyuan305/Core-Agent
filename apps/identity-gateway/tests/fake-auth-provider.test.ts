@@ -75,6 +75,10 @@ test("deterministic fake implements the closed adapter and returns only verified
     email: "new-user@example.test",
     password: "a sufficiently long password",
   }), { kind: "verification_pending" });
+  const verifier = provider as unknown as { verifyEmail?: (input: { verificationCode: string }) => Promise<unknown> };
+  assert.equal(typeof verifier.verifyEmail, "function");
+  assert.equal((await verifier.verifyEmail!({ verificationCode: "fake-email-verification-code" }) as { normalizedEmail?: unknown }).normalizedEmail, "new-user@example.test");
+  await expectFailure(() => verifier.verifyEmail!({ verificationCode: "fake-email-verification-code" }), "AUTH_CALLBACK_INVALID");
   const unknownBinding = await provider.beginPasswordReset("unknown@example.test");
   assert.deepEqual(Object.keys(unknownBinding).sort(), ["expires_at", "state", "transaction_id"]);
   assert.equal(Object.isFrozen(unknownBinding), true);
