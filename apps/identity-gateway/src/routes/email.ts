@@ -226,19 +226,29 @@ export async function registerEmailRoutes(app: FastifyInstance, dependencies: Id
       payloadHash: expectedPayloadHash,
     });
     if ("kind" in completion) {
-      if (completion.kind !== "password_reset_settlement_checkpoint") {
+      if (completion.kind !== "password_reset_provider_observation") {
         throw new IdentityGatewayFailure("INTERNAL_ERROR");
       }
-      const settlement = await dependencies.operations.executeAuthorityCommand({
-        kind: "password_reset_settlement_checkpoint",
+      const observation = await dependencies.operations.executeAuthorityCommand({
+        kind: "password_reset_provider_observation",
         payload: {
           idempotency_key: body.idempotency_key,
           payload_hash: body.payload_hash,
           transaction_id: binding.transactionId,
         },
-      }) as { readonly kind?: unknown };
-      if (settlement.kind === "in_progress") throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
-      throw new IdentityGatewayFailure("INTERNAL_ERROR");
+        passwordResetObservation: completion,
+      }) as { readonly kind?: unknown; readonly verifiedSubject?: unknown };
+      if (observation.kind === "in_progress") throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+      if (observation.kind !== "completed" || observation.verifiedSubject === undefined) {
+        throw new IdentityGatewayFailure("INTERNAL_ERROR");
+      }
+      await dependencies.operations.executeAuthorityCommand({
+        kind: "password_reset_completed",
+        payload: { idempotency_key: body.idempotency_key, payload_hash: body.payload_hash, transaction_id: binding.transactionId },
+        verifiedSubject: observation.verifiedSubject as VerifiedProviderSubject,
+      });
+      clearRecoveryCookie(reply);
+      return { schema_version: 1, accepted: true };
     }
     await dependencies.operations.executeAuthorityCommand({
       kind: "password_reset_completed",

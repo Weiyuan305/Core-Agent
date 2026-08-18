@@ -19,7 +19,7 @@ import type {
   ProviderClientKind,
   ProviderProof,
   PasswordResetCompletionInput,
-  PasswordResetSettlementCheckpoint,
+  PasswordResetProviderObservation,
   PasswordResetStart,
   PasswordResetStartInput,
   VerifiedProviderSubject,
@@ -1185,7 +1185,7 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
 
   async completePasswordReset(
     input: PasswordResetCompletionInput,
-  ): Promise<VerifiedProviderSubject | PasswordResetSettlementCheckpoint> {
+  ): Promise<VerifiedProviderSubject | PasswordResetProviderObservation> {
     const binding = ownData(input, "binding");
     const transactionId = ownString(binding, "transaction_id");
     const authorizationCode = ownString(input, "authorization_code");
@@ -1230,45 +1230,44 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       || !equalDigest(transaction.stateDigest, sha256(state))) {
       throw new ProviderFailure("AUTH_CALLBACK_INVALID");
     }
-    const inspectEvidence = async (subject: VerifiedProviderSubject): Promise<string> => {
+    const inspectEvidence = async (subject: VerifiedProviderSubject): Promise<PasswordResetProviderObservation> => {
       const { client, storage } = this.#newClient(this.#serviceRoleKey);
       try {
         const data = requireResultData(await safeProviderCall(
           () => client.auth.admin.getUserById(subject.providerSubject),
         ));
         const providerUser = ownData(data, "user");
-        if (ownString(providerUser, "id") !== subject.providerSubject
-          || normalizeEmail(ownString(providerUser, "email") ?? "") !== subject.normalizedEmail) {
-          throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+        if (ownString(providerUser, "id") !== subject.providerSubject) {
+          return Object.freeze({
+            kind: "password_reset_provider_observation" as const,
+            outcome: "invalid" as const,
+            reason: "provider_subject_mismatch" as const,
+          });
+        }
+        if (normalizeEmail(ownString(providerUser, "email") ?? "") !== subject.normalizedEmail) {
+          return Object.freeze({
+            kind: "password_reset_provider_observation" as const,
+            outcome: "invalid" as const,
+            reason: "provider_email_mismatch" as const,
+          });
         }
         const evidence = ownString(providerUser, "updated_at");
         if (evidence === undefined || strictUtcMilliseconds(evidence) === undefined) {
-          throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+          return Object.freeze({
+            kind: "password_reset_provider_observation" as const,
+            outcome: "invalid" as const,
+            reason: "provider_evidence_malformed" as const,
+          });
         }
-        return evidence;
+        return Object.freeze({
+          kind: "password_reset_provider_observation" as const,
+          outcome: "exact" as const,
+          verifiedSubject: subject,
+          providerEvidenceAt: evidence,
+        });
       } finally {
         storage.clear();
       }
-    };
-    const checkpointEvidence = async (
-      evidenceAt: string,
-      startedAt: string | undefined,
-    ): Promise<"completed" | "in_progress"> => {
-      const startedTimestamp = startedAt === undefined ? undefined : strictUtcMilliseconds(startedAt);
-      const evidenceTimestamp = strictUtcMilliseconds(evidenceAt);
-      const now = this.#now().getTime();
-      if (startedTimestamp === undefined || evidenceTimestamp === undefined || evidenceTimestamp > now) {
-        throw new ProviderFailure("AUTH_CALLBACK_INVALID");
-      }
-      if (evidenceTimestamp < startedTimestamp) {
-        // Only Core's caller-owned transaction and PostgreSQL clock may decide
-        // whether this admitted provider effect is still running or has expired.
-        return "in_progress";
-      }
-      await safeProviderCall(() => checkpointCompletion.call(this.#transactionStore, {
-        transactionId, providerEvidenceAt: evidenceAt,
-      }));
-      return "completed";
     };
 
     if (transaction.providerCompletionStatus === "provider_completed") {
@@ -1287,15 +1286,8 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
         || settlementExpiresAt === undefined || settlementExpiresAt > bindingSettlementNotAfter) {
         throw new ProviderFailure("AUTH_CALLBACK_INVALID");
       }
-      if (settlementExpiresAt <= this.#now().getTime()) {
-        return Object.freeze({ kind: "password_reset_settlement_checkpoint" as const });
-      }
       const subject = await this.#readPasswordResetSubject(transaction.providerSubjectCiphertext);
-      const recoveredEvidence = await inspectEvidence(subject);
-      if (await checkpointEvidence(recoveredEvidence, transaction.providerCompletionStartedAt) === "in_progress") {
-        return Object.freeze({ kind: "password_reset_settlement_checkpoint" as const });
-      }
-      return subject;
+      return inspectEvidence(subject);
     }
 
     if (transaction.expiresAt <= this.#now().getTime()

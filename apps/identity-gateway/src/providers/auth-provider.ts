@@ -108,9 +108,23 @@ export interface PasswordResetCompletionInput {
   readonly payloadHash: string;
 }
 
-export interface PasswordResetSettlementCheckpoint {
-  readonly kind: "password_reset_settlement_checkpoint";
-}
+/**
+ * Closed, internal observation of a previously admitted password-reset
+ * provider effect. The Core database clock remains authoritative for expiry
+ * and evidence-time classification.
+ */
+export type PasswordResetProviderObservation =
+  | {
+    readonly kind: "password_reset_provider_observation";
+    readonly outcome: "exact";
+    readonly verifiedSubject: VerifiedProviderSubject;
+    readonly providerEvidenceAt: string;
+  }
+  | {
+    readonly kind: "password_reset_provider_observation";
+    readonly outcome: "invalid";
+    readonly reason: "provider_subject_mismatch" | "provider_email_mismatch" | "provider_evidence_malformed";
+  };
 
 export interface AuthProviderAdapter {
   signUpEmail(input: EmailCredentialInput): Promise<{
@@ -126,7 +140,7 @@ export interface AuthProviderAdapter {
   verifyCurrentSubject(input: ProviderProof): Promise<VerifiedProviderSubject>;
   reauthenticatePassword(input: EmailCredentialInput): Promise<VerifiedProviderSubject>;
   beginPasswordReset(input: PasswordResetStartInput): Promise<PasswordResetStart>;
-  completePasswordReset(input: PasswordResetCompletionInput): Promise<VerifiedProviderSubject | PasswordResetSettlementCheckpoint>;
+  completePasswordReset(input: PasswordResetCompletionInput): Promise<VerifiedProviderSubject | PasswordResetProviderObservation>;
   linkApple(input: AppleLinkInput): Promise<VerifiedProviderSubject>;
   revokeCurrentProviderSession(input: ProviderProof): Promise<void>;
   deleteProviderSubject(providerSubject: string): Promise<void>;

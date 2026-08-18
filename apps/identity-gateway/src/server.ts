@@ -48,7 +48,7 @@ import { Pool } from "pg";
 
 import { buildIdentityGatewayApp, type GatewayAuthenticatedSession, type IdentityGatewayOperations } from "./app.js";
 import { assertManagedSecretFile, loadIdentityGatewayConfig } from "./config.js";
-import type { VerifiedProviderSubject } from "./providers/auth-provider.js";
+import type { PasswordResetProviderObservation, VerifiedProviderSubject } from "./providers/auth-provider.js";
 import { SupabaseAuthProvider, type OAuthTransactionRecord, type OAuthTransactionStore, type TransactionProtector } from "./providers/supabase-auth-provider.js";
 import { PASSWORD_RESET_SETTLEMENT_SECONDS } from "./security.js";
 
@@ -73,6 +73,13 @@ async function readManagedSecret(reference: string): Promise<Buffer> {
 function deriveKey(material: Uint8Array, purpose: string): Buffer {
   if (material.byteLength < 32) throw new Error("Identity Gateway key material is invalid");
   return createHmac("sha256", material).update(`core-agent:identity-gateway:${purpose}:v1`, "utf8").digest();
+}
+
+function strictUtcMilliseconds(value: string): number | undefined {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)) return undefined;
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== value) return undefined;
+  return timestamp;
 }
 
 function aesProtector(key: Uint8Array, purpose: string): TransactionProtector {
@@ -841,38 +848,67 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
           }
         }, { isolationLevel: "serializable" });
       }
-      if (input.kind === "password_reset_settlement_checkpoint") {
+      if (input.kind === "password_reset_provider_observation") {
         const payload = input.payload as { idempotency_key: string; payload_hash: string; transaction_id: string };
         const settlement = await withDatabaseTransactionRetry(db, async (trx) => {
           const transaction = await trx.selectFrom("oauth_transactions").selectAll()
             .where("oauth_transaction_id", "=", payload.transaction_id).forUpdate().executeTakeFirst();
           if (transaction === undefined || transaction.flow_kind !== "password_reset"
             || transaction.status !== "pending"
-            || (transaction.provider_completion_status !== "provider_started"
-              && transaction.provider_completion_status !== "provider_completed")
+            || transaction.provider_completion_status !== "provider_started"
+            || transaction.provider_completion_started_at === null
             || transaction.provider_subject_ciphertext === null
             || transaction.provider_completion_payload_hash !== payload.payload_hash
             || transaction.provider_settlement_expires_at === null) {
-            throw new DomainError("UNAUTHENTICATED", "Password-reset settlement checkpoint is invalid");
+            throw new DomainError("UNAUTHENTICATED", "Password-reset provider observation is invalid");
           }
           const now = (await sql<{ now: Date }>`select clock_timestamp() as now`.execute(trx)).rows[0]?.now;
           if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
             throw new DomainError("INTERNAL_ERROR", "Password-reset database clock is unavailable");
           }
-          if (transaction.provider_settlement_expires_at.getTime() > now.getTime()) {
+          if (transaction.provider_settlement_expires_at.getTime() <= now.getTime()) {
+            await trx.updateTable("oauth_transactions").set({
+              status: "expired", pkce_verifier_ciphertext: Buffer.from([0]),
+              provider_completion_status: "pending", provider_completion_started_at: null,
+              expected_provider_subject_ciphertext: null, provider_subject_ciphertext: null,
+              provider_completion_payload_hash: null, provider_settlement_expires_at: null,
+              provider_completed_at: null, provider_evidence_at: null, updated_at: now,
+            }).where("oauth_transaction_id", "=", payload.transaction_id).executeTakeFirstOrThrow();
+            return { kind: "expired" as const };
+          }
+
+          const observation: PasswordResetProviderObservation | undefined = input.passwordResetObservation;
+          if (observation === undefined || observation.kind !== "password_reset_provider_observation") {
+            return { kind: "terminal" as const };
+          }
+          if (observation.outcome === "invalid") {
+            if (observation.reason !== "provider_subject_mismatch"
+              && observation.reason !== "provider_email_mismatch"
+              && observation.reason !== "provider_evidence_malformed") {
+              return { kind: "terminal" as const };
+            }
+            return { kind: "terminal" as const };
+          }
+          const evidenceTimestamp = strictUtcMilliseconds(observation.providerEvidenceAt);
+          if (evidenceTimestamp === undefined || evidenceTimestamp > now.getTime()) {
+            return { kind: "terminal" as const };
+          }
+          if (evidenceTimestamp < transaction.provider_completion_started_at.getTime()) {
             return { kind: "in_progress" as const };
           }
           await trx.updateTable("oauth_transactions").set({
-            status: "expired", pkce_verifier_ciphertext: Buffer.from([0]),
-            provider_completion_status: "pending", provider_completion_started_at: null,
-            expected_provider_subject_ciphertext: null, provider_subject_ciphertext: null,
-            provider_completion_payload_hash: null, provider_settlement_expires_at: null,
-            provider_completed_at: null, provider_evidence_at: null, updated_at: now,
+            provider_completion_status: "provider_completed",
+            provider_completed_at: now,
+            provider_evidence_at: new Date(evidenceTimestamp),
+            updated_at: now,
           }).where("oauth_transaction_id", "=", payload.transaction_id).executeTakeFirstOrThrow();
-          return { kind: "expired" as const };
+          return { kind: "completed" as const, verifiedSubject: observation.verifiedSubject };
         }, { isolationLevel: "serializable" });
         if (settlement.kind === "expired") {
           throw new DomainError("UNAUTHENTICATED", "Password-reset settlement authority expired");
+        }
+        if (settlement.kind === "terminal") {
+          throw new DomainError("UNAUTHENTICATED", "Password-reset provider observation is invalid");
         }
         return settlement;
       }

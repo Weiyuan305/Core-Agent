@@ -2008,7 +2008,9 @@ test("production Fastify and Supabase adapter defer provider-started reset settl
   const normalizedEmail = "round-nine-reset@example.test";
   const providerSubject = "provider_round_nine_reset";
   let gatewayNow = (await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now;
-  let providerEvidenceAt = "2020-01-01T00:00:00.000Z";
+  let observedProviderSubject = providerSubject;
+  let observedProviderEmail = normalizedEmail;
+  let providerEvidenceAt: unknown = "2020-01-01T00:00:00.000Z";
   let providerUpdates = 0;
   let providerInspections = 0;
   let providerExchanges = 0;
@@ -2022,9 +2024,9 @@ test("production Fastify and Supabase adapter defer provider-started reset settl
     exchangeRelease = new Promise<void>((resolve) => { releaseExchange = resolve; });
     exchangeStarted = new Promise<void>((resolve) => { signalExchangeStarted = resolve; });
   };
-  const providerUser = (updatedAt: string) => ({
-    id: providerSubject,
-    email: normalizedEmail,
+  const providerUser = (updatedAt: unknown) => ({
+    id: observedProviderSubject,
+    email: observedProviderEmail,
     email_confirmed_at: "2026-08-01T00:00:00.000Z",
     updated_at: updatedAt,
     app_metadata: { provider: "email" },
@@ -2060,8 +2062,11 @@ test("production Fastify and Supabase adapter defer provider-started reset settl
       admin: {
         async updateUserById() {
           providerUpdates += 1;
-          providerEvidenceAt = (await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now.toISOString();
-          gatewayNow = new Date(providerEvidenceAt);
+          observedProviderSubject = providerSubject;
+          observedProviderEmail = normalizedEmail;
+          const updatedAt = (await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now.toISOString();
+          providerEvidenceAt = updatedAt;
+          gatewayNow = new Date(updatedAt);
           return { data: { user: providerUser(providerEvidenceAt) }, error: null };
         },
         async getUserById() {
@@ -2199,36 +2204,86 @@ test("production Fastify and Supabase adapter defer provider-started reset settl
     assert.equal(providerInspections >= 1, true);
     await concurrentApp.close();
 
-    const expiredPayload = completionPayload("round-nine-expired-completion");
-    const expiredStart = await startProviderReset("round-nine-expired-start");
-    await providerStore.beginPasswordResetCompletion!({
-      transactionId: expiredStart.binding.transaction_id,
-      payloadHash: expiredPayload.payload_hash,
-      settlementNotAfter: new Date(Date.parse(expiredStart.binding.expires_at) + 30 * 60_000).toISOString(),
-    });
-    await pool.query(`with bounds as (select clock_timestamp() - interval '31 minutes' as started_at)
-      update oauth_transactions set provider_completion_started_at = bounds.started_at,
-        provider_settlement_expires_at = bounds.started_at + interval '30 minutes', updated_at = bounds.started_at
-      from bounds where oauth_transaction_id = $1`, [expiredStart.binding.transaction_id]);
-    providerEvidenceAt = "2020-01-01T00:00:00.000Z";
-    gatewayNow = new Date((await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now.getTime() - 60 * 60_000);
-    const expiredApp = await buildIdentityGatewayApp({ config, provider, operations, flowCookieKey, now: () => new Date(gatewayNow) });
-    const expiredResponse = await expiredApp.inject({
-      method: "POST", url: "/auth/v1/password/reset/complete",
-      headers: { ...headers, cookie: expiredStart.cookie }, payload: expiredPayload,
-    });
-    assert.equal(expiredResponse.statusCode, 401, expiredResponse.body);
-    assert.match(String(expiredResponse.headers["set-cookie"]), /core_agent_recovery=;[^\n]*Max-Age=0/u);
-    assert.deepEqual((await pool.query(`select status, provider_completion_status,
-      provider_completion_started_at, expected_provider_subject_ciphertext, provider_subject_ciphertext,
-      provider_completion_payload_hash, provider_settlement_expires_at, provider_completed_at, provider_evidence_at
-      from oauth_transactions where oauth_transaction_id = $1`, [expiredStart.binding.transaction_id])).rows[0], {
-      status: "expired", provider_completion_status: "pending", provider_completion_started_at: null,
-      expected_provider_subject_ciphertext: null, provider_subject_ciphertext: null,
-      provider_completion_payload_hash: null, provider_settlement_expires_at: null,
-      provider_completed_at: null, provider_evidence_at: null,
-    });
-    await expiredApp.close();
+    const observationCases = [
+      { name: "valid", expired: false, observation: "valid", statusCode: 200, rowStatus: "consumed" },
+      { name: "old", expired: false, observation: "old", statusCode: 503, rowStatus: "pending" },
+      { name: "future", expired: false, observation: "future", statusCode: 401, rowStatus: "pending" },
+      { name: "malformed", expired: false, observation: "malformed", statusCode: 401, rowStatus: "pending" },
+      { name: "subject-mismatch", expired: false, observation: "subject-mismatch", statusCode: 401, rowStatus: "pending" },
+      { name: "email-mismatch", expired: false, observation: "email-mismatch", statusCode: 401, rowStatus: "pending" },
+      { name: "expired-valid", expired: true, observation: "valid", statusCode: 401, rowStatus: "expired" },
+      { name: "expired-old", expired: true, observation: "old", statusCode: 401, rowStatus: "expired" },
+      { name: "expired-future", expired: true, observation: "future", statusCode: 401, rowStatus: "expired" },
+      { name: "expired-malformed", expired: true, observation: "malformed", statusCode: 401, rowStatus: "expired" },
+      { name: "expired-subject-mismatch", expired: true, observation: "subject-mismatch", statusCode: 401, rowStatus: "expired" },
+      { name: "expired-email-mismatch", expired: true, observation: "email-mismatch", statusCode: 401, rowStatus: "expired" },
+    ] as const;
+    for (const testCase of observationCases) {
+      gatewayNow = (await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now;
+      observedProviderSubject = providerSubject;
+      observedProviderEmail = normalizedEmail;
+      const payload = completionPayload(`round-eleven-${testCase.name}-completion`);
+      const start = await startProviderReset(`round-eleven-${testCase.name}-start`);
+      await providerStore.beginPasswordResetCompletion!({
+        transactionId: start.binding.transaction_id,
+        payloadHash: payload.payload_hash,
+        settlementNotAfter: new Date(Date.parse(start.binding.expires_at) + 30 * 60_000).toISOString(),
+      });
+      if (testCase.expired) {
+        await pool.query(`with bounds as (select clock_timestamp() - interval '31 minutes' as started_at)
+          update oauth_transactions set provider_completion_started_at = bounds.started_at,
+            provider_settlement_expires_at = bounds.started_at + interval '30 minutes', updated_at = bounds.started_at
+          from bounds where oauth_transaction_id = $1`, [start.binding.transaction_id]);
+      }
+      const clock = (await pool.query<{
+        provider_completion_started_at: Date; provider_settlement_expires_at: Date; now: Date;
+      }>(`select provider_completion_started_at, provider_settlement_expires_at,
+        clock_timestamp() as now from oauth_transactions where oauth_transaction_id = $1`,
+      [start.binding.transaction_id])).rows[0]!;
+      if (testCase.observation === "old") {
+        providerEvidenceAt = new Date(clock.provider_completion_started_at.getTime() - 1).toISOString();
+      } else if (testCase.observation === "future") {
+        providerEvidenceAt = new Date(clock.now.getTime() + 60 * 60_000).toISOString();
+      } else if (testCase.observation === "malformed") {
+        providerEvidenceAt = "not-a-timestamp";
+      } else {
+        providerEvidenceAt = clock.now.toISOString();
+      }
+      if (testCase.observation === "subject-mismatch") observedProviderSubject = "different-provider-subject";
+      if (testCase.observation === "email-mismatch") observedProviderEmail = "different@example.test";
+      gatewayNow = new Date(clock.now.getTime() - 60 * 60_000);
+      const app = await buildIdentityGatewayApp({ config, provider, operations, flowCookieKey, now: () => new Date(gatewayNow) });
+      try {
+        const response = await app.inject({
+          method: "POST", url: "/auth/v1/password/reset/complete",
+          headers: { ...headers, cookie: start.cookie }, payload,
+        });
+        assert.equal(response.statusCode, testCase.statusCode, `${testCase.name}: ${response.body}`);
+        if (testCase.statusCode === 503) {
+          assert.doesNotMatch(String(response.headers["set-cookie"] ?? ""), /core_agent_recovery=;[^\n]*Max-Age=0/u);
+        } else {
+          assert.match(String(response.headers["set-cookie"]), /core_agent_recovery=;[^\n]*Max-Age=0/u);
+        }
+        const row = (await pool.query(`select status, provider_completion_status,
+          provider_completion_started_at, expected_provider_subject_ciphertext, provider_subject_ciphertext,
+          provider_completion_payload_hash, provider_settlement_expires_at, provider_completed_at, provider_evidence_at
+          from oauth_transactions where oauth_transaction_id = $1`, [start.binding.transaction_id])).rows[0];
+        assert.equal(row.status, testCase.rowStatus, testCase.name);
+        if (testCase.rowStatus === "expired") {
+          assert.deepEqual(row, {
+            status: "expired", provider_completion_status: "pending", provider_completion_started_at: null,
+            expected_provider_subject_ciphertext: null, provider_subject_ciphertext: null,
+            provider_completion_payload_hash: null, provider_settlement_expires_at: null,
+            provider_completed_at: null, provider_evidence_at: null,
+          }, testCase.name);
+        } else if (testCase.rowStatus === "pending") {
+          assert.equal(row.provider_completion_status, "provider_started", testCase.name);
+          assert(row.provider_subject_ciphertext instanceof Buffer, testCase.name);
+        }
+      } finally {
+        await app.close();
+      }
+    }
   } finally {
     await db.destroy();
   }
