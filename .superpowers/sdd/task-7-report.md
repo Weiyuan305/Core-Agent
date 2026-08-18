@@ -8,6 +8,66 @@
 - Original implementation commit: `2240a1bb0645e50a22204783f7cac5362924d906`
 - No merge or push was performed.
 
+## Round 21 review fix (2026-08-19)
+
+### Outcome and boundary
+
+- Native Apple linking no longer applies a separate JavaScript UTF-16
+  `state.length` check to the state returned by the installed Supabase identity
+  authorization endpoint. It uses the same provider-neutral OAuth proof validator
+  as Gateway callbacks and Round 20 provider inputs: exactly 8..4,096 Unicode code
+  points and at most 16,384 UTF-8 bytes.
+- This is link-specific: the state comes from the pinned Supabase
+  `/auth/v1/user/identities/authorize` response, is hashed into the durable OAuth
+  transaction, and must match the later native callback. The exact-single-state
+  query requirement remains. S256 challenge generation/request placement and
+  callback verifier comparison are unchanged.
+- The installed Supabase 2.112.2 fake-fetch path now exercises provider states of
+  7, 8, 4,096 emoji, and 4,097 emoji. The accepted paths use 44- and 128-character
+  RFC 7636 verifiers and complete the link, while every provider authorization
+  request still carries the exact derived challenge and `S256`, carries no caller
+  state, and uses the operation-local password Session.
+- The required official Supabase Auth/breaking-change changelog scan found no
+  change relevant to this local response-parser boundary. No SDK API, public
+  contract, migration, package, or provider-effect ordering changed.
+
+### Strict RED then GREEN
+
+- RED command:
+  `node --import tsx --test --test-name-pattern='installed Supabase 2.112.2 native Apple link validates provider state' apps/identity-gateway/tests/supabase-auth-provider.test.ts`
+  — exact result 1 total / 0 pass / 1 fail. The 7-code-point provider state was
+  incorrectly accepted, producing `Missing expected rejection`.
+- After replacing only the local length predicate with `isOAuthProofString`, the
+  same command is GREEN 1/1. It rejects 7 and 4,097, accepts 8 and 4,096 emoji,
+  completes both 44/128-verifier callbacks, and observes the exact S256 provider
+  requests.
+
+### Verification, scans, and self-review
+
+- `npm run check -w @core-agent/identity-gateway` — PASS: build and 124/124.
+- Protected `npm run test:unit` — PASS: Runtime 192/192, Contracts 180/180,
+  Runtime Core 83/83, Gateway 124/124, and Web 129/129 across nine files.
+- Official `npm run test:runtime:database-ci-equivalent` — PASS 3/3 in
+  154,339.200542 ms. Its protected manifest asserted Runtime Core PostgreSQL 344,
+  Gateway PostgreSQL 2, API PostgreSQL 14, and integration 93; failure injection,
+  output-leak rejection, and cleanup passed. Exact label scans found zero Docker
+  containers, volumes, and networks afterward.
+- Exact pins remain Fastify 5.11.2, Cookie 11.1.2, Supabase JS/Auth JS 2.112.2,
+  and Contracts 0.6.0. `git diff --check`, sentinel scan, production log-call scan,
+  and residual diffs for Contracts, migrations, packages, and lockfiles are empty.
+- Self-review confirms the provider response is validated after the provider call
+  but before durable start completion/response, rejected provider states map to
+  the calm provider-unavailable boundary, and no state, credential, token, or
+  provider body is logged. The known untouched Worker TS2345 concern remains.
+
+### Files and commit
+
+- Production: `apps/identity-gateway/src/providers/supabase-auth-provider.ts`.
+- Test: `apps/identity-gateway/tests/supabase-auth-provider.test.ts` using the
+  installed exact SDK and fake HTTP boundary.
+- Round 21 implementation commit: `67dbda57c`
+  (`fix(identity): validate native link provider state`). No merge or push occurred.
+
 ## Round 20 review fix (2026-08-19)
 
 ### Outcome and boundary
