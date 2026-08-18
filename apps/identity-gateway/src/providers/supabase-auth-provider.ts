@@ -199,10 +199,6 @@ interface ProviderStartMetadata {
 }
 
 const oauthTransactionTtlMs = 5 * 60 * 1_000;
-// A loser may observe the pre-effect admin timestamp while the admitted provider
-// update is still running. Only this bounded fresh interval is retryable; stale,
-// mismatched, malformed, and future evidence remain terminal.
-const passwordResetProviderEffectLeaseMs = 30 * 1_000;
 const transientRefreshPlaceholder = "core-agent-transient-proof";
 const utf8 = new TextEncoder();
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
@@ -1255,28 +1251,24 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       }
     };
     const checkpointEvidence = async (
-      subject: VerifiedProviderSubject,
       evidenceAt: string,
       startedAt: string | undefined,
-      allowFreshInProgress = false,
-    ): Promise<void> => {
+    ): Promise<"completed" | "in_progress"> => {
       const startedTimestamp = startedAt === undefined ? undefined : strictUtcMilliseconds(startedAt);
       const evidenceTimestamp = strictUtcMilliseconds(evidenceAt);
       const now = this.#now().getTime();
-      if (startedTimestamp === undefined || evidenceTimestamp === undefined || startedTimestamp > now
-        || evidenceTimestamp > now) {
+      if (startedTimestamp === undefined || evidenceTimestamp === undefined || evidenceTimestamp > now) {
         throw new ProviderFailure("AUTH_CALLBACK_INVALID");
       }
       if (evidenceTimestamp < startedTimestamp) {
-        if (allowFreshInProgress && now < startedTimestamp + passwordResetProviderEffectLeaseMs) {
-          throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
-        }
-        throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+        // Only Core's caller-owned transaction and PostgreSQL clock may decide
+        // whether this admitted provider effect is still running or has expired.
+        return "in_progress";
       }
       await safeProviderCall(() => checkpointCompletion.call(this.#transactionStore, {
         transactionId, providerEvidenceAt: evidenceAt,
       }));
-      void subject;
+      return "completed";
     };
 
     if (transaction.providerCompletionStatus === "provider_completed") {
@@ -1300,7 +1292,9 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       }
       const subject = await this.#readPasswordResetSubject(transaction.providerSubjectCiphertext);
       const recoveredEvidence = await inspectEvidence(subject);
-      await checkpointEvidence(subject, recoveredEvidence, transaction.providerCompletionStartedAt, true);
+      if (await checkpointEvidence(recoveredEvidence, transaction.providerCompletionStartedAt) === "in_progress") {
+        return Object.freeze({ kind: "password_reset_settlement_checkpoint" as const });
+      }
       return subject;
     }
 

@@ -1584,10 +1584,15 @@ test("Supabase password recovery checkpoint failure restarts from exact causal p
       payloadHash: resetCompletionPayloadHash,
     }), "AUTH_PROVIDER_UNAVAILABLE");
     if (evidence === "2026-08-17T01:59:59.999Z") invalidNow = new Date(fixedNow.getTime() + 30_001);
-    await expectFailure(() => invalid.provider.completePasswordReset({
-      binding: passwordResetCompletionBinding(invalidBinding), authorization_code: "already-used-code", new_password: "new correct horse battery staple",
-      payloadHash: resetCompletionPayloadHash,
-    }), "AUTH_CALLBACK_INVALID");
+    const retry = () => invalid.provider.completePasswordReset({
+      binding: passwordResetCompletionBinding(invalidBinding), authorization_code: "already-used-code",
+      new_password: "new correct horse battery staple", payloadHash: resetCompletionPayloadHash,
+    });
+    if (evidence === "2026-08-17T01:59:59.999Z") {
+      assert.deepEqual(await retry(), { kind: "password_reset_settlement_checkpoint" });
+    } else {
+      await expectFailure(retry, "AUTH_CALLBACK_INVALID");
+    }
   }
 });
 
@@ -1617,8 +1622,10 @@ test("Supabase password recovery settlement uses its bounded post-provider deadl
   }
 });
 
-test("Supabase reports a freshly loaded provider-started reset as retryable while provider evidence is still old", async () => {
+test("Supabase returns a provider-started settlement checkpoint after an arbitrary adapter delay while evidence is still old", async () => {
+  let now = new Date(fixedNow);
   const harness = createHarness({
+    now: () => new Date(now),
     adminUser: user("email", resetExpectedSubject.providerSubject, resetExpectedSubject.normalizedEmail,
       resetExpectedSubject.verifiedAt, "2026-08-17T01:59:59.999Z"),
   });
@@ -1628,11 +1635,12 @@ test("Supabase reports a freshly loaded provider-started reset as retryable whil
     payloadHash: resetCompletionPayloadHash,
     settlementNotAfter: passwordResetCompletionBinding(binding).settlement_not_after,
   });
+  now = new Date(fixedNow.getTime() + 30_001);
 
-  await expectFailure(() => harness.provider.completePasswordReset({
+  assert.deepEqual(await harness.provider.completePasswordReset({
     binding: passwordResetCompletionBinding(binding), authorization_code: "already-used-code",
     new_password: "new correct horse battery staple", payloadHash: resetCompletionPayloadHash,
-  }), "AUTH_PROVIDER_UNAVAILABLE");
+  }), { kind: "password_reset_settlement_checkpoint" });
 
   assert.deepEqual(
     harness.methodCalls.filter((call) => ["exchangeCodeForSession", "updateUserById", "getUserById"].includes(call.name))
@@ -1696,10 +1704,11 @@ test("Supabase password recovery crash before admin update is not falsely recove
   assert.equal(providerBodyGetterCalls, 0);
   assert.equal(harness.store.records.get(binding.transaction_id)?.provider_completion_status, "provider_started");
   now = new Date(fixedNow.getTime() + 30_001);
-  await expectFailure(() => harness.provider.completePasswordReset({
+  assert.deepEqual(await harness.provider.completePasswordReset({
     binding: passwordResetCompletionBinding(binding), authorization_code: "already-used-code",
     new_password: "new correct horse battery staple", payloadHash: resetCompletionPayloadHash,
-  }), "AUTH_CALLBACK_INVALID");
+  }), { kind: "password_reset_settlement_checkpoint" });
+  assert.equal(harness.store.records.get(binding.transaction_id)?.provider_completion_status, "provider_started");
   const replacement = await harness.provider.beginPasswordReset(passwordResetStartInput("idem_password_reset_replacement"));
   assert.notEqual(replacement.transaction_id, binding.transaction_id);
   assert.equal(harness.methodCalls.filter((call) => call.name === "updateUserById").length, 1);

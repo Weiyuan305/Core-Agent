@@ -1994,7 +1994,7 @@ test("production composition atomically verifies email, registers Task 3, issues
   }
 });
 
-test("production Fastify and Supabase adapter settle expired and concurrent provider-started password resets", async () => {
+test("production Fastify and Supabase adapter defer provider-started reset settlement to the PostgreSQL clock", async () => {
   const pool = new Pool({ connectionString: databaseUrl });
   const db = createRuntimeDatabase(pool);
   await pool.query("drop schema public cascade; create schema public");
@@ -2172,7 +2172,7 @@ test("production Fastify and Supabase adapter settle expired and concurrent prov
       headers: { ...headers, cookie: concurrentStart.cookie }, payload: concurrentPayload,
     });
     await exchangeStarted;
-    gatewayNow = (await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now;
+    gatewayNow = new Date((await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now.getTime() + 30_001);
     const loser = await concurrentApp.inject({
       method: "POST", url: "/auth/v1/password/reset/complete",
       headers: { ...headers, cookie: concurrentStart.cookie }, payload: concurrentPayload,
@@ -2210,7 +2210,8 @@ test("production Fastify and Supabase adapter settle expired and concurrent prov
       update oauth_transactions set provider_completion_started_at = bounds.started_at,
         provider_settlement_expires_at = bounds.started_at + interval '30 minutes', updated_at = bounds.started_at
       from bounds where oauth_transaction_id = $1`, [expiredStart.binding.transaction_id]);
-    gatewayNow = (await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now;
+    providerEvidenceAt = "2020-01-01T00:00:00.000Z";
+    gatewayNow = new Date((await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now.getTime() - 60 * 60_000);
     const expiredApp = await buildIdentityGatewayApp({ config, provider, operations, flowCookieKey, now: () => new Date(gatewayNow) });
     const expiredResponse = await expiredApp.inject({
       method: "POST", url: "/auth/v1/password/reset/complete",
