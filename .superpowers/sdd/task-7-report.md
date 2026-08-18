@@ -8,6 +8,76 @@
 - Original implementation commit: `2240a1bb0645e50a22204783f7cac5362924d906`
 - No merge or push was performed.
 
+## Round 5 review fixes (2026-08-18)
+
+Status: `DONE_WITH_CONCERNS`. The bounded callback-rate, reauthentication ordering,
+Kysely type, and fake-provider parity findings are implemented and verified. No
+migration SQL, public contract, Worker, or integration-harness file changed.
+
+### Delivered Round 5 corrections
+
+- Apple sign-in, Apple link, and invitation Apple callbacks now consume the
+  `apple_callback` bucket with exact server-owned route identifiers. Transaction
+  ids, state, authorization codes, and idempotency keys cannot partition the
+  primary pre-auth bucket. The existing client/IP identifier remains the second
+  bucket dimension, so a different client is independently admitted.
+- Reauthentication now separates pure credential/transport validation from Task 6
+  Session authentication. Exact Web Cookie/CSRF or native Bearer mode validation,
+  including mixed-header and Origin rejection, completes before the pre-auth rate
+  operation. Correctly shaped but invalid credentials still consume the stable
+  route/client bucket before authentication and provider work.
+- `PublicRateLimitTable.bucket_kind` now includes the already persisted schema-12
+  `apple_start` and `apple_link` values, with a source-static regression test.
+- `FakeAuthProvider` now assigns email `verifiedAt` from its injected clock at the
+  successful one-time OTP consumption, not at signup. Advancing-clock parity proves
+  the timestamp satisfies the durable attempt window and recovery check.
+
+### Round 5 RED and focused GREEN evidence
+
+- `node --import tsx --test --test-name-pattern='rotating Apple|native Apple sign-in and link callbacks|Apple invitation callback rotation|reauthentication rejects changed password' apps/identity-gateway/tests/routes.test.ts`
+  was RED 4 tests / 0 pass / 4 fail: rotated Web/native/link/invitation
+  transactions returned 401/200 instead of stable-bucket 429, and mixed native
+  traffic recorded an unwanted limiter call. The same command is GREEN 4/4 after
+  the fix; rotated identifiers share one account identifier, same-client second
+  requests are limited before provider/Session effects, and a different remote
+  client remains independent.
+- `node --import tsx --test --test-name-pattern='timestamps email verification' apps/identity-gateway/tests/fake-auth-provider.test.ts`
+  was RED 0/1 because `verifiedAt` remained
+  `2026-08-17T01:02:03.000Z` from signup instead of OTP consumption at
+  `2026-08-17T01:03:01.000Z`. It is GREEN 1/1 after the fix, including causal
+  recovery through the existing exact attempt window.
+- `node --import tsx --test --test-name-pattern='public rate-limit table type' packages/runtime-core/tests/repository-static-gate.test.ts`
+  was RED 0/1 because `PublicRateLimitTable` omitted both
+  schema-12 Apple-start buckets. It is GREEN 1/1 after the union correction.
+
+### Round 5 verification
+
+- `npm run check -w @core-agent/identity-gateway` — PASS: build and 87/87.
+- `npm run check -w @core-agent/runtime-core` — PASS: build and 83/83.
+- `npm run check -w @core-agent/contracts` — PASS: 180/180; 85 valid and 11
+  invalid fixtures plus cumulative 0.6 compatibility.
+- `npm run test:unit` — PASS outside the restricted command sandbox: Runtime 192,
+  Contracts 180, Runtime Core 83, Gateway 87, and Web 129 across 9 files. The first
+  sandboxed attempt had only three local TCP/Unix-socket `listen EPERM` failures;
+  the required unsandboxed rerun was clean.
+- `npm run test:runtime:database-ci-equivalent` completed the protected Runtime
+  Core PostgreSQL 339, Gateway composition 1, and API 14 phases before integration.
+  All 93 integration behaviors passed, but the aggregate again ended 2/3 in
+  204249.570084 ms because the unchanged `agent-run.test.ts` after-hook failed its
+  database drop (94 total / 93 pass / 1 teardown failure). Both exact cleanup
+  scenarios passed and the final labeled container/volume/network scan is empty.
+- Root `npm run check` passes Contracts, Runtime Core 83, Gateway 87, and API 17,
+  then stops on the unchanged Worker `project_platform_memberships` TS2345 pair at
+  `src/main.ts:60,129`. Neither independent baseline defect was modified.
+- `git diff --check`, sentinel secret scan, pin check, accepted-history diff, and
+  migration residual check pass. Fastify 5.11.2, Cookie 11.1.2, Supabase 2.112.2,
+  and Contracts 0.6.0 remain exact. Migration 012 is unchanged from Round 4, so no
+  topology rerun was necessary; SHA-256 remains
+  `7545113387693ca0a944dd09033df0941333bfbbc9e8f23d3d622b84a6155bf8`.
+- Round 5 implementation commit:
+  `a90623fde99da4ba7fa5306ed3e0a0861b9bd175`.
+- No merge or push was performed.
+
 ## Round 4 review fixes (2026-08-18)
 
 Status: `DONE_WITH_CONCERNS`. All three Round 4 identity findings are implemented
