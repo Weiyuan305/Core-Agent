@@ -8,6 +8,84 @@
 - Original implementation commit: `2240a1bb0645e50a22204783f7cac5362924d906`
 - No merge or push was performed.
 
+## Round 20 review fix (2026-08-19)
+
+### Outcome and boundary
+
+- Supabase and deterministic Fake Apple parsing now share one provider-neutral
+  proof validator with the Gateway. OAuth authorization code, state, and native
+  nonce accept exactly 8..4,096 Unicode code points, bounded to 16,384 UTF-8
+  bytes; this no longer mistakes one emoji for two characters.
+- Native `pkce_code_verifier` now implements the RFC 7636 unreserved alphabet
+  `[A-Za-z0-9._~-]` at exactly 43..128 ASCII characters. The start-side S256
+  `pkce_code_challenge` remains an exact 43-character base64url value. Tests derive
+  the challenge from each verifier and prove the stored challenge comparison, so
+  widening parser length cannot bypass PKCE binding.
+- The same helper is used by the direct invitation canonical-payload preflight.
+  Real Fastify injection covers native sign-in and link starts, sign-in and link
+  callbacks, and native Apple invitation acceptance at the 4,096-code-point and
+  44/128-verifier boundaries. The installed pinned Supabase 2.112.2 fake-fetch
+  path completes a native link with a 44-character verifier and the same subject.
+- Contracts 0.6.0 and all migrations are byte-untouched. The Supabase skill's
+  required changelog URL check was attempted before implementation, but the Web
+  tool rejected the direct markdown URL with a non-retryable safe-open internal
+  error. This parser-only change uses no new or assumed Supabase API surface, and
+  the locally installed exact 2.112.2 SDK path is exercised directly.
+
+### Strict RED then GREEN
+
+- RED command:
+  `node --import tsx --test --test-name-pattern='native Apple proofs|installed Supabase 2.112.2 Apple link' apps/identity-gateway/tests/fake-auth-provider.test.ts apps/identity-gateway/tests/supabase-auth-provider.test.ts`
+  — exact result 3 total / 0 pass / 3 fail. Fake rejected the first non-43
+  verifier at callback; Supabase rejected the 4,096-emoji nonce using UTF-16
+  length; and the installed SDK link rejected a 44-character callback verifier.
+- After the minimal shared-validator implementation, the same adapter command is
+  GREEN 3/3. The Fastify route focus
+  `node --import tsx --test --test-name-pattern='native Apple route families|Apple invitation proof preflight' apps/identity-gateway/tests/routes.test.ts`
+  is GREEN 2/2. Fake and Supabase matrices accept verifier lengths 43, 44, and
+  128; reject 42, 129, and a non-unreserved `!`; accept 4,096 emoji nonce/state;
+  reject 4,097; and preserve a correct S256 comparison.
+
+### Full verification and self-review
+
+- Final `npm run check -w @core-agent/identity-gateway` — PASS: build and 124/124.
+- Protected `npm run check -w @core-agent/contracts` — PASS: 180/180, generated
+  schema/compatibility checks, 86 valid and 11 invalid fixtures. The first
+  sandboxed run reached 180/180 then hit test-only `tsx` IPC `EPERM`; the identical
+  protected rerun completed every gate.
+- Protected root `npm run test:unit` — PASS: Runtime 192/192, Contracts 180/180,
+  Runtime Core 83/83, Identity Gateway 124/124, and Web 129/129 across nine files.
+- Official `npm run test:runtime:database-ci-equivalent` — PASS 3/3 in
+  144,341.193291 ms. Its fresh protected manifest asserted Runtime Core PostgreSQL
+  344, Identity Gateway PostgreSQL 2, Control Plane API PostgreSQL 14, and
+  integration 93; failure injection, output-leak rejection, and cleanup passed.
+  Exact post-run Docker label scans found zero containers, volumes, and networks.
+- Root `npm run check` passes Contracts, Runtime Core 83/83, Gateway 124/124, and
+  API 17/17, then stops only at the untouched Worker `src/main.ts:60,129` TS2345
+  `project_platform_memberships` mismatch. This remains independent of Task 7.
+- Compatibility history from Task 7 base passes. Exact pins remain Fastify
+  5.11.2, Cookie 11.1.2, Supabase JS/Auth JS 2.112.2, and Contracts 0.6.0.
+  Accepted Contracts 0.5.0 and migrations 010/011 have empty base diffs.
+  Checksums remain 010
+  `eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381`,
+  011 `fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393`,
+  and 012 `2e7a7d0b8f910ff5253ace5dff1f0cc242224ec432e75621f15f57d93d14af12`.
+- `git diff --check`, unique-sentinel scan over every Round 20 file, production
+  log-call scan, migration/accepted-release residual scan, and Docker residual
+  scan are empty. Self-review found no relaxed ordinary-string bound, no change
+  to provider effects or authority, no raw proof persistence/logging, and no
+  detached PKCE challenge.
+
+### Files and commit
+
+- Production: `apps/identity-gateway/src/oauth-proof.ts`, `src/security.ts`,
+  `src/providers/fake-auth-provider.ts`, and
+  `src/providers/supabase-auth-provider.ts`.
+- Tests: Gateway Fake provider, Supabase provider/installed SDK fake-fetch, and
+  real Fastify route-family suites.
+- Round 20 implementation commit: `aab077094`
+  (`fix(identity): align native Apple proof parsing`). No merge or push occurred.
+
 ## Round 19 review fixes (2026-08-19)
 
 ### Outcome and security boundary
