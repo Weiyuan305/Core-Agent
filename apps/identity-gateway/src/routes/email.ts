@@ -6,11 +6,12 @@ import {
   EmailVerificationRequestSchema,
   EmailVerificationResponseSchema,
   PasswordResetRequestSchema,
+  PasswordResetCompletionRequestSchema,
   PasswordResetResponseSchema,
 } from "@core-agent/contracts";
+import { canonicalPayloadHash } from "@core-agent/runtime-core";
 import { createHash } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import Type from "typebox";
 
 import type { GatewayIssuedSession, IdentityGatewayRouteDependencies } from "../app.js";
 import { IdentityGatewayFailure } from "../errors.js";
@@ -26,12 +27,6 @@ import {
   clearRecoveryCookie,
   sealRecoveryCookie,
 } from "../security.js";
-
-const PasswordResetCompleteRequestSchema = Type.Object({
-  schema_version: Type.Literal(1),
-  authorization_code: Type.String({ minLength: 8, maxLength: 4_096 }),
-  new_password: Type.String({ minLength: 8, maxLength: 1_024 }),
-}, { additionalProperties: false });
 
 function rateLimitFailure(retryAfterMs: number | null): void {
   if (retryAfterMs !== null) throw new IdentityGatewayFailure("AUTH_RATE_LIMITED", retryAfterMs);
@@ -119,6 +114,10 @@ export async function registerEmailRoutes(app: FastifyInstance, dependencies: Id
     assertEmailVerificationPayloadHash(body);
     const binding = await dependencies.operations.prepareEmailVerification({ verificationId: body.verification_id });
     assertClientTransport(request, binding.clientKind, dependencies.config);
+    rateLimitFailure(await dependencies.operations.consumeRateLimit({
+      bucketKind: "email_verification", accountIdentifier: "route:email_verification",
+      clientIdentifier: request.identityContext.clientIdentifier,
+    }));
     const providerVerification = binding.providerVerification;
     let subject: VerifiedProviderSubject;
     if (providerVerification.kind === "verified") {
@@ -196,19 +195,37 @@ export async function registerEmailRoutes(app: FastifyInstance, dependencies: Id
     return reply.code(202).send({ schema_version: 1, accepted: true });
   });
 
-  app.post("/auth/v1/password/reset/complete", { schema: { body: PasswordResetCompleteRequestSchema, response: { 200: PasswordResetResponseSchema } } }, async (request, reply) => {
+  app.post("/auth/v1/password/reset/complete", { schema: { body: PasswordResetCompletionRequestSchema, response: { 200: PasswordResetResponseSchema } } }, async (request, reply) => {
     assertClientTransport(request, "web", dependencies.config);
-    clearRecoveryCookie(reply);
+    rateLimitFailure(await dependencies.operations.consumeRateLimit({
+      bucketKind: "reset_complete", accountIdentifier: "route:password_reset_completion",
+      clientIdentifier: request.identityContext.clientIdentifier,
+    }));
     const sealed = request.cookies[RECOVERY_COOKIE_NAME];
     if (sealed === undefined) throw new IdentityGatewayFailure("AUTH_INVALID");
     const binding = readRecoveryCookie(dependencies.flowCookieKey, sealed, dependencies.now());
-    const body = request.body as { authorization_code: string; new_password: string };
+    const body = request.body as {
+      schema_version: 1; idempotency_key: string; payload_hash: string;
+      authorization_code: string; new_password: string;
+    };
+    const expectedPayloadHash = canonicalPayloadHash({
+      schema_version: body.schema_version, idempotency_key: body.idempotency_key,
+      reset_code_digest: `sha256:${createHash("sha256").update(body.authorization_code, "utf8").digest("hex")}`,
+      new_value_digest: `sha256:${createHash("sha256").update(body.new_password, "utf8").digest("hex")}`,
+    });
+    if (body.payload_hash !== expectedPayloadHash) throw new IdentityGatewayFailure("INVALID_REQUEST");
     const subject = await dependencies.provider.completePasswordReset({
       binding: { transaction_id: binding.transactionId, state: binding.state, expires_at: binding.expiresAt },
       authorization_code: body.authorization_code,
       new_password: body.new_password,
+      payloadHash: expectedPayloadHash,
     });
-    await dependencies.operations.executeAuthorityCommand({ kind: "password_reset_completed", payload: {}, verifiedSubject: subject });
+    await dependencies.operations.executeAuthorityCommand({
+      kind: "password_reset_completed",
+      payload: { idempotency_key: body.idempotency_key, payload_hash: body.payload_hash, transaction_id: binding.transactionId },
+      verifiedSubject: subject,
+    });
+    clearRecoveryCookie(reply);
     return { schema_version: 1, accepted: true };
   });
 }

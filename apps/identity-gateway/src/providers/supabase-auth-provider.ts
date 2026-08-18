@@ -105,6 +105,12 @@ export interface OAuthTransactionRecord {
   readonly redirect_uri: string;
   readonly status: "pending";
   readonly expires_at: string;
+  readonly provider_completion_status?: "pending" | "provider_started" | "provider_completed";
+  readonly provider_completion_started_at?: string;
+  readonly provider_subject_ciphertext?: Uint8Array;
+  readonly provider_completion_payload_hash?: string;
+  readonly provider_completed_at?: string;
+  readonly provider_evidence_at?: string;
 }
 
 export interface OAuthTransactionStore {
@@ -114,6 +120,15 @@ export interface OAuthTransactionStore {
   reserveStart?(record: OAuthTransactionRecord): Promise<boolean>;
   completeStart?(record: OAuthTransactionRecord): Promise<void>;
   loadStart?(transactionId: string): Promise<OAuthTransactionRecord | undefined>;
+  beginPasswordResetCompletion?(input: {
+    readonly transactionId: string;
+    readonly providerSubjectCiphertext: Uint8Array;
+    readonly payloadHash: string;
+  }): Promise<{ readonly startedAt: string }>;
+  checkpointPasswordResetCompletion?(input: {
+    readonly transactionId: string;
+    readonly providerEvidenceAt: string;
+  }): Promise<void>;
 }
 
 export interface TransactionProtector {
@@ -510,6 +525,12 @@ interface ParsedOAuthTransaction {
   readonly ciphertext: Uint8Array;
   readonly redirectUri: string;
   readonly expiresAt: number;
+  readonly providerCompletionStatus: "pending" | "provider_started" | "provider_completed";
+  readonly providerCompletionStartedAt?: string;
+  readonly providerSubjectCiphertext?: Uint8Array;
+  readonly providerCompletionPayloadHash?: string;
+  readonly providerCompletedAt?: string;
+  readonly providerEvidenceAt?: string;
 }
 
 function parseOAuthTransaction(record: unknown): ParsedOAuthTransaction | undefined {
@@ -526,16 +547,42 @@ function parseOAuthTransaction(record: unknown): ParsedOAuthTransaction | undefi
   const status = ownString(record, "status");
   const expiresAtText = ownString(record, "expires_at");
   const expiresAt = expiresAtText === undefined ? Number.NaN : new Date(expiresAtText).getTime();
+  const completionStatusValue = ownString(record, "provider_completion_status") ?? "pending";
+  const completionStatus = completionStatusValue === "pending" || completionStatusValue === "provider_started"
+    || completionStatusValue === "provider_completed" ? completionStatusValue : undefined;
+  const completionStartedAt = ownString(record, "provider_completion_started_at");
+  const providerSubjectCiphertext = copyBytes(ownData(record, "provider_subject_ciphertext"), 33, 65_536);
+  const providerCompletionPayloadHash = ownString(record, "provider_completion_payload_hash");
+  const providerCompletedAt = ownString(record, "provider_completed_at");
+  const providerEvidenceAt = ownString(record, "provider_evidence_at");
   if (transactionId === undefined || transactionId.length === 0 || transactionId.length > 256
     || provider !== "supabase"
     || (flowKind !== "apple_sign_in" && flowKind !== "apple_link" && flowKind !== "password_reset")
     || (actor !== null && (typeof actor !== "string" || actor.length === 0 || actor.length > 256))
     || clientKind === undefined || stateDigest === undefined || nonceDigest === undefined
     || ciphertext === undefined || redirectUri === undefined || redirectUri.length === 0
-    || redirectUri.length > 2_048 || status !== "pending" || !Number.isFinite(expiresAt)) return undefined;
+    || redirectUri.length > 2_048 || status !== "pending" || !Number.isFinite(expiresAt)
+    || completionStatus === undefined
+    || (completionStatus === "pending" && (completionStartedAt !== undefined || providerSubjectCiphertext !== undefined
+      || providerCompletionPayloadHash !== undefined
+      || providerCompletedAt !== undefined || providerEvidenceAt !== undefined))
+    || (completionStatus === "provider_started" && (completionStartedAt === undefined
+      || providerSubjectCiphertext === undefined || providerCompletionPayloadHash === undefined
+      || !/^sha256:[a-f0-9]{64}$/u.test(providerCompletionPayloadHash)
+      || providerCompletedAt !== undefined || providerEvidenceAt !== undefined))
+    || (completionStatus === "provider_completed" && (completionStartedAt === undefined
+      || providerSubjectCiphertext === undefined || providerCompletionPayloadHash === undefined
+      || !/^sha256:[a-f0-9]{64}$/u.test(providerCompletionPayloadHash)
+      || providerCompletedAt === undefined || providerEvidenceAt === undefined))) return undefined;
   return {
     transactionId, flowKind, actorId: actor as string | null, clientKind,
     stateDigest, nonceDigest, ciphertext, redirectUri, expiresAt,
+    providerCompletionStatus: completionStatus,
+    ...(completionStartedAt === undefined ? {} : { providerCompletionStartedAt: completionStartedAt }),
+    ...(providerSubjectCiphertext === undefined ? {} : { providerSubjectCiphertext }),
+    ...(providerCompletionPayloadHash === undefined ? {} : { providerCompletionPayloadHash }),
+    ...(providerCompletedAt === undefined ? {} : { providerCompletedAt }),
+    ...(providerEvidenceAt === undefined ? {} : { providerEvidenceAt }),
   };
 }
 
@@ -722,6 +769,40 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       ), 1, 65_536);
       if (ciphertext === undefined) throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
       return ciphertext;
+    } finally {
+      plaintext?.fill(0);
+    }
+  }
+
+  async #protectPasswordResetSubject(subject: VerifiedProviderSubject): Promise<Uint8Array> {
+    return this.#protectStartEnvelope({
+      kind: "password_reset_subject", provider: subject.provider,
+      providerSubject: subject.providerSubject, identityKind: "email_password",
+      normalizedEmail: subject.normalizedEmail, verifiedAt: subject.verifiedAt,
+    });
+  }
+
+  async #readPasswordResetSubject(ciphertext: Uint8Array): Promise<VerifiedProviderSubject> {
+    let plaintext: Uint8Array | undefined;
+    try {
+      plaintext = copyBytes(await this.#transactionProtector.decrypt(ciphertext), 1, 65_536);
+      if (plaintext === undefined) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+      const parsed: unknown = JSON.parse(utf8Decoder.decode(plaintext));
+      const provider = ownString(parsed, "provider");
+      const providerSubject = ownString(parsed, "providerSubject");
+      const identityKind = ownString(parsed, "identityKind");
+      const normalizedEmail = ownString(parsed, "normalizedEmail");
+      const verifiedAt = ownString(parsed, "verifiedAt");
+      if (ownString(parsed, "kind") !== "password_reset_subject" || provider !== "supabase"
+        || providerSubject === undefined || providerSubject.length < 1 || providerSubject.length > 1_024
+        || identityKind !== "email_password" || normalizedEmail === undefined
+        || !validEmail(normalizedEmail) || normalizedEmail !== normalizeEmail(normalizedEmail)
+        || verifiedAt === undefined || strictUtcMilliseconds(verifiedAt) === undefined) {
+        throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+      }
+      return Object.freeze({ provider, providerSubject, identityKind, normalizedEmail, verifiedAt });
+    } catch (error) {
+      throw mapProviderFailure(error, "AUTH_CALLBACK_INVALID");
     } finally {
       plaintext?.fill(0);
     }
@@ -1079,15 +1160,28 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       ? Number.NaN
       : new Date(bindingExpiresAtText).getTime();
     const newPassword = ownString(input, "new_password");
+    const payloadHash = ownString(input, "payloadHash");
     if (transactionId === undefined || transactionId.length === 0 || transactionId.length > 256
       || authorizationCode === undefined || authorizationCode.length < 8 || authorizationCode.length > 8_192
       || state === undefined || state.length < 8 || state.length > 4_096
       || bindingExpiresAtText === undefined || bindingExpiresAtText.length > 64
       || !Number.isFinite(bindingExpiresAt)
-      || newPassword === undefined || newPassword.length < 8 || newPassword.length > 1_024) {
+      || newPassword === undefined || newPassword.length < 8 || newPassword.length > 1_024
+      || payloadHash === undefined || !/^sha256:[a-f0-9]{64}$/u.test(payloadHash)) {
       throw new ProviderFailure("AUTH_CALLBACK_INVALID");
     }
-    const transaction = await this.#consumeTransaction(transactionId);
+    const load = this.#transactionStore.loadStart;
+    const beginCompletion = this.#transactionStore.beginPasswordResetCompletion;
+    const checkpointCompletion = this.#transactionStore.checkpointPasswordResetCompletion;
+    if (load === undefined || beginCompletion === undefined || checkpointCompletion === undefined) {
+      throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+    }
+    const transaction = parseOAuthTransaction(await safeProviderCall(
+      () => load.call(this.#transactionStore, transactionId), "AUTH_CALLBACK_INVALID",
+    ));
+    if (transaction === undefined || transaction.transactionId !== transactionId) {
+      throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+    }
     if (transaction.flowKind !== "password_reset" || transaction.actorId !== null
       || transaction.clientKind !== "web" || transaction.redirectUri !== this.#passwordResetRedirectUri
       || transaction.expiresAt !== bindingExpiresAt
@@ -1095,32 +1189,97 @@ export class SupabaseAuthProvider implements AuthProviderAdapter {
       || !equalDigest(transaction.stateDigest, sha256(state))) {
       throw new ProviderFailure("AUTH_CALLBACK_INVALID");
     }
+    const inspectEvidence = async (subject: VerifiedProviderSubject): Promise<string> => {
+      const { client, storage } = this.#newClient(this.#serviceRoleKey);
+      try {
+        const data = requireResultData(await safeProviderCall(
+          () => client.auth.admin.getUserById(subject.providerSubject),
+        ));
+        const providerUser = ownData(data, "user");
+        if (ownString(providerUser, "id") !== subject.providerSubject
+          || normalizeEmail(ownString(providerUser, "email") ?? "") !== subject.normalizedEmail) {
+          throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+        }
+        const evidence = ownString(providerUser, "updated_at");
+        if (evidence === undefined || strictUtcMilliseconds(evidence) === undefined) {
+          throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+        }
+        return evidence;
+      } finally {
+        storage.clear();
+      }
+    };
+    const checkpointEvidence = async (subject: VerifiedProviderSubject, evidenceAt: string): Promise<void> => {
+      const startedAt = transaction.providerCompletionStartedAt;
+      const startedTimestamp = startedAt === undefined ? undefined : strictUtcMilliseconds(startedAt);
+      const evidenceTimestamp = strictUtcMilliseconds(evidenceAt);
+      const now = this.#now().getTime();
+      if (startedTimestamp === undefined || evidenceTimestamp === undefined
+        || evidenceTimestamp < startedTimestamp || evidenceTimestamp > now) {
+        throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+      }
+      await safeProviderCall(() => checkpointCompletion.call(this.#transactionStore, {
+        transactionId, providerEvidenceAt: evidenceAt,
+      }));
+      void subject;
+    };
+
+    if (transaction.providerCompletionStatus === "provider_completed") {
+      if (transaction.providerSubjectCiphertext === undefined || transaction.providerCompletionPayloadHash !== payloadHash) {
+        throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+      }
+      return this.#readPasswordResetSubject(transaction.providerSubjectCiphertext);
+    }
+    if (transaction.providerCompletionStatus === "provider_started") {
+      if (transaction.providerSubjectCiphertext === undefined || transaction.providerCompletionPayloadHash !== payloadHash) {
+        throw new ProviderFailure("AUTH_CALLBACK_INVALID");
+      }
+      const subject = await this.#readPasswordResetSubject(transaction.providerSubjectCiphertext);
+      const recoveredEvidence = await inspectEvidence(subject);
+      await checkpointEvidence(subject, recoveredEvidence);
+      return subject;
+    }
+
     const envelope = await this.#decryptEnvelope(transaction.ciphertext);
     if (envelope.kind !== "password_reset") throw new ProviderFailure("AUTH_CALLBACK_INVALID");
     const { client, storage, storageKey } = this.#newClient(undefined, transactionId);
+    let subjectCiphertext: Uint8Array | undefined;
     try {
       await storage.setItem(`${storageKey}-flow-${envelope.flowId}-code-verifier`, JSON.stringify(envelope.verifier));
       const data = requireResultData(await safeProviderCall(
         () => client.auth.exchangeCodeForSession(authorizationCode, { flowId: envelope.flowId }),
         "AUTH_CALLBACK_INVALID",
       ), "AUTH_CALLBACK_INVALID");
-      if (ownData(data, "session") === null || ownData(data, "session") === undefined) {
-        throw new ProviderFailure("AUTH_CALLBACK_INVALID");
-      }
+      if (ownData(data, "session") === null || ownData(data, "session") === undefined) throw new ProviderFailure("AUTH_CALLBACK_INVALID");
       const subject = copySubject(ownData(data, "user"), "email_password");
+      subjectCiphertext = await this.#protectPasswordResetSubject(subject);
+      const started = await safeProviderCall(() => beginCompletion.call(this.#transactionStore, {
+        transactionId, providerSubjectCiphertext: subjectCiphertext!, payloadHash,
+      }));
+      const transactionWithStart = { ...transaction, providerCompletionStartedAt: started.startedAt };
       const { client: adminClient, storage: adminStorage } = this.#newClient(this.#serviceRoleKey);
       try {
         const adminData = requireResultData(await safeProviderCall(
           () => adminClient.auth.admin.updateUserById(subject.providerSubject, { password: newPassword }),
         ));
-        if (ownString(ownData(adminData, "user"), "id") !== subject.providerSubject) {
+        const providerUser = ownData(adminData, "user");
+        if (ownString(providerUser, "id") !== subject.providerSubject) throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
+        const evidence = ownString(providerUser, "updated_at");
+        const startedTimestamp = strictUtcMilliseconds(transactionWithStart.providerCompletionStartedAt);
+        const evidenceTimestamp = evidence === undefined ? undefined : strictUtcMilliseconds(evidence);
+        if (startedTimestamp === undefined || evidenceTimestamp === undefined
+          || evidenceTimestamp < startedTimestamp || evidenceTimestamp > this.#now().getTime()) {
           throw new ProviderFailure("AUTH_PROVIDER_UNAVAILABLE");
         }
+        await safeProviderCall(() => checkpointCompletion.call(this.#transactionStore, {
+          transactionId, providerEvidenceAt: evidence!,
+        }));
+        return subject;
       } finally {
         adminStorage.clear();
       }
-      return subject;
     } finally {
+      subjectCiphertext?.fill(0);
       storage.clear();
     }
   }

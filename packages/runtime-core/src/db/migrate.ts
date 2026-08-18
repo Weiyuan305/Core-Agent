@@ -115,7 +115,7 @@ const schemaManifestEntries = [
   [9, "agent_run_failure_code", "5c67f4d0bb65a25cf331acd122e3ae1ba48ef287f34e2cd97844e96b1f95af95"],
   [10, "identity_authority", "eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381"],
   [11, "password_reset_transactions", "fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393"],
-  [12, "email_verification_transactions", "7545113387693ca0a944dd09033df0941333bfbbc9e8f23d3d622b84a6155bf8"],
+  [12, "email_verification_transactions", "9bd9e2521bac3c6e172ee170bc163d42fbecd69e7af352d9415c1e80040ef32c"],
 ] as const;
 
 const schemaManifests = new Map<number, SchemaManifest>(schemaManifestEntries.map(([version, name, checksum]) => [
@@ -341,6 +341,12 @@ const publicRateLimitBucketConstraintBase: ConstraintShape = {
   definition: "CHECK (bucket_kind = ANY (ARRAY['signup'::text, 'login'::text, 'reset'::text, 'apple_callback'::text, 'invitation_accept'::text, 'reauthenticate'::text]))",
 };
 
+const authSubjectProviderIdentityKindConstraintBase: ConstraintShape = {
+  schema: "public", relation: "auth_subjects", relkind: "r",
+  name: "auth_subjects_provider_identity_kind_check", type: "c", validated: true,
+  definition: "CHECK (provider_identity_kind = ANY (ARRAY['email_password'::text, 'apple'::text]))",
+};
+
 schemaManifests.set(10, {
   ...schemaManifests.get(10)!,
   objects: ownedTables([
@@ -352,7 +358,7 @@ schemaManifests.set(10, {
   routines: schema10Routines,
   routineAcls: schema10Routines.flatMap(([kind, name]) => ["PUBLIC", "core_agent_app", "core_agent_identity"].map((grantee) =>
     ["revoke", "public", name, kind, "", grantee, "EXECUTE", false] as const)),
-  constraints: [oauthFlowKindConstraintBase, publicRateLimitBucketConstraintBase],
+  constraints: [oauthFlowKindConstraintBase, publicRateLimitBucketConstraintBase, authSubjectProviderIdentityKindConstraintBase],
   validateAndConverge: convergeSchema10Acls,
 });
 
@@ -392,6 +398,7 @@ schemaManifests.set(12, {
     [schema12Table, "provider_verification_started_at", "timestamp with time zone", false, ""],
     [schema12Table, "provider_verification_attempt_expires_at", "timestamp with time zone", false, ""],
     [schema12Table, "provider_verification_proof_hmac", "bytea", false, ""],
+    [schema12Table, "provider_verification_attempt_count", "integer", true, "0"],
     [schema12Table, "provider_verified_at", "timestamp with time zone", false, ""],
     [schema12Table, "provider_start_status", "text", true, ""],
     [schema12Table, "provider_start_attempt", "integer", true, "1"],
@@ -409,6 +416,7 @@ schemaManifests.set(12, {
     [schema12Table, "email_verification_transacti_expected_provider_subject_hm_check", "c", true, "CHECK (expected_provider_subject_hmac IS NULL OR octet_length(expected_provider_subject_hmac) = 32)"],
     [schema12Table, "email_verification_transacti_provider_verification_status_check", "c", true, "CHECK (provider_verification_status = ANY (ARRAY['pending'::text, 'verified'::text]))"],
     [schema12Table, "email_verification_transacti_provider_verification_proof__check", "c", true, "CHECK (provider_verification_proof_hmac IS NULL OR octet_length(provider_verification_proof_hmac) = 32)"],
+    [schema12Table, "email_verification_provider_verification_attempt_count_check", "c", true, "CHECK (provider_verification_attempt_count >= 0 AND provider_verification_attempt_count <= 5)"],
     [schema12Table, "email_verification_transacti_verified_provider_subject_hm_check", "c", true, "CHECK (verified_provider_subject_hmac IS NULL OR octet_length(verified_provider_subject_hmac) = 32)"],
     [schema12Table, "email_verification_transactio_verified_subject_ciphertext_check", "c", true, "CHECK (verified_subject_ciphertext IS NULL OR octet_length(verified_subject_ciphertext) >= 33 AND octet_length(verified_subject_ciphertext) <= 65536)"],
     [schema12Table, "email_verification_provider_start_attempt_check", "c", true, "CHECK (provider_start_attempt >= 1 AND provider_start_attempt <= 100)"],
@@ -433,13 +441,41 @@ schemaManifests.set(12, {
     [schema12Table, "email_verification_transactions_start_idempotency_key_key", "CREATE UNIQUE INDEX email_verification_transactions_start_idempotency_key_key ON public.email_verification_transactions USING btree (start_idempotency_key)"],
   ],
   relationAcls: schema12RelationAcls,
+  columnAmendments: [
+    { action: "add", after: { schema: "public", relation: "oauth_transactions", relkind: "r", name: "provider_completion_status", position: 15, type: "text", notNull: true, defaultExpression: "'pending'::text", collation: "pg_catalog.\"default\"", identity: "", generated: "" } },
+    { action: "add", after: { schema: "public", relation: "oauth_transactions", relkind: "r", name: "provider_completion_started_at", position: 16, type: "timestamp with time zone", notNull: false, defaultExpression: "", collation: "", identity: "", generated: "" } },
+    { action: "add", after: { schema: "public", relation: "oauth_transactions", relkind: "r", name: "provider_subject_ciphertext", position: 17, type: "bytea", notNull: false, defaultExpression: "", collation: "", identity: "", generated: "" } },
+    { action: "add", after: { schema: "public", relation: "oauth_transactions", relkind: "r", name: "provider_completion_payload_hash", position: 18, type: "text", notNull: false, defaultExpression: "", collation: "pg_catalog.\"default\"", identity: "", generated: "" } },
+    { action: "add", after: { schema: "public", relation: "oauth_transactions", relkind: "r", name: "provider_completed_at", position: 19, type: "timestamp with time zone", notNull: false, defaultExpression: "", collation: "", identity: "", generated: "" } },
+    { action: "add", after: { schema: "public", relation: "oauth_transactions", relkind: "r", name: "provider_evidence_at", position: 20, type: "timestamp with time zone", notNull: false, defaultExpression: "", collation: "", identity: "", generated: "" } },
+  ],
   constraintAmendments: [{
     action: "replace",
     before: publicRateLimitBucketConstraintBase,
     after: {
       ...publicRateLimitBucketConstraintBase,
-      definition: "CHECK (bucket_kind = ANY (ARRAY['signup'::text, 'login'::text, 'reset'::text, 'apple_start'::text, 'apple_link'::text, 'apple_callback'::text, 'invitation_accept'::text, 'reauthenticate'::text]))",
+      definition: "CHECK (bucket_kind = ANY (ARRAY['signup'::text, 'login'::text, 'reset'::text, 'email_verification'::text, 'reset_complete'::text, 'apple_start'::text, 'apple_link'::text, 'apple_callback'::text, 'invitation_accept'::text, 'reauthenticate'::text]))",
     },
+  }, {
+    action: "replace", before: authSubjectProviderIdentityKindConstraintBase,
+    after: { ...authSubjectProviderIdentityKindConstraintBase,
+      definition: "CHECK (provider_identity_kind = ANY (ARRAY['email_password'::text, 'apple'::text, 'email_password_apple'::text]))" },
+  }, {
+    action: "add", after: { schema: "public", relation: "oauth_transactions", relkind: "r",
+      name: "oauth_transactions_provider_subject_ciphertext_check", type: "c", validated: true,
+      definition: "CHECK (provider_subject_ciphertext IS NULL OR octet_length(provider_subject_ciphertext) >= 33 AND octet_length(provider_subject_ciphertext) <= 65536)" },
+  }, {
+    action: "add", after: { schema: "public", relation: "oauth_transactions", relkind: "r",
+      name: "oauth_transactions_provider_completion_status_check", type: "c", validated: true,
+      definition: "CHECK (provider_completion_status = ANY (ARRAY['pending'::text, 'provider_started'::text, 'provider_completed'::text]))" },
+  }, {
+    action: "add", after: { schema: "public", relation: "oauth_transactions", relkind: "r",
+      name: "oauth_transactions_provider_completion_payload_hash_check", type: "c", validated: true,
+      definition: "CHECK (provider_completion_payload_hash IS NULL OR provider_completion_payload_hash ~ '^sha256:[0-9a-f]{64}$'::text)" },
+  }, {
+    action: "add", after: { schema: "public", relation: "oauth_transactions", relkind: "r",
+      name: "oauth_transactions_provider_completion_state_check", type: "c", validated: true,
+      definition: "CHECK (flow_kind <> 'password_reset'::text AND provider_completion_status = 'pending'::text AND provider_completion_started_at IS NULL AND provider_subject_ciphertext IS NULL AND provider_completion_payload_hash IS NULL AND provider_completed_at IS NULL AND provider_evidence_at IS NULL OR flow_kind = 'password_reset'::text AND provider_completion_status = 'pending'::text AND provider_completion_started_at IS NULL AND provider_subject_ciphertext IS NULL AND provider_completion_payload_hash IS NULL AND provider_completed_at IS NULL AND provider_evidence_at IS NULL OR flow_kind = 'password_reset'::text AND provider_completion_status = 'provider_started'::text AND provider_completion_started_at IS NOT NULL AND provider_subject_ciphertext IS NOT NULL AND provider_completion_payload_hash IS NOT NULL AND provider_completed_at IS NULL AND provider_evidence_at IS NULL OR flow_kind = 'password_reset'::text AND provider_completion_status = 'provider_completed'::text AND provider_completion_started_at IS NOT NULL AND provider_subject_ciphertext IS NOT NULL AND provider_completion_payload_hash IS NOT NULL AND provider_completed_at IS NOT NULL AND provider_evidence_at IS NOT NULL AND provider_evidence_at >= provider_completion_started_at AND provider_evidence_at <= provider_completed_at)" },
   }],
 });
 

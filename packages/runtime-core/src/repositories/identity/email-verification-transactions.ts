@@ -384,6 +384,7 @@ export async function beginEmailVerificationTransaction(
         verified_provider_subject_hmac: null,
         verified_subject_ciphertext: null,
         provider_verification_status: "pending",
+        provider_verification_attempt_count: 0,
         provider_verification_started_at: null,
         provider_verification_attempt_expires_at: null,
         provider_verification_proof_hmac: null,
@@ -690,6 +691,7 @@ export async function admitEmailVerificationProviderAttempt(
     if (row.provider_verification_status === "verified") {
       return { kind: "verified", subject: await verifiedAttemptSubject(dependencies, row) };
     }
+    if (row.provider_verification_attempt_count >= 5) invalidAuthority();
     const authority = await pendingAttemptAuthority(dependencies, row);
     const proofHmac = verificationProofHmac(dependencies, input.verificationProofDigest);
     try {
@@ -781,7 +783,7 @@ export async function releaseEmailVerificationProviderAttempt(
   const execute = async (trx: Transaction<RuntimeDatabase>): Promise<void> => {
     const now = await databaseNow(dependencies, trx);
     const row = await trx.selectFrom("email_verification_transactions")
-      .select(["provider_verification_status", "provider_verification_proof_hmac", "status"])
+      .select(["provider_verification_status", "provider_verification_proof_hmac", "provider_verification_attempt_count", "status"])
       .where("email_verification_transaction_id", "=", input.verificationId).forUpdate().executeTakeFirst();
     if (row === undefined || row.status !== "pending" || row.provider_verification_status !== "pending"
       || row.provider_verification_proof_hmac === null) invalidAuthority();
@@ -792,6 +794,7 @@ export async function releaseEmailVerificationProviderAttempt(
         provider_verification_started_at: null,
         provider_verification_attempt_expires_at: null,
         provider_verification_proof_hmac: null,
+        provider_verification_attempt_count: row.provider_verification_attempt_count + 1,
         updated_at: now,
       }).where("email_verification_transaction_id", "=", input.verificationId)
         .where("provider_verification_status", "=", "pending").execute();

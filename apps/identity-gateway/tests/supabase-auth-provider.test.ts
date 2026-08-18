@@ -8,6 +8,7 @@ import type {
   AppleAuthorizationStart,
   AppleLinkAuthorizationInput,
   AppleLinkInput,
+  PasswordResetCompletionInput,
   ProviderClientKind,
 } from "../src/providers/auth-provider.js";
 import { canonicalProviderStartPayloadHash } from "../src/providers/auth-provider.js";
@@ -24,6 +25,7 @@ const fixedNow = new Date("2026-08-17T02:00:00.000Z");
 const callbackUri = "https://identity.example.test/auth/v1/apple/callback";
 const nativeCallbackUri = "coreagent://auth/callback";
 const passwordResetCallbackUri = "https://identity.example.test/auth/v1/password/reset/callback";
+const resetCompletionPayloadHash = `sha256:${"a".repeat(64)}`;
 const credential = Object.freeze({
   email: "USER@EXAMPLE.TEST",
   password: "correct horse battery staple",
@@ -51,6 +53,7 @@ function sha256ForTest(value: string): Uint8Array {
 
 class MemoryTransactionStore implements OAuthTransactionStore {
   readonly records = new Map<string, OAuthTransactionRecord>();
+  failCheckpointOnce = false;
 
   async save(record: OAuthTransactionRecord): Promise<void> {
     assert.equal(this.records.has(record.oauth_transaction_id), false);
@@ -77,6 +80,38 @@ class MemoryTransactionStore implements OAuthTransactionStore {
   async loadStart(transactionId: string): Promise<OAuthTransactionRecord | undefined> {
     return this.records.get(transactionId);
   }
+
+  async beginPasswordResetCompletion(input: {
+    transactionId: string; providerSubjectCiphertext: Uint8Array; payloadHash: string;
+  }): Promise<{ startedAt: string }> {
+    const record = this.records.get(input.transactionId);
+    assert.notEqual(record, undefined);
+    const startedAt = fixedNow.toISOString();
+    if (record?.provider_completion_status === "provider_started") {
+      assert.equal(record.provider_completion_payload_hash, input.payloadHash);
+      return { startedAt: record.provider_completion_started_at! };
+    }
+    this.records.set(input.transactionId, {
+      ...record!, provider_completion_status: "provider_started",
+      provider_completion_started_at: startedAt,
+      provider_subject_ciphertext: Uint8Array.from(input.providerSubjectCiphertext),
+      provider_completion_payload_hash: input.payloadHash,
+    });
+    return { startedAt };
+  }
+
+  async checkpointPasswordResetCompletion(input: { transactionId: string; providerEvidenceAt: string }): Promise<void> {
+    if (this.failCheckpointOnce) {
+      this.failCheckpointOnce = false;
+      throw new Error("forced checkpoint failure");
+    }
+    const record = this.records.get(input.transactionId);
+    assert.notEqual(record, undefined);
+    this.records.set(input.transactionId, {
+      ...record!, provider_completion_status: "provider_completed",
+      provider_completed_at: fixedNow.toISOString(), provider_evidence_at: input.providerEvidenceAt,
+    });
+  }
 }
 
 const protector: TransactionProtector = {
@@ -102,12 +137,14 @@ function user(
   id = "provider-subject-1",
   email = "User@Example.Test",
   emailConfirmedAt: unknown = "2026-08-01T00:00:00.000Z",
+  updatedAt: unknown = fixedNow.toISOString(),
 ): unknown {
   let unknownGetterCalls = 0;
   const value = Object.defineProperties({}, {
     id: { value: id, enumerable: true },
     email: { value: email, enumerable: true },
     email_confirmed_at: { value: emailConfirmedAt, enumerable: true },
+    updated_at: { value: updatedAt, enumerable: true },
     app_metadata: { value: Object.freeze({ provider }), enumerable: true },
     access_token: {
       enumerable: true,
@@ -136,8 +173,10 @@ function createHarness(input: {
   readonly exchangedProviderSubject?: string;
   readonly adminUser?: unknown;
   readonly verifyOtpError?: unknown;
+  readonly failResetCheckpointOnce?: boolean;
 } = {}): Harness {
   const store = new MemoryTransactionStore();
+  store.failCheckpointOnce = input.failResetCheckpointOnce === true;
   const clientCalls: Harness["clientCalls"] = [];
   const methodCalls: Harness["methodCalls"] = [];
   const exchangedVerifiers: string[] = [];
@@ -1238,6 +1277,20 @@ test("installed Supabase 2.112.2 Apple link uses only its operation-local passwo
         },
       });
     }
+    if (requestUrl.pathname === "/auth/v1/token" && requestUrl.searchParams.get("grant_type") === "pkce") {
+      return Response.json({
+        access_token: accessToken,
+        refresh_token: "installed-sdk-link-refresh-sentinel",
+        expires_in: 3600,
+        token_type: "bearer",
+        user: {
+          id: "provider-subject-1",
+          email: "User@Example.Test",
+          email_confirmed_at: "2026-08-01T00:00:00.000Z",
+          app_metadata: { provider: "apple" },
+        },
+      });
+    }
     if (requestUrl.pathname === "/auth/v1/user") {
       return Response.json({ user: {
         id: "provider-subject-1",
@@ -1339,6 +1392,15 @@ test("installed Supabase 2.112.2 Apple link uses only its operation-local passwo
     assert.equal(JSON.stringify(webEnvelope).includes(credential.password), false);
     assert.equal(JSON.stringify(webStart).includes(accessToken), false);
     assert.equal(JSON.stringify(webStart).includes(credential.password), false);
+    const linkedSubject = await webProvider.linkApple({
+      ...callbackFromStart(webStart), authenticatedActorId: "actor-1",
+    });
+    assert.equal(linkedSubject.providerSubject, "provider-subject-1");
+    assert.equal(linkedSubject.identityKind, "apple");
+    assert.equal(serverRequests.some((request) => {
+      const url = new URL(request.url);
+      return url.pathname === "/auth/v1/token" && url.searchParams.get("grant_type") === "pkce";
+    }), true);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1366,6 +1428,7 @@ test("Supabase password recovery uses the fresh admin atomic password-and-sessio
     binding,
     authorization_code: "one-time-recovery-code",
     new_password: "new correct horse battery staple",
+    payloadHash: resetCompletionPayloadHash,
   });
   assert.equal(result.providerSubject, "provider-subject-1");
   assert.deepEqual(harness.exchangedVerifiers, [recoveryVerifier]);
@@ -1380,10 +1443,21 @@ test("Supabase password recovery uses the fresh admin atomic password-and-sessio
   assert.equal(harness.methodCalls.some((call) => call.name === "signOut"), false);
   assert.equal(harness.clientCalls.at(-1)?.key, serviceRoleKey);
   assert.equal(JSON.stringify(result).includes(providerAccessToken), false);
-  assert.equal(harness.store.records.has(binding.transaction_id), false);
+  assert.equal(harness.store.records.get(binding.transaction_id)?.provider_completion_status, "provider_completed");
+  const replay = await harness.provider.completePasswordReset({
+    binding, authorization_code: "one-time-recovery-code", new_password: "new correct horse battery staple",
+    payloadHash: resetCompletionPayloadHash,
+  });
+  assert.equal(replay.providerSubject, result.providerSubject);
+  assert.deepEqual(
+    harness.methodCalls.filter((call) => ["exchangeCodeForSession", "updateUserById"].includes(call.name))
+      .map((call) => call.name),
+    ["exchangeCodeForSession", "updateUserById"],
+  );
   await expectFailure(() => harness.provider.completePasswordReset({
-    binding, authorization_code: "one-time-recovery-code", new_password: "another valid password",
-  }), "AUTH_CALLBACK_INVALID");
+    binding, authorization_code: "one-time-recovery-code", new_password: "a different valid password",
+    payloadHash: `sha256:${"f".repeat(64)}`,
+  } as PasswordResetCompletionInput), "AUTH_CALLBACK_INVALID");
 
   for (const mutate of [
     (input: typeof binding) => ({ ...input, state: `${input.state}-changed` }),
@@ -1396,8 +1470,49 @@ test("Supabase password recovery uses the fresh admin atomic password-and-sessio
       binding: isolatedInput,
       authorization_code: "one-time-recovery-code",
       new_password: "another valid password",
+      payloadHash: resetCompletionPayloadHash,
     }), "AUTH_CALLBACK_INVALID");
     assert.equal(isolated.methodCalls.some((call) => call.name === "exchangeCodeForSession"), false);
+  }
+});
+
+test("Supabase password recovery checkpoint failure restarts from exact causal provider evidence", async () => {
+  const harness = createHarness({ failResetCheckpointOnce: true });
+  const binding = await harness.provider.beginPasswordReset("USER@EXAMPLE.TEST");
+  await expectFailure(() => harness.provider.completePasswordReset({
+    binding, authorization_code: "one-time-recovery-code", new_password: "new correct horse battery staple",
+    payloadHash: resetCompletionPayloadHash,
+  }), "AUTH_PROVIDER_UNAVAILABLE");
+  assert.equal(harness.store.records.get(binding.transaction_id)?.provider_completion_status, "provider_started");
+  assert.deepEqual(
+    harness.methodCalls.filter((call) => ["exchangeCodeForSession", "updateUserById"].includes(call.name)).map((call) => call.name),
+    ["exchangeCodeForSession", "updateUserById"],
+  );
+  const recovered = await harness.provider.completePasswordReset({
+    binding, authorization_code: "already-used-code", new_password: "new correct horse battery staple",
+    payloadHash: resetCompletionPayloadHash,
+  });
+  assert.equal(recovered.providerSubject, "provider-subject-1");
+  assert.equal(harness.store.records.get(binding.transaction_id)?.provider_completion_status, "provider_completed");
+  assert.deepEqual(
+    harness.methodCalls.filter((call) => ["exchangeCodeForSession", "updateUserById"].includes(call.name)).map((call) => call.name),
+    ["exchangeCodeForSession", "updateUserById"],
+  );
+
+  for (const evidence of ["2026-08-17T01:59:59.999Z", "2026-08-17T02:00:00.001Z", "not-a-timestamp"]) {
+    const invalid = createHarness({
+      failResetCheckpointOnce: true,
+      adminUser: user("email", "provider-subject-1", "user@example.test", "2026-08-01T00:00:00.000Z", evidence),
+    });
+    const invalidBinding = await invalid.provider.beginPasswordReset("USER@EXAMPLE.TEST");
+    await expectFailure(() => invalid.provider.completePasswordReset({
+      binding: invalidBinding, authorization_code: "one-time-recovery-code", new_password: "new correct horse battery staple",
+      payloadHash: resetCompletionPayloadHash,
+    }), "AUTH_PROVIDER_UNAVAILABLE");
+    await expectFailure(() => invalid.provider.completePasswordReset({
+      binding: invalidBinding, authorization_code: "already-used-code", new_password: "new correct horse battery staple",
+      payloadHash: resetCompletionPayloadHash,
+    }), "AUTH_CALLBACK_INVALID");
   }
 });
 
@@ -1420,6 +1535,7 @@ test("Supabase password recovery returns no subject when the atomic admin update
     binding,
     authorization_code: "one-time-recovery-code",
     new_password: "new correct horse battery staple",
+    payloadHash: resetCompletionPayloadHash,
   }), "AUTH_PROVIDER_UNAVAILABLE");
 
   assert.deepEqual(
@@ -1444,6 +1560,7 @@ test("Supabase password recovery requires the admin update to return the exact r
       binding,
       authorization_code: "one-time-recovery-code",
       new_password: "new correct horse battery staple",
+      payloadHash: resetCompletionPayloadHash,
     }), "AUTH_PROVIDER_UNAVAILABLE");
 
     assert.deepEqual(

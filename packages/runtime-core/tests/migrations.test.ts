@@ -78,6 +78,7 @@ const identityColumnShape = {
     "verified_provider_subject_hmac:bytea:YES", "verified_subject_ciphertext:bytea:YES",
     "provider_verification_status:text:NO", "provider_verification_started_at:timestamptz:YES",
     "provider_verification_attempt_expires_at:timestamptz:YES", "provider_verification_proof_hmac:bytea:YES",
+    "provider_verification_attempt_count:int4:NO",
     "provider_verified_at:timestamptz:YES",
     "provider_start_status:text:NO", "provider_start_attempt:int4:NO", "provider_start_finalized_at:timestamptz:YES",
     "provider_start_failed_at:timestamptz:YES",
@@ -95,6 +96,10 @@ const identityColumnShape = {
     "client_kind:text:NO", "state_digest:bytea:NO", "nonce_digest:bytea:NO", "pkce_verifier_ciphertext:bytea:NO",
     "redirect_uri:text:NO", "status:text:NO", "expires_at:timestamptz:NO", "consumed_at:timestamptz:YES",
     "created_at:timestamptz:NO", "updated_at:timestamptz:NO",
+    "provider_completion_status:text:NO", "provider_completion_started_at:timestamptz:YES",
+    "provider_subject_ciphertext:bytea:YES", "provider_completion_payload_hash:text:YES",
+    "provider_completed_at:timestamptz:YES",
+    "provider_evidence_at:timestamptz:YES",
   ],
   platform_role_assignments: [
     "platform_role_assignment_id:text:NO", "actor_id:text:NO", "role:text:NO", "status:text:NO",
@@ -387,6 +392,7 @@ test("empty database migrates exactly to schema version 12 with durable email ve
     "provider_verification_started_at",
     "provider_verification_attempt_expires_at",
     "provider_verification_proof_hmac",
+    "provider_verification_attempt_count",
     "provider_verified_at",
     "provider_start_status",
     "provider_start_attempt",
@@ -1157,15 +1163,15 @@ test("schema 10 identity authority tables retain their compatibility and securit
   );
   const checkText = new Map(checks.rows.map((row) => [row.table_name, row.definitions]));
   for (const [tableName, required] of Object.entries({
-    auth_subjects: ["supabase", "email_password", "apple", "active", "unlinked", "revoked"],
+    auth_subjects: ["supabase", "email_password", "apple", "email_password_apple", "active", "unlinked", "revoked"],
     platform_role_assignments: ["platform_super_admin", "active", "revoked"],
     identity_invitations: ["admin", "consultant", "pending", "accepted", "revoked", "expired", "replaced", "octet_length(secret_digest) = 32", "octet_length(normalized_email_hmac) = 32"],
-    oauth_transactions: ["supabase", "apple_sign_in", "apple_link", "password_reset", "web", "iphone", "macos", "pending", "consumed", "expired", "octet_length(state_digest) = 32", "octet_length(nonce_digest) = 32"],
+    oauth_transactions: ["supabase", "apple_sign_in", "apple_link", "password_reset", "web", "iphone", "macos", "pending", "provider_started", "provider_completed", "consumed", "expired", "octet_length(state_digest) = 32", "octet_length(nonce_digest) = 32", "octet_length(provider_subject_ciphertext)"],
     core_sessions: ["web", "iphone", "macos", "active", "revoked", "expired", "octet_length(secret_digest) = 32", "octet_length(csrf_digest) = 32"],
-    email_verification_transactions: ["pending", "consumed", "expired", "verified", "sha256:", "octet_length(normalized_email_hmac) = 32", "octet_length(binding_ciphertext) >= 33", "octet_length(expected_provider_subject_hmac) = 32", "octet_length(verified_provider_subject_hmac) = 32"],
+    email_verification_transactions: ["pending", "consumed", "expired", "verified", "sha256:", "octet_length(normalized_email_hmac) = 32", "octet_length(binding_ciphertext) >= 33", "octet_length(expected_provider_subject_hmac) = 32", "octet_length(verified_provider_subject_hmac) = 32", "provider_verification_attempt_count"],
     account_deletions: ["deletion_pending", "cancelled", "deleted"],
     private_identity_pii: ["octet_length(normalized_email_hmac) = 32", "octet_length(encrypted_email) > 0"],
-    public_rate_limits: ["signup", "login", "reset", "apple_callback", "invitation_accept", "reauthenticate", "octet_length(account_identifier_hmac) = 32", "octet_length(client_identifier_hmac) = 32"],
+    public_rate_limits: ["signup", "login", "reset", "email_verification", "reset_complete", "apple_callback", "invitation_accept", "reauthenticate", "octet_length(account_identifier_hmac) = 32", "octet_length(client_identifier_hmac) = 32"],
   })) {
     const definitions = checkText.get(tableName) ?? "";
     for (const fragment of required) assert(definitions.includes(fragment), `${tableName} missing check: ${fragment}`);

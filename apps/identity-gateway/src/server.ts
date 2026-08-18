@@ -36,9 +36,10 @@ import {
   requireRecentReauthentication,
   revokeCoreSession,
   revokeCoreSessionInTransaction,
-  revokeCoreSessions,
+  revokeCoreSessionsInTransaction,
   revokeInvitation,
   suspendMembership,
+  withDatabaseTransactionRetry,
   type RuntimeDatabase,
 } from "@core-agent/runtime-core";
 import type { FastifyInstance } from "fastify";
@@ -99,6 +100,12 @@ function oauthStore(db: Kysely<RuntimeDatabase>): OAuthTransactionStore {
     actor_id: row.actor_id, client_kind: row.client_kind, state_digest: row.state_digest,
     nonce_digest: row.nonce_digest, pkce_verifier_ciphertext: row.pkce_verifier_ciphertext,
     redirect_uri: row.redirect_uri, status: "pending", expires_at: row.expires_at.toISOString(),
+    provider_completion_status: row.provider_completion_status,
+    ...(row.provider_completion_started_at === null ? {} : { provider_completion_started_at: row.provider_completion_started_at.toISOString() }),
+    ...(row.provider_subject_ciphertext === null ? {} : { provider_subject_ciphertext: Uint8Array.from(row.provider_subject_ciphertext) }),
+    ...(row.provider_completion_payload_hash === null ? {} : { provider_completion_payload_hash: row.provider_completion_payload_hash }),
+    ...(row.provider_completed_at === null ? {} : { provider_completed_at: row.provider_completed_at.toISOString() }),
+    ...(row.provider_evidence_at === null ? {} : { provider_evidence_at: row.provider_evidence_at.toISOString() }),
   });
   const databaseNow = async (): Promise<Date> => {
     const now = (await sql<{ now: Date }>`select clock_timestamp() as now`.execute(db)).rows[0]?.now;
@@ -114,6 +121,9 @@ function oauthStore(db: Kysely<RuntimeDatabase>): OAuthTransactionStore {
         state_digest: record.state_digest, nonce_digest: record.nonce_digest,
         pkce_verifier_ciphertext: record.pkce_verifier_ciphertext, redirect_uri: record.redirect_uri,
         status: "pending", expires_at: new Date(record.expires_at), consumed_at: null,
+        provider_completion_status: "pending", provider_completion_started_at: null,
+        provider_subject_ciphertext: null, provider_completion_payload_hash: null,
+        provider_completed_at: null, provider_evidence_at: null,
         created_at: now, updated_at: now,
       }).execute();
     },
@@ -137,6 +147,9 @@ function oauthStore(db: Kysely<RuntimeDatabase>): OAuthTransactionStore {
         state_digest: record.state_digest, nonce_digest: record.nonce_digest,
         pkce_verifier_ciphertext: record.pkce_verifier_ciphertext, redirect_uri: record.redirect_uri,
         status: "pending", expires_at: new Date(record.expires_at), consumed_at: null,
+        provider_completion_status: "pending", provider_completion_started_at: null,
+        provider_subject_ciphertext: null, provider_completion_payload_hash: null,
+        provider_completed_at: null, provider_evidence_at: null,
         created_at: now, updated_at: now,
       }).onConflict((conflict) => conflict.column("oauth_transaction_id").doNothing()).executeTakeFirst();
       return result.numInsertedOrUpdatedRows === 1n;
@@ -155,6 +168,54 @@ function oauthStore(db: Kysely<RuntimeDatabase>): OAuthTransactionStore {
       const row = await db.selectFrom("oauth_transactions").selectAll()
         .where("oauth_transaction_id", "=", transactionId).where("status", "=", "pending").executeTakeFirst();
       return row === undefined ? undefined : recordFromRow(row);
+    },
+    async beginPasswordResetCompletion(input: {
+      readonly transactionId: string; readonly providerSubjectCiphertext: Uint8Array; readonly payloadHash: string;
+    }) {
+      return db.transaction().execute(async (trx) => {
+        const now = (await sql<{ now: Date }>`select clock_timestamp() as now`.execute(trx)).rows[0]?.now;
+        if (!(now instanceof Date) || !Number.isFinite(now.getTime())) throw new DomainError("INTERNAL_ERROR", "OAuth database clock is unavailable");
+        const row = await trx.selectFrom("oauth_transactions").selectAll()
+          .where("oauth_transaction_id", "=", input.transactionId).forUpdate().executeTakeFirst();
+        if (row === undefined || row.flow_kind !== "password_reset" || row.status !== "pending"
+          || row.expires_at.getTime() <= now.getTime()) throw new DomainError("UNAUTHENTICATED", "Password reset authority is invalid");
+        if (row.provider_completion_status === "provider_started") {
+          if (row.provider_completion_started_at === null || row.provider_subject_ciphertext === null
+            || row.provider_completion_payload_hash !== input.payloadHash
+            || !Buffer.from(row.provider_subject_ciphertext).equals(Buffer.from(input.providerSubjectCiphertext))) {
+            throw new DomainError("UNAUTHENTICATED", "Password reset checkpoint conflicts");
+          }
+          return { startedAt: row.provider_completion_started_at.toISOString() };
+        }
+        if (row.provider_completion_status !== "pending") throw new DomainError("IDEMPOTENCY_CONFLICT", "Password reset provider completion changed");
+        await trx.updateTable("oauth_transactions").set({
+          provider_completion_status: "provider_started", provider_completion_started_at: now,
+          provider_subject_ciphertext: input.providerSubjectCiphertext,
+          provider_completion_payload_hash: input.payloadHash, updated_at: now,
+        }).where("oauth_transaction_id", "=", input.transactionId).executeTakeFirstOrThrow();
+        return { startedAt: now.toISOString() };
+      });
+    },
+    async checkpointPasswordResetCompletion(input: { readonly transactionId: string; readonly providerEvidenceAt: string }) {
+      await db.transaction().execute(async (trx) => {
+        const now = (await sql<{ now: Date }>`select clock_timestamp() as now`.execute(trx)).rows[0]?.now;
+        const evidenceAt = new Date(input.providerEvidenceAt);
+        if (!(now instanceof Date) || !Number.isFinite(now.getTime()) || !Number.isFinite(evidenceAt.getTime())) {
+          throw new DomainError("INTERNAL_ERROR", "Password reset checkpoint clock is invalid");
+        }
+        const row = await trx.selectFrom("oauth_transactions").selectAll()
+          .where("oauth_transaction_id", "=", input.transactionId).forUpdate().executeTakeFirst();
+        if (row === undefined || row.flow_kind !== "password_reset" || row.status !== "pending"
+          || row.provider_completion_started_at === null || row.provider_subject_ciphertext === null
+          || evidenceAt.getTime() < row.provider_completion_started_at.getTime()
+          || evidenceAt.getTime() > now.getTime()) throw new DomainError("UNAUTHENTICATED", "Password reset checkpoint evidence is invalid");
+        if (row.provider_completion_status === "provider_completed") return;
+        if (row.provider_completion_status !== "provider_started") throw new DomainError("UNAUTHENTICATED", "Password reset checkpoint is invalid");
+        await trx.updateTable("oauth_transactions").set({
+          provider_completion_status: "provider_completed", provider_completed_at: now,
+          provider_evidence_at: evidenceAt, updated_at: now,
+        }).where("oauth_transaction_id", "=", input.transactionId).executeTakeFirstOrThrow();
+      });
     },
   });
 }
@@ -348,7 +409,7 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
       if (prepared.providerVerification.kind !== "verified") {
         throw new DomainError("UNAUTHENTICATED", "Provider verification checkpoint is required");
       }
-      const completion = await db.transaction().execute(async (trx) => {
+      const completion = await withDatabaseTransactionRetry(db, async (trx) => {
         if (prepared.flowKind === "invitation") {
           if (prepared.tenantId === undefined || prepared.invitationId === undefined
             || prepared.invitationSecretDigest === undefined || prepared.expectedResourceVersion === undefined
@@ -466,16 +527,37 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
           operation: "email_verification",
         });
         return { actorId: registration.actor_id, authSubjectId: registration.auth_subject_id, clientKind: binding.clientKind, ...(binding.deviceLabel === undefined ? {} : { deviceLabel: binding.deviceLabel }), issuedSession };
-      });
+      }, { isolationLevel: "serializable" });
       if ("kind" in completion) throw new DomainError("UNAUTHENTICATED", "Email verification expired");
       return completion;
     },
     async issueSession(subject, clientKind, deviceLabel, idempotency) {
       if (idempotency === undefined) throw new DomainError("INVALID_REQUEST", "Session issuance idempotency is required");
-      return db.transaction().execute(async (trx) => {
-        const subjectRow = await trx.selectFrom("auth_subjects").select(["auth_subject_id", "actor_id"])
+      return withDatabaseTransactionRetry(db, async (trx) => {
+        let subjectRow = await trx.selectFrom("auth_subjects").select(["auth_subject_id", "actor_id"])
           .where("provider", "=", subject.provider).where("provider_subject", "=", subject.providerSubject)
           .where("status", "=", "active").executeTakeFirst();
+        if (subjectRow === undefined && idempotency.operation === "apple_sign_in") {
+          const registrationPayload = {
+            schema_version: 1 as const,
+            idempotency_key: derivedId("idem_apple_registration", idempotency.idempotencyKey),
+            auth_subject: subject,
+            display_name: "Apple 用户",
+          };
+          await registerB2c({
+            db, transaction: trx,
+            defaultProfile: { providerConfigId: "identity-default", modelId: "identity-default" },
+            privatePii: {
+              normalizedEmailHmacKey: piiKey, encryptionKeyRef: "identity-pii-v1",
+              encryptNormalizedEmail: (email: string) => piiProtector.encrypt(Buffer.from(email, "utf8")),
+            },
+          }, { requestId: `request_${randomUUID()}`, traceId: `trace_${randomUUID()}` }, {
+            ...registrationPayload, payload_hash: canonicalPayloadHash(registrationPayload),
+          });
+          subjectRow = await trx.selectFrom("auth_subjects").select(["auth_subject_id", "actor_id"])
+            .where("provider", "=", subject.provider).where("provider_subject", "=", subject.providerSubject)
+            .where("status", "=", "active").executeTakeFirst();
+        }
         if (subjectRow === undefined) throw new DomainError("UNAUTHENTICATED", "Verified subject is not registered");
         const actor = await trx.selectFrom("actors").select("resource_version")
           .where("actor_id", "=", subjectRow.actor_id).executeTakeFirstOrThrow();
@@ -506,12 +588,12 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
           response: { schema_version: 1, session_id: view.session_id }, updatedAt: now,
         });
         return { session: view, sessionSecret: issued.sessionSecret, ...(issued.csrfSecret === undefined ? {} : { csrfSecret: issued.csrfSecret }) };
-      });
+      }, { isolationLevel: "serializable" });
     },
     async authenticateSession(input) {
       const authenticated = await authenticateCoreSession({ db }, {
         ...input,
-        advanceActivity: false,
+        advanceActivity: input.advanceActivity ?? false,
       });
       const actor = await db.selectFrom("actors").select("resource_version").where("actor_id", "=", authenticated.authSubject.actorId).executeTakeFirstOrThrow();
       return { actorId: authenticated.authSubject.actorId, authSubjectId: authenticated.authSubject.authSubjectId, session: sessionView(authenticated.session as unknown as Record<string, unknown>, Number(actor.resource_version)) };
@@ -551,7 +633,7 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
         if (suppliedHash !== computedHash) {
           throw new DomainError("INVALID_REQUEST", "Reauthentication payload hash is invalid");
         }
-        return db.transaction().execute(async (trx) => {
+        return withDatabaseTransactionRetry(db, async (trx) => {
           const tenant = await trx.selectFrom("memberships").select("tenant_id")
             .where("actor_id", "=", input.authority!.actorId).where("status", "=", "active")
             .orderBy("tenant_id").executeTakeFirst();
@@ -576,7 +658,7 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
             resultRef: String(input.authority!.session.session_id), response, updatedAt: now,
           });
           return response;
-        });
+        }, { isolationLevel: "serializable" });
       }
       if (input.kind === "invitation_inspect") {
         const payload = input.payload as { invitation_secret: string };
@@ -596,61 +678,126 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
           device_label?: string;
         };
         const inspected = await db.transaction().execute((trx) => readInvitationBySecret(trx, payload.invitation_secret));
-        return db.transaction().execute(async (trx) => {
-          const subject = await trx.selectFrom("auth_subjects").select(["actor_id", "auth_subject_id"])
+        return withDatabaseTransactionRetry(db, async (trx) => {
+          let subject = await trx.selectFrom("auth_subjects").select(["actor_id", "auth_subject_id"])
             .where("provider", "=", input.verifiedSubject!.provider)
             .where("provider_subject", "=", input.verifiedSubject!.providerSubject)
             .where("status", "=", "active").executeTakeFirst();
+          let verifiedInvitationBinding: {
+            invitationId: string; secretDigest: Buffer; tenantId: string;
+            expectedResourceVersion: number; role: "admin" | "consultant";
+          } | undefined;
+          if (subject === undefined) {
+            const tenant = await trx.selectFrom("tenants").select(["tenant_mode", "status"])
+              .where("tenant_id", "=", inspected.tenantId).forUpdate().executeTakeFirst();
+            if (tenant?.tenant_mode !== "b2b" || tenant.status !== "active") {
+              throw new DomainError("UNAUTHENTICATED", "Invitation authority is unavailable");
+            }
+            const invitation = await lockInvitationBySecret(trx, payload.invitation_secret);
+            if (invitation.invitationId !== inspected.invitationId || invitation.tenantId !== inspected.tenantId
+              || invitation.resourceVersion !== payload.expected_resource_version || invitation.role !== inspected.role) {
+              throw new DomainError("UNAUTHENTICATED", "Invitation authority is unavailable");
+            }
+            const secretBytes = Buffer.from(payload.invitation_secret, "base64url");
+            const secretDigest = createHash("sha256").update(secretBytes).digest();
+            secretBytes.fill(0);
+            verifiedInvitationBinding = {
+              invitationId: invitation.invitationId, tenantId: invitation.tenantId, secretDigest,
+              expectedResourceVersion: invitation.resourceVersion, role: invitation.role,
+            };
+            const registrationPayload = {
+              schema_version: 1 as const,
+              idempotency_key: derivedId("idem_apple_invited_registration", payload.idempotency_key),
+              tenant_id: invitation.tenantId,
+              auth_subject: input.verifiedSubject!,
+              display_name: "Apple 受邀用户",
+            };
+            try {
+              const registered = await registerInvitedIdentityForVerifiedInvitation({
+                db, transaction: trx,
+                privatePii: {
+                  normalizedEmailHmacKey: piiKey, encryptionKeyRef: "identity-pii-v1",
+                  encryptNormalizedEmail: (email: string) => piiProtector.encrypt(Buffer.from(email, "utf8")),
+                },
+                verifiedInvitationBinding,
+              }, { requestId: `request_${randomUUID()}`, traceId: `trace_${randomUUID()}` }, {
+                ...registrationPayload, payload_hash: canonicalPayloadHash(registrationPayload),
+              });
+              subject = { actor_id: registered.actor_id, auth_subject_id: registered.auth_subject_id };
+            } catch (error) {
+              secretDigest.fill(0);
+              throw error;
+            }
+          }
           if (subject === undefined) throw new DomainError("UNAUTHENTICATED", "Invitation subject is not registered");
-          const acceptCommand = internalCommand({
-            schema_version: 1 as const,
-            idempotency_key: derivedId("idem_invitation_accept", payload.idempotency_key),
-            tenant_id: inspected.tenantId,
-            invitation_code: payload.invitation_secret,
-            expected_resource_version: payload.expected_resource_version,
-          });
-          const accepted = await acceptInvitation({
-            db, transaction: trx, emailHmacKey: piiKey,
-            consultantProfile: { providerConfigId: "identity-default", modelId: "identity-default" },
-          }, { ...commandContext(subject.actor_id), normalizedEmail: input.verifiedSubject!.normalizedEmail }, acceptCommand);
-          const sessionPayload = {
-            schema_version: 1 as const,
-            actor_id: subject.actor_id,
-            client_kind: payload.client_kind,
-            invitation_id: accepted.invitation_id,
-            ...(payload.device_label === undefined ? {} : { device_label: payload.device_label }),
-          };
-          const issuedSession = await issueSessionInTransaction(
-            trx, input.verifiedSubject!, payload.client_kind, payload.device_label,
-            {
-              idempotencyKey: derivedId("idem_invitation_session", payload.idempotency_key),
-              payloadHash: canonicalPayloadHash(sessionPayload),
-              operation: "invitation_accept",
-            },
-          );
-          return {
-            schema_version: 1, tenant_id: accepted.tenant_id,
-            invitation_resource_version: accepted.invitation_resource_version,
-            membership_id: accepted.membership_id, membership_resource_version: accepted.membership_resource_version,
-            role: inspected.role,
-            ...(accepted.profile_id === undefined ? {} : { profile_id: accepted.profile_id, profile_resource_version: 1 }),
-            issuedSession,
-          };
-        });
+          try {
+            const acceptCommand = internalCommand({
+              schema_version: 1 as const,
+              idempotency_key: derivedId("idem_invitation_accept", payload.idempotency_key),
+              tenant_id: inspected.tenantId,
+              invitation_code: payload.invitation_secret,
+              expected_resource_version: payload.expected_resource_version,
+            });
+            const accepted = await acceptInvitation({
+              db, transaction: trx, emailHmacKey: piiKey,
+              consultantProfile: { providerConfigId: "identity-default", modelId: "identity-default" },
+              ...(verifiedInvitationBinding === undefined ? {} : { verifiedInvitationBinding }),
+            }, { ...commandContext(subject.actor_id), normalizedEmail: input.verifiedSubject!.normalizedEmail }, acceptCommand);
+            const sessionPayload = {
+              schema_version: 1 as const,
+              actor_id: subject.actor_id,
+              client_kind: payload.client_kind,
+              invitation_id: accepted.invitation_id,
+              ...(payload.device_label === undefined ? {} : { device_label: payload.device_label }),
+            };
+            const issuedSession = await issueSessionInTransaction(
+              trx, input.verifiedSubject!, payload.client_kind, payload.device_label,
+              {
+                idempotencyKey: derivedId("idem_invitation_session", payload.idempotency_key),
+                payloadHash: canonicalPayloadHash(sessionPayload),
+                operation: "invitation_accept",
+              },
+            );
+            return {
+              schema_version: 1, tenant_id: accepted.tenant_id,
+              invitation_resource_version: accepted.invitation_resource_version,
+              membership_id: accepted.membership_id, membership_resource_version: accepted.membership_resource_version,
+              role: inspected.role,
+              ...(accepted.profile_id === undefined ? {} : { profile_id: accepted.profile_id, profile_resource_version: 1 }),
+              issuedSession,
+            };
+          } finally {
+            verifiedInvitationBinding?.secretDigest.fill(0);
+          }
+        }, { isolationLevel: "serializable" });
       }
       if (input.kind === "password_reset_completed" && input.verifiedSubject !== undefined) {
-        const subject = await db.selectFrom("auth_subjects").select("actor_id")
-          .where("provider", "=", input.verifiedSubject.provider)
-          .where("provider_subject", "=", input.verifiedSubject.providerSubject)
-          .where("status", "=", "active").executeTakeFirst();
-        if (subject === undefined) throw new DomainError("UNAUTHENTICATED", "Password-reset subject is not registered");
-        await revokeCoreSessions({ db }, { actorId: subject.actor_id, reason: "password_reset" });
-        return { schema_version: 1 };
+        const payload = input.payload as { idempotency_key: string; payload_hash: string; transaction_id: string };
+        return withDatabaseTransactionRetry(db, async (trx) => {
+          const transaction = await trx.selectFrom("oauth_transactions").selectAll()
+            .where("oauth_transaction_id", "=", payload.transaction_id).forUpdate().executeTakeFirst();
+          if (transaction === undefined || transaction.flow_kind !== "password_reset"
+            || transaction.status !== "pending" || transaction.provider_completion_status !== "provider_completed"
+            || transaction.provider_subject_ciphertext === null) {
+            throw new DomainError("UNAUTHENTICATED", "Password-reset completion authority is invalid");
+          }
+          const subject = await trx.selectFrom("auth_subjects").select("actor_id")
+            .where("provider", "=", input.verifiedSubject!.provider)
+            .where("provider_subject", "=", input.verifiedSubject!.providerSubject)
+            .where("status", "=", "active").forUpdate().executeTakeFirst();
+          if (subject === undefined) throw new DomainError("UNAUTHENTICATED", "Password-reset subject is not registered");
+          await revokeCoreSessionsInTransaction({ db }, trx, { actorId: subject.actor_id, reason: "password_reset" });
+          const now = (await sql<{ now: Date }>`select clock_timestamp() as now`.execute(trx)).rows[0]?.now;
+          if (!(now instanceof Date)) throw new DomainError("INTERNAL_ERROR", "Password-reset database clock is unavailable");
+          await trx.updateTable("oauth_transactions").set({ status: "consumed", consumed_at: now, updated_at: now })
+            .where("oauth_transaction_id", "=", payload.transaction_id).executeTakeFirstOrThrow();
+          return { schema_version: 1 };
+        }, { isolationLevel: "serializable" });
       }
       return unavailable();
     },
     async executeProtectedAuthorityCommand(input) {
-      return db.transaction().execute(async (trx) => {
+      return withDatabaseTransactionRetry(db, async (trx) => {
         await requireRecentReauthentication({ trx }, authorityInput(input.authority));
         if (input.kind === "session_revoke") {
           const payload = input.payload as {
@@ -848,7 +995,6 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
         if (input.kind === "apple_identity_link" && input.verifiedSubject !== undefined) {
           const idempotencyKey = String(payload.idempotency_key);
           const payloadHash = String(payload.payload_hash);
-          const authSubjectId = derivedId("auth_subject", `${input.authority.actorId}:${input.verifiedSubject.providerSubject}`);
           const tenant = await trx.selectFrom("memberships").select("tenant_id")
             .where("actor_id", "=", input.authority.actorId).where("status", "=", "active")
             .orderBy("tenant_id").executeTakeFirst();
@@ -868,24 +1014,31 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
               .where("auth_subject_id", "=", admission.resultRef).executeTakeFirst();
             if (existing?.actor_id !== input.authority.actorId || existing.provider !== input.verifiedSubject.provider
               || existing.provider_subject !== input.verifiedSubject.providerSubject
-              || existing.provider_identity_kind !== "apple" || existing.status !== "active"
+              || existing.provider_identity_kind !== "email_password_apple" || existing.status !== "active"
               || admission.response.auth_subject_id !== existing.auth_subject_id || admission.response.linked !== true) {
               throw new DomainError("IDEMPOTENCY_CONFLICT", "Apple identity link replay conflicts");
             }
             return admission.response;
           }
-          await trx.insertInto("auth_subjects").values({
-            auth_subject_id: authSubjectId, actor_id: input.authority.actorId, provider: input.verifiedSubject.provider,
-            provider_subject: input.verifiedSubject.providerSubject, provider_identity_kind: "apple",
-            verified_at: new Date(input.verifiedSubject.verifiedAt), status: "active", resource_version: 1,
-            created_at: now, updated_at: now,
-          }).onConflict((conflict) => conflict.columns(["provider", "provider_subject"]).doNothing()).execute();
-          const linked = await trx.selectFrom("auth_subjects").select(["auth_subject_id", "actor_id", "provider_identity_kind", "status"])
+          const current = await trx.selectFrom("auth_subjects")
+            .select(["auth_subject_id", "actor_id", "provider_identity_kind", "status", "resource_version"])
             .where("provider", "=", input.verifiedSubject.provider)
-            .where("provider_subject", "=", input.verifiedSubject.providerSubject).executeTakeFirst();
-          if (linked?.actor_id !== input.authority.actorId || linked.provider_identity_kind !== "apple" || linked.status !== "active") {
+            .where("provider_subject", "=", input.verifiedSubject.providerSubject).forUpdate().executeTakeFirst();
+          if (current?.auth_subject_id !== input.authority.authSubjectId || current.actor_id !== input.authority.actorId
+            || current.status !== "active"
+            || (current.provider_identity_kind !== "email_password" && current.provider_identity_kind !== "email_password_apple")) {
             throw new DomainError("IDEMPOTENCY_CONFLICT", "Apple identity is already linked");
           }
+          if (current.provider_identity_kind === "email_password") {
+            await trx.updateTable("auth_subjects").set({
+              provider_identity_kind: "email_password_apple",
+              verified_at: new Date(input.verifiedSubject.verifiedAt),
+              resource_version: Number(current.resource_version) + 1,
+              updated_at: now,
+            }).where("auth_subject_id", "=", current.auth_subject_id)
+              .where("resource_version", "=", String(current.resource_version)).executeTakeFirstOrThrow();
+          }
+          const linked = { auth_subject_id: current.auth_subject_id };
           const response = { schema_version: 1 as const, auth_subject_id: linked.auth_subject_id, linked: true as const };
           await completeIdempotentCommand(context, {
             key: idempotencyKey, payloadHash, operation, resultRef: linked.auth_subject_id, response, updatedAt: now,
@@ -894,7 +1047,7 @@ function productionOperations(db: Kysely<RuntimeDatabase>, piiKey: Uint8Array, p
         }
         if (input.kind === "account_deletion_request" || input.kind === "account_deletion_cancel") return unavailable();
         return unavailable();
-      });
+      }, { isolationLevel: "serializable" });
     },
   } satisfies IdentityGatewayOperations);
 }

@@ -9,7 +9,7 @@ export interface AuthSubjectTable {
   actor_id: string;
   provider: "supabase";
   provider_subject: string;
-  provider_identity_kind: "email_password" | "apple";
+  provider_identity_kind: "email_password" | "apple" | "email_password_apple";
   verified_at: Date;
   status: "active" | "unlinked" | "revoked";
   resource_version: IdentityBigInt;
@@ -69,6 +69,12 @@ export interface OauthTransactionTable {
   consumed_at: Date | null;
   created_at: Date;
   updated_at: Date;
+  provider_completion_status: "pending" | "provider_started" | "provider_completed";
+  provider_completion_started_at: Date | null;
+  provider_subject_ciphertext: ColumnType<Buffer | null, Uint8Array | null, Uint8Array | null>;
+  provider_completion_payload_hash: string | null;
+  provider_completed_at: Date | null;
+  provider_evidence_at: Date | null;
 }
 
 export interface EmailVerificationTransactionTable {
@@ -85,6 +91,7 @@ export interface EmailVerificationTransactionTable {
   provider_verification_started_at: Date | null;
   provider_verification_attempt_expires_at: Date | null;
   provider_verification_proof_hmac: ColumnType<Buffer | null, Uint8Array | null, Uint8Array | null>;
+  provider_verification_attempt_count: number;
   provider_verified_at: Date | null;
   provider_start_status: "reserved" | "finalized" | "failed";
   provider_start_attempt: number;
@@ -130,7 +137,7 @@ export interface AccountDeletionTable {
 }
 
 export interface PublicRateLimitTable {
-  bucket_kind: "signup" | "login" | "reset" | "apple_start" | "apple_link" | "apple_callback" | "invitation_accept" | "reauthenticate";
+  bucket_kind: "signup" | "login" | "reset" | "email_verification" | "reset_complete" | "apple_start" | "apple_link" | "apple_callback" | "invitation_accept" | "reauthenticate";
   account_identifier_hmac: Digest;
   client_identifier_hmac: Digest;
   window_started_at: Date;

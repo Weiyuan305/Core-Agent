@@ -70,7 +70,9 @@ async function authenticateValidatedMutation(
 export async function registerSessionRoutes(app: FastifyInstance, dependencies: IdentityGatewayRouteDependencies): Promise<void> {
   app.get("/auth/v1/session", { schema: { response: { 200: SessionInspectResponseSchema } } }, async (request) => {
     assertClientTransport(request, "web", dependencies.config);
-    const authority = await dependencies.operations.authenticateSession({ sessionSecret: requireSessionCredential(request), requireCsrf: false });
+    const authority = await dependencies.operations.authenticateSession({
+      sessionSecret: requireSessionCredential(request), requireCsrf: false, advanceActivity: true,
+    });
     return { schema_version: 1, session: authority.session };
   });
 

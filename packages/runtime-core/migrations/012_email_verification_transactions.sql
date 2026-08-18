@@ -23,6 +23,9 @@ create table email_verification_transactions (
   provider_verification_attempt_expires_at timestamptz,
   provider_verification_proof_hmac bytea
     check (provider_verification_proof_hmac is null or octet_length(provider_verification_proof_hmac) = 32),
+  provider_verification_attempt_count integer not null default 0
+    constraint email_verification_provider_verification_attempt_count_check
+    check (provider_verification_attempt_count between 0 and 5),
   provider_verified_at timestamptz,
   provider_start_status text not null
     constraint email_verification_provider_start_status_check
@@ -87,6 +90,50 @@ alter table public_rate_limits
 alter table public_rate_limits
   add constraint public_rate_limits_bucket_kind_check
   check (bucket_kind in (
-    'signup', 'login', 'reset', 'apple_start', 'apple_link',
+    'signup', 'login', 'reset', 'email_verification', 'reset_complete', 'apple_start', 'apple_link',
     'apple_callback', 'invitation_accept', 'reauthenticate'
   ));
+
+alter table auth_subjects
+  drop constraint auth_subjects_provider_identity_kind_check;
+
+alter table auth_subjects
+  add constraint auth_subjects_provider_identity_kind_check
+  check (provider_identity_kind in ('email_password', 'apple', 'email_password_apple'));
+
+alter table oauth_transactions
+  add column provider_completion_status text not null default 'pending',
+  add column provider_completion_started_at timestamptz,
+  add column provider_subject_ciphertext bytea
+    constraint oauth_transactions_provider_subject_ciphertext_check
+    check (provider_subject_ciphertext is null or octet_length(provider_subject_ciphertext) between 33 and 65536),
+  add column provider_completion_payload_hash text
+    constraint oauth_transactions_provider_completion_payload_hash_check
+    check (provider_completion_payload_hash is null or provider_completion_payload_hash ~ '^sha256:[0-9a-f]{64}$'),
+  add column provider_completed_at timestamptz,
+  add column provider_evidence_at timestamptz;
+
+alter table oauth_transactions
+  add constraint oauth_transactions_provider_completion_status_check
+  check (provider_completion_status in ('pending', 'provider_started', 'provider_completed')),
+  add constraint oauth_transactions_provider_completion_state_check
+  check (
+    (flow_kind <> 'password_reset' and provider_completion_status = 'pending'
+      and provider_completion_started_at is null and provider_subject_ciphertext is null
+      and provider_completion_payload_hash is null
+      and provider_completed_at is null and provider_evidence_at is null)
+    or (flow_kind = 'password_reset' and provider_completion_status = 'pending'
+      and provider_completion_started_at is null and provider_subject_ciphertext is null
+      and provider_completion_payload_hash is null
+      and provider_completed_at is null and provider_evidence_at is null)
+    or (flow_kind = 'password_reset' and provider_completion_status = 'provider_started'
+      and provider_completion_started_at is not null and provider_subject_ciphertext is not null
+      and provider_completion_payload_hash is not null
+      and provider_completed_at is null and provider_evidence_at is null)
+    or (flow_kind = 'password_reset' and provider_completion_status = 'provider_completed'
+      and provider_completion_started_at is not null and provider_subject_ciphertext is not null
+      and provider_completion_payload_hash is not null
+      and provider_completed_at is not null and provider_evidence_at is not null
+      and provider_evidence_at >= provider_completion_started_at
+      and provider_evidence_at <= provider_completed_at)
+  );

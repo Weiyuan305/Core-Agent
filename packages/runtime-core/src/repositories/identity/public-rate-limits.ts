@@ -9,6 +9,8 @@ export type PublicRateLimitBucketKind =
   | "signup"
   | "login"
   | "reset"
+  | "email_verification"
+  | "reset_complete"
   | "apple_start"
   | "apple_link"
   | "apple_callback"
@@ -29,7 +31,7 @@ export interface ConsumePublicRateLimitInput {
 }
 
 const bucketKinds = new Set<PublicRateLimitBucketKind>([
-  "signup", "login", "reset", "apple_start", "apple_link", "apple_callback", "invitation_accept", "reauthenticate",
+  "signup", "login", "reset", "email_verification", "reset_complete", "apple_start", "apple_link", "apple_callback", "invitation_accept", "reauthenticate",
 ]);
 
 function invalidConfiguration(): never {

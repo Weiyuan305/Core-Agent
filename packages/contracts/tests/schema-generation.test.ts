@@ -59,6 +59,7 @@ test("registry publishes exactly the planned v1 contracts", () => {
     "email-sign-in-request",
     "email-sign-in-response",
     "password-reset-request",
+    "password-reset-completion-request",
     "password-reset-response",
     "apple-authorization-start-request",
     "apple-authorization-start-response",

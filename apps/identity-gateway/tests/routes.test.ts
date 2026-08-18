@@ -64,6 +64,7 @@ async function buildApp(
     readonly failFirstCheckpoint?: boolean;
     readonly failFirstEmailCompletion?: boolean;
     readonly failAuthentication?: boolean;
+    readonly failPasswordResetAuthority?: boolean;
     readonly rateLimitAfter?: number;
     readonly rateLimit?: (input: {
       readonly bucketKind?: unknown;
@@ -111,7 +112,7 @@ async function buildApp(
       async reauthenticateAndBeginAppleLink(input: unknown) { calls.push({ name: "reauthenticateAndBeginAppleLink", input }); return { transaction_id: "oauth_link", authorization_url: `https://apple.example.test/auth/v1/authorize?state=state_link&redirect_to=${encodeURIComponent((input as { redirect_uri: string }).redirect_uri)}`, expires_at: "2026-08-17T00:05:00.000Z" }; },
       async completeApple(input: unknown) { calls.push({ name: "completeApple", input }); return subject; }, async linkApple() { return subject; },
       async beginPasswordReset(input: unknown) { calls.push({ name: "beginPasswordReset", input }); return { transaction_id: "reset_01", state: "state_reset", expires_at: "2026-08-17T00:05:00.000Z" }; },
-      async completePasswordReset() { return subject; }, async verifyCurrentSubject() { return subject; },
+      async completePasswordReset(input: unknown) { calls.push({ name: "completePasswordReset", input }); return subject; }, async verifyCurrentSubject() { return subject; },
       async reauthenticatePassword() { return subject; }, async revokeCurrentProviderSession() {}, async deleteProviderSubject() {},
     },
     operations: {
@@ -136,6 +137,7 @@ async function buildApp(
       async executeAuthorityCommand(input: unknown) {
         calls.push({ name: "executeAuthorityCommand", input });
         const kind = (input as { kind?: unknown }).kind;
+        if (kind === "password_reset_completed" && options.failPasswordResetAuthority === true) throw new Error("forced Core revocation rollback");
         if (kind === "reauthenticate") return { schema_version: 1, reauthenticated_at: "2026-08-17T00:00:00.000Z", valid_until: "2026-08-17T00:10:00.000Z", session_resource_version: 2 };
         if (kind === "invitation_accept") return {
           schema_version: 1, tenant_id: "tenant_01", invitation_resource_version: 2,
@@ -262,6 +264,83 @@ test("password reset normalizes one account identifier for rate limit and provid
     idempotencyKey: idem.idempotency_key,
     payloadHash: idem.payload_hash,
   });
+  await app.close();
+});
+
+test("email verification and password-reset completion consume stable client route buckets before provider effects", async () => {
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const app = await buildApp(calls, { rateLimitAfter: 0 });
+  const verification = await app.inject({
+    method: "POST", url: "/auth/v1/email/verification",
+    headers: { host, origin, "content-type": "application/json" },
+    payload: emailVerificationPayload("idem_completion_rate"),
+  });
+  assert.equal(verification.statusCode, 429, verification.body);
+  assert.deepEqual(calls.map(({ name }) => name), ["prepareEmailVerification", "consumeRateLimit"]);
+  assert.equal((calls[1]?.input as { bucketKind?: unknown }).bucketKind, "email_verification");
+  assert.equal((calls[1]?.input as { accountIdentifier?: unknown }).accountIdentifier, "route:email_verification");
+  assert.match(String((calls[1]?.input as { clientIdentifier?: unknown }).clientIdentifier), /./u);
+  await app.close();
+
+  const resetCalls: Array<{ name: string; input: unknown }> = [];
+  const resetApp = await buildApp(resetCalls, { rateLimitAfter: 1 });
+  const start = await resetApp.inject({
+    method: "POST", url: "/auth/v1/password/reset/start",
+    headers: { host, origin, "content-type": "application/json" },
+    payload: { ...idem, email: "student@example.test" },
+  });
+  const recoveryCookie = ([] as string[]).concat(start.headers["set-cookie"] ?? [])
+    .find((value) => value.startsWith("core_agent_recovery="))?.split(";", 1)[0];
+  assert.notEqual(recoveryCookie, undefined);
+  resetCalls.length = 0;
+  const resetFacts = {
+    schema_version: 1 as const, idempotency_key: "idem_reset_completion_rate",
+    authorization_code: "one-time-authorization-code", new_password: "updated-correct-horse",
+  };
+  const resetPayloadHash = canonicalPayloadHash({
+    schema_version: resetFacts.schema_version, idempotency_key: resetFacts.idempotency_key,
+    reset_code_digest: digest(resetFacts.authorization_code),
+    new_value_digest: digest(resetFacts.new_password),
+  });
+  const completion = await resetApp.inject({
+    method: "POST", url: "/auth/v1/password/reset/complete",
+    headers: { host, origin, "content-type": "application/json", cookie: recoveryCookie! },
+    payload: { ...resetFacts, payload_hash: resetPayloadHash },
+  });
+  assert.equal(completion.statusCode, 429, completion.body);
+  assert.deepEqual(resetCalls.map(({ name }) => name), ["consumeRateLimit"]);
+  assert.equal((resetCalls[0]?.input as { bucketKind?: unknown }).bucketKind, "reset_complete");
+  await resetApp.close();
+});
+
+test("password-reset completion retains its recovery cookie when the Core revocation phase rolls back", async () => {
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const app = await buildApp(calls, { failPasswordResetAuthority: true });
+  const start = await app.inject({
+    method: "POST", url: "/auth/v1/password/reset/start",
+    headers: { host, origin, "content-type": "application/json" },
+    payload: { ...idem, email: "student@example.test" },
+  });
+  const recoveryCookie = ([] as string[]).concat(start.headers["set-cookie"] ?? [])
+    .find((value) => value.startsWith("core_agent_recovery="))?.split(";", 1)[0];
+  const facts = {
+    schema_version: 1 as const, idempotency_key: "idem_reset_retryable",
+    authorization_code: "one-time-authorization-code", new_password: "updated-correct-horse",
+  };
+  const payloadHash = canonicalPayloadHash({
+    schema_version: facts.schema_version, idempotency_key: facts.idempotency_key,
+    reset_code_digest: digest(facts.authorization_code),
+    new_value_digest: digest(facts.new_password),
+  });
+  const completion = await app.inject({
+    method: "POST", url: "/auth/v1/password/reset/complete",
+    headers: { host, origin, "content-type": "application/json", cookie: recoveryCookie! },
+    payload: { ...facts, payload_hash: payloadHash },
+  });
+  assert.equal(completion.statusCode, 500, completion.body);
+  assert.doesNotMatch(String(completion.headers["set-cookie"] ?? ""), /core_agent_recovery=;[^\n]*Max-Age=0/u);
+  assert.deepEqual(calls.slice(-2).map(({ name }) => name), ["completePasswordReset", "executeAuthorityCommand"]);
+  assert.equal((calls.at(-2)?.input as { payloadHash?: unknown }).payloadHash, payloadHash);
   await app.close();
 });
 
@@ -508,14 +587,14 @@ test("email verification verifies the provider subject, registers Task 3, and is
   assert.equal(response.statusCode, 200);
   assert.equal(response.json().transport, "web_cookie");
   assert.deepEqual(calls.map(({ name }) => name), [
-    "prepareEmailVerification", "admitEmailVerificationProviderAttempt", "verifyEmail",
+    "prepareEmailVerification", "consumeRateLimit", "admitEmailVerificationProviderAttempt", "verifyEmail",
     "checkpointEmailVerification", "completeEmailVerification",
   ]);
-  const providerInput = calls[2]?.input as Record<string, unknown>;
+  const providerInput = calls[3]?.input as Record<string, unknown>;
   assert.deepEqual(providerInput, {
     verificationCode: "opaque-email-token-hash", expectedProviderSubject: "subject_01",
   });
-  const completion = calls[4]?.input as { idempotencyKey?: unknown; payloadHash?: unknown };
+  const completion = calls[5]?.input as { idempotencyKey?: unknown; payloadHash?: unknown };
   assert.equal(completion.idempotencyKey, idem.idempotency_key);
   assert.equal(completion.payloadHash, emailVerificationPayload().payload_hash);
   await app.close();
@@ -541,7 +620,7 @@ test("email verification rejects a cross-mode request before any provider effect
   });
   assert.equal(webRetry.statusCode, 200);
   assert.deepEqual(calls.map(({ name }) => name), [
-    "prepareEmailVerification", "admitEmailVerificationProviderAttempt", "verifyEmail",
+    "prepareEmailVerification", "consumeRateLimit", "admitEmailVerificationProviderAttempt", "verifyEmail",
     "checkpointEmailVerification", "completeEmailVerification",
   ]);
   await app.close();

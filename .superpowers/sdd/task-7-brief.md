@@ -62,6 +62,19 @@
   email verification -> Task 3 registration -> Task 6 Session issuance, and a
   Task 4 protected mutation with Task 6 authority rechecked in the caller-owned
   mutation transaction.
+- The still-unmerged migration 012 also adds the precise combined
+  `email_password_apple` provider-identity state and password-reset provider
+  completion checkpoints. Same-subject Apple linking CAS-updates one AuthSubject;
+  new Apple B2C and invited B2B identities are created only in the post-provider
+  serializable domain phase.
+- Password-reset completion checkpoints an encrypted exact provider subject and
+  the server-validated completion payload hash with causal provider evidence before Core Session revocation. A retry after Core
+  rollback skips the provider mutation, retains the recovery Cookie on retryable
+  failure, and consumes the transaction only after revocation commits.
+- Email-verification and reset-completion routes consume stable pre-provider rate
+  buckets. Invalid OTP proofs have a durable bounded attempt count. Production
+  Session inspection advances bounded idle activity without changing mutation CAS
+  versions during authentication.
 
 - [ ] **Step 1: Write failing HTTP security tests**
 

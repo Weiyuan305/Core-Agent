@@ -49,7 +49,7 @@ export interface RecentReauthenticationAuthority {
     readonly actorId: string;
     readonly provider: "supabase";
     readonly providerSubject: string;
-    readonly identityKind: "email_password" | "apple";
+    readonly identityKind: "email_password" | "apple" | "email_password_apple";
     readonly status: "active";
   };
   readonly reauthenticatedAt: string;

@@ -256,6 +256,7 @@ export {
   revokeCoreSession,
   revokeCoreSessionInTransaction,
   revokeCoreSessions,
+  revokeCoreSessionsInTransaction,
   type AuthenticateCoreSessionInput,
   type AuthenticatedCoreSession,
   type CoreSessionAuthSubjectAuthority,

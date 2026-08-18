@@ -313,9 +313,11 @@ test("runtime command migration never fabricates ambiguous legacy intent", async
   assert.match(migration, /status in \('succeeded', 'failed', 'cancelled'\)/);
 });
 
-test("public rate-limit table type includes every schema-12 Apple bucket", async () => {
+test("public rate-limit table type includes every schema-12 gateway bucket", async () => {
   const source = await readFile(identityTables, "utf8");
   const table = source.slice(source.indexOf("export interface PublicRateLimitTable"), source.indexOf("export interface IdentityAuthorityTables"));
+  assert.match(table, /bucket_kind:[^;]*"email_verification"/);
+  assert.match(table, /bucket_kind:[^;]*"reset_complete"/);
   assert.match(table, /bucket_kind:[^;]*"apple_start"/);
   assert.match(table, /bucket_kind:[^;]*"apple_link"/);
 });

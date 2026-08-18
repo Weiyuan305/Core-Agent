@@ -266,6 +266,11 @@ create table core_sessions (
 );
 ```
 
+The Task 7 forward-only migration 012 amends the closed
+`provider_identity_kind` constraint with `email_password_apple`. This represents one
+Supabase user that has both password and Apple methods; Apple link CAS-updates the
+existing row and never inserts a duplicate `(provider, provider_subject)`.
+
 Also create `private_identity_pii`, `platform_role_assignments`, `identity_invitations`, `oauth_transactions`, `account_deletions`, and `public_rate_limits`. Store normalized-email HMAC and encrypted/provider-owned PII separately; never store plaintext passwords, provider tokens, OAuth codes, raw claims, or Session secrets.
 
 Replace the `worker_jobs_job_kind_check` constraint in this same forward-only migration so its allowlist includes existing kinds plus `project_platform_memberships` and `finalize_account_deletion`. Later Worker tasks wire handlers to already-valid schema values; they do not rewrite migration 010.
@@ -631,6 +636,15 @@ Use an injected database clock and deterministic random source to prove:
 - concurrent use/revoke leaves revoked authority current;
 - password reset, provider unlink, Actor disable, deletion, and sign-out revoke the required scope; and
 - reauthentication is accepted at 9:59 and rejected at 10:00 or later.
+
+Task 7 password-reset completion uses the same unmerged migration 012 for a durable
+provider-started/provider-completed checkpoint. The provider effect precedes the
+serializable Core revocation transaction; retry after Core rollback reuses the exact
+encrypted provider-subject checkpoint only for the same server-validated completion
+payload hash and cannot repeat the password mutation. Exact
+causal provider evidence is required to recover the narrow post-provider/pre-checkpoint
+window. Email verification and reset completion also consume independent stable route
+buckets, and invalid OTP attempts are durably bounded.
 
 - [ ] **Step 2: Implement issue/authenticate with constant-time digest handling**
 

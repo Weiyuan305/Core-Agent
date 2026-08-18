@@ -111,7 +111,7 @@ export interface IdentityGatewayOperations {
     readonly issuedSession: GatewayIssuedSession;
   }>;
   readonly consumeRateLimit: (input: {
-    readonly bucketKind: "signup" | "login" | "reset" | "apple_start" | "apple_link" | "apple_callback" | "invitation_accept" | "reauthenticate";
+    readonly bucketKind: "signup" | "login" | "reset" | "email_verification" | "reset_complete" | "apple_start" | "apple_link" | "apple_callback" | "invitation_accept" | "reauthenticate";
     readonly accountIdentifier: string;
     readonly clientIdentifier: string;
   }) => Promise<number | null>;
@@ -129,6 +129,7 @@ export interface IdentityGatewayOperations {
     readonly sessionSecret: string;
     readonly csrfSecret?: string;
     readonly requireCsrf: boolean;
+    readonly advanceActivity?: boolean;
   }) => Promise<GatewayAuthenticatedSession>;
   /** Implementations must use Task 6's caller-owned transaction guard. */
   readonly requireRecentReauthentication: (authority: GatewayAuthenticatedSession) => Promise<void>;
@@ -224,8 +225,9 @@ export async function buildIdentityGatewayApp(dependencies: BuildIdentityGateway
     const path = request.url.split("?", 1)[0];
     if ((path === "/auth/v1/apple/callback" || path === "/auth/v1/apple/link/callback" || path === "/auth/v1/invitations/accept")
       && request.cookies?.core_agent_apple_flow !== undefined) clearAppleFlowCookie(reply);
-    if (path === "/auth/v1/password/reset/complete" && request.cookies?.core_agent_recovery !== undefined) clearRecoveryCookie(reply);
     const mapped = mapIdentityGatewayError(error, identifiers);
+    if (path === "/auth/v1/password/reset/complete" && request.cookies?.core_agent_recovery !== undefined
+      && mapped.statusCode < 500) clearRecoveryCookie(reply);
     void reply.code(mapped.statusCode).type("application/json").send(mapped.envelope);
   });
 

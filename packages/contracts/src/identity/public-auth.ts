@@ -142,6 +142,11 @@ export const PasswordResetRequestSchema = request("password-reset-request", {
   ...IdempotencyRequestProperties,
   email: EmailSchema,
 });
+export const PasswordResetCompletionRequestSchema = request("password-reset-completion-request", {
+  ...IdempotencyRequestProperties,
+  authorization_code: OAuthProofSchema,
+  new_password: PasswordSchema,
+});
 export const PasswordResetResponseSchema = response("password-reset-response", {
   schema_version: SchemaVersionSchema,
   accepted: Type.Literal(true),
@@ -597,6 +602,7 @@ export type EmailVerificationResponse = Static<typeof EmailVerificationResponseS
 export type EmailSignInRequest = Static<typeof EmailSignInRequestSchema>;
 export type EmailSignInResponse = Static<typeof EmailSignInResponseSchema>;
 export type PasswordResetRequest = Static<typeof PasswordResetRequestSchema>;
+export type PasswordResetCompletionRequest = Static<typeof PasswordResetCompletionRequestSchema>;
 export type PasswordResetResponse = Static<typeof PasswordResetResponseSchema>;
 export type AppleAuthorizationStartRequest = Static<typeof AppleAuthorizationStartRequestSchema>;
 export type AppleAuthorizationStartResponse = Static<typeof AppleAuthorizationStartResponseSchema>;

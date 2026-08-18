@@ -58,7 +58,7 @@ export interface CoreSessionAuthSubjectAuthority {
   readonly authSubjectId: string;
   readonly actorId: string;
   readonly provider: "supabase";
-  readonly identityKind: "email_password" | "apple";
+  readonly identityKind: "email_password" | "apple" | "email_password_apple";
   readonly status: "active" | "unlinked" | "revoked";
 }
 
@@ -325,7 +325,28 @@ export async function revokeCoreSessions(
   ) {
     throw new DomainError("INVALID_REQUEST", "Core Session revocation input is invalid");
   }
-  return withDatabaseTransactionRetry(dependencies.db, async (trx) => {
+  return withDatabaseTransactionRetry(dependencies.db, async (trx) => (
+    revokeCoreSessionsInTransaction(dependencies, trx, input)
+  ));
+}
+
+/** Caller-owned variant for composing provider-completion checkpoints with final revocation. */
+export async function revokeCoreSessionsInTransaction(
+  dependencies: CoreSessionDependencies,
+  trx: Transaction<RuntimeDatabase>,
+  input: RevokeCoreSessionsInput,
+): Promise<number> {
+  assertRevokeIdentity(input.actorId);
+  const hasAuthSubjectId = Object.hasOwn(input, "authSubjectId");
+  const actorScopedReason = input.reason === "password_reset"
+    || input.reason === "actor_disabled"
+    || input.reason === "account_deletion_requested"
+    || input.reason === "administrator_revoked";
+  if (input.reason === "provider_unlinked"
+    ? !hasAuthSubjectId || !validId(input.authSubjectId)
+    : !actorScopedReason || hasAuthSubjectId) {
+    throw new DomainError("INVALID_REQUEST", "Core Session revocation input is invalid");
+  }
     const actor = await trx.selectFrom("actors").select("actor_id")
       .where("actor_id", "=", input.actorId)
       .forUpdate()
@@ -345,5 +366,4 @@ export async function revokeCoreSessions(
       reason: input.reason,
       now,
     });
-  });
 }

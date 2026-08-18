@@ -100,7 +100,8 @@ function assertCommand(input: unknown): asserts input is RegisterInvitedIdentity
   ]) || input.schema_version !== 1 || !validId(input.idempotency_key) || !validId(input.tenant_id)
     || typeof input.payload_hash !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(input.payload_hash)
     || typeof input.display_name !== "string" || input.display_name.length < 1 || input.display_name.length > 200
-    || subject.provider !== "supabase" || subject.identityKind !== "email_password"
+    || subject.provider !== "supabase"
+    || (subject.identityKind !== "email_password" && subject.identityKind !== "apple")
     || !validId(subject.providerSubject)
     || typeof subject.normalizedEmail !== "string"
     || subject.normalizedEmail !== subject.normalizedEmail.trim().toLowerCase()

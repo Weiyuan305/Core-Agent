@@ -372,10 +372,12 @@ export class FakeAuthProvider implements AuthProviderAdapter {
     const state = ownString(binding, "state");
     const expiresAt = ownString(binding, "expires_at");
     const password = ownString(input, "new_password");
+    const payloadHash = ownString(input, "payloadHash");
     if (transactionId === undefined || authorizationCode === undefined || authorizationCode.length < 8
       || state === undefined || expiresAt === undefined || !Number.isFinite(new Date(expiresAt).getTime())
       || password === undefined
-      || password.length < 8 || password.length > 1_024) {
+      || password.length < 8 || password.length > 1_024
+      || payloadHash === undefined || !/^sha256:[a-f0-9]{64}$/u.test(payloadHash)) {
       throw new ProviderFailure("AUTH_CALLBACK_INVALID");
     }
     const transaction = this.#transactions.get(transactionId);

@@ -536,6 +536,47 @@ test("registerInvitedIdentity composes in a caller-owned transaction without sel
   assert.equal(await tableCount("memberships"), 0);
   assert.equal(await tableCount("profiles"), 0);
   assert.equal(await tableCount("tenants"), 1, "the service must not create a personal Tenant");
+  const appleInvitationSecretDigest = Buffer.alloc(32, 0x4b);
+  await identityDb.insertInto("identity_invitations").values({
+    invitation_id: "invitation_invited_apple_registration",
+    tenant_id: "tenant_invited_registration",
+    membership_id: "membership_invited_apple_registration",
+    invited_by_actor_id: "actor_invited_registration_admin",
+    role: "admin",
+    secret_digest: appleInvitationSecretDigest,
+    normalized_email_hmac: createHmac("sha256", normalizedEmailHmacKey).update("apple-invited@example.test").digest(),
+    status: "pending",
+    expires_at: new Date("2099-01-01T00:00:00.000Z"),
+    accepted_actor_id: null,
+    accepted_at: null,
+    replaced_by_invitation_id: null,
+    resource_version: 1,
+    created_at: now,
+    updated_at: now,
+  }).execute();
+  const appleWithoutHash = {
+    schema_version: 1 as const,
+    idempotency_key: "register-invited-apple-identity-0001",
+    tenant_id: "tenant_invited_registration",
+    auth_subject: {
+      provider: "supabase" as const,
+      providerSubject: "supabase-invited-apple-0001",
+      identityKind: "apple" as const,
+      normalizedEmail: "apple-invited@example.test",
+      verifiedAt: "2026-08-14T01:00:00.000Z",
+    },
+    display_name: "Apple Invited User",
+  };
+  const appleRegistration = await identityDb.transaction().execute((trx) => registerInvitedIdentityForVerifiedInvitation({
+    ...invitedDependencies(trx),
+    verifiedInvitationBinding: {
+      invitationId: "invitation_invited_apple_registration", tenantId: "tenant_invited_registration",
+      secretDigest: appleInvitationSecretDigest, expectedResourceVersion: 1, role: "admin" as const,
+    },
+  }, context, { ...appleWithoutHash, payload_hash: canonicalPayloadHash(appleWithoutHash) }));
+  assert.equal(appleRegistration.schema_version, 1);
+  assert.equal((await identityDb.selectFrom("auth_subjects").select("provider_identity_kind")
+    .where("auth_subject_id", "=", appleRegistration.auth_subject_id).executeTakeFirstOrThrow()).provider_identity_kind, "apple");
   await assert.rejects(identityDb.transaction().execute((trx) => registerInvitedIdentityForVerifiedInvitation(invitedDependencies(trx), context, {
     ...invitedCommand,
     auth_subject: { ...invitedCommand.auth_subject, providerSubject: "supabase-invited-conflict" },

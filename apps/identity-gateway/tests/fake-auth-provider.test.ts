@@ -119,6 +119,7 @@ test("deterministic fake implements the closed adapter and returns only verified
     binding: unknownBinding,
     authorization_code: "fake-recovery-code",
     new_password: "must not reset another account",
+    payloadHash: `sha256:${"a".repeat(64)}`,
   }), "AUTH_INVALID");
   const binding = await provider.beginPasswordReset(credential.email);
   assert.equal(binding.expires_at, "2026-08-17T01:07:03.000Z");
@@ -126,6 +127,7 @@ test("deterministic fake implements the closed adapter and returns only verified
     binding,
     authorization_code: "fake-recovery-code",
     new_password: "a new sufficiently long password",
+    payloadHash: `sha256:${"a".repeat(64)}`,
   })).providerSubject, "provider-subject-1");
   await expectFailure(() => provider.signInEmail(credential), "AUTH_INVALID");
   assert.equal((await provider.signInEmail({

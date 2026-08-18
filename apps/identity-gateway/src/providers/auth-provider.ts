@@ -104,6 +104,7 @@ export interface PasswordResetCompletionInput {
   readonly binding: PasswordResetStart;
   readonly authorization_code: string;
   readonly new_password: string;
+  readonly payloadHash: string;
 }
 
 export interface AuthProviderAdapter {

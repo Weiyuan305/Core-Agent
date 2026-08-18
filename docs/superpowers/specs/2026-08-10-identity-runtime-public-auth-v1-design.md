@@ -178,7 +178,7 @@ The authority applies these invariants:
 | `actor_id` | Stable internal Actor reference |
 | `provider` | Closed adapter identifier, initially `supabase` |
 | `provider_subject` | Provider user identifier, unique with `provider` |
-| `provider_identity_kind` | `email_password` or `apple` |
+| `provider_identity_kind` | `email_password`, `apple`, or the exact combined `email_password_apple` state |
 | `verified_at` | Server-observed verification time |
 | `status` | `active`, `unlinked`, or `revoked` |
 | metadata | Resource version and timestamps only |
@@ -193,6 +193,13 @@ linking with a different email requires an active Core Session, recent password
 reauthentication, a one-time state/nonce, and successful provider callback. Linking
 never merges two existing Core-Agent Actors automatically; that conflict fails closed
 for platform support.
+
+When Supabase links Apple to the same provider user identifier as the existing
+email/password method, Core-Agent does not create a second `auth_subjects` row. The
+caller-owned serializable link transaction locks the existing row and changes its
+closed kind from `email_password` to `email_password_apple`; replay is idempotent and
+any different Actor or provider subject fails before a Core mutation. Password
+reauthentication and either sign-in method continue to resolve that one authority.
 
 ### 5.3 Platform role and permanent cross-company Memberships
 
@@ -267,7 +274,17 @@ It supports:
 - password-reauthenticated identity-link start on one operation-local provider
   client, followed by a password/token-free callback bound to the encrypted
   provider-subject digest;
-- provider Session revocation and password reset initiation.
+- provider Session revocation and recoverable password reset initiation/completion.
+
+Password reset completion is a checkpointed saga. Before the provider password
+mutation, the adapter durably binds an encrypted exact provider subject and a
+database-clock start time plus the server-validated completion payload hash to the
+pending reset transaction. A successful provider
+mutation checkpoints causal `updated_at` evidence before Core Session revocation.
+Restart after a Core rollback skips the provider mutation and finishes revocation;
+restart after a checkpoint failure may use only exact subject inspection whose own
+timestamp is within the durable attempt window. The transaction becomes consumed
+only after all Core Sessions are revoked.
 
 The adapter never returns a provider error body, password, refresh token, Apple token,
 or arbitrary metadata to a route handler. Failures map to a small internal vocabulary:
@@ -340,9 +357,12 @@ deletion require `reauthenticated_at` within ten minutes. The first release sati
 reauthentication with the current password; an Apple-only account must add a verified
 password before it may perform those actions.
 
-Login, sign-up, password reset, invitation acceptance, Apple callback, and
-reauthentication have independent account/IP/device rate limits. Public errors do not
-reveal whether an email, invitation, Actor, or Tenant exists.
+Login, sign-up, password-reset start/completion, email-verification completion,
+invitation acceptance, Apple callback, and reauthentication have independent
+account/IP/device rate limits. Completion routes use stable server-owned route buckets
+so rotating transaction identifiers or proofs cannot bypass them. Email verification
+also has a bounded durable provider-attempt count. Public errors do not reveal whether
+an email, invitation, Actor, or Tenant exists.
 
 ## 8. Trusted Context issuance and verification
 
