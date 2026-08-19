@@ -11,7 +11,10 @@ import type { ClientFrame } from "../src/shared/protocol.js";
 const firstId = `chat_${"a".repeat(32)}`;
 const secondId = `chat_${"b".repeat(32)}`;
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  sessionStorage.clear();
+});
 
 function fakePort(overrides: Partial<ClientGatewayPort> = {}): ClientGatewayPort {
   return {
@@ -113,6 +116,19 @@ describe("consultant workspace", () => {
     expect((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled).toBe(true);
     await act(async () => { release(); await hold; });
     await screen.findByText("完成");
+  });
+
+  it("restores only an unsent local chat draft after the workspace remounts", async () => {
+    const first = render(<ConsultantWorkspaceApp port={fakePort()} />);
+    const user = userEvent.setup();
+    const composer = await screen.findByRole("textbox", { name: "给 Core Agent 发送任务或指令" });
+    await user.type(composer, "保留这条未发送草稿");
+    first.unmount();
+
+    render(<ConsultantWorkspaceApp port={fakePort()} />);
+    expect((await screen.findByRole("textbox", { name: "给 Core Agent 发送任务或指令" }) as HTMLTextAreaElement).value)
+      .toBe("保留这条未发送草稿");
+    expect(JSON.stringify(sessionStorage)).not.toMatch(/(?:session|password|provider|invitation)/iu);
   });
 
   it("shows a clear thinking state until the first reply content arrives", async () => {

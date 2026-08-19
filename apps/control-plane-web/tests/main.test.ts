@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { runControlPlaneWeb } from "../src/server/main.js";
 
 function validEnvironment(port = "4173"): NodeJS.ProcessEnv {
-  return { CORE_AGENT_WEB_PORT: port };
+  return { CORE_AGENT_WEB_PORT: port, CORE_AGENT_WEB_SYNTHETIC_DEMO: "1" };
 }
 
 describe("managed Web host lifecycle", () => {
@@ -104,12 +104,13 @@ describe("managed Web host lifecycle", () => {
     controller.abort();
     const runManagedSession = vi.fn(async (options) => {
       expect(options.environment).not.toHaveProperty("CORE_AGENT_WEB_PORT");
+      expect(options.environment).not.toHaveProperty("CORE_AGENT_WEB_SYNTHETIC_DEMO");
       expect(options.environment.CORE_AGENT_REAL_HERMES_SMOKE).toBe("1");
       await options.use({ context: {}, operations: {} });
     });
     await runControlPlaneWeb({
       controller,
-      environment: { CORE_AGENT_WEB_PORT: "4173" },
+      environment: validEnvironment(),
       output: () => undefined,
       dependencies: {
         runManagedSession,
@@ -118,5 +119,55 @@ describe("managed Web host lifecycle", () => {
       },
     });
     expect(runManagedSession).toHaveBeenCalledOnce();
+  });
+
+  it("starts public auth without creating a managed Runtime Session", async () => {
+    const controller = new AbortController();
+    const events: string[] = [];
+    const runManagedSession = vi.fn();
+    await runControlPlaneWeb({
+      controller,
+      environment: {
+        CORE_AGENT_WEB_PORT: "4318",
+        CORE_AGENT_WEB_PUBLIC_AUTH: "1",
+        CORE_AGENT_WEB_IDENTITY_GATEWAY_URL: "http://127.0.0.1:4910",
+        CORE_AGENT_WEB_PUBLIC_ORIGIN: "https://app.example.com",
+      },
+      output: (line) => events.push(line),
+      dependencies: {
+        runManagedSession,
+        createPort: () => ({} as never),
+        async buildApp(options) {
+          expect(options).not.toHaveProperty("port");
+          expect(options.authProxy).toMatchObject({
+            origin: "http://127.0.0.1:4910",
+            publicOrigin: "https://app.example.com",
+          });
+          return {
+            async listen() { controller.abort(); },
+            async close() { events.push("app.close"); },
+          } as never;
+        },
+      },
+    });
+    expect(runManagedSession).not.toHaveBeenCalled();
+    expect(events).toEqual(["WEB_READY http://127.0.0.1:4318", "app.close"]);
+  });
+
+  it("rejects implicit demo mode and every production synthetic configuration", async () => {
+    const runManagedSession = vi.fn();
+    const dependencies = {
+      runManagedSession,
+      createPort: () => ({} as never),
+      buildApp: async () => ({} as never),
+    };
+    await expect(runControlPlaneWeb({ environment: { CORE_AGENT_WEB_PORT: "4173" }, dependencies }))
+      .rejects.toThrowError("WEB_CONFIGURATION_INVALID");
+    await expect(runControlPlaneWeb({ environment: {
+      NODE_ENV: "production",
+      CORE_AGENT_WEB_PORT: "4173",
+      CORE_AGENT_WEB_SYNTHETIC_DEMO: "1",
+    }, dependencies })).rejects.toThrowError("WEB_CONFIGURATION_INVALID");
+    expect(runManagedSession).not.toHaveBeenCalled();
   });
 });

@@ -14,9 +14,66 @@ import { GlobalNavigationRail } from "./components/global-navigation-rail.js";
 import { StudentContextInspector } from "./components/student-context-inspector.js";
 import { StudentConversationSidebar } from "./components/student-conversation-sidebar.js";
 import { RUN_FAILURE_COPY } from "./content/run-failure-copy.js";
+import { AuthShell } from "./features/auth/auth-shell.js";
 import { initialChatState, reduceChatState } from "./state/chat-reducer.js";
 
 const defaultPort = createClientGatewayPort();
+const CHAT_DRAFT_STORAGE_KEY = "core-agent.chat.unsent-draft.v1";
+
+function storedChatDraft(): string {
+  try {
+    const value = sessionStorage.getItem(CHAT_DRAFT_STORAGE_KEY) ?? "";
+    return value === "" || isValidClientMessage(value) ? value : "";
+  } catch {
+    return "";
+  }
+}
+
+function storeChatDraft(value: string): void {
+  try {
+    if (value === "") sessionStorage.removeItem(CHAT_DRAFT_STORAGE_KEY);
+    else if (isValidClientMessage(value)) sessionStorage.setItem(CHAT_DRAFT_STORAGE_KEY, value);
+  } catch { /* ephemeral local draft only */ }
+}
+
+type ClientMode = "synthetic_demo" | "public_auth";
+
+function readClientMode(value: unknown): ClientMode | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return undefined;
+  const record = value as Readonly<Record<string, unknown>>;
+  if (Reflect.ownKeys(record).length !== 2 || record.schema_version !== 1) return undefined;
+  return record.mode === "synthetic_demo" || record.mode === "public_auth" ? record.mode : undefined;
+}
+
+export interface ControlPlaneWebAppProps {
+  readonly invitationSecret?: string;
+}
+
+export function ControlPlaneWebApp({ invitationSecret }: ControlPlaneWebAppProps) {
+  const [mode, setMode] = useState<ClientMode | "failed">();
+  useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+    void fetch("/client/v1/config", {
+      credentials: "same-origin",
+      headers: { accept: "application/json" },
+      signal: controller.signal,
+    }).then(async (response) => {
+      const text = await response.text();
+      if (!response.ok || new TextEncoder().encode(text).byteLength > 8_192) throw new Error("CLIENT_CONFIGURATION_INVALID");
+      const parsed = JSON.parse(text) as unknown;
+      const result = readClientMode(parsed);
+      if (result === undefined) throw new Error("CLIENT_CONFIGURATION_INVALID");
+      if (active) setMode(result);
+    }).catch(() => { if (active) setMode("failed"); });
+    return () => { active = false; controller.abort(); };
+  }, []);
+
+  if (mode === undefined) return <div aria-live="polite" className="launch-state"><span className="launch-state__mark">CA</span><p>正在启动…</p></div>;
+  if (mode === "failed") return <main className="auth-card" role="alert"><div className="auth-brand" aria-hidden="true">CA</div><h1>暂时无法连接</h1><p className="auth-lead">客户端配置暂时不可用，请稍后再试。</p></main>;
+  if (mode === "public_auth") return <AuthShell {...(invitationSecret === undefined ? {} : { invitationSecret })} />;
+  return <ConsultantWorkspaceApp />;
+}
 
 export interface ConsultantWorkspaceAppProps {
   readonly port?: ClientGatewayPort;
@@ -58,6 +115,8 @@ export function ConsultantWorkspaceApp({ port = defaultPort }: ConsultantWorkspa
         conversationIds: bootstrap.conversations.map(({ id }) => id),
         selectedConversationId: bootstrap.selectedConversationId,
       });
+      const savedDraft = storedChatDraft();
+      if (savedDraft !== "") dispatch({ type: "draft.changed", conversationId: bootstrap.selectedConversationId, value: savedDraft });
       setBootState("ready");
     }).catch(() => {
       if (active) setBootState("failed");
@@ -106,6 +165,7 @@ export function ConsultantWorkspaceApp({ port = defaultPort }: ConsultantWorkspa
     const error = validationMessage(message);
     setComposerError(error);
     if (error !== undefined) return;
+    storeChatDraft("");
     dispatch({ type: "run.started", conversationId, localMessage: message });
     const progress = { terminal: false };
     try {
@@ -222,6 +282,7 @@ export function ConsultantWorkspaceApp({ port = defaultPort }: ConsultantWorkspa
         inspectorTriggerRef={inspectorTriggerRef}
         onBack={() => setMobileListVisible(true)}
         onDraftChange={(value) => {
+          storeChatDraft(value);
           dispatch({ type: "draft.changed", conversationId: selectedConversation.id, value });
           if (composerError !== undefined) setComposerError(undefined);
         }}

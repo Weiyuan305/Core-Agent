@@ -98,13 +98,34 @@ function parseLoopbackHost(value: string): URL | undefined {
   }
 }
 
-export function validateBrowserRequest(rawHeaders: readonly string[]): BrowserRequestDecision {
+function parsePublicOrigin(value: string): URL | undefined {
+  try {
+    const parsed = new URL(value);
+    if (
+      (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && (parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost")))
+      || parsed.username !== ""
+      || parsed.password !== ""
+      || parsed.pathname !== "/"
+      || parsed.search !== ""
+      || parsed.hash !== ""
+    ) return undefined;
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+export function validateBrowserRequest(
+  rawHeaders: readonly string[],
+  publicOrigin?: string,
+): BrowserRequestDecision {
   const headers = parseRawHeaders(rawHeaders);
   if (headers === undefined) return invalidDecision("CLIENT_HOST_INVALID");
   const hostValue = singleton(headers, "host");
   if (hostValue === undefined || hostValue === null) return invalidDecision("CLIENT_HOST_INVALID");
-  const host = parseLoopbackHost(hostValue);
-  if (host === undefined) return invalidDecision("CLIENT_HOST_INVALID");
+  const configuredOrigin = publicOrigin === undefined ? undefined : parsePublicOrigin(publicOrigin);
+  const host = configuredOrigin === undefined ? parseLoopbackHost(hostValue) : configuredOrigin;
+  if (host === undefined || host.host !== hostValue) return invalidDecision("CLIENT_HOST_INVALID");
 
   const originValue = singleton(headers, "origin");
   const fetchSite = singleton(headers, "sec-fetch-site");
@@ -116,8 +137,7 @@ export function validateBrowserRequest(rawHeaders: readonly string[]): BrowserRe
     try {
       const origin = new URL(originValue);
       if (
-        origin.protocol !== "http:"
-        || origin.host !== host.host
+        origin.origin !== host.origin
         || origin.username !== ""
         || origin.password !== ""
         || origin.pathname !== "/"
