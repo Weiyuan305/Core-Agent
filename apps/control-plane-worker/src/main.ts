@@ -1,6 +1,6 @@
 import {
-  claimOutboxWakeups, claimPlatformWorkerJobs, completeJob, createRedactor, failOutbox,
-  heartbeatJob, markOutboxDelivered, rescheduleOutbox, retryDecision,
+  claimOutboxWakeups, claimPlatformWorkerJobs, completeJob, createRedactor, failJob, failOutbox,
+  heartbeatJob, markOutboxDelivered, projectPlatformMemberships, rescheduleJob, rescheduleOutbox, retryDecision,
   OUTBOX_MAX_ATTEMPTS,
   withAgentRunConversationLock, withRuntimeAdvisoryLock, WorkerAgentRunRepository, WorkerRuntimeRepository,
   type ClaimedJob, type HermesChatInput, type ProviderCatalog, type Redactor, type RuntimeDatabase,
@@ -11,13 +11,17 @@ import { sql, type Kysely } from "kysely";
 import { dispatchJob, type DispatchPort, type HandlerResult } from "./dispatch-job.js";
 import { dispatchOutbox } from "./handlers/dispatch-outbox.js";
 import { handleExecuteAgentRun } from "./handlers/execute-agent-run.js";
+import { handleProjectPlatformMemberships } from "./handlers/project-platform-memberships.js";
 import { buildProvisionRuntimeRequest, handleProvisionRuntime, validatePrivateHermesOrigin } from "./handlers/provision-runtime.js";
 import { handleReconcileRuntime } from "./handlers/reconcile-runtime.js";
 import { inspectAgentRunRuntime } from "./inspect-agent-runtime.js";
 import { handleNonReconcileRecovery } from "./recovery-boundary.js";
 import { runWorkerLoop } from "./worker-loop.js";
 
-export const implementedWorkerJobKinds = ["provision_runtime", "reconcile_runtime", "execute_agent_run", "dispatch_outbox"] as const;
+export const implementedWorkerJobKinds = [
+  "provision_runtime", "reconcile_runtime", "execute_agent_run", "dispatch_outbox",
+  "project_platform_memberships",
+] as const;
 
 export interface WorkerClock {
   now(): Date;
@@ -52,6 +56,27 @@ function nextAttempt(dependencies: WorkerDependencies, job: ClaimedJob, summary:
 }
 
 async function dispatchRuntimeJob(dependencies: WorkerDependencies, job: ClaimedJob, signal: AbortSignal): Promise<HandlerResult> {
+  if (job.jobKind === "project_platform_memberships") return handleProjectPlatformMemberships({
+    project: (assignmentId, cursor, limit) => projectPlatformMemberships(dependencies.db, assignmentId, cursor, limit),
+    succeed: async (projectionJob) => (await completeJob(dependencies.db, {
+      tenantId: projectionJob.tenantId, jobId: projectionJob.jobId,
+      workerId: dependencies.workerId, attemptCount: projectionJob.attemptCount,
+    })).kind === "updated",
+    retry: async (projectionJob, summary) => {
+      const retry = nextAttempt(dependencies, job, summary);
+      return (await rescheduleJob(dependencies.db, {
+        tenantId: projectionJob.tenantId, jobId: projectionJob.jobId,
+        workerId: dependencies.workerId, attemptCount: projectionJob.attemptCount,
+        nextAttemptAt: retry.at, lastErrorSummary: retry.summary,
+        redactor: dependencies.repositories.redactor,
+      })).kind === "updated";
+    },
+    fail: async (projectionJob, summary) => (await failJob(dependencies.db, {
+      tenantId: projectionJob.tenantId, jobId: projectionJob.jobId,
+      workerId: dependencies.workerId, attemptCount: projectionJob.attemptCount,
+      lastErrorSummary: summary, redactor: dependencies.repositories.redactor,
+    })).kind === "updated",
+  }, job, signal);
   const ref = jobRef(dependencies, job);
   if (job.jobKind === "provision_runtime") return withRuntimeAdvisoryLock(dependencies.db, job.tenantId, job.payloadRef, async () => {
     const recovery = await handleNonReconcileRecovery({

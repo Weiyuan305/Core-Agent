@@ -28,7 +28,9 @@ export type AgentRunEffectState = WorkerEffectState;
 export type ClaimedJob =
   | (ClaimedJobBase & { jobKind: "reconcile_runtime"; runtimeCommand: RuntimeCommandIntent; targetCommandVersion: number; effectState: ReconcileEffectState })
   | (ClaimedJobBase & { jobKind: "execute_agent_run"; runtimeCommand: null; targetCommandVersion: null; effectState: AgentRunEffectState })
-  | (ClaimedJobBase & { jobKind: "provision_runtime" | "dispatch_outbox" | "project_platform_memberships"; runtimeCommand: null; targetCommandVersion: null; effectState: "pre_effect" });
+  | (ClaimedJobBase & { jobKind: "provision_runtime"; runtimeCommand: null; targetCommandVersion: null; effectState: "pre_effect" })
+  | (ClaimedJobBase & { jobKind: "dispatch_outbox"; runtimeCommand: null; targetCommandVersion: null; effectState: "pre_effect" })
+  | (ClaimedJobBase & { jobKind: "project_platform_memberships"; runtimeCommand: null; targetCommandVersion: null; effectState: "pre_effect" });
 
 function workerEffectState(value: string): WorkerEffectState {
   if (!workerEffectStates.includes(value as WorkerEffectState)) throw new Error("Stored worker job effect state is invalid");
