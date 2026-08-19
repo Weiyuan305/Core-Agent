@@ -16,6 +16,7 @@ const lock = JSON.parse(await import("node:fs/promises").then(({ readFile }) => 
 )));
 const platform = process.arch === "arm64" ? "linux/arm64" : "linux/amd64";
 const { prepareRuntimePaths } = await import("../../scripts/prepare-runtime-paths.mjs");
+const { prepareRuntimeNetwork } = await import("../../scripts/prepare-runtime-network.mjs");
 
 function safeResult(result, credentials) {
   const output = Buffer.concat([result.stdout ?? Buffer.alloc(0), result.stderr ?? Buffer.alloc(0)]);
@@ -141,8 +142,10 @@ async function scenario(kind) {
 
   const docker = (...args) => command(args, childEnvironment, credentialValues);
   const compose = (...args) => docker(...composeArguments(project, ...args));
+  let createdNetworks = [];
   let scenarioFailure;
   try {
+    createdNetworks = await prepareRuntimeNetwork({ environment: childEnvironment });
     if (kind === "legacy") {
       docker(
         "volume", "create",
@@ -458,6 +461,19 @@ SQL`,
         credentialValues,
         /No such container/iu,
       ),
+    },
+    {
+      category: "runtime_network_remove",
+      work: async () => {
+        for (const network of createdNetworks.toReversed()) {
+          cleanupDocker(
+            ["network", "rm", network],
+            childEnvironment,
+            credentialValues,
+            /No such network/iu,
+          );
+        }
+      },
     },
     {
       category: "postgres_volume_remove",
