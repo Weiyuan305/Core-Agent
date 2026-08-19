@@ -60,4 +60,4 @@
   347/347; Control Plane API PostgreSQL 15/15; integration clean rerun 93/93.
 - Environment: native disposable PostgreSQL 17 with SCRAM; no Colima/Docker.
 - Report: `.superpowers/sdd/task-8-report.md`.
-- Commit: PENDING
+- Implementation commit: `3597901191`.
