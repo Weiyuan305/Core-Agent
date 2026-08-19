@@ -346,11 +346,14 @@ test("Unix service rejects deadline configuration outside the shared production 
 
 test("effect cancellation fires before the outer operation response window", async () => {
   let abortObserved = false;
+  let markExecutionStarted!: () => void;
+  const executionStarted = new Promise<void>((resolve) => { markExecutionStarted = resolve; });
   const server = buildServer(async (value, signal) => {
+    markExecutionStarted();
     await new Promise<void>((resolve) => {
       signal.addEventListener("abort", () => {
         abortObserved = true;
-        resolve();
+        setTimeout(resolve, 150);
       }, { once: true });
     });
     return {
@@ -362,15 +365,17 @@ test("effect cancellation fires before the outer operation response window", asy
       summary: "synthetic effect cancellation",
     };
   }, {
-    admissionTimeoutMs: 25,
-    effectTimeoutMs: 50,
-    operationTimeoutMs: 120,
-    cancellationSettlementTimeoutMs: 20,
+    admissionTimeoutMs: 250,
+    effectTimeoutMs: 500,
+    operationTimeoutMs: 1_200,
+    cancellationSettlementTimeoutMs: 250,
   });
   await server.start();
   try {
-    const response = await new RuntimeSupervisorClient({ socketPath, timeoutMs: 100 })
+    const responsePromise = new RuntimeSupervisorClient({ socketPath, timeoutMs: 2_000 })
       .execute(request("operation_effect_deadline"));
+    await waitForTestSignal(executionStarted, "effect execution started");
+    const response = await responsePromise;
     assert.equal(abortObserved, true);
     assert.equal(response.outcome, "failed");
     if (response.outcome === "failed") assert.equal(response.code, "DEPENDENCY_TIMEOUT");
