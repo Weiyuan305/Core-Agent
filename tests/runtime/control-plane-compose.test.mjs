@@ -1011,6 +1011,12 @@ test("CI preserves contracts and separates deterministic runtime gates", async (
   assert.equal(workflow.jobs.compose.steps.find((step) => step.name === "Validate Compose configuration").env.CORE_AGENT_DOCKER_SOCKET_SOURCE, "/var/run/docker.sock");
 });
 
+test("disposable authentication topology derives the current shipped schema version", async () => {
+  const topology = await source("tests/runtime/database-auth-topology.integration.mjs");
+  assert.match(topology, /const expectedSchemaVersion = Math\.max\(\.\.\.migrationVersions\);/u);
+  assert.doesNotMatch(topology, /core_agent_app\\\|10/u);
+});
+
 test("fresh CI-equivalent protects command output and proves cleanup after success failure and leak", async () => {
   const text = await source("tests/runtime/database-ci-equivalent.integration.mjs");
   const runner = await source("scripts/run-protected-ci-command.mjs");
