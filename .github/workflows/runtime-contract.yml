@@ -84,7 +84,7 @@ jobs:
         run: npm run contracts:build
 
       - name: Install pinned Chromium
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
 
       - name: Run consultant Web browser acceptance
         run: npm run test:browser -w @core-agent/control-plane-web

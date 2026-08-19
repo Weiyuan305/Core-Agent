@@ -1690,7 +1690,8 @@ test("Web consultant demo stays loopback-only, synthetic-only, and CI-gated", as
   assert.match(runbook, /New Conversation/u);
   assert.match(runbook, /API\/Worker restart/u);
   assert.match(workflow, /web-browser:/u);
-  assert.match(workflow, /npx playwright install --with-deps chromium/u);
+  assert.match(workflow, /npx playwright install chromium/u);
+  assert.doesNotMatch(workflow, /playwright install --with-deps/u);
   assert.match(workflow, /npm run test:browser -w @core-agent\/control-plane-web/u);
   assert.match(main, /host: "127\.0\.0\.1"/u);
   assert.match(gateway, /\/client\/v1\/conversations/u);
