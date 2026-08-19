@@ -8,6 +8,7 @@ import { assertSchemaVersion, createRedactor, createRuntimeDatabase, databaseCon
 import { Pool } from "pg";
 
 import { HttpHermesReadinessClient } from "./hermes-readiness-client.js";
+import { IdentityProviderDeletionClient } from "./identity-provider-deletion-client.js";
 import { createWorkerRuntimeRepositories, runControlPlaneWorker, type WorkerClock, type WorkerLogger } from "./main.js";
 
 const require = createRequire(import.meta.url);
@@ -47,6 +48,33 @@ export function createWorkerLeaseOwner(workerId: string, uuid: () => string = ra
   return `${workerId}:${incarnation}`;
 }
 
+export interface IdentityFinalizerConfiguration {
+  readonly databaseUrl: string;
+  readonly databasePasswordFile: string;
+  readonly providerUrl: string;
+  readonly providerServiceRoleKeyFile: string;
+}
+
+export function loadIdentityFinalizerConfiguration(
+  environment: NodeJS.ProcessEnv,
+): IdentityFinalizerConfiguration | undefined {
+  const names = [
+    "IDENTITY_DATABASE_URL",
+    "IDENTITY_DATABASE_PASSWORD_FILE",
+    "IDENTITY_PROVIDER_URL",
+    "IDENTITY_PROVIDER_SERVICE_ROLE_KEY_FILE",
+  ] as const;
+  const values = names.map((name) => environment[name]?.trim()).map((value) => value === "" ? undefined : value);
+  if (values.every((value) => value === undefined)) return undefined;
+  if (values.some((value) => value === undefined)) {
+    throw new Error("Identity finalizer configuration is incomplete");
+  }
+  return Object.freeze({
+    databaseUrl: values[0]!, databasePasswordFile: values[1]!,
+    providerUrl: values[2]!, providerServiceRoleKeyFile: values[3]!,
+  });
+}
+
 export async function startControlPlaneWorker(environment: NodeJS.ProcessEnv = process.env): Promise<void> {
   const configuration = loadRuntimeEnvironment(environment);
   const providerPath = resolve(configuration.providerCatalogFile);
@@ -55,16 +83,35 @@ export async function startControlPlaneWorker(environment: NodeJS.ProcessEnv = p
   try { providerJson = JSON.parse(await readFile(providerPath, "utf8")) as unknown; }
   catch { throw new Error("Control Plane Worker configuration is invalid"); }
   const databasePassword = await readProtectedDatabasePassword(configuration.databasePasswordFile);
-  const pool = new Pool(databaseConnectionOptions(configuration.databaseUrl, databasePassword));
+  const identityConfiguration = loadIdentityFinalizerConfiguration(environment);
+  const identityPassword = identityConfiguration === undefined
+    ? undefined
+    : await readProtectedDatabasePassword(identityConfiguration.databasePasswordFile);
+  const applicationConnection = databaseConnectionOptions(configuration.databaseUrl, databasePassword);
+  const identityConnection = identityConfiguration === undefined || identityPassword === undefined
+    ? undefined
+    : databaseConnectionOptions(identityConfiguration.databaseUrl, identityPassword);
+  const identityProviderDeletion = identityConfiguration === undefined ? undefined : new IdentityProviderDeletionClient({
+    providerUrl: identityConfiguration.providerUrl,
+    serviceRoleKeyFile: identityConfiguration.providerServiceRoleKeyFile,
+  });
+  const pool = new Pool(applicationConnection);
   const db = createRuntimeDatabase(pool);
+  const identityPool = identityConnection === undefined
+    ? undefined
+    : new Pool(identityConnection);
+  const identityDb = identityPool === undefined ? undefined : createRuntimeDatabase(identityPool);
   const controller = new AbortController();
   const stop = () => controller.abort();
   process.once("SIGINT", stop); process.once("SIGTERM", stop);
   try {
     await assertSchemaVersion(db);
+    if (identityDb !== undefined) await assertSchemaVersion(identityDb);
     const providerCatalog = loadProviderCatalog(providerJson);
     await runControlPlaneWorker({
-      db, workerId: createWorkerLeaseOwner(configuration.workerId), clock: createWorkerClock(), logger: pino(),
+      db, ...(identityDb === undefined ? {} : { identityDb }),
+      ...(identityProviderDeletion === undefined ? {} : { identityProviderDeletion }),
+      workerId: createWorkerLeaseOwner(configuration.workerId), clock: createWorkerClock(), logger: pino(),
       repositories: createWorkerRuntimeRepositories(db, providerCatalog, createRedactor([])),
       providerCatalog,
       supervisorClient: new RuntimeSupervisorClient({ socketPath: configuration.supervisorSocket }),
@@ -74,6 +121,7 @@ export async function startControlPlaneWorker(environment: NodeJS.ProcessEnv = p
     }, controller.signal);
   } finally {
     process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop);
+    await identityDb?.destroy();
     await db.destroy();
   }
 }

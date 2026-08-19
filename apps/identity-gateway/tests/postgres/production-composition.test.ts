@@ -2504,6 +2504,103 @@ test("production composition atomically verifies email, registers Task 3, issues
       [concurrentTransactionId])).rows[0]?.status, "consumed");
     await concurrentResetApp.close();
 
+    const deletionSession = await issueCoreSession({ db }, {
+      sessionId: "session_composition_account_deletion", actorId: registered.actorId,
+      authSubjectId: registered.authSubjectId, clientKind: "web",
+    });
+    const deletionClock = (await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now;
+    await pool.query("update core_sessions set reauthenticated_at = $2 where session_id = $1", [
+      deletionSession.session.session_id, deletionClock,
+    ]);
+    const deletionProvider: AuthProviderAdapter = {
+      ...provider,
+      async reauthenticatePassword(input) {
+        assert.equal(input.email, verifiedSubject.normalizedEmail);
+        assert.equal(input.password, "composition-deletion-recovery-password");
+        return verifiedSubject;
+      },
+    };
+    const deletionApp = await buildIdentityGatewayApp({
+      config: onboardingConfig, provider: deletionProvider, operations,
+      flowCookieKey: Buffer.alloc(32, 0x7d), now: () => deletionClock,
+    });
+    const deletionHeaders = {
+      ...publicHeaders,
+      cookie: `core_agent_session=${deletionSession.sessionSecret}; core_agent_csrf=${deletionSession.csrfSecret!}`,
+      "x-core-agent-csrf": deletionSession.csrfSecret!,
+    };
+    const actorVersion = Number((await pool.query<{ resource_version: string }>(
+      "select resource_version from actors where actor_id = $1", [registered.actorId],
+    )).rows[0]!.resource_version);
+    const deletionRequestFacts = {
+      schema_version: 1 as const, idempotency_key: "composition-account-deletion-request",
+      expected_resource_version: actorVersion, reason_code: "user_requested" as const,
+    };
+    const deletionRequested = await deletionApp.inject({
+      method: "POST", url: "/auth/v1/account/deletion/request", headers: deletionHeaders,
+      payload: { ...deletionRequestFacts, payload_hash: canonicalPayloadHash(deletionRequestFacts) },
+    });
+    assert.equal(deletionRequested.statusCode, 200, deletionRequested.body);
+    const deletionResponse = deletionRequested.json<{
+      account_deletion_id: string; status: string; resource_version: number; scheduled_for: string;
+    }>();
+    assert.equal(deletionResponse.status, "deletion_pending");
+    const deletionTimes = (await pool.query<{ requested_at: Date; scheduled_for: Date }>(
+      "select requested_at, scheduled_for from account_deletions where account_deletion_id = $1",
+      [deletionResponse.account_deletion_id],
+    )).rows[0]!;
+    assert.equal(deletionTimes.scheduled_for.getTime() - deletionTimes.requested_at.getTime(), 30 * 24 * 60 * 60 * 1_000);
+    assert.deepEqual((await pool.query(
+      "select status, revocation_reason, reauthenticated_at from core_sessions where session_id = $1",
+      [deletionSession.session.session_id],
+    )).rows[0], { status: "revoked", revocation_reason: "account_deletion_requested", reauthenticated_at: null });
+    const deletionReplay = await deletionApp.inject({
+      method: "POST", url: "/auth/v1/account/deletion/request", headers: deletionHeaders,
+      payload: { ...deletionRequestFacts, payload_hash: canonicalPayloadHash(deletionRequestFacts) },
+    });
+    assert.equal(deletionReplay.statusCode, 200, deletionReplay.body);
+    assert.deepEqual(deletionReplay.json(), deletionResponse);
+    assert.equal((await pool.query(
+      "select count(*)::int as count from account_deletions where actor_id = $1",
+      [registered.actorId],
+    )).rows[0]?.count, 1);
+
+    const recoveryReauthentication = reauthenticationRequest({
+      schema_version: 1, idempotency_key: "composition-account-deletion-reauth",
+      expected_resource_version: deletionSession.session.resource_version,
+      password: "composition-deletion-recovery-password",
+    });
+    const recovered = await deletionApp.inject({
+      method: "POST", url: "/auth/v1/reauthenticate", headers: deletionHeaders,
+      payload: recoveryReauthentication,
+    });
+    assert.equal(recovered.statusCode, 200, recovered.body);
+    const cancellationFacts = {
+      schema_version: 1 as const, idempotency_key: "composition-account-deletion-cancel",
+      expected_resource_version: deletionResponse.resource_version,
+      account_deletion_id: deletionResponse.account_deletion_id,
+    };
+    const cancelled = await deletionApp.inject({
+      method: "POST", url: "/auth/v1/account/deletion/cancel", headers: deletionHeaders,
+      payload: { ...cancellationFacts, payload_hash: canonicalPayloadHash(cancellationFacts) },
+    });
+    assert.equal(cancelled.statusCode, 200, cancelled.body);
+    const cancellationReplay = await deletionApp.inject({
+      method: "POST", url: "/auth/v1/account/deletion/cancel", headers: deletionHeaders,
+      payload: { ...cancellationFacts, payload_hash: canonicalPayloadHash(cancellationFacts) },
+    });
+    assert.equal(cancellationReplay.statusCode, 200, cancellationReplay.body);
+    assert.deepEqual(cancellationReplay.json(), cancelled.json());
+    assert.deepEqual((await pool.query(
+      "select a.status as actor_status, d.status as deletion_status, s.status as session_status from actors a join account_deletions d on d.actor_id = a.actor_id join core_sessions s on s.actor_id = a.actor_id where a.actor_id = $1 and d.account_deletion_id = $2 and s.session_id = $3",
+      [registered.actorId, deletionResponse.account_deletion_id, deletionSession.session.session_id],
+    )).rows[0], { actor_status: "active", deletion_status: "cancelled", session_status: "revoked" });
+    assert.equal((await pool.query(
+      "select count(*)::int as count from worker_jobs where job_kind = 'finalize_account_deletion' and payload_ref = $1",
+      [deletionResponse.account_deletion_id],
+    )).rows[0]?.count, 1);
+    await deletionApp.close();
+
     const secretDirectory = await mkdtemp(join(tmpdir(), "identity-gateway-secrets-"));
     try {
       const writeSecret = async (name: string, value: string) => {

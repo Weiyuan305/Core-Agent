@@ -507,6 +507,8 @@ export function assertInvitationAcceptancePayloadHash(body: {
 }
 
 export type ProtectedWritePayloadKind =
+  | "account_deletion_request"
+  | "account_deletion_cancel"
   | "company_create"
   | "company_member_invite"
   | "company_consultant_grant"

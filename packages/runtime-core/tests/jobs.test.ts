@@ -7,7 +7,7 @@ import test from "node:test";
 import { sql } from "kysely";
 import { Pool } from "pg";
 
-import { applyMigrations, claimJobs, claimPlatformWorkerJobs, completeJob, createRedactor, createRuntimeDatabase, failJob, heartbeatJob, retryDecision, withRuntimeAdvisoryLock } from "../src/index.js";
+import { applyMigrations, claimJobs, claimPlatformWorkerJobs, completeJob, createRedactor, createRuntimeDatabase, failJob, heartbeatJob, markJobEffectDispatched, retryDecision, withRuntimeAdvisoryLock } from "../src/index.js";
 
 const databaseUrl = process.env.CONTROL_PLANE_TEST_DATABASE_URL;
 if (databaseUrl === undefined || !new URL(databaseUrl).pathname.slice(1).startsWith("core_agent_")) {
@@ -104,7 +104,7 @@ async function insertExecuteBacklog(
 }
 
 async function insertRecoveryJob(input: {
-  jobId: string; jobKind: "reconcile_runtime" | "execute_agent_run" | "dispatch_outbox";
+  jobId: string; jobKind: "reconcile_runtime" | "execute_agent_run" | "dispatch_outbox" | "finalize_account_deletion";
   status: "queued" | "retrying" | "running"; attemptCount: number; maxAttempts: number;
   effectState: "pre_effect" | "unsafe_to_replay"; runtimeCommand?: "restart";
 }): Promise<void> {
@@ -179,6 +179,38 @@ test("expired final execute jobs reclaim pre and unsafe phases without increment
     { jobId: "job_execute_unsafe_0", attemptCount: 2, recoveryOnly: true, effectState: "unsafe_to_replay" },
   ]);
   assert.deepEqual(await claimPlatformWorkerJobs(db, { workerId: "platform_recover_c", limit: 8, leaseMs: 30_000, jobKinds: ["execute_agent_run"] }), []);
+});
+
+test("account-deletion finalizer fences provider effects and only one worker reclaims an unsafe final attempt", async () => {
+  await insertRecoveryJob({
+    jobId: "job_delete_account", jobKind: "finalize_account_deletion",
+    status: "queued", attemptCount: 0, maxAttempts: 2, effectState: "pre_effect",
+  });
+  const [claimed] = await claimPlatformWorkerJobs(db, {
+    workerId: "deletion_worker_a", limit: 1, leaseMs: 30_000,
+    jobKinds: ["finalize_account_deletion"],
+  });
+  assert.equal(claimed?.jobKind, "finalize_account_deletion");
+  assert.equal(claimed?.effectState, "pre_effect");
+  assert.deepEqual(await markJobEffectDispatched(db, {
+    tenantId: "tenant_jobs", jobId: "job_delete_account", workerId: "wrong_worker", attemptCount: 1,
+  }), { kind: "lease_lost" });
+  assert.deepEqual(await markJobEffectDispatched(db, {
+    tenantId: "tenant_jobs", jobId: "job_delete_account", workerId: "deletion_worker_a", attemptCount: 1,
+  }), { kind: "updated" });
+  await db.updateTable("worker_jobs").set({
+    attempt_count: 2, max_attempts: 2, lease_owner: "worker_crashed", lease_expires_at: new Date(0),
+  }).where("tenant_id", "=", "tenant_jobs").where("job_id", "=", "job_delete_account").execute();
+  const [left, right] = await Promise.all([
+    claimPlatformWorkerJobs(db, { workerId: "deletion_recover_a", limit: 1, leaseMs: 30_000, jobKinds: ["finalize_account_deletion"] }),
+    claimPlatformWorkerJobs(db, { workerId: "deletion_recover_b", limit: 1, leaseMs: 30_000, jobKinds: ["finalize_account_deletion"] }),
+  ]);
+  const recovered = [...left, ...right];
+  assert.equal(recovered.length, 1);
+  assert.equal(recovered[0]?.jobKind, "finalize_account_deletion");
+  assert.equal(recovered[0]?.attemptCount, 2);
+  assert.equal(recovered[0]?.recoveryOnly, true);
+  assert.equal(recovered[0]?.effectState, "unsafe_to_replay");
 });
 
 test("queued and retrying max-attempt jobs are ineligible while a normal final claim is not recovery-only", async () => {

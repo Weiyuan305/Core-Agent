@@ -41,6 +41,8 @@ export interface GatewayAuthenticatedSession {
   readonly actorId: string;
   readonly authSubjectId: string;
   readonly session: Readonly<Record<string, unknown>>;
+  /** Internal-only authority marker; never serialized into a public Session view. */
+  readonly deletionRecovery?: true;
 }
 
 export interface IdentityGatewayOperations {
@@ -130,6 +132,13 @@ export interface IdentityGatewayOperations {
     readonly csrfSecret?: string;
     readonly requireCsrf: boolean;
     readonly advanceActivity?: boolean;
+  }) => Promise<GatewayAuthenticatedSession>;
+  /** Accepts only a deletion-revoked Session for the bounded recovery flow. */
+  readonly authenticateDeletionRecoverySession?: (input: {
+    readonly sessionSecret: string;
+    readonly csrfSecret?: string;
+    readonly requireCsrf: boolean;
+    readonly allowCancelled?: boolean;
   }) => Promise<GatewayAuthenticatedSession>;
   /** Implementations must use Task 6's caller-owned transaction guard. */
   readonly requireRecentReauthentication: (authority: GatewayAuthenticatedSession) => Promise<void>;

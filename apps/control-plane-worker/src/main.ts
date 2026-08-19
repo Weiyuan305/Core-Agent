@@ -1,6 +1,7 @@
 import {
   claimOutboxWakeups, claimPlatformWorkerJobs, completeJob, createRedactor, failJob, failOutbox,
-  heartbeatJob, markOutboxDelivered, projectPlatformMemberships, rescheduleJob, rescheduleOutbox, retryDecision,
+  finalizeAccountDeletion, heartbeatJob, loadAccountDeletionFinalization, markJobEffectDispatched,
+  markOutboxDelivered, projectPlatformMemberships, rescheduleJob, rescheduleOutbox, retryDecision,
   OUTBOX_MAX_ATTEMPTS,
   withAgentRunConversationLock, withRuntimeAdvisoryLock, WorkerAgentRunRepository, WorkerRuntimeRepository,
   type ClaimedJob, type HermesChatInput, type ProviderCatalog, type Redactor, type RuntimeDatabase,
@@ -11,6 +12,7 @@ import { sql, type Kysely } from "kysely";
 import { dispatchJob, type DispatchPort, type HandlerResult } from "./dispatch-job.js";
 import { dispatchOutbox } from "./handlers/dispatch-outbox.js";
 import { handleExecuteAgentRun } from "./handlers/execute-agent-run.js";
+import { handleFinalizeAccountDeletion } from "./handlers/finalize-account-deletion.js";
 import { handleProjectPlatformMemberships } from "./handlers/project-platform-memberships.js";
 import { buildProvisionRuntimeRequest, handleProvisionRuntime, validatePrivateHermesOrigin } from "./handlers/provision-runtime.js";
 import { handleReconcileRuntime } from "./handlers/reconcile-runtime.js";
@@ -20,8 +22,21 @@ import { runWorkerLoop } from "./worker-loop.js";
 
 export const implementedWorkerJobKinds = [
   "provision_runtime", "reconcile_runtime", "execute_agent_run", "dispatch_outbox",
-  "project_platform_memberships",
+  "project_platform_memberships", "finalize_account_deletion",
 ] as const;
+
+export function workerClaimJobKinds(
+  dependencies: Pick<WorkerDependencies, "identityDb" | "identityProviderDeletion">,
+): readonly ClaimedJob["jobKind"][] {
+  const hasIdentityDatabase = dependencies.identityDb !== undefined;
+  const hasProviderDeletion = dependencies.identityProviderDeletion !== undefined;
+  if (hasIdentityDatabase !== hasProviderDeletion) {
+    throw new Error("Identity account-deletion finalizer configuration is incomplete");
+  }
+  return hasIdentityDatabase
+    ? implementedWorkerJobKinds
+    : implementedWorkerJobKinds.filter((kind) => kind !== "finalize_account_deletion");
+}
 
 export interface WorkerClock {
   now(): Date;
@@ -33,9 +48,14 @@ export interface HermesReadinessClient {
   probe(input: { origin: string; profileRef: string; sessionId: string; ingressKey: string; modelId: string }, signal: AbortSignal): Promise<void>;
 }
 export interface HermesExecutionClient { streamChat(input: HermesChatInput): AsyncIterable<string> }
+export interface WorkerIdentityProviderDeletionClient {
+  inspectProviderSubject(providerSubject: string): Promise<"present" | "absent">;
+  deleteProviderSubject(providerSubject: string): Promise<void>;
+}
 export interface WorkerRepositories { readonly runtimes: WorkerRuntimeRepository; readonly agentRuns: WorkerAgentRunRepository; readonly redactor: Redactor }
 export interface WorkerDependencies {
   readonly db: Kysely<RuntimeDatabase>;
+  readonly identityDb?: Kysely<RuntimeDatabase>;
   readonly workerId: string;
   readonly clock: WorkerClock;
   readonly logger: WorkerLogger;
@@ -45,6 +65,7 @@ export interface WorkerDependencies {
   readonly ingressSecretStore: SecretStore;
   readonly hermesClient: HermesReadinessClient;
   readonly executionHermesClient: HermesExecutionClient;
+  readonly identityProviderDeletion?: WorkerIdentityProviderDeletionClient;
 }
 
 function jobRef(dependencies: WorkerDependencies, job: ClaimedJob) {
@@ -77,6 +98,40 @@ async function dispatchRuntimeJob(dependencies: WorkerDependencies, job: Claimed
       lastErrorSummary: summary, redactor: dependencies.repositories.redactor,
     })).kind === "updated",
   }, job, signal);
+  if (job.jobKind === "finalize_account_deletion") {
+    const identityDb = dependencies.identityDb ?? dependencies.db;
+    const provider = dependencies.identityProviderDeletion;
+    const ownedJob = {
+      tenantId: job.tenantId, jobId: job.jobId,
+      workerId: dependencies.workerId, attemptCount: job.attemptCount,
+    };
+    return handleFinalizeAccountDeletion({
+      load: (_deletionJob, cursor, limit) => loadAccountDeletionFinalization(identityDb, job.payloadRef, cursor, limit),
+      markEffectDispatched: async () => (await markJobEffectDispatched(dependencies.db, ownedJob)).kind === "updated",
+      inspectProviderSubject: async (providerSubject) => {
+        if (provider === undefined) throw new Error("Identity provider deletion is not configured");
+        return provider.inspectProviderSubject(providerSubject);
+      },
+      deleteProviderSubject: async (providerSubject) => {
+        if (provider === undefined) throw new Error("Identity provider deletion is not configured");
+        await provider.deleteProviderSubject(providerSubject);
+      },
+      finalize: async () => (await finalizeAccountDeletion({ db: identityDb }, {
+        accountDeletionId: job.payloadRef,
+      })).kind,
+      succeed: async () => (await completeJob(dependencies.db, ownedJob)).kind === "updated",
+      retry: async (_deletionJob, summary) => {
+        const retry = nextAttempt(dependencies, job, summary);
+        return (await rescheduleJob(dependencies.db, {
+          ...ownedJob, nextAttemptAt: retry.at, lastErrorSummary: retry.summary,
+          redactor: dependencies.repositories.redactor,
+        })).kind === "updated";
+      },
+      fail: async (_deletionJob, summary) => (await failJob(dependencies.db, {
+        ...ownedJob, lastErrorSummary: summary, redactor: dependencies.repositories.redactor,
+      })).kind === "updated",
+    }, job, signal);
+  }
   const ref = jobRef(dependencies, job);
   if (job.jobKind === "provision_runtime") return withRuntimeAdvisoryLock(dependencies.db, job.tenantId, job.payloadRef, async () => {
     const recovery = await handleNonReconcileRecovery({
@@ -172,6 +227,7 @@ async function pollOutbox(dependencies: WorkerDependencies): Promise<void> {
 }
 
 export async function runControlPlaneWorker(dependencies: WorkerDependencies, signal: AbortSignal): Promise<void> {
+  const claimJobKinds = workerClaimJobKinds(dependencies);
   const dispatchPort: DispatchPort = {
     workerId: dependencies.workerId, heartbeatEveryMs: 10_000,
     scheduleHeartbeat: (callback, milliseconds) => dependencies.clock.scheduleEvery(callback, milliseconds),
@@ -180,7 +236,9 @@ export async function runControlPlaneWorker(dependencies: WorkerDependencies, si
   };
   await runWorkerLoop({
     tick: () => pollOutbox(dependencies),
-    claim: (limit) => claimPlatformWorkerJobs(dependencies.db, { workerId: dependencies.workerId, limit, leaseMs: 30_000, jobKinds: implementedWorkerJobKinds }),
+    claim: (limit) => claimPlatformWorkerJobs(dependencies.db, {
+      workerId: dependencies.workerId, limit, leaseMs: 30_000, jobKinds: claimJobKinds,
+    }),
     dispatch: (job, operationSignal) => dispatchJob(dispatchPort, job, operationSignal),
     wait: (milliseconds, operationSignal) => dependencies.clock.wait(milliseconds, operationSignal),
   }, signal);

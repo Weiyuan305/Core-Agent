@@ -16,7 +16,7 @@ interface ClaimedJobBase {
 
 export const workerJobKinds = [
   "provision_runtime", "reconcile_runtime", "execute_agent_run", "dispatch_outbox",
-  "project_platform_memberships",
+  "project_platform_memberships", "finalize_account_deletion",
 ] as const;
 export type WorkerJobKind = (typeof workerJobKinds)[number];
 export const runtimeCommandIntents = ["start", "stop", "restart", "delete"] as const;
@@ -30,7 +30,8 @@ export type ClaimedJob =
   | (ClaimedJobBase & { jobKind: "execute_agent_run"; runtimeCommand: null; targetCommandVersion: null; effectState: AgentRunEffectState })
   | (ClaimedJobBase & { jobKind: "provision_runtime"; runtimeCommand: null; targetCommandVersion: null; effectState: "pre_effect" })
   | (ClaimedJobBase & { jobKind: "dispatch_outbox"; runtimeCommand: null; targetCommandVersion: null; effectState: "pre_effect" })
-  | (ClaimedJobBase & { jobKind: "project_platform_memberships"; runtimeCommand: null; targetCommandVersion: null; effectState: "pre_effect" });
+  | (ClaimedJobBase & { jobKind: "project_platform_memberships"; runtimeCommand: null; targetCommandVersion: null; effectState: "pre_effect" })
+  | (ClaimedJobBase & { jobKind: "finalize_account_deletion"; runtimeCommand: null; targetCommandVersion: null; effectState: WorkerEffectState });
 
 function workerEffectState(value: string): WorkerEffectState {
   if (!workerEffectStates.includes(value as WorkerEffectState)) throw new Error("Stored worker job effect state is invalid");
@@ -46,7 +47,7 @@ function runtimeCommandIntent(value: string | null): RuntimeCommandIntent {
 function nonReconcileJobKind(value: string): Exclude<WorkerJobKind, "reconcile_runtime"> {
   if (
     value === "provision_runtime" || value === "execute_agent_run" || value === "dispatch_outbox"
-    || value === "project_platform_memberships"
+    || value === "project_platform_memberships" || value === "finalize_account_deletion"
   ) return value;
   throw new Error("Stored worker job kind is invalid");
 }
@@ -133,7 +134,9 @@ export async function claimJobs(db: Kysely<RuntimeDatabase>, input: ClaimJobsInp
       if (job.runtime_command !== null) throw new Error("Stored worker job command intent is invalid");
       if (job.target_command_version !== null) throw new Error("Stored worker job target command version is invalid");
       const jobKind = nonReconcileJobKind(job.job_kind);
-      if (jobKind === "execute_agent_run") return { ...base, jobKind, runtimeCommand: null, targetCommandVersion: null, effectState };
+      if (jobKind === "execute_agent_run" || jobKind === "finalize_account_deletion") {
+        return { ...base, jobKind, runtimeCommand: null, targetCommandVersion: null, effectState };
+      }
       if (effectState !== "pre_effect") throw new Error("Stored worker job effect state is invalid for job kind");
       return { ...base, jobKind, runtimeCommand: null, targetCommandVersion: null, effectState };
     });
@@ -307,7 +310,9 @@ export async function claimPlatformWorkerJobs(
         if (row.runtime_command !== null) throw new Error("Stored worker job command intent is invalid");
         if (row.target_command_version !== null) throw new Error("Stored worker job target command version is invalid");
         const jobKind = nonReconcileJobKind(row.job_kind);
-        if (jobKind === "execute_agent_run") claimed.push({ ...base, jobKind, runtimeCommand: null, targetCommandVersion: null, effectState });
+        if (jobKind === "execute_agent_run" || jobKind === "finalize_account_deletion") {
+          claimed.push({ ...base, jobKind, runtimeCommand: null, targetCommandVersion: null, effectState });
+        }
         else {
           if (effectState !== "pre_effect") throw new Error("Stored worker job effect state is invalid for job kind");
           claimed.push({ ...base, jobKind, runtimeCommand: null, targetCommandVersion: null, effectState });
@@ -347,6 +352,13 @@ export async function heartbeatJob(
   return updateOwnedLease(db, input, {
     lease_expires_at: sql<Date>`now() + ${input.leaseMs} * interval '1 millisecond'`,
   });
+}
+
+export async function markJobEffectDispatched(
+  db: Kysely<RuntimeDatabase>,
+  input: { tenantId: string; jobId: string; workerId: string; attemptCount: number },
+): Promise<JobLeaseResult> {
+  return updateOwnedLease(db, input, { effect_state: "unsafe_to_replay" });
 }
 
 export async function completeJob(

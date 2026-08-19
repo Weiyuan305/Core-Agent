@@ -196,6 +196,13 @@ async function buildApp(
           : credential.sessionSecret === "m".repeat(43) ? "macos" : "iphone";
         return { actorId: "actor_server", authSubjectId: "auth_server", session: { session_id: "session_01", client_kind: clientKind, session_resource_version: 1 } };
       },
+      async authenticateDeletionRecoverySession(input: unknown) {
+        calls.push({ name: "authenticateDeletionRecoverySession", input });
+        return {
+          actorId: "actor_server", authSubjectId: "auth_server", deletionRecovery: true as const,
+          session: { session_id: "session_01", client_kind: "web", session_resource_version: 2 },
+        };
+      },
       async requireRecentReauthentication(input: unknown) { calls.push({ name: "requireRecentReauthentication", input }); },
       async loadNormalizedEmail(input: unknown) { calls.push({ name: "loadNormalizedEmail", input }); return "current@example.test"; },
       async readAppleLinkSettlement(input: unknown) {
@@ -207,6 +214,9 @@ async function buildApp(
         const kind = (input as { kind?: unknown }).kind;
         if (kind === "password_reset_completed" && options.failPasswordResetAuthority === true) throw new Error("forced Core revocation rollback");
         if (kind === "reauthenticate") return { schema_version: 1, reauthenticated_at: "2026-08-17T00:00:00.000Z", valid_until: "2026-08-17T00:10:00.000Z", session_resource_version: 2 };
+        if (kind === "account_deletion_cancel") return {
+          schema_version: 1, account_deletion_id: "deletion_01", status: "cancelled", resource_version: 2,
+        };
         if (kind === "invitation_inspect" || kind === "invitation_rate_identity") return {
           schema_version: 1, invitation_id: "invitation_01", tenant_id: "tenant_01", role: "admin",
           status: "pending", expires_at: "2026-08-18T00:00:00.000Z", resource_version: 1,
@@ -226,6 +236,10 @@ async function buildApp(
         const kind = (input as { kind?: unknown }).kind;
         if (kind === "invitation_revoke") return { schema_version: 1, invitation_id: "invitation_01", status: "revoked", resource_version: 2 };
         if (kind === "apple_identity_link") return { schema_version: 1, auth_subject_id: "auth_apple", linked: true };
+        if (kind === "account_deletion_request") return {
+          schema_version: 1, account_deletion_id: "deletion_01", status: "deletion_pending",
+          scheduled_for: "2026-09-16T00:00:00.000Z", resource_version: 1,
+        };
         return { schema_version: 1 };
       },
       async beginEmailVerification(input: unknown) {
@@ -1311,7 +1325,9 @@ test("pre-auth route rate limits count invalid Sessions before authentication an
   });
   assert.equal(first.statusCode, 401, first.body);
   assert.equal(limited.statusCode, 429, limited.body);
-  assert.deepEqual(calls.map(({ name }) => name), ["consumeRateLimit", "authenticateSession", "consumeRateLimit"]);
+  assert.deepEqual(calls.map(({ name }) => name), [
+    "consumeRateLimit", "authenticateSession", "authenticateDeletionRecoverySession", "consumeRateLimit",
+  ]);
   await app.close();
 });
 
@@ -1980,6 +1996,79 @@ test("durable commands receive server authority but never passwords or provider 
   assert.equal(calls.some(({ name }) => name === "issueSession"), false,
     "acceptance and its one-time Session secret must be one atomic authority operation");
   assert.equal(acceptance.json().issuedSession, undefined);
+  await app.close();
+});
+
+test("account deletion validates commands before authority and cancellation uses only deletion recovery authority", async () => {
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const app = await buildApp(calls);
+  const headers = {
+    host, origin, "content-type": "application/json",
+    cookie: `core_agent_session=${secret}; core_agent_csrf=${csrf}`,
+    "x-core-agent-csrf": csrf,
+  };
+  const requestFacts = {
+    schema_version: 1 as const, idempotency_key: "idem_deletion_request",
+    expected_resource_version: 1, reason_code: "user_requested" as const,
+  };
+  const malformed = await app.inject({
+    method: "POST", url: "/auth/v1/account/deletion/request", headers,
+    payload: { ...requestFacts, payload_hash: canonicalPayloadHash({ ...requestFacts, reason_code: "changed" }) },
+  });
+  assert.equal(malformed.statusCode, 400);
+  assert.equal(calls.length, 0, "invalid public hash must fail before Session authority");
+
+  const requested = await app.inject({
+    method: "POST", url: "/auth/v1/account/deletion/request", headers,
+    payload: { ...requestFacts, payload_hash: canonicalPayloadHash(requestFacts) },
+  });
+  assert.equal(requested.statusCode, 200, requested.body);
+  assert.deepEqual(calls.map(({ name }) => name), ["authenticateSession", "executeProtectedAuthorityCommand"]);
+
+  calls.length = 0;
+  const cancelFacts = {
+    schema_version: 1 as const, idempotency_key: "idem_deletion_cancel",
+    expected_resource_version: 1, account_deletion_id: "deletion_01",
+  };
+  const cancelled = await app.inject({
+    method: "POST", url: "/auth/v1/account/deletion/cancel", headers,
+    payload: { ...cancelFacts, payload_hash: canonicalPayloadHash(cancelFacts) },
+  });
+  assert.equal(cancelled.statusCode, 200, cancelled.body);
+  assert.deepEqual(calls.map(({ name }) => name), [
+    "authenticateDeletionRecoverySession", "executeAuthorityCommand",
+  ]);
+  assert.equal((calls[1]?.input as { authority?: { deletionRecovery?: unknown } }).authority?.deletionRecovery, true);
+  await app.close();
+});
+
+test("password reauthentication can recover only through the deletion-revoked Session boundary", async () => {
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const app = await buildApp(calls, { failAuthentication: true });
+  const facts = {
+    schema_version: 1 as const, idempotency_key: "idem_deletion_reauth",
+    expected_resource_version: 1,
+    reauthentication_proof_digest: digest("correct-horse"),
+  };
+  const response = await app.inject({
+    method: "POST", url: "/auth/v1/reauthenticate",
+    headers: {
+      host, origin, "content-type": "application/json",
+      cookie: `core_agent_session=${secret}; core_agent_csrf=${csrf}`,
+      "x-core-agent-csrf": csrf,
+    },
+    payload: {
+      schema_version: facts.schema_version, idempotency_key: facts.idempotency_key,
+      expected_resource_version: facts.expected_resource_version, password: "correct-horse",
+      payload_hash: canonicalPayloadHash(facts),
+    },
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(calls.some(({ name }) => name === "authenticateDeletionRecoverySession"), true);
+  const command = calls.find(({ name }) => name === "executeAuthorityCommand")?.input as {
+    authority?: { deletionRecovery?: unknown };
+  };
+  assert.equal(command.authority?.deletionRecovery, true);
   await app.close();
 });
 

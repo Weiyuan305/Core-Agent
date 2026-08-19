@@ -4,12 +4,12 @@ import test from "node:test";
 
 import { identityGatewayServerTestInternals } from "../src/server.js";
 
-test("production server owns provider, database, secret, and Tasks 3-6 composition", async () => {
+test("production server owns provider, database, secret, and Tasks 3-9 composition", async () => {
   const server = await import("../src/server.js") as Record<string, unknown>;
   assert.equal(typeof server.buildProductionIdentityGateway, "function");
   assert.equal(typeof server.startIdentityGatewayServer, "function");
   assert.equal((server.startIdentityGatewayServer as Function).length, 0);
-  assert.equal(server.TASK9_ACCOUNT_DELETION_AVAILABLE, false);
+  assert.equal(server.TASK9_ACCOUNT_DELETION_AVAILABLE, true);
 
   const build = server.buildProductionIdentityGateway as undefined | ((input?: unknown) => Promise<unknown>);
   assert.equal(typeof build, "function");

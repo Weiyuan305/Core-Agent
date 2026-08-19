@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createWorkerClock, createWorkerLeaseOwner } from "../src/server.js";
+import { createWorkerClock, createWorkerLeaseOwner, loadIdentityFinalizerConfiguration } from "../src/server.js";
+import { workerClaimJobKinds } from "../src/main.js";
 
 test("idle wait removes its abort listener after the timer resolves", async () => {
   const controller = new AbortController();
@@ -58,4 +59,31 @@ test("each Worker process has a bounded unique lease-owner incarnation", () => {
   assert.match(first, /^worker_alpha:[0-9a-f-]{36}$/);
   assert.equal(first.length <= 128, true);
   assert.throws(() => createWorkerLeaseOwner("invalid worker", () => "11111111-1111-4111-8111-111111111111"), /worker/i);
+});
+
+test("identity finalizer production configuration is all-or-none", () => {
+  assert.equal(loadIdentityFinalizerConfiguration({}), undefined);
+  assert.throws(() => loadIdentityFinalizerConfiguration({
+    IDENTITY_DATABASE_URL: "postgresql://core_agent_identity@postgres/core_agent_runtime",
+  }), /configuration is incomplete/u);
+  assert.deepEqual(loadIdentityFinalizerConfiguration({
+    IDENTITY_DATABASE_URL: "postgresql://core_agent_identity@postgres/core_agent_runtime",
+    IDENTITY_DATABASE_PASSWORD_FILE: "/run/identity/database-password",
+    IDENTITY_PROVIDER_URL: "https://provider.example.test",
+    IDENTITY_PROVIDER_SERVICE_ROLE_KEY_FILE: "/run/identity/service-role-key",
+  }), {
+    databaseUrl: "postgresql://core_agent_identity@postgres/core_agent_runtime",
+    databasePasswordFile: "/run/identity/database-password",
+    providerUrl: "https://provider.example.test",
+    providerServiceRoleKeyFile: "/run/identity/service-role-key",
+  });
+});
+
+test("Worker claims account finalization only with both protected identity dependencies", () => {
+  assert.equal(workerClaimJobKinds({}).includes("finalize_account_deletion"), false);
+  const identityDb = {} as never;
+  const identityProviderDeletion = {} as never;
+  assert.equal(workerClaimJobKinds({ identityDb, identityProviderDeletion }).includes("finalize_account_deletion"), true);
+  assert.throws(() => workerClaimJobKinds({ identityDb }), /configuration is incomplete/u);
+  assert.throws(() => workerClaimJobKinds({ identityProviderDeletion }), /configuration is incomplete/u);
 });

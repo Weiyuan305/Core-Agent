@@ -192,6 +192,8 @@ async function runCiEquivalentScenario({ injectedFailure = false, injectedOutput
     assert.match(postgresOutput, /identity bootstrap snapshot is explicit and cannot admit an Agent Run/u);
     assert.match(postgresOutput, /trusted context admits a Conversation and rejects bootstrap authority/u);
     assert.match(postgresOutput, /trusted context binds and admits one AgentRun/u);
+    assert.match(postgresOutput, /deletion request is one serializable Actor-first transition/u);
+    assert.match(postgresOutput, /account-deletion finalizer fences provider effects/u);
     const integrationOutput = protectedRun("npm", ["run", "test:integration"], environment, credential, credentialFile);
     assertNodeTestSummaries(integrationOutput, [expectedCounts.integration.testCount]);
     assert.match(integrationOutput, /provision, converse, stream, restart, and resume/u);

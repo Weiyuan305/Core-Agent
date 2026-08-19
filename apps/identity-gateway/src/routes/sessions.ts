@@ -58,11 +58,22 @@ async function authenticateValidatedMutation(
   credential: ValidatedMutationCredential,
   dependencies: IdentityGatewayRouteDependencies,
 ): Promise<GatewayAuthenticatedSession> {
-  const authority = credential.clientKind === "web"
-    ? await dependencies.operations.authenticateSession({
-      sessionSecret: credential.sessionSecret, csrfSecret: credential.csrfSecret, requireCsrf: true,
-    })
-    : await dependencies.operations.authenticateSession({ sessionSecret: credential.sessionSecret, requireCsrf: false });
+  let authority: GatewayAuthenticatedSession;
+  try {
+    authority = credential.clientKind === "web"
+      ? await dependencies.operations.authenticateSession({
+        sessionSecret: credential.sessionSecret, csrfSecret: credential.csrfSecret, requireCsrf: true,
+      })
+      : await dependencies.operations.authenticateSession({ sessionSecret: credential.sessionSecret, requireCsrf: false });
+  } catch (error) {
+    const authenticateRecovery = dependencies.operations.authenticateDeletionRecoverySession;
+    if (authenticateRecovery === undefined) throw error;
+    authority = credential.clientKind === "web"
+      ? await authenticateRecovery({
+        sessionSecret: credential.sessionSecret, csrfSecret: credential.csrfSecret, requireCsrf: true,
+      })
+      : await authenticateRecovery({ sessionSecret: credential.sessionSecret, requireCsrf: false });
+  }
   if (authority.session.client_kind !== credential.clientKind) throw new IdentityGatewayFailure("AUTH_INVALID");
   return authority;
 }

@@ -5,6 +5,7 @@ import {
   assertSchemaVersion,
   acceptInvitation,
   admitEmailVerificationProviderAttempt,
+  authenticateAccountDeletionRecoverySession,
   authenticateCoreSession,
   beginIdempotentCommand,
   beginEmailVerificationTransaction,
@@ -14,12 +15,14 @@ import {
   constantTimeDigestMatches,
   consumeEmailVerificationTransaction,
   consumePublicRateLimit,
+  cancelAccountDeletion,
   completeIdempotentCommand,
   createB2bCompany,
   createInvitation,
   createRuntimeDatabase,
   DomainError,
   establishRecentReauthenticationInTransaction,
+  establishAccountDeletionRecoveryReauthentication,
   finalizeEmailVerificationTransactionStart,
   grantConsultantRole,
   inspectInvitation,
@@ -33,6 +36,7 @@ import {
   terminalizeEmailVerificationProviderAttempt,
   registerB2c,
   registerInvitedIdentityForVerifiedInvitation,
+  requestAccountDeletion,
   removeConsultantRole,
   requireRecentReauthentication,
   revokeCoreSession,
@@ -71,8 +75,8 @@ export interface ProductionIdentityGatewayOptions {
   readonly environment?: NodeJS.ProcessEnv;
 }
 
-/** Task 9 owns durable account-deletion services; Task 7 fails these routes closed. */
-export const TASK9_ACCOUNT_DELETION_AVAILABLE = false;
+/** Account-deletion routes are backed by Task 9's durable state machine. */
+export const TASK9_ACCOUNT_DELETION_AVAILABLE = true;
 const expiredAppleLinkSettlement = Symbol("expired-apple-link-settlement");
 
 interface ManagedSecretIo {
@@ -861,6 +865,15 @@ function productionOperations(
       const actor = await db.selectFrom("actors").select("resource_version").where("actor_id", "=", authenticated.authSubject.actorId).executeTakeFirstOrThrow();
       return { actorId: authenticated.authSubject.actorId, authSubjectId: authenticated.authSubject.authSubjectId, session: sessionView(authenticated.session as unknown as Record<string, unknown>, Number(actor.resource_version)) };
     },
+    async authenticateDeletionRecoverySession(input) {
+      const authenticated = await authenticateAccountDeletionRecoverySession({ db }, input);
+      return {
+        actorId: authenticated.actorId,
+        authSubjectId: authenticated.authSubjectId,
+        session: sessionView(authenticated.session as unknown as Record<string, unknown>, authenticated.actorResourceVersion),
+        deletionRecovery: true,
+      };
+    },
     async requireRecentReauthentication(authority) {
       await db.transaction().execute((trx) => requireRecentReauthentication({ trx }, authorityInput(authority)));
     },
@@ -895,6 +908,13 @@ function productionOperations(
         await revokeCoreSession({ db }, { actorId: input.authority.actorId, sessionId: String(input.authority.session.session_id), reason: "user_sign_out" });
         return { schema_version: 1 };
       }
+      if (input.kind === "account_deletion_cancel" && input.authority?.deletionRecovery === true) {
+        return cancelAccountDeletion({ db }, {
+          ...authorityInput(input.authority),
+          requestId: `request_${randomUUID()}`,
+          traceId: `trace_${randomUUID()}`,
+        }, input.payload);
+      }
       if (input.kind === "reauthenticate" && input.authority !== undefined && input.verifiedSubject !== undefined) {
         const payload = input.payload as {
           schema_version: 1;
@@ -919,26 +939,38 @@ function productionOperations(
           auth_subject_id: input.authority.authSubjectId,
           session_id: input.authority.session.session_id,
         }, input.secretProof);
+        const deletionRecovery = input.authority.deletionRecovery === true;
         return withDatabaseTransactionRetry(db, async (trx) => {
-          const tenant = await trx.selectFrom("memberships").select("tenant_id")
-            .where("actor_id", "=", input.authority!.actorId).where("status", "=", "active")
-            .orderBy("tenant_id").executeTakeFirst();
-          if (tenant === undefined) throw new DomainError("UNAUTHENTICATED", "Active reauthentication tenant authority is unavailable");
+          let tenantQuery = trx.selectFrom("memberships").select("tenant_id")
+            .where("actor_id", "=", input.authority!.actorId)
+            .where("membership_source", "!=", "platform")
+            .orderBy("tenant_id");
+          if (!deletionRecovery) tenantQuery = tenantQuery.where("status", "=", "active");
+          const tenant = await tenantQuery.executeTakeFirst();
+          if (tenant === undefined) throw new DomainError("UNAUTHENTICATED", "Reauthentication tenant authority is unavailable");
           const now = (await sql<{ now: Date }>`select clock_timestamp() as now`.execute(trx)).rows[0]?.now;
           if (!(now instanceof Date) || !Number.isFinite(now.getTime())) throw new DomainError("INTERNAL_ERROR", "Reauthentication database clock is unavailable");
           const context = { tenantId: tenant.tenant_id, trx };
-          const operation = "identity.reauthenticate";
+          const operation = deletionRecovery
+            ? "identity.account-deletion.reauthenticate"
+            : "identity.reauthenticate";
           const admission = await beginIdempotentCommand(context, {
             key: payload.idempotency_key, payloadHash: durablePayloadHash, operation, now,
             expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1_000),
           });
           if (admission.kind === "replay") return admission.response;
           if (admission.kind === "in_progress") throw new DomainError("IDEMPOTENCY_CONFLICT", "Reauthentication is already in progress");
-          const response = await establishRecentReauthenticationInTransaction({ trx }, {
-            ...authorityInput(input.authority!),
-            verifiedPasswordSubject: input.verifiedSubject!,
-            expectedResourceVersion: payload.expected_resource_version,
-          });
+          const response = deletionRecovery
+            ? await establishAccountDeletionRecoveryReauthentication({ db, transaction: trx }, {
+              ...authorityInput(input.authority!),
+              verifiedPasswordSubject: input.verifiedSubject!,
+              expectedResourceVersion: payload.expected_resource_version,
+            })
+            : await establishRecentReauthenticationInTransaction({ trx }, {
+              ...authorityInput(input.authority!),
+              verifiedPasswordSubject: input.verifiedSubject!,
+              expectedResourceVersion: payload.expected_resource_version,
+            });
           await completeIdempotentCommand(context, {
             key: payload.idempotency_key, payloadHash: durablePayloadHash, operation,
             resultRef: String(input.authority!.session.session_id), response, updatedAt: now,
@@ -1287,6 +1319,29 @@ function productionOperations(
     },
     async executeProtectedAuthorityCommand(input) {
       const result = await withDatabaseTransactionRetry(db, async (trx) => {
+        if (input.kind === "account_deletion_request") {
+          return requestAccountDeletion({
+            db,
+            transaction: trx,
+            entitlementRevocation: {
+              async revokeInTransaction() {
+                // Entitlements are not persisted until their dedicated task; the port is
+                // intentionally present so that implementation can replace this boundary.
+              },
+            },
+            runtimeStopIntent: {
+              async stopInTransaction() {
+                // The account.deletion_requested ProductEvent/Outbox row written below is
+                // the durable runtime stop intent. Runtime workers consume that boundary;
+                // identity authority never receives UPDATE on runtime_containers.
+              },
+            },
+          }, {
+            ...authorityInput(input.authority),
+            requestId: `request_${randomUUID()}`,
+            traceId: `trace_${randomUUID()}`,
+          }, input.payload);
+        }
         await requireRecentReauthentication({ trx }, authorityInput(input.authority));
         if (input.kind === "apple_link_provider_observation") {
           const payload = input.payload as {
@@ -1626,7 +1681,6 @@ function productionOperations(
             .where("status", "=", "pending").executeTakeFirstOrThrow();
           return response;
         }
-        if (input.kind === "account_deletion_request" || input.kind === "account_deletion_cancel") return unavailable();
         return unavailable();
       }, { isolationLevel: "serializable" });
       if (result === expiredAppleLinkSettlement) {

@@ -643,9 +643,15 @@ test("enumeration responses for unknown account, invitation, and tenant share on
     cookie: `core_agent_session=${sessionSecret}; core_agent_csrf=${csrfSecret}`,
     "x-core-agent-csrf": csrfSecret,
   };
+  const deletionFacts = {
+    schema_version: 1 as const,
+    idempotency_key: "idem_01",
+    expected_resource_version: 1,
+    reason_code: "user_requested" as const,
+  };
   const requests = [
     { method: "POST" as const, url: "/auth/v1/invitations/inspect", headers: jsonHeaders, payload: { schema_version: 1, invitation_secret: "i".repeat(43) } },
-    { method: "POST" as const, url: "/auth/v1/account/deletion/request", headers: authenticatedHeaders, payload: { ...idem, expected_resource_version: 1, reason_code: "user_requested" } },
+    { method: "POST" as const, url: "/auth/v1/account/deletion/request", headers: authenticatedHeaders, payload: { ...deletionFacts, payload_hash: canonicalPayloadHash(deletionFacts) } },
     { method: "POST" as const, url: "/auth/v1/companies/members/list", headers: authenticatedHeaders, payload: { schema_version: 1, tenant_id: "tenant_missing", cursor: "member_cursor", limit: 20 } },
   ];
   for (const options of requests) await app.inject(options);

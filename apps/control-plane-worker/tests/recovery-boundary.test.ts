@@ -33,10 +33,11 @@ test("normal provision and Outbox jobs continue to their implemented handlers", 
 test("production Worker claims Agent Run execution only after its normal and recovery handlers are implemented", () => {
   assert.deepEqual(implementedWorkerJobKinds, [
     "provision_runtime", "reconcile_runtime", "execute_agent_run", "dispatch_outbox",
-    "project_platform_memberships",
+    "project_platform_memberships", "finalize_account_deletion",
   ]);
   assert.equal((implementedWorkerJobKinds as readonly string[]).includes("execute_agent_run"), true);
   assert.equal((implementedWorkerJobKinds as readonly string[]).includes("project_platform_memberships"), true);
+  assert.equal((implementedWorkerJobKinds as readonly string[]).includes("finalize_account_deletion"), true);
 });
 
 test("final non-reconcile recovery reports lease loss instead of claiming terminal ownership", async () => {

@@ -75,6 +75,7 @@ export {
   claimJobs,
   claimPlatformWorkerJobs,
   heartbeatJob,
+  markJobEffectDispatched,
   completeJob,
   rescheduleJob,
   failJob,
@@ -364,6 +365,31 @@ export {
   projectPlatformMemberships,
   type PlatformMembershipProjectionPage,
 } from "./services/identity/project-platform-memberships.js";
+export {
+  accountDeletionPseudonym,
+  authenticateAccountDeletionRecoverySession,
+  cancelAccountDeletion,
+  establishAccountDeletionRecoveryReauthentication,
+  finalizeAccountDeletion,
+  loadAccountDeletionFinalization,
+  requestAccountDeletion,
+  type AccountDeletionCancellationContext,
+  type AccountDeletionCancellationResult,
+  type AccountDeletionCommandContext,
+  type AccountDeletionDependencies,
+  type AccountDeletionEntitlementRevocationPort,
+  type AccountDeletionFinalizationFacts,
+  type AccountDeletionFinalizationResult,
+  type AccountDeletionRequestResult,
+  type AccountDeletionRuntimeStopIntentPort,
+  type AuthenticateAccountDeletionRecoveryInput,
+  type AuthenticatedAccountDeletionRecovery,
+  type EstablishAccountDeletionRecoveryReauthenticationInput,
+} from "./services/identity/manage-account-deletion.js";
+export {
+  readAccountDeletionFinalizationFacts,
+  type StoredAccountDeletionFinalizationFacts,
+} from "./repositories/identity/account-deletions.js";
 export {
   RuntimeCommandRequestSchema,
   commandRuntime,
