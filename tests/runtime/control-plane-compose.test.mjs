@@ -1011,6 +1011,12 @@ test("CI preserves contracts and separates deterministic runtime gates", async (
   assert.equal(workflow.jobs.compose.steps.find((step) => step.name === "Validate Compose configuration").env.CORE_AGENT_DOCKER_SOCKET_SOURCE, "/var/run/docker.sock");
 });
 
+test("disposable authentication topology derives the current shipped schema version", async () => {
+  const topology = await source("tests/runtime/database-auth-topology.integration.mjs");
+  assert.match(topology, /const expectedSchemaVersion = Math\.max\(\.\.\.migrationVersions\);/u);
+  assert.doesNotMatch(topology, /core_agent_app\\\|10/u);
+});
+
 test("fresh CI-equivalent protects command output and proves cleanup after success failure and leak", async () => {
   const text = await source("tests/runtime/database-ci-equivalent.integration.mjs");
   const runner = await source("scripts/run-protected-ci-command.mjs");
@@ -1046,17 +1052,17 @@ test("fresh CI-equivalent protects command output and proves cleanup after succe
   assert.doesNotMatch(text, /docker (?:volume|network) (?:prune|rm) .*\*/u);
 });
 
-test("isolated CI consumers build shared contracts before execution", async () => {
+test("isolated CI consumers build every required workspace dependency before execution", async () => {
   const workflow = await yaml(".github/workflows/runtime-contract.yml");
-  for (const [jobName, consumerCommand] of [
-    ["web-browser", "npm run test:browser -w @core-agent/control-plane-web"],
-    ["compose", "npm run test:runtime"],
+  for (const [jobName, buildCommand, consumerCommand] of [
+    ["web-browser", "npm run contracts:build", "npm run test:browser -w @core-agent/control-plane-web"],
+    ["compose", "npm run build:runtime-deps", "npm run test:runtime"],
   ]) {
     const steps = workflow.jobs[jobName].steps;
-    const buildIndex = steps.findIndex((step) => step.run === "npm run contracts:build");
+    const buildIndex = steps.findIndex((step) => step.run === buildCommand);
     const consumerIndex = steps.findIndex((step) => step.run === consumerCommand);
-    assert(buildIndex >= 0, `${jobName} must build shared contracts`);
-    assert(consumerIndex > buildIndex, `${jobName} must build shared contracts before its consumer`);
+    assert(buildIndex >= 0, `${jobName} must run ${buildCommand}`);
+    assert(consumerIndex > buildIndex, `${jobName} must build its dependencies before its consumer`);
   }
 });
 
@@ -1436,12 +1442,13 @@ test("runtime network preparation owns exact private backplane and provider-capa
     },
   });
   const existingCalls = [];
-  await network.prepareRuntimeNetwork({ runDocker: async (args) => {
+  const existingNetworks = await network.prepareRuntimeNetwork({ runDocker: async (args) => {
     existingCalls.push(args);
     if (args[0] === "context") return '"unix:///var/run/docker.sock"\n';
     if (args[1] === "ls") return `${args[3].includes("egress") ? "core-agent-egress" : "core-agent-backplane"}\n`;
     return `${args.at(-1) === "core-agent-egress" ? egressInspection : backplaneInspection}\n`;
   } });
+  assert.deepEqual(existingNetworks, []);
   assert.deepEqual(existingCalls, [
     ["context", "inspect", "--format", "{{json .Endpoints.docker.Host}}"],
     ["network", "ls", "--filter", "name=^core-agent-backplane$", "--format", "{{.Name}}"],
@@ -1450,13 +1457,14 @@ test("runtime network preparation owns exact private backplane and provider-capa
     ["network", "inspect", "--format", "{{json .}}", "core-agent-egress"],
   ]);
   const createCalls = [];
-  await network.prepareRuntimeNetwork({ runDocker: async (args) => {
+  const createdNetworks = await network.prepareRuntimeNetwork({ runDocker: async (args) => {
     createCalls.push(args);
     if (args[0] === "context") return '"unix:///var/run/docker.sock"\n';
     if (args[1] === "ls") return "";
     if (args[1] === "create") return `${args.at(-1)}\n`;
     return args.at(-1) === "core-agent-egress" ? egressInspection : backplaneInspection;
   } });
+  assert.deepEqual(createdNetworks, ["core-agent-backplane", "core-agent-egress"]);
   assert.deepEqual(createCalls[2], [
     "network", "create", "--driver", "bridge", "--internal",
     "--label", "core-agent.managed=runtime-v1",
@@ -1474,6 +1482,13 @@ test("runtime network preparation owns exact private backplane and provider-capa
     "--label", "core-agent.network=core-agent-egress",
     "core-agent-egress",
   ]);
+  const selectivelyCreatedNetworks = await network.prepareRuntimeNetwork({ runDocker: async (args) => {
+    if (args[0] === "context") return '"unix:///var/run/docker.sock"\n';
+    if (args[1] === "ls") return args[3].includes("egress") ? "core-agent-egress\n" : "";
+    if (args[1] === "create") return "core-agent-backplane\n";
+    return args.at(-1) === "core-agent-egress" ? egressInspection : backplaneInspection;
+  } });
+  assert.deepEqual(selectivelyCreatedNetworks, ["core-agent-backplane"]);
   const drifted = JSON.stringify({ ...JSON.parse(egressInspection), Internal: true });
   await assert.rejects(
     network.prepareRuntimeNetwork({ runDocker: async (args) => {
@@ -1675,7 +1690,8 @@ test("Web consultant demo stays loopback-only, synthetic-only, and CI-gated", as
   assert.match(runbook, /New Conversation/u);
   assert.match(runbook, /API\/Worker restart/u);
   assert.match(workflow, /web-browser:/u);
-  assert.match(workflow, /npx playwright install --with-deps chromium/u);
+  assert.match(workflow, /npx playwright install chromium/u);
+  assert.doesNotMatch(workflow, /playwright install --with-deps/u);
   assert.match(workflow, /npm run test:browser -w @core-agent\/control-plane-web/u);
   assert.match(main, /host: "127\.0\.0\.1"/u);
   assert.match(gateway, /\/client\/v1\/conversations/u);

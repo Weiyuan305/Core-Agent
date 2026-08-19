@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { chmod, lstat, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -22,6 +23,7 @@ import { RuntimeSupervisorServer } from "../src/server.js";
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const imageRef = `managed/runtime@sha256:${"a".repeat(64)}`;
 const singletonLockName = ".core-agent-runtime-supervisor.lock";
+const socketTestTempRoot = process.platform === "darwin" ? "/private/tmp" : tmpdir();
 
 function request(operationId: string): SupervisorRequestV1 {
   const data = {
@@ -133,15 +135,18 @@ async function waitForTestSignal(signal: Promise<void>, label: string): Promise<
 }
 
 let temporaryRoot: string;
+let socketRoot: string;
 let socketPath: string;
 
 test.beforeEach(async () => {
   temporaryRoot = await mkdtemp(join(repositoryRoot, ".supervisor-server-test-"));
-  socketPath = join(temporaryRoot, "supervisor.sock");
+  socketRoot = await mkdtemp(join(socketTestTempRoot, "core-supervisor-socket-"));
+  socketPath = join(socketRoot, "supervisor.sock");
 });
 
 test.afterEach(async () => {
   await rm(temporaryRoot, { recursive: true, force: true });
+  await rm(socketRoot, { recursive: true, force: true });
 });
 
 function buildServer(
@@ -220,7 +225,7 @@ test("concurrent Supervisor starts elect exactly one singleton owner before bind
   const second = buildServer(async (value) => accepted(value.operation_id));
   const starts = await Promise.allSettled([first.start(), second.start()]);
   const winners = starts.flatMap((result, index) => result.status === "fulfilled" ? [index] : []);
-  const lockPath = join(temporaryRoot, singletonLockName);
+  const lockPath = join(socketRoot, singletonLockName);
   try {
     assert.equal(winners.length, 1);
     assert.equal((await lstat(lockPath)).mode & 0o777, 0o600);
@@ -250,7 +255,7 @@ test("a second Supervisor cannot disturb the first live owner or its socket", as
 });
 
 test("Supervisor recovers only a dead-PID singleton record and releases its nonce", async () => {
-  const lockPath = join(temporaryRoot, singletonLockName);
+  const lockPath = join(socketRoot, singletonLockName);
   await writeFile(lockPath, `${JSON.stringify({
     protocol_version: 1,
     pid: 2_147_483_647,
@@ -271,7 +276,7 @@ test("Supervisor never unlinks a connectable current-uid socket after stale-lock
     raw.once("error", reject);
     raw.listen(socketPath, resolve);
   });
-  const lockPath = join(temporaryRoot, singletonLockName);
+  const lockPath = join(socketRoot, singletonLockName);
   await writeFile(lockPath, `${JSON.stringify({
     protocol_version: 1,
     pid: 2_147_483_647,
@@ -288,9 +293,9 @@ test("Supervisor never unlinks a connectable current-uid socket after stale-lock
 });
 
 test("Unix service refuses unsafe parents and never unlinks a non-socket", async () => {
-  await chmod(temporaryRoot, 0o777);
+  await chmod(socketRoot, 0o777);
   await assert.rejects(buildServer(async (value) => accepted(value.operation_id)).start(), /SUPERVISOR_REJECTED/);
-  await chmod(temporaryRoot, 0o700);
+  await chmod(socketRoot, 0o700);
 
   await writeFile(socketPath, "preserve-me", { mode: 0o600 });
   await assert.rejects(buildServer(async (value) => accepted(value.operation_id)).start(), /SUPERVISOR_REJECTED/);
@@ -508,7 +513,7 @@ test("Unix service caps execution at four and waits for abort settlement before 
     await capped.close();
   }
 
-  socketPath = join(temporaryRoot, "deadline.sock");
+  socketPath = join(socketRoot, "deadline.sock");
   let aborted = false;
   let dispatches = 0;
   let mutations = 0;

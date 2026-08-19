@@ -100,6 +100,7 @@ function validateInspection(raw, contract) {
 export async function prepareRuntimeNetwork({ environment = process.env, runDocker } = {}) {
   assertLocalDockerEnvironment(environment);
   const invokeDocker = runDocker ?? ((args) => docker(args, environment));
+  const createdNetworks = [];
   await assertSelectedLocalDockerContext(invokeDocker);
   for (const contract of networkContracts) {
     const listed = (await invokeDocker([
@@ -120,11 +121,13 @@ export async function prepareRuntimeNetwork({ environment = process.env, runDock
         "--label", `core-agent.network=${contract.name}`,
         contract.name,
       ]);
+      createdNetworks.push(contract.name);
     }
     validateInspection(await invokeDocker([
       "network", "inspect", "--format", "{{json .}}", contract.name,
     ]), contract);
   }
+  return Object.freeze(createdNetworks);
 }
 
 async function main() {

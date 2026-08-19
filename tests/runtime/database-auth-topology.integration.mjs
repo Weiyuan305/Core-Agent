@@ -16,6 +16,14 @@ const lock = JSON.parse(await import("node:fs/promises").then(({ readFile }) => 
 )));
 const platform = process.arch === "arm64" ? "linux/arm64" : "linux/amd64";
 const { prepareRuntimePaths } = await import("../../scripts/prepare-runtime-paths.mjs");
+const { prepareRuntimeNetwork } = await import("../../scripts/prepare-runtime-network.mjs");
+const migrationVersions = (await readdir(join(repositoryRoot, "packages/runtime-core/migrations")))
+  .map((name) => /^(\d{3})_[a-z0-9_-]+\.sql$/u.exec(name))
+  .filter((match) => match !== null)
+  .map((match) => Number(match[1]));
+const expectedSchemaVersion = Math.max(...migrationVersions);
+assert(Number.isSafeInteger(expectedSchemaVersion) && expectedSchemaVersion > 0);
+const expectedApplicationIdentity = new RegExp(`core_agent_app\\|${expectedSchemaVersion}`, "u");
 
 function safeResult(result, credentials) {
   const output = Buffer.concat([result.stdout ?? Buffer.alloc(0), result.stderr ?? Buffer.alloc(0)]);
@@ -141,8 +149,10 @@ async function scenario(kind) {
 
   const docker = (...args) => command(args, childEnvironment, credentialValues);
   const compose = (...args) => docker(...composeArguments(project, ...args));
+  let createdNetworks = [];
   let scenarioFailure;
   try {
+    createdNetworks = await prepareRuntimeNetwork({ environment: childEnvironment });
     if (kind === "legacy") {
       docker(
         "volume", "create",
@@ -365,7 +375,7 @@ SQL`,
     `;
     for (const service of ["api", "worker"]) {
       const result = compose("run", "--rm", "--no-deps", "--entrypoint", "node", service, "--input-type=module", "--eval", applicationProbe).trim();
-      assert.match(result, /core_agent_app\|10/u, service);
+      assert.match(result, expectedApplicationIdentity, service);
       compose(
         "run", "--rm", "--no-deps", "--entrypoint", "sh", service, "-ceu",
         "test -f /run/core-agent/database-credentials/database-password; test -r /run/core-agent/database-credentials/database-password; test ! -e /run/core-agent/database-credentials/identity-password; test ! -e /run/core-agent/database-credentials/bootstrap-password; test ! -e /run/core-agent/projected",
@@ -433,13 +443,13 @@ SQL`,
         "--user", "0:0", "--entrypoint", "sh", "postgres", "-ceu",
         "unset PGPASSWORD; export PGPASSFILE=/run/unavailable; exec psql -X -w -h postgres -U core_agent_app -d core_agent_runtime -Atc 'select current_user'",
       );
-      assert.match(compose("run", "--rm", "--no-deps", "--entrypoint", "node", "api", "--input-type=module", "--eval", applicationProbe), /core_agent_app\|10/u);
+      assert.match(compose("run", "--rm", "--no-deps", "--entrypoint", "node", "api", "--input-type=module", "--eval", applicationProbe), expectedApplicationIdentity);
     }
 
     for (const service of ["database-credential-projector", "identity-role-bootstrap", "postgres-auth-convergence", "migrate"]) {
       compose("run", "--rm", "--no-deps", service);
     }
-    assert.match(compose("run", "--rm", "--no-deps", "--entrypoint", "node", "api", "--input-type=module", "--eval", applicationProbe), /core_agent_app\|10/u);
+    assert.match(compose("run", "--rm", "--no-deps", "--entrypoint", "node", "api", "--input-type=module", "--eval", applicationProbe), expectedApplicationIdentity);
   } catch (error) {
     scenarioFailure = error;
   }
@@ -458,6 +468,19 @@ SQL`,
         credentialValues,
         /No such container/iu,
       ),
+    },
+    {
+      category: "runtime_network_remove",
+      work: async () => {
+        for (const network of createdNetworks.toReversed()) {
+          cleanupDocker(
+            ["network", "rm", network],
+            childEnvironment,
+            credentialValues,
+            /No such network/iu,
+          );
+        }
+      },
     },
     {
       category: "postgres_volume_remove",

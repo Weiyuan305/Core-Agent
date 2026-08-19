@@ -7,6 +7,8 @@ implementation in this same file once that phase ships.
 """
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from hermes_cli.service_manager import (
@@ -192,6 +194,7 @@ def fake_subprocess_run(monkeypatch: pytest.MonkeyPatch):
 # tests/docker/test_s6_profile_gateway_integration.py.
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="s6 supervise modes are Linux-only")
 def test_seed_supervise_skeleton_creates_expected_layout(tmp_path) -> None:
     """Verifies the dirs + FIFO + modes the helper lays down."""
     import stat
@@ -284,6 +287,28 @@ def test_render_finish_script_exits_125_on_ex_config() -> None:
     assert '[ "$1" = "78" ]' in text
     assert "exit 125" in text
     assert "exit 0" in text
+
+
+def test_render_finish_script_does_not_restart_on_clean_exit(tmp_path) -> None:
+    """Behavioral: the rendered finish script, executed for each run-exit
+    code, must exit 125 (no restart) for clean exit 0 and EX_CONFIG 78,
+    and exit 0 (restart) for genuine crashes (#76435 — restart-on-normal-
+    exit turned a supervised gateway into a reconnect storm)."""
+    import subprocess
+
+    script = tmp_path / "finish"
+    script.write_text(S6ServiceManager._render_finish_script())
+    script.chmod(0o755)
+
+    def finish_exit(run_exit_code: int) -> int:
+        proc = subprocess.run(["sh", str(script), str(run_exit_code)],
+                              capture_output=True)
+        return proc.returncode
+
+    assert finish_exit(0) == 125   # clean stop — no restart
+    assert finish_exit(78) == 125  # fatal config — no restart
+    assert finish_exit(1) == 0     # crash — s6 restarts
+    assert finish_exit(137) == 0   # SIGKILL crash — s6 restarts
 
 
 
@@ -487,5 +512,3 @@ def test_s6_log_run_never_invokes_chown_with_symlinked_log_dir(tmp_path) -> None
     assert after.st_gid == before.st_gid
     assert (victim / "marker").read_text(encoding="utf-8") == "keep"
     assert (victim / "lock").read_text(encoding="utf-8") == "keep-lock"
-
-

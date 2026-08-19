@@ -84,7 +84,7 @@ jobs:
         run: npm run contracts:build
 
       - name: Install pinned Chromium
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
 
       - name: Run consultant Web browser acceptance
         run: npm run test:browser -w @core-agent/control-plane-web
@@ -94,7 +94,7 @@ jobs:
     timeout-minutes: 15
     services:
       postgres:
-        image: postgres:17-bookworm@sha256:6e5a6518f9d2ff9e9f4cba2a5a87d8f41b0f067f6f92ac847c344351a6c8d923
+        image: postgres:17-bookworm@sha256:07edf880f0cf3f742c990d23faf92cb19e84923a8bce30f7d8e1a8ab63cae7b3
         ports:
           - 5432:5432
         env:
@@ -152,7 +152,7 @@ jobs:
     timeout-minutes: 20
     services:
       postgres:
-        image: postgres:17-bookworm@sha256:6e5a6518f9d2ff9e9f4cba2a5a87d8f41b0f067f6f92ac847c344351a6c8d923
+        image: postgres:17-bookworm@sha256:07edf880f0cf3f742c990d23faf92cb19e84923a8bce30f7d8e1a8ab63cae7b3
         ports:
           - 5432:5432
         env:
@@ -221,8 +221,8 @@ jobs:
       - name: Install pinned dependencies
         run: npm ci
 
-      - name: Build shared contracts
-        run: npm run contracts:build
+      - name: Build runtime dependencies
+        run: npm run build:runtime-deps
 
       - name: Resolve approved image tags and reject lock drift
         run: |

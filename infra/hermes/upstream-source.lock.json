@@ -1,11 +1,11 @@
 {
   "license": "MIT",
   "license_sha256": "821556e6336796450ab852d375117b48a4887e71d255794fd6318d99982a5ab6",
-  "product_tree": "d14fc8ade54364ab43c5d541f95c5c3458551075",
+  "product_tree": "bfafc6b857d42acd076f8dfdee6e96ebac383b97",
   "schema_version": 1,
   "source_mode": "git-subtree-squash",
-  "upstream_commit": "cc4cab2f592e60a197e796506de9168f74baf3ea",
-  "upstream_ref": "refs/tags/v2026.7.30",
+  "upstream_commit": "e624e9fde561e1add9388384012b295fde669ade",
+  "upstream_ref": "refs/tags/v2026.8.18",
   "upstream_repository": "https://github.com/NousResearch/hermes-agent.git",
-  "upstream_tree": "fcdc6093750ed0a3a556e20927799d7245ba65e4"
+  "upstream_tree": "99270c7e45ccf1669314dc7dd591ce5c6fb3a412"
 }

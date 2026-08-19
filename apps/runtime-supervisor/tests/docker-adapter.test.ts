@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, rmdir, stat, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -31,6 +32,7 @@ import { deriveRuntimeNames, validateSupervisorPolicy } from "../src/policy.js";
 import { RuntimeSupervisorServer } from "../src/server.js";
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+const socketTestTempRoot = process.platform === "darwin" ? "/private/tmp" : tmpdir();
 const imageLock = JSON.parse(await readFile(join(repositoryRoot, "infra", "hermes", "base-images.lock.json"), "utf8")) as unknown;
 const providerCatalog = loadProviderCatalog(JSON.parse(await readFile(join(repositoryRoot, "infra", "runtime", "providers.dev.json"), "utf8")));
 const imageRef = `nousresearch/hermes-agent:v2026.7.30@sha256:${"5316c2c2534c49f5e1b1691e1a2115f1230d900033c3b35d1c8fc2e47352b26d"}`;
@@ -553,12 +555,15 @@ class FakeDocker {
 }
 
 let temporaryRoot: string;
+let socketRoot: string;
 
 test.beforeEach(async () => {
   temporaryRoot = await mkdtemp(join(repositoryRoot, ".supervisor-adapter-test-"));
+  socketRoot = await mkdtemp(join(socketTestTempRoot, "core-supervisor-sockets-"));
 });
 
 test.afterEach(async () => {
+  await rm(socketRoot, { recursive: true, force: true });
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       await rm(temporaryRoot, { recursive: true, force: true });
@@ -1195,7 +1200,7 @@ test("pending lifecycle stages recover applied response-less mutations without r
     const caseRoot = join(temporaryRoot, `lifecycle-recovery-${kind}`);
     await mkdir(caseRoot, { mode: 0o700 });
     const journalRoot = join(caseRoot, "journal");
-    const socketPath = join(temporaryRoot, `s${index}.sock`);
+    const socketPath = join(socketRoot, `s${index}.sock`);
     const docker = new FakeDocker();
     const first = buildAdapter(docker);
     const provisionRequest = recoveryProvision(index);
@@ -1283,8 +1288,8 @@ test("pending lifecycle stages recover applied response-less mutations without r
 test("an admission transient retains a pending non-reserved stage for recovery", async () => {
   const caseRoot = join(temporaryRoot, "staged-admission-recovery");
   const journalRoot = join(caseRoot, "journal");
-  const firstSocket = join(temporaryRoot, "sa1.sock");
-  const recoveredSocket = join(temporaryRoot, "sa2.sock");
+  const firstSocket = join(socketRoot, "sa1.sock");
+  const recoveredSocket = join(socketRoot, "sa2.sock");
   await mkdir(caseRoot, { mode: 0o700 });
   const docker = new FakeDocker();
   const first = buildAdapter(docker);
@@ -1401,7 +1406,7 @@ test("abort while a lifecycle stage advance is blocked prevents mutation and lea
 test("restart recovers response-less stop from stop_pending without a duplicate stop", async () => {
   const caseRoot = join(temporaryRoot, "restart-stop-pending");
   const journalRoot = join(caseRoot, "journal");
-  const socketPath = join(temporaryRoot, "rs.sock");
+  const socketPath = join(socketRoot, "rs.sock");
   await mkdir(caseRoot, { mode: 0o700 });
   const docker = new FakeDocker();
   const first = buildAdapter(docker);
@@ -1444,7 +1449,7 @@ test("restart recovers response-less stop from stop_pending without a duplicate 
 test("restart recovers start_pending after a durable transition and crash before start dispatch", async () => {
   const caseRoot = join(temporaryRoot, "restart-transition-crash");
   const journalRoot = join(caseRoot, "journal");
-  const socketPath = join(temporaryRoot, "rt.sock");
+  const socketPath = join(socketRoot, "rt.sock");
   await mkdir(caseRoot, { mode: 0o700 });
   const docker = new FakeDocker();
   const first = buildAdapter(docker);
@@ -1478,7 +1483,7 @@ test("restart recovers start_pending after a durable transition and crash before
 test("restart recovers an applied response-less start from start_pending without replay", async () => {
   const caseRoot = join(temporaryRoot, "restart-start-pending");
   const journalRoot = join(caseRoot, "journal");
-  const socketPath = join(temporaryRoot, "ra.sock");
+  const socketPath = join(socketRoot, "ra.sock");
   await mkdir(caseRoot, { mode: 0o700 });
   const docker = new FakeDocker();
   const first = buildAdapter(docker);
