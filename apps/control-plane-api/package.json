@@ -6,7 +6,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/server.js",
-    "test": "node --import tsx --test --test-concurrency=1 tests/auth.test.ts tests/health.test.ts tests/lifecycle.test.ts tests/identity-fixtures-static.test.ts",
+    "test": "node --import tsx --test --test-concurrency=1 tests/auth.test.ts tests/trusted-context-auth.test.ts tests/health.test.ts tests/lifecycle.test.ts tests/identity-fixtures-static.test.ts",
     "test:postgres": "node --import tsx --test --test-concurrency=1 tests/provisioning.test.ts tests/runtime.test.ts tests/conversations.test.ts tests/runs.test.ts tests/events.test.ts",
     "check": "npm run build && npm test"
   },

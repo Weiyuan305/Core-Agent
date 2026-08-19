@@ -30,6 +30,10 @@ import { registerConversationRoutes } from "./routes/conversations.js";
 import { registerRunRoutes } from "./routes/runs.js";
 import { registerEventRoutes } from "./routes/events.js";
 import { BoundedTimerEventNotifier, type EventNotifier } from "./sse.js";
+import {
+  authenticateTrustedContextRequest,
+  type AuthenticateTrustedContextDependencies,
+} from "./trusted-context-auth.js";
 
 export const MAX_API_BODY_BYTES = 64 * 1024;
 export const MAX_API_HEADER_BYTES = 16 * 1024;
@@ -47,6 +51,7 @@ declare module "fastify" {
 
   interface FastifyContextConfig {
     tenantScoped?: boolean;
+    authentication?: "bootstrap" | "trusted_context";
   }
 }
 
@@ -57,6 +62,7 @@ export interface ControlPlaneAppDependencies extends HealthDependencies {
   readonly logger: FastifyBaseLogger;
   readonly redactor: Redactor;
   readonly eventNotifier?: EventNotifier;
+  readonly trustedContext?: Omit<AuthenticateTrustedContextDependencies, "db">;
 }
 
 export async function cleanupFailedAppStartup(
@@ -109,14 +115,30 @@ export async function buildControlPlaneApp(dependencies: ControlPlaneAppDependen
         traceId: `trace_${randomUUID()}`,
       });
       if (!isProtectedRequest(request)) return;
-      request.apiContext = authenticateBootstrapRequest({
-        configuredDigest: bootstrapDigest,
-        headers: request.headers,
-        rawHeaders: request.raw.rawHeaders,
-        tenantScoped: request.routeOptions.config.tenantScoped === true,
-        requestId: request.apiIdentifiers.requestId,
-        traceId: request.apiIdentifiers.traceId,
-      });
+      request.apiContext = request.routeOptions.config.authentication === "trusted_context"
+        ? await authenticateTrustedContextRequest({
+          db: dependencies.db,
+          keys: dependencies.trustedContext?.keys ?? [],
+          expectedIssuer: dependencies.trustedContext?.expectedIssuer ?? "identity-gateway",
+          expectedAudience: dependencies.trustedContext?.expectedAudience ?? "control-plane-api",
+          ...(dependencies.trustedContext?.clockSkewMs === undefined ? {} : {
+            clockSkewMs: dependencies.trustedContext.clockSkewMs,
+          }),
+          ...(dependencies.trustedContext?.databaseNow === undefined ? {} : {
+            databaseNow: dependencies.trustedContext.databaseNow,
+          }),
+          ...(dependencies.trustedContext?.loadCurrentAuthority === undefined ? {} : {
+            loadCurrentAuthority: dependencies.trustedContext.loadCurrentAuthority,
+          }),
+        }, { headers: request.headers, rawHeaders: request.raw.rawHeaders })
+        : authenticateBootstrapRequest({
+          configuredDigest: bootstrapDigest,
+          headers: request.headers,
+          rawHeaders: request.raw.rawHeaders,
+          tenantScoped: request.routeOptions.config.tenantScoped === true,
+          requestId: request.apiIdentifiers.requestId,
+          traceId: request.apiIdentifiers.traceId,
+        });
     });
 
     app.setNotFoundHandler(async () => {

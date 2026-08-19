@@ -26,7 +26,7 @@ import {
 } from "../domain/idempotency.js";
 import { appendAuditEvent, appendProductEvents } from "../repositories/events.js";
 import { ResourceRepositories } from "../repositories/index.js";
-import { deriveRuntimeContainerId, type ProvisioningContext } from "./provision-tenant.js";
+import { deriveRuntimeContainerId } from "./provision-tenant.js";
 
 export interface CreateAgentRunDependencies {
   readonly db: Kysely<RuntimeDatabase>;
@@ -34,7 +34,14 @@ export interface CreateAgentRunDependencies {
   readonly now?: () => Date;
 }
 
-export type CreateAgentRunContext = ProvisioningContext;
+export interface CreateAgentRunContext {
+  readonly tenantId: string;
+  readonly requestId: string;
+  readonly traceId: string;
+  readonly actorId: string;
+  readonly membershipId: string;
+  readonly effectiveRole: "admin" | "consultant" | "student";
+}
 
 const requestValidator = Schema.Compile(CreateAgentRunRequestSchema);
 const responseValidator = Schema.Compile(AgentRunSchema);
@@ -79,7 +86,7 @@ function digest(parts: readonly string[]): string {
   return createHash("sha256").update(parts.join(":"), "utf8").digest("hex").slice(0, 32);
 }
 
-function deriveRunId(tenantId: string, conversationId: string, request: CreateAgentRunRequest): string {
+export function deriveAgentRunId(tenantId: string, conversationId: string, request: CreateAgentRunRequest): string {
   return `run_${digest([
     tenantId,
     conversationId,
@@ -151,7 +158,7 @@ export async function createAgentRun(
   if (typeof conversationId !== "string" || conversationId.length < 1 || conversationId.length > 255) notFound();
   if (request.payload_hash !== canonicalPayloadHash(payloadWithoutHash(request))) invalid("Payload hash does not match the canonical request");
   const tenantId = context.tenantId;
-  const runId = deriveRunId(tenantId, conversationId, request);
+  const runId = deriveAgentRunId(tenantId, conversationId, request);
   const messageId = deriveMessageId(tenantId, conversationId, request.input_message.client_message_id);
 
   try {
@@ -171,7 +178,7 @@ export async function createAgentRun(
       if (
         tenant?.status !== "active"
         || conversation === undefined
-        || actor?.actor_kind !== "service"
+        || (actor?.actor_kind !== "service" && actor?.actor_kind !== "human")
         || actor.status !== "active"
         || conversation.created_by_actor_id !== context.actorId
         || membership?.actor_id !== context.actorId

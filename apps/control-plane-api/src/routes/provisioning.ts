@@ -1,5 +1,6 @@
 import {
   TenantProvisioningRequestSchema,
+  DomainError,
   provisionTenant,
   type ProviderCatalog,
   type RuntimeDatabase,
@@ -23,6 +24,9 @@ export async function registerProvisioningRoutes(
     schema: { body: TenantProvisioningRequestSchema },
   }, async (request, reply) => {
     const context = request.apiContext;
+    if ("authenticationKind" in context) {
+      throw new DomainError("UNAUTHENTICATED", "Trusted context cannot access bootstrap provisioning");
+    }
     const response = await provisionTenant(
       dependencies,
       {

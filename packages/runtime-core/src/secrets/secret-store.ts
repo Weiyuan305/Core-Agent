@@ -2,6 +2,7 @@ export const secretPurposes = [
   "model_provider",
   "hermes_ingress",
   "bootstrap_service",
+  "identity_signing",
 ] as const;
 
 export type SecretPurpose = (typeof secretPurposes)[number];
@@ -14,6 +15,7 @@ export interface SecretReference {
 
 export interface SecretMaterial {
   readonly reference: SecretReference;
+  withBytes<T>(consumer: (bytes: Uint8Array) => T): T;
   text(): string;
   release(): void;
 }

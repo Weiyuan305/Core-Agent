@@ -26,7 +26,7 @@ import {
 } from "../domain/idempotency.js";
 import { appendAuditEvent, appendProductEvents } from "../repositories/events.js";
 import { ResourceRepositories } from "../repositories/index.js";
-import { deriveRuntimeContainerId, type ProvisioningContext } from "./provision-tenant.js";
+import { deriveRuntimeContainerId } from "./provision-tenant.js";
 
 const CreateConversationServiceRequestSchema = Type.Object({
   schema_version: Type.Literal(1),
@@ -53,7 +53,14 @@ export interface CreateConversationDependencies {
   readonly now?: () => Date;
 }
 
-export type CreateConversationContext = ProvisioningContext;
+export interface CreateConversationContext {
+  readonly tenantId: string;
+  readonly requestId: string;
+  readonly traceId: string;
+  readonly actorId: string;
+  readonly membershipId: string;
+  readonly effectiveRole: "admin" | "consultant" | "student";
+}
 
 const requestValidator = Schema.Compile(CreateConversationServiceRequestSchema);
 const responseValidator = Schema.Compile(ConversationSchema);
@@ -78,6 +85,10 @@ function deriveId(prefix: string, tenantId: string, idempotencyKey: string): str
     .digest("hex")
     .slice(0, 32);
   return `${prefix}_${digest}`;
+}
+
+export function deriveConversationId(tenantId: string, idempotencyKey: string): string {
+  return deriveId("conversation", tenantId, idempotencyKey);
 }
 
 function payloadWithoutHash(request: CreateConversationRequest): Omit<CreateConversationRequest, "payload_hash"> {
@@ -125,7 +136,7 @@ export async function createConversation(
   if (request.payload_hash !== canonicalPayloadHash(payloadWithoutHash(request))) invalid("Payload hash does not match the canonical request");
 
   const tenantId = context.tenantId;
-  const conversationId = deriveId("conversation", tenantId, request.idempotency_key);
+  const conversationId = deriveConversationId(tenantId, request.idempotency_key);
   const sessionId = deriveId("session", tenantId, request.idempotency_key);
   const hermesSessionRef = deriveId("hermes_session", tenantId, request.idempotency_key);
 
@@ -150,7 +161,7 @@ export async function createConversation(
       tenant?.status !== "active"
       || profile === undefined
       || runtime === undefined
-      || actor?.actor_kind !== "service"
+      || (actor?.actor_kind !== "service" && actor?.actor_kind !== "human")
       || actor.status !== "active"
       || membership?.actor_id !== context.actorId
       || membership.status !== "active"

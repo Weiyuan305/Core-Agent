@@ -57,6 +57,7 @@ test("Supervisor routes only provider and ingress references to purpose-scoped p
   const calls: string[] = [];
   const material = {
     reference: { reference_id: "material", version: 1, purpose: "model_provider" as const },
+    withBytes: <T>(consumer: (bytes: Uint8Array) => T) => consumer(Buffer.from("x", "utf8")),
     text: () => "x",
     release: () => undefined,
   };

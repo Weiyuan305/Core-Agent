@@ -231,6 +231,24 @@ export {
   type ConsumePublicRateLimitInput,
   type PublicRateLimitBucketKind,
 } from "./repositories/identity/public-rate-limits.js";
+export { canonicalJson } from "./services/identity/canonical-json.js";
+export {
+  decodeSignedTrustedContext,
+  encodeSignedTrustedContext,
+  assertTrustedContextAgentRunAdmission,
+  createIdentityBootstrapEntitlementSnapshotAuthorityPort,
+  issueTrustedContext,
+  loadIdentitySigningPrivateKey,
+  resolveTrustedContextPublicKey,
+  verifyTrustedContextSignature,
+  type ResolveTrustedContextPublicKeyInput,
+  type CurrentEntitlementSnapshotAuthority,
+  type EntitlementSnapshotAuthorityPort,
+  type IssueTrustedContextDependencies,
+  type IssueTrustedContextInput,
+  type TrustedContextPublicKey,
+  type VerifyTrustedContextSignatureInput,
+} from "./services/identity/trusted-context.js";
 export {
   beginEmailVerificationTransaction,
   admitEmailVerificationProviderAttempt,
@@ -356,12 +374,14 @@ export {
 } from "./services/command-runtime.js";
 export {
   createConversation,
+  deriveConversationId,
   type CreateConversationContext,
   type CreateConversationDependencies,
   type CreateConversationRequest,
 } from "./services/create-conversation.js";
 export {
   createAgentRun,
+  deriveAgentRunId,
   getAgentRun,
   type CreateAgentRunContext,
   type CreateAgentRunDependencies,

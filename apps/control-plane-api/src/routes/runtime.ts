@@ -1,6 +1,7 @@
 import {
   RuntimeCommandRequestSchema,
   commandRuntime,
+  DomainError,
   getTenantRuntime,
   type RuntimeCommandRequest,
   type RuntimeDatabase,
@@ -32,6 +33,9 @@ export async function registerRuntimeRoutes(app: FastifyInstance, dependencies: 
       await getTenantRuntime(dependencies.db, request.apiContext.tenantId!, request.params.tenant_id);
     }
     const context = request.apiContext;
+    if ("authenticationKind" in context) {
+      throw new DomainError("UNAUTHENTICATED", "Trusted context cannot access runtime operations");
+    }
     const response = await commandRuntime(dependencies, {
       tenantId: context.tenantId!, requestId: context.requestId, traceId: context.traceId,
       actorId: context.actorId, membershipId: context.membershipId, effectiveRole: context.effectiveRole,

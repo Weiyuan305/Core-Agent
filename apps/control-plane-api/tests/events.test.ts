@@ -18,11 +18,11 @@ import {
   type EventWaitInput,
 } from "../src/sse.js";
 import {
-  bootstrapKey,
   buildHttpAdmissionApp,
   createRuntimeDatabase,
   resetHttpAdmissionDatabase,
   seedHttpReadyTenant,
+  trustedContextHeaders,
 } from "./admission-http-test-support.js";
 
 const databaseUrl = process.env.CONTROL_PLANE_TEST_DATABASE_URL;
@@ -171,8 +171,12 @@ async function collectSse(
         options.afterSequence === undefined ? "" : `?after_sequence=${encodeURIComponent(options.afterSequence)}`
       }`,
       headers: {
-        authorization: `Bearer ${bootstrapKey}`,
-        "x-core-agent-tenant-id": tenantId,
+        ...trustedContextHeaders({
+          tenantId,
+          profileId: `profile_${tenantId}`,
+          conversationId,
+          runId: `run_context_${conversationId}`,
+        }),
         ...options.headers,
       },
     });
@@ -247,6 +251,51 @@ test("SSE conversation events route is registered", async () => {
   } finally {
     await app.close();
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("SSE conversation stream closes when its trusted context expires", async () => {
+  await resetHttpAdmissionDatabase(pool);
+  const tenantId = "tenant_http_events_expiry";
+  const conversationId = "expiry_1";
+  await seedConversationAndRun(tenantId, conversationId);
+  const notifier = new ManualEventNotifier();
+  const built = await buildHttpAdmissionApp(databaseUrl, db, { eventNotifier: notifier });
+  try {
+    const endpoint = await listen(built.app);
+    const headers = trustedContextHeaders({
+      tenantId,
+      profileId: `profile_${tenantId}`,
+      conversationId,
+      runId: `run_context_${conversationId}`,
+      issuedAt: "2026-08-05T01:59:59.900Z",
+      expiresAt: "2026-08-05T02:00:00.100Z",
+    });
+    await new Promise<void>((resolve, reject) => {
+      const request = httpRequest({
+        ...endpoint,
+        method: "GET",
+        path: `/internal/v1/conversations/${conversationId}/events`,
+        headers,
+      });
+      const timeout = setTimeout(() => {
+        request.destroy();
+        reject(new Error("SSE stream outlived its trusted context"));
+      }, 1_500);
+      request.once("error", reject);
+      request.once("response", (response) => {
+        assert.equal(response.statusCode, 200);
+        response.resume();
+        response.once("end", () => {
+          clearTimeout(timeout);
+          resolve();
+        });
+      });
+      request.end();
+    });
+  } finally {
+    await built.app.close();
+    await rm(built.directory, { recursive: true, force: true });
   }
 });
 
@@ -438,17 +487,27 @@ test("cross-tenant conversation and invalid cursor fail with JSON before SSE hea
     const crossTenant = await app.inject({
       method: "GET",
       url: `/internal/v1/conversations/${conversationId}/events`,
-      headers: { authorization: `Bearer ${bootstrapKey}`, "x-core-agent-tenant-id": "tenant_other" },
+      headers: trustedContextHeaders({
+        tenantId: "tenant_other", profileId: "profile_tenant_other", conversationId,
+        runId: "run_context_errors",
+      }),
     });
     const absent = await app.inject({
       method: "GET",
       url: "/internal/v1/conversations/absent/events",
-      headers: { authorization: `Bearer ${bootstrapKey}`, "x-core-agent-tenant-id": tenantId },
+      headers: trustedContextHeaders({
+        tenantId, profileId: `profile_${tenantId}`, conversationId: "absent", runId: "run_context_absent",
+      }),
     });
     const invalidCursor = await app.inject({
       method: "GET",
       url: `/internal/v1/conversations/${conversationId}/events`,
-      headers: { authorization: `Bearer ${bootstrapKey}`, "x-core-agent-tenant-id": tenantId, "last-event-id": "01" },
+      headers: {
+        ...trustedContextHeaders({
+          tenantId, profileId: `profile_${tenantId}`, conversationId, runId: "run_context_errors",
+        }),
+        "last-event-id": "01",
+      },
     });
     assert.equal(crossTenant.statusCode, 404);
     assert.equal(absent.statusCode, 404);

@@ -129,7 +129,7 @@ test("forged cross-tenant Profile binding hides foreign existence", async () => 
     absentRequest,
   );
   assert.deepEqual(foreign, absent);
-  assert.equal(foreign.code, "RESOURCE_NOT_FOUND");
+  assert.equal(foreign.code, "UNAUTHENTICATED");
 });
 
 test("cross-tenant Run access hides foreign existence", async () => {

@@ -45,6 +45,11 @@ class BufferedSecretMaterial implements SecretMaterial {
     return this.#buffer.toString("utf8");
   }
 
+  public withBytes<T>(consumer: (bytes: Uint8Array) => T): T {
+    if (this.#released) throw new Error("Secret material has been released");
+    return consumer(this.#buffer);
+  }
+
   /**
    * Clears this private Buffer and revokes reads. This is best-effort lifetime
    * control only; it does not claim physical zeroization of JavaScript memory.
@@ -147,8 +152,8 @@ async function boundedRead(handle: FileHandle): Promise<Buffer> {
   }
 }
 
-function validateSecretContent(buffer: Buffer): void {
-  if (buffer.includes(0x00) || buffer.includes(0x0a) || buffer.includes(0x0d)) {
+function validateSecretContent(buffer: Buffer, purpose: SecretReference["purpose"]): void {
+  if (buffer.includes(0x00) || purpose !== "identity_signing" && (buffer.includes(0x0a) || buffer.includes(0x0d))) {
     throw fixedFileError("Secret file contains invalid line data");
   }
   try {
@@ -229,7 +234,7 @@ export class FileSecretStore implements SecretStore {
           }
           await this.#assertOpenedPathStable(path, after);
           await this.#assertRootStable(canonicalRoot, rootHandle, rootMetadata);
-          validateSecretContent(privateBuffer);
+          validateSecretContent(privateBuffer, reference.purpose);
           material = new BufferedSecretMaterial(reference, privateBuffer);
           return material;
         } catch (error) {

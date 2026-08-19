@@ -11,6 +11,7 @@ function material(value = "synthetic-ingress-key-00000001") {
   let releases = 0;
   const secret: SecretMaterial = {
     reference: { reference_id: "ingress_test", version: 1, purpose: "hermes_ingress" },
+    withBytes: (consumer) => consumer(Buffer.from(value, "utf8")),
     text: () => value,
     release: () => { releases += 1; },
   };

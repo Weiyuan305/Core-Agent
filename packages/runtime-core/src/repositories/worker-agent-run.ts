@@ -190,14 +190,23 @@ export class WorkerAgentRunRepository {
       if (run === undefined || run.conversation_id !== conversationId) throw new Error("Stored Agent Run execution identity is unavailable");
       const claimed = await lockedOwnedJob(trx, job);
       if (claimed.effect_state !== "pre_effect") throw new Error("Unsafe Agent execution cannot begin");
-      const actor = await trx.selectFrom("actors").select(["actor_kind", "status"])
+      const workerActor = await trx.selectFrom("actors").select(["actor_kind", "status"])
+        .where("actor_id", "=", workerActorId).forShare().executeTakeFirst();
+      const conversationActor = await trx.selectFrom("actors").select(["actor_kind", "status"])
         .where("actor_id", "=", conversation.created_by_actor_id).forShare().executeTakeFirst();
-      const membership = await trx.selectFrom("memberships").select(["actor_id", "roles", "status"]).where("tenant_id", "=", job.tenantId)
+      const workerMembership = await trx.selectFrom("memberships").select(["actor_id", "roles", "status"]).where("tenant_id", "=", job.tenantId)
         .where("membership_id", "=", workerMembershipId).forShare().executeTakeFirst();
+      const conversationMemberships = await trx.selectFrom("memberships").select(["roles", "status"])
+        .where("tenant_id", "=", job.tenantId).where("actor_id", "=", conversation.created_by_actor_id)
+        .forShare().execute();
       if (
-        tenant?.status !== "active" || conversation.created_by_actor_id !== workerActorId
-        || actor?.actor_kind !== "service" || actor.status !== "active"
-        || membership?.actor_id !== workerActorId || membership.status !== "active" || !membership.roles.includes("admin")
+        tenant?.status !== "active"
+        || workerActor?.actor_kind !== "service" || workerActor.status !== "active"
+        || workerMembership?.actor_id !== workerActorId || workerMembership.status !== "active"
+        || !workerMembership.roles.includes("admin")
+        || (conversationActor?.actor_kind !== "service" && conversationActor?.actor_kind !== "human")
+        || conversationActor.status !== "active"
+        || !conversationMemberships.some((candidate) => candidate.status === "active" && candidate.roles.length > 0)
       ) throw new Error("Stored Agent Run execution authority is inconsistent");
       await requireStillOwned(trx, job);
       const now = this.now();

@@ -43,12 +43,16 @@ export async function registerEventRoutes(
   app.get<{ Params: ConversationEventsPath; Querystring: ConversationEventsQuery }>(
     "/internal/v1/conversations/:conversation_id/events",
     {
-      config: { tenantScoped: true },
+      config: { tenantScoped: true, authentication: "trusted_context" },
       schema: { params: ConversationEventsPathSchema },
     },
     async (request, reply) => {
-      const tenantId = request.apiContext.tenantId!;
+      const context = request.apiContext;
+      const tenantId = context.tenantId!;
       const conversationId = request.params.conversation_id;
+      if (!("authenticationKind" in context) || context.conversationId !== conversationId) {
+        throw new DomainError("UNAUTHENTICATED", "Trusted context binding is invalid");
+      }
       const conversation = await new ResourceRepositories(dependencies.db)
         .forTenant(tenantId).conversations.find(conversationId);
       if (conversation === undefined) {
@@ -62,6 +66,8 @@ export async function registerEventRoutes(
       const streamId = `conversation_${conversationId}`;
       const abortController = new AbortController();
       const abort = (): void => abortController.abort();
+      const expiryTimer = setTimeout(abort, context.remainingLifetimeMs);
+      expiryTimer.unref();
       request.raw.once("aborted", abort);
       reply.raw.once("close", abort);
 
@@ -106,8 +112,10 @@ export async function registerEventRoutes(
           reply.raw.destroy(error instanceof Error ? error : undefined);
         }
       } finally {
+        clearTimeout(expiryTimer);
         request.raw.removeListener("aborted", abort);
         reply.raw.removeListener("close", abort);
+        if (!reply.raw.destroyed && !reply.raw.writableEnded) reply.raw.end();
       }
     },
   );

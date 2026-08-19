@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
 import { chmod, link, mkdtemp, mkdir, readFile, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
-import { FileSecretStore, loadProviderCatalog } from "../src/index.js";
+import { FileSecretStore, loadIdentitySigningPrivateKey, loadProviderCatalog } from "../src/index.js";
 import { resolveSecretChildOpenPath } from "../src/secrets/file-secret-store.js";
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
@@ -68,6 +69,24 @@ test("file secret store accepts one owner-only file beneath its canonical root",
   material.release();
   material.release();
   assert.throws(() => material.text(), /released/);
+});
+
+test("file secret store loads an owner-only multiline Ed25519 PKCS8 signing key", async () => {
+  const pair = generateKeyPairSync("ed25519");
+  const path = join(secretRoot, "identity_signing_current.v1");
+  await writeFile(path, pair.privateKey.export({ format: "pem", type: "pkcs8" }), { mode: 0o600 });
+  await chmod(path, 0o600);
+  const privateKey = await loadIdentitySigningPrivateKey(new FileSecretStore(secretRoot), {
+    reference_id: "identity_signing_current",
+    version: 1,
+    purpose: "identity_signing",
+  });
+  assert.equal(privateKey.type, "private");
+  assert.equal(privateKey.asymmetricKeyType, "ed25519");
+  assert.deepEqual(
+    privateKey.export({ format: "der", type: "pkcs8" }),
+    pair.privateKey.export({ format: "der", type: "pkcs8" }),
+  );
 });
 
 test("file secret store rejects non-canonical text without reflecting secret material", async () => {

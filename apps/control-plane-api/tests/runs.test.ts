@@ -3,16 +3,16 @@ import { rm } from "node:fs/promises";
 import test from "node:test";
 
 import { AgentRunSchema } from "@core-agent/contracts";
-import { canonicalPayloadHash } from "@core-agent/runtime-core";
+import { canonicalPayloadHash, deriveAgentRunId, deriveConversationId } from "@core-agent/runtime-core";
 import { Pool } from "pg";
 import Schema from "typebox/schema";
 
 import {
-  bootstrapKey,
   buildHttpAdmissionApp,
   createRuntimeDatabase,
   resetHttpAdmissionDatabase,
   seedHttpReadyTenant,
+  trustedContextHeaders,
 } from "./admission-http-test-support.js";
 
 const databaseUrl = process.env.CONTROL_PLANE_TEST_DATABASE_URL;
@@ -23,42 +23,48 @@ const pool = new Pool({ connectionString: databaseUrl });
 const db = createRuntimeDatabase(pool);
 const validator = Schema.Compile(AgentRunSchema);
 
-test("POST conversation Run and tenant-scoped GET return only a contract-valid AgentRun", async () => {
+test("trusted context binds and admits one AgentRun across POST replay and GET", async () => {
   await resetHttpAdmissionDatabase(pool);
   const tenantId = "tenant_http_run";
   const profileId = await seedHttpReadyTenant(db, tenantId);
   const { app, directory } = await buildHttpAdmissionApp(databaseUrl, db);
   try {
     const conversationPayload = { schema_version: 1, idempotency_key: "idem_http_run_conversation", tenant_id: tenantId, profile_id: profileId };
+    const conversationId = deriveConversationId(tenantId, conversationPayload.idempotency_key);
     const conversationResponse = await app.inject({
       method: "POST",
       url: "/internal/v1/conversations",
-      headers: { authorization: `Bearer ${bootstrapKey}`, "x-core-agent-tenant-id": tenantId },
+      headers: trustedContextHeaders({ tenantId, profileId, conversationId, runId: "run_http_create_conversation" }),
       payload: { ...conversationPayload, payload_hash: canonicalPayloadHash(conversationPayload) },
     });
     assert.equal(conversationResponse.statusCode, 201);
-    const conversationId = (conversationResponse.json() as { conversation_id: string }).conversation_id;
-    const runPayload = { schema_version: 1, idempotency_key: "idem_http_run", client_request_id: "client_http_run", input_message: { client_message_id: "message_http_run", content: "Hello central agent" } };
+    assert.equal((conversationResponse.json() as { conversation_id: string }).conversation_id, conversationId);
+    const runPayload = { schema_version: 1 as const, idempotency_key: "idem_http_run", client_request_id: "client_http_run", input_message: { client_message_id: "message_http_run", content: "Hello central agent" } };
+    const completeRunPayload = { ...runPayload, payload_hash: canonicalPayloadHash(runPayload) };
+    const runId = deriveAgentRunId(tenantId, conversationId, completeRunPayload);
+    const runHeaders = trustedContextHeaders({
+      tenantId, profileId, conversationId, runId, clientRequestId: runPayload.client_request_id,
+    });
     const created = await app.inject({
       method: "POST",
       url: `/internal/v1/conversations/${conversationId}/runs`,
-      headers: { authorization: `Bearer ${bootstrapKey}`, "x-core-agent-tenant-id": tenantId },
-      payload: { ...runPayload, payload_hash: canonicalPayloadHash(runPayload) },
+      headers: runHeaders,
+      payload: completeRunPayload,
     });
     assert.equal(created.statusCode, 202);
     assert.equal(validator.Check(created.json()), true);
     const replay = await app.inject({
       method: "POST",
       url: `/internal/v1/conversations/${conversationId}/runs`,
-      headers: { authorization: `Bearer ${bootstrapKey}`, "x-core-agent-tenant-id": tenantId },
-      payload: { ...runPayload, payload_hash: canonicalPayloadHash(runPayload) },
+      headers: runHeaders,
+      payload: completeRunPayload,
     });
     assert.deepEqual(replay.json(), created.json());
     const run = created.json() as { run_id: string };
     const queried = await app.inject({
       method: "GET",
       url: `/internal/v1/runs/${run.run_id}`,
-      headers: { authorization: `Bearer ${bootstrapKey}`, "x-core-agent-tenant-id": tenantId },
+      headers: runHeaders,
     });
     assert.equal(queried.statusCode, 200);
     assert.deepEqual(queried.json(), created.json());
@@ -69,12 +75,17 @@ test("POST conversation Run and tenant-scoped GET return only a contract-valid A
     const absent = await app.inject({
       method: "GET",
       url: "/internal/v1/runs/run_absent",
-      headers: { authorization: `Bearer ${bootstrapKey}`, "x-core-agent-tenant-id": tenantId },
+      headers: trustedContextHeaders({
+        tenantId, profileId, conversationId, runId: "run_absent", clientRequestId: runPayload.client_request_id,
+      }),
     });
     const crossTenant = await app.inject({
       method: "GET",
       url: `/internal/v1/runs/${run.run_id}`,
-      headers: { authorization: `Bearer ${bootstrapKey}`, "x-core-agent-tenant-id": "tenant_other" },
+      headers: trustedContextHeaders({
+        tenantId: "tenant_other", profileId: "profile_tenant_other", conversationId,
+        runId: run.run_id, clientRequestId: runPayload.client_request_id,
+      }),
     });
     assert.equal(absent.statusCode, 404);
     assert.equal(crossTenant.statusCode, 404);

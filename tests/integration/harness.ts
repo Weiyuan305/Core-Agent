@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -7,13 +7,17 @@ import { fileURLToPath } from "node:url";
 import { createConnection, Socket } from "node:net";
 import { spawn } from "node:child_process";
 
-import type { ProductEvent } from "@core-agent/contracts";
+import type { ProductEvent, TrustedRequestContext } from "@core-agent/contracts";
 import {
   HermesClient,
   RuntimeSupervisorClient,
   applyMigrations,
+  canonicalJson,
   createRedactor,
   createRuntimeDatabase,
+  deriveAgentRunId,
+  deriveConversationId,
+  encodeSignedTrustedContext,
   type RuntimeDatabase,
   type SecretMaterial,
   type SecretReference,
@@ -75,6 +79,8 @@ const databaseNamePattern = /^core_agent_test_[a-f0-9]{16}$/;
 const externalStageTimeoutMs = 6_000;
 const cleanupStageTimeoutMs = 2_000;
 const sentinelScanNodeBudget = 100_000;
+const integrationTrustedContextKey = generateKeyPairSync("ed25519");
+const integrationTrustedContextKeyId = "key_integration_trusted_context";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -1620,6 +1626,10 @@ class SyntheticSecretStore implements SecretStore {
     let released = false;
     return {
       reference,
+      withBytes(consumer) {
+        if (released) throw new Error("Synthetic material was released");
+        return consumer(Buffer.from(SYNTHETIC_INGRESS_KEY, "utf8"));
+      },
       text() {
         if (released) throw new Error("Synthetic material was released");
         return SYNTHETIC_INGRESS_KEY;
@@ -2033,13 +2043,18 @@ export class IntegrationHarness {
     let response: Response;
     let body: unknown;
     try {
+      const trustedContext = options.tenantId === undefined
+        ? undefined
+        : await this.#trustedContextHeader(method, path, options.tenantId, options.payload);
       response = await fetch(`${this.#apiOrigin}${path}`, {
         method,
         headers: {
-          authorization: `Bearer ${SYNTHETIC_BOOTSTRAP_KEY}`,
-          ...(options.tenantId === undefined
-            ? {}
-            : { "x-core-agent-tenant-id": options.tenantId }),
+          ...(trustedContext === undefined
+            ? {
+              authorization: `Bearer ${SYNTHETIC_BOOTSTRAP_KEY}`,
+              ...(options.tenantId === undefined ? {} : { "x-core-agent-tenant-id": options.tenantId }),
+            }
+            : { "x-core-agent-context": trustedContext }),
           ...(options.payload === undefined ? {} : { "content-type": "application/json" }),
         },
         ...(options.payload === undefined ? {} : { body: JSON.stringify(options.payload) }),
@@ -2077,8 +2092,11 @@ export class IntegrationHarness {
         `${this.#apiOrigin}/internal/v1/conversations/${encodeURIComponent(conversationId)}/events?after_sequence=${options.afterSequence}`,
         {
           headers: {
-            authorization: `Bearer ${SYNTHETIC_BOOTSTRAP_KEY}`,
-            "x-core-agent-tenant-id": tenantId,
+            "x-core-agent-context": await this.#trustedContextHeader(
+              "GET",
+              `/internal/v1/conversations/${encodeURIComponent(conversationId)}/events`,
+              tenantId,
+            ),
           },
           signal: controller.signal,
         },
@@ -2185,6 +2203,16 @@ export class IntegrationHarness {
         LEAK_SENTINEL,
       ]),
       eventNotifier: notifier,
+      trustedContext: {
+        keys: [{
+          keyId: integrationTrustedContextKeyId,
+          publicKey: integrationTrustedContextKey.publicKey,
+          status: "active",
+          activatedAt: "2026-08-18T00:00:00.000Z",
+        }],
+        expectedIssuer: "identity-gateway",
+        expectedAudience: "control-plane-api",
+      },
     }));
     try {
       const address = await boundedExternal(
@@ -2201,6 +2229,113 @@ export class IntegrationHarness {
       ]);
       throw error;
     }
+  }
+
+  async #trustedContextHeader(
+    method: string,
+    rawPath: string,
+    tenantId: string,
+    payload?: unknown,
+  ): Promise<string | undefined> {
+    const path = rawPath.split("?", 1)[0]!;
+    const conversationCreate = method === "POST" && path === "/internal/v1/conversations";
+    const runCreate = method === "POST" && /^\/internal\/v1\/conversations\/[^/]+\/runs$/u.test(path);
+    const runRead = method === "GET" && /^\/internal\/v1\/runs\/[^/]+$/u.test(path);
+    const eventRead = method === "GET" && /^\/internal\/v1\/conversations\/[^/]+\/events$/u.test(path);
+    if (!conversationCreate && !runCreate && !runRead && !eventRead) return undefined;
+
+    const pathParts = path.split("/").map((part) => decodeURIComponent(part));
+    const payloadRecord = typeof payload === "object" && payload !== null
+      ? payload as Record<string, unknown>
+      : {};
+    const conversationId = conversationCreate
+      ? deriveConversationId(tenantId, typeof payloadRecord.idempotency_key === "string" ? payloadRecord.idempotency_key : "invalid")
+      : runRead
+        ? (await this.db.selectFrom("agent_runs").select("conversation_id")
+          .where("tenant_id", "=", tenantId).where("run_id", "=", pathParts.at(-1)!).executeTakeFirst())?.conversation_id
+          ?? "conversation_context_absent"
+        : pathParts[4]!;
+    const storedConversation = await this.db.selectFrom("conversations")
+      .select(["profile_id", "created_by_actor_id"])
+      .where("tenant_id", "=", tenantId).where("conversation_id", "=", conversationId)
+      .executeTakeFirst();
+    const requestedProfileId = conversationCreate && typeof payloadRecord.profile_id === "string"
+      ? payloadRecord.profile_id
+      : storedConversation?.profile_id;
+    const fallbackProfile = await this.db.selectFrom("profiles")
+      .select(["profile_id", "owner_actor_id"])
+      .where("tenant_id", "=", tenantId).where("status", "=", "active")
+      .orderBy("profile_id", "asc").executeTakeFirst();
+    const selectedProfile = requestedProfileId === undefined
+      ? fallbackProfile
+      : await this.db.selectFrom("profiles").select(["profile_id", "owner_actor_id"])
+        .where("tenant_id", "=", tenantId).where("profile_id", "=", requestedProfileId)
+        .executeTakeFirst();
+    const actorId = storedConversation?.created_by_actor_id
+      ?? selectedProfile?.owner_actor_id
+      ?? fallbackProfile?.owner_actor_id
+      ?? `actor_context_${tenantId}`;
+    const memberships = await this.db.selectFrom("memberships")
+      .select(["membership_id", "roles"])
+      .where("tenant_id", "=", tenantId).where("actor_id", "=", actorId).where("status", "=", "active")
+      .orderBy("membership_id", "asc").execute();
+    const membership = memberships.find((candidate) => candidate.roles.length > 0);
+    const tenant = await this.db.selectFrom("tenants").select("tenant_mode")
+      .where("tenant_id", "=", tenantId).executeTakeFirst();
+    const container = await this.db.selectFrom("runtime_containers").select("container_id")
+      .where("tenant_id", "=", tenantId).orderBy("container_id", "asc").executeTakeFirst();
+    const completeRunPayload = runCreate && typeof payload === "object" && payload !== null
+      ? payload as Parameters<typeof deriveAgentRunId>[2]
+      : undefined;
+    const runId = runCreate && completeRunPayload !== undefined
+      ? deriveAgentRunId(tenantId, conversationId, completeRunPayload)
+      : runRead
+        ? pathParts.at(-1)!
+        : `run_context_${conversationId}`;
+    const issuedAt = new Date();
+    const context: TrustedRequestContext = {
+      schema_version: 1,
+      tenant_mode: tenant?.tenant_mode === "b2c" ? "b2c" : "b2b",
+      tenant_id: tenantId,
+      actor_id: actorId,
+      original_actor_id: actorId,
+      membership_id: membership?.membership_id ?? `membership_context_${tenantId}`,
+      effective_role: membership?.roles[0] === "admin" || membership?.roles[0] === "consultant"
+        ? membership.roles[0]
+        : "student",
+      profile_id: requestedProfileId ?? fallbackProfile?.profile_id ?? `profile_context_${tenantId}`,
+      entitlement_snapshot_ref: {
+        snapshot_id: "snapshot_integration_context",
+        version: 1,
+        evaluated_at: issuedAt.toISOString(),
+      },
+      capability_ids: ["capability_integration_context"],
+      container_id: container?.container_id ?? `container_context_${tenantId}`,
+      conversation_id: conversationId,
+      run_id: runId,
+      request_id: `request_context_${runId}`,
+      trace_id: `trace_context_${runId}`,
+      client_request_id: runCreate && typeof payloadRecord.client_request_id === "string"
+        ? payloadRecord.client_request_id
+        : `client_context_${runId}`,
+      context_id: `context_${runId}`,
+      issuer: "identity-gateway",
+      audience: ["control-plane-api"],
+      issued_at: issuedAt.toISOString(),
+      expires_at: new Date(issuedAt.getTime() + 300_000).toISOString(),
+      key_id: integrationTrustedContextKeyId,
+    };
+    return encodeSignedTrustedContext({
+      schema_version: 1,
+      algorithm: "EdDSA",
+      key_id: integrationTrustedContextKeyId,
+      payload: context,
+      signature: sign(
+        null,
+        Buffer.from(canonicalJson(context), "utf8"),
+        integrationTrustedContextKey.privateKey,
+      ).toString("base64url"),
+    });
   }
 
   async #closeApi(): Promise<void> {

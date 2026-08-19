@@ -10,14 +10,16 @@ import { repositoryContext, safeContractInteger, type TenantRepositoryContext } 
 export const secretReferenceStatuses = ["active", "rotated", "revoked"] as const;
 export type SecretReferenceStatus = (typeof secretReferenceStatuses)[number];
 type StoredSecretPurpose = "provider_credential" | "integration" | "bootstrap";
+type StoredPublicSecretPurpose = Exclude<SecretPurpose, "identity_signing">;
 
-const storedPurposeByPublicPurpose: Readonly<Record<SecretPurpose, StoredSecretPurpose>> = {
+const storedPurposeByPublicPurpose: Readonly<Record<StoredPublicSecretPurpose, StoredSecretPurpose>> = {
   model_provider: "provider_credential",
   hermes_ingress: "integration",
   bootstrap_service: "bootstrap",
 };
 
-export interface SecretReferenceMetadata extends SecretReference {
+export interface SecretReferenceMetadata extends Omit<SecretReference, "purpose"> {
+  readonly purpose: StoredPublicSecretPurpose;
   readonly status: SecretReferenceStatus;
   readonly created_at: string;
   readonly updated_at: string;
@@ -37,7 +39,7 @@ function parseTimestamp(value: string): Date {
   return parsed;
 }
 
-function publicPurposeFromStored(purpose: string): SecretPurpose {
+function publicPurposeFromStored(purpose: string): StoredPublicSecretPurpose {
   switch (purpose) {
     case "provider_credential": return "model_provider";
     case "integration": return "hermes_ingress";

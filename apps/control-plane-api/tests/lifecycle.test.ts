@@ -126,4 +126,8 @@ test("production server owns the PostgreSQL event notifier lifecycle", async () 
   assert.match(source, /createPostgresEventNotifier\(pool\)/u);
   assert.match(source, /eventNotifier,/u);
   assert.match(source, /await eventNotifier\?\.close\(\)/u);
+  assert.match(source, /CONTROL_PLANE_TRUSTED_CONTEXT_KEYS_FILE/u);
+  assert.match(source, /loadTrustedContextPublicKeys/u);
+  assert.match(source, /expectedIssuer: "identity-gateway"/u);
+  assert.match(source, /expectedAudience: "control-plane-api"/u);
 });

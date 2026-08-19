@@ -46,3 +46,18 @@
 - Round 20 implementation commit: `aab077094`.
 - Round 21 implementation commit: `67dbda57c`.
 - Round 22 implementation commit: `b2dde3d27`.
+
+## Task 8 — Cryptographically real Trusted Context
+
+- Status: COMPLETE
+- Branch: `feat/identity-trusted-context-v1`
+- Base: `3dbdd33b28`
+- Result: Ed25519 canonical signing/verification, protected signing-key loading,
+  current database authority issuance, key rotation, alternate Control Plane auth,
+  bootstrap-only operations, signed Conversation/Run/SSE admission, and expiry-bound
+  SSE streams are implemented.
+- Verification: root check PASS; root unit PASS; Runtime Core protected PostgreSQL
+  347/347; Control Plane API PostgreSQL 15/15; integration clean rerun 93/93.
+- Environment: native disposable PostgreSQL 17 with SCRAM; no Colima/Docker.
+- Report: `.superpowers/sdd/task-8-report.md`.
+- Commit: PENDING

@@ -16,6 +16,7 @@ import type { FastifyInstance } from "fastify";
 import { Pool } from "pg";
 
 import { buildControlPlaneApp } from "./app.js";
+import { loadTrustedContextPublicKeys } from "./trusted-context-auth.js";
 import {
   createPostgresEventNotifier,
   type CloseableEventNotifier,
@@ -50,6 +51,11 @@ async function readJson(path: string): Promise<unknown> {
 export async function startControlPlaneServer(environment: NodeJS.ProcessEnv = process.env) {
   const configuration = loadRuntimeEnvironment(environment);
   const imageLockPath = managedAbsolutePath(environment.CONTROL_PLANE_IMAGE_LOCK_FILE);
+  const trustedContextKeys = environment.CONTROL_PLANE_TRUSTED_CONTEXT_KEYS_FILE === undefined
+    ? Object.freeze([])
+    : loadTrustedContextPublicKeys(await readJson(
+      managedAbsolutePath(environment.CONTROL_PLANE_TRUSTED_CONTEXT_KEYS_FILE),
+    ));
   const databasePassword = await readProtectedDatabasePassword(configuration.databasePasswordFile);
   const pool = new Pool(databaseConnectionOptions(configuration.databaseUrl, databasePassword));
   const db = createRuntimeDatabase(pool);
@@ -66,6 +72,11 @@ export async function startControlPlaneServer(environment: NodeJS.ProcessEnv = p
       logger,
       redactor: createRedactor([]),
       eventNotifier,
+      trustedContext: {
+        keys: trustedContextKeys,
+        expectedIssuer: "identity-gateway",
+        expectedAudience: "control-plane-api",
+      },
     });
     app.addHook("onClose", async () => {
       await eventNotifier?.close();

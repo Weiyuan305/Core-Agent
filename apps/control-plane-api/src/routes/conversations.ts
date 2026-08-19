@@ -6,6 +6,8 @@ import {
 } from "@core-agent/contracts";
 import {
   createConversation,
+  deriveConversationId,
+  DomainError,
   type CreateConversationRequest,
   type RuntimeDatabase,
 } from "@core-agent/runtime-core";
@@ -34,10 +36,15 @@ export async function registerConversationRoutes(
   dependencies: ConversationRouteDependencies,
 ): Promise<void> {
   app.post<{ Body: CreateConversationRequest }>("/internal/v1/conversations", {
-    config: { tenantScoped: true },
+    config: { tenantScoped: true, authentication: "trusted_context" },
     schema: { body: CreateConversationRouteRequestSchema },
   }, async (request, reply) => {
     const context = request.apiContext;
+    if (!("authenticationKind" in context)
+      || context.profileId !== request.body.profile_id
+      || context.conversationId !== deriveConversationId(context.tenantId, request.body.idempotency_key)) {
+      throw new DomainError("UNAUTHENTICATED", "Trusted context binding is invalid");
+    }
     const conversation = await createConversation(dependencies, {
       tenantId: context.tenantId!,
       requestId: context.requestId,

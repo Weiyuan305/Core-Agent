@@ -201,6 +201,11 @@ class FakeMaterial implements SecretMaterial {
     return this.#value;
   }
 
+  public withBytes<T>(consumer: (bytes: Uint8Array) => T): T {
+    if (this.released) throw new Error("released");
+    return consumer(Buffer.from(this.#value, "utf8"));
+  }
+
   public release(): void {
     this.released = true;
   }

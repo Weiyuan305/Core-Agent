@@ -4,13 +4,14 @@ import { dirname, resolve } from "node:path";
 import { lstat, open } from "node:fs/promises";
 
 import { DomainError } from "@core-agent/runtime-core";
+import type { TrustedContextApiRequestContext } from "./trusted-context-auth.js";
 
 const MINIMUM_KEY_BYTES = 32;
 const MAXIMUM_KEY_BYTES = 512;
 const MAXIMUM_FILE_BYTES = MAXIMUM_KEY_BYTES + 1;
 const tenantIdPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
-export interface ApiRequestContext {
+export interface BootstrapApiRequestContext {
   readonly requestId: string;
   readonly traceId: string;
   readonly tenantId?: string;
@@ -18,6 +19,8 @@ export interface ApiRequestContext {
   readonly membershipId: "core_agent_provisioner_admin";
   readonly effectiveRole: "admin";
 }
+
+export type ApiRequestContext = BootstrapApiRequestContext | TrustedContextApiRequestContext;
 
 interface AuthenticationInput {
   readonly configuredDigest: Buffer;
@@ -185,7 +188,7 @@ function ownHeader(headers: unknown, name: string): string | undefined {
   return descriptor.value;
 }
 
-export function authenticateBootstrapRequest(input: AuthenticationInput): ApiRequestContext {
+export function authenticateBootstrapRequest(input: AuthenticationInput): BootstrapApiRequestContext {
   if (rawAuthorizationCount(input.rawHeaders) !== 1) {
     throw new DomainError("UNAUTHENTICATED", "Bootstrap authentication failed");
   }

@@ -1,15 +1,19 @@
 import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { generateKeyPairSync, sign } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
   applyMigrations,
+  canonicalJson,
   createRedactor,
   createRuntimeDatabase,
   deriveRuntimeContainerId,
+  encodeSignedTrustedContext,
   loadProviderCatalog,
   type RuntimeDatabase,
 } from "@core-agent/runtime-core";
+import type { TrustedRequestContext } from "@core-agent/contracts";
 import type { FastifyBaseLogger, FastifyInstance } from "fastify";
 import type { Kysely } from "kysely";
 import type { Pool } from "pg";
@@ -19,6 +23,7 @@ import type { EventNotifier } from "../src/sse.js";
 
 export const bootstrapKey = "synthetic-bootstrap-key-00000001";
 export const admissionHttpNow = new Date("2026-08-05T02:00:00.000Z");
+const trustedContextKeyPair = generateKeyPairSync("ed25519");
 const migrationsDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages", "runtime-core", "migrations");
 const testRoot = join(dirname(fileURLToPath(import.meta.url)), ".tmp");
 const providerCatalog = loadProviderCatalog([{
@@ -64,6 +69,55 @@ export async function seedHttpReadyTenant(db: Kysely<RuntimeDatabase>, tenantId:
   return profileId;
 }
 
+export function trustedContextHeaders(input: {
+  readonly tenantId: string;
+  readonly profileId: string;
+  readonly conversationId: string;
+  readonly runId: string;
+  readonly requestId?: string;
+  readonly traceId?: string;
+  readonly clientRequestId?: string;
+  readonly capabilityIds?: readonly string[];
+  readonly issuedAt?: string;
+  readonly expiresAt?: string;
+}): Record<string, string> {
+  const context: TrustedRequestContext = {
+    schema_version: 1,
+    tenant_mode: "b2c",
+    tenant_id: input.tenantId,
+    actor_id: `owner_${input.tenantId}`,
+    original_actor_id: `owner_${input.tenantId}`,
+    membership_id: `membership_${input.tenantId}`,
+    effective_role: "student",
+    profile_id: input.profileId,
+    entitlement_snapshot_ref: {
+      snapshot_id: "snapshot_http_admission", version: 1, evaluated_at: "2026-08-05T01:58:00.000Z",
+    },
+    capability_ids: [...(input.capabilityIds ?? ["capability_http_admission"])],
+    container_id: deriveRuntimeContainerId(input.tenantId),
+    conversation_id: input.conversationId,
+    run_id: input.runId,
+    request_id: input.requestId ?? "request_http_context",
+    trace_id: input.traceId ?? "trace_http_context",
+    client_request_id: input.clientRequestId ?? "client_http_context",
+    context_id: `context_${input.runId}`,
+    issuer: "identity-gateway",
+    audience: ["control-plane-api"],
+    issued_at: input.issuedAt ?? "2026-08-05T01:59:00.000Z",
+    expires_at: input.expiresAt ?? "2026-08-05T02:04:00.000Z",
+    key_id: "key_http_admission",
+  };
+  return {
+    "x-core-agent-context": encodeSignedTrustedContext({
+      schema_version: 1,
+      algorithm: "EdDSA",
+      key_id: context.key_id,
+      payload: context,
+      signature: sign(null, Buffer.from(canonicalJson(context), "utf8"), trustedContextKeyPair.privateKey).toString("base64url"),
+    }),
+  };
+}
+
 export async function buildHttpAdmissionApp(
   databaseUrl: string,
   db: Kysely<RuntimeDatabase>,
@@ -92,6 +146,15 @@ export async function buildHttpAdmissionApp(
     imageLock,
     logger,
     redactor: createRedactor([bootstrapKey]),
+    trustedContext: {
+      keys: [{
+        keyId: "key_http_admission", publicKey: trustedContextKeyPair.publicKey, status: "active",
+        activatedAt: "2026-08-05T00:00:00.000Z",
+      }],
+      expectedIssuer: "identity-gateway",
+      expectedAudience: "control-plane-api",
+      databaseNow: async () => new Date(admissionHttpNow),
+    },
     ...(options.eventNotifier === undefined ? {} : { eventNotifier: options.eventNotifier }),
   });
   return { app, directory };

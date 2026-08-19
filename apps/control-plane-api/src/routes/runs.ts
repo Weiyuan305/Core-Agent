@@ -4,6 +4,8 @@ import {
 } from "@core-agent/contracts";
 import {
   createAgentRun,
+  deriveAgentRunId,
+  DomainError,
   getAgentRun,
   type ProviderCatalog,
   type RuntimeDatabase,
@@ -31,11 +33,18 @@ export async function registerRunRoutes(app: FastifyInstance, dependencies: RunR
   app.post<{ Params: ConversationPath; Body: CreateAgentRunRequest }>(
     "/internal/v1/conversations/:conversation_id/runs",
     {
-      config: { tenantScoped: true },
+      config: { tenantScoped: true, authentication: "trusted_context" },
       schema: { params: ConversationPathSchema, body: CreateAgentRunRequestSchema },
     },
     async (request, reply) => {
       const context = request.apiContext;
+      if (!("authenticationKind" in context)
+        || context.conversationId !== request.params.conversation_id
+        || context.clientRequestId !== request.body.client_request_id
+        || context.runId !== deriveAgentRunId(context.tenantId, request.params.conversation_id, request.body)
+        || context.capabilityIds.length === 0) {
+        throw new DomainError("UNAUTHENTICATED", "Trusted context binding is invalid");
+      }
       const run = await createAgentRun(dependencies, {
         tenantId: context.tenantId!,
         requestId: context.requestId,
@@ -49,7 +58,12 @@ export async function registerRunRoutes(app: FastifyInstance, dependencies: RunR
   );
 
   app.get<{ Params: RunPath }>("/internal/v1/runs/:run_id", {
-    config: { tenantScoped: true },
+    config: { tenantScoped: true, authentication: "trusted_context" },
     schema: { params: RunPathSchema },
-  }, async (request) => getAgentRun(dependencies.db, request.apiContext.tenantId!, request.params.run_id));
+  }, async (request) => {
+    if (!("authenticationKind" in request.apiContext) || request.apiContext.runId !== request.params.run_id) {
+      throw new DomainError("UNAUTHENTICATED", "Trusted context binding is invalid");
+    }
+    return getAgentRun(dependencies.db, request.apiContext.tenantId, request.params.run_id);
+  });
 }
