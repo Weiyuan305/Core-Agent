@@ -2,12 +2,19 @@
 
 import hashlib
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, patch
 
 import pytest
 
 from hermes_cli.main import cmd_update, PROJECT_ROOT
+
+
+pytestmark = pytest.mark.skipif(
+    not (Path(__file__).resolve().parents[2] / ".git").exists(),
+    reason="Hermes self-update is disabled in a managed vendored checkout",
+)
 
 
 def _make_run_side_effect(branch="main", verify_ok=True, commit_count="0"):

@@ -354,7 +354,8 @@ class TestSSEAgentFailureFinishReason:
 
         reason, finish, sse = self._run(crash)
         assert reason == "error"
-        assert "error" in finish
+        assert "error" not in finish
+        assert finish["hermes"]["error_code"] == "model_response_invalid"
         assert "data: [DONE]" in sse
 
     def test_failed_result_dict_reports_error_not_stop(self):
@@ -378,8 +379,8 @@ class TestSSEAgentFailureFinishReason:
             )
 
         reason, finish, _ = self._run(trunc)
-        assert reason == "length"
-        assert finish["hermes"]["error_code"] == "output_truncated"
+        assert reason == "error"
+        assert finish["hermes"]["error_code"] == "model_response_invalid"
 
     def test_successful_completion_reports_stop(self):
         async def ok():

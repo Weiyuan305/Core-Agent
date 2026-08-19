@@ -1,13 +1,19 @@
 import { configure } from '@testing-library/react'
 
-// Node 26 defines its own `localStorage` accessor on the global object, which
-// returns `undefined` unless the process was started with --localstorage-file
-// (it warns: "localStorage is not available because --localstorage-file was
-// not provided"). In the jsdom environment `globalThis` IS the window, so that
-// accessor shadows jsdom's Storage and every `localStorage.getItem(...)` in a
-// test throws "Cannot read properties of undefined". Install a real in-memory
-// Storage when the global resolves to nothing, before any test module reads it.
-if (typeof (globalThis as any).localStorage === 'undefined') {
+// Node 25+ defines its own `localStorage` accessor on the global object. With
+// no valid --localstorage-file it may resolve to undefined or to an empty
+// object whose Storage methods are all missing. In the jsdom environment
+// `globalThis` IS the window, so that accessor shadows jsdom's Storage. Install
+// a real in-memory Storage before any test module reads the broken global.
+const currentLocalStorage = (globalThis as any).localStorage
+const hasUsableLocalStorage =
+  currentLocalStorage !== null &&
+  typeof currentLocalStorage === 'object' &&
+  ['getItem', 'setItem', 'removeItem', 'clear', 'key'].every(
+    (method) => typeof currentLocalStorage[method] === 'function',
+  )
+
+if (!hasUsableLocalStorage) {
   const store = new Map<string, string>()
   const storage: Storage = {
     get length() {

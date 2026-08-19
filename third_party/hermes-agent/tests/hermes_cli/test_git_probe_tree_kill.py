@@ -66,7 +66,9 @@ def test_timeout_kills_descendants(tmp_path):
     """A probe timeout must take the descendant down with the launcher."""
     script, marker = _write_forking_script(tmp_path)
 
-    out = bounded_git_probe([str(script)], timeout=1.0)
+    # Give a heavily parallel macOS runner enough time to schedule bash and
+    # write the descendant marker before exercising the timeout path.
+    out = bounded_git_probe([str(script)], timeout=5.0)
     assert out == ""
 
     child_pid = _wait_marker(marker)

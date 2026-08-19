@@ -44,6 +44,12 @@ class HermesOverlay:
 
 
 HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
+    "meta": HermesOverlay(
+        transport="codex_responses",
+        extra_env_vars=("MODEL_API_KEY", "META_API_KEY", "META_MODEL_API_KEY"),
+        base_url_override="https://api.meta.ai/v1",
+        base_url_env_var="META_BASE_URL",
+    ),
     "moa": HermesOverlay(
         transport="openai_chat",
         auth_type="virtual",
@@ -427,6 +433,8 @@ _LABEL_OVERRIDES: Dict[str, str] = {
     "vertex": "Google Vertex AI",
     "ollama-cloud": "Ollama Cloud",
     "xai-oauth": "xAI Grok OAuth (SuperGrok / Premium+)",
+    "xai": "xAI",
+    "meta": "Meta Model API",
 }
 
 

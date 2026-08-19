@@ -9,10 +9,19 @@ Covers:
 """
 
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from hermes_cli.main import cmd_update
+
+
+pytestmark = pytest.mark.skipif(
+    not (Path(__file__).resolve().parents[2] / ".git").exists(),
+    reason="Hermes self-update is disabled in a managed vendored checkout",
+)
 
 
 def _make_run_side_effect(

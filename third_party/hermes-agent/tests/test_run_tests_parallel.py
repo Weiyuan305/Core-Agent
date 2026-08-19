@@ -270,6 +270,50 @@ def _run_runner(probe_dir: Path, *extra: str) -> subprocess.CompletedProcess:
     )
 
 
+def test_parallel_files_use_distinct_pytest_temp_roots(tmp_path: Path) -> None:
+    """Per-file pytest cleanup must not race on a shared ``pytest-current``."""
+    probe_dir = tmp_path / "probe_temp_roots"
+    probe_dir.mkdir()
+    markers = [tmp_path / "root-a", tmp_path / "root-b"]
+    for index, marker in enumerate(markers):
+        (probe_dir / f"test_temp_root_{index}.py").write_text(
+            "import os\n"
+            "from pathlib import Path\n\n"
+            "def test_records_temp_root():\n"
+            f"    Path({str(marker)!r}).write_text("
+            "os.environ.get('PYTEST_DEBUG_TEMPROOT', ''))\n",
+            encoding="utf-8",
+        )
+
+    repo_root = Path(__file__).resolve().parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--paths",
+            str(probe_dir),
+            "-j",
+            "2",
+            "--file-timeout",
+            "30",
+            "-q",
+        ],
+        cwd=repo_root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=60,
+    )
+
+    assert proc.returncode == 0, proc.stdout
+    roots = [marker.read_text() for marker in markers]
+    assert all(roots), roots
+    assert len(set(roots)) == len(roots), roots
+    if sys.platform != "win32":
+        assert all(len(Path(root).resolve().as_posix()) < 32 for root in roots), roots
+
+
 
 
 def test_bare_value_flag_keeps_its_value(tmp_path: Path) -> None:
