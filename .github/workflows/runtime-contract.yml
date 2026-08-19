@@ -221,8 +221,8 @@ jobs:
       - name: Install pinned dependencies
         run: npm ci
 
-      - name: Build shared contracts
-        run: npm run contracts:build
+      - name: Build runtime dependencies
+        run: npm run build:runtime-deps
 
       - name: Resolve approved image tags and reject lock drift
         run: |

@@ -1046,17 +1046,17 @@ test("fresh CI-equivalent protects command output and proves cleanup after succe
   assert.doesNotMatch(text, /docker (?:volume|network) (?:prune|rm) .*\*/u);
 });
 
-test("isolated CI consumers build shared contracts before execution", async () => {
+test("isolated CI consumers build every required workspace dependency before execution", async () => {
   const workflow = await yaml(".github/workflows/runtime-contract.yml");
-  for (const [jobName, consumerCommand] of [
-    ["web-browser", "npm run test:browser -w @core-agent/control-plane-web"],
-    ["compose", "npm run test:runtime"],
+  for (const [jobName, buildCommand, consumerCommand] of [
+    ["web-browser", "npm run contracts:build", "npm run test:browser -w @core-agent/control-plane-web"],
+    ["compose", "npm run build:runtime-deps", "npm run test:runtime"],
   ]) {
     const steps = workflow.jobs[jobName].steps;
-    const buildIndex = steps.findIndex((step) => step.run === "npm run contracts:build");
+    const buildIndex = steps.findIndex((step) => step.run === buildCommand);
     const consumerIndex = steps.findIndex((step) => step.run === consumerCommand);
-    assert(buildIndex >= 0, `${jobName} must build shared contracts`);
-    assert(consumerIndex > buildIndex, `${jobName} must build shared contracts before its consumer`);
+    assert(buildIndex >= 0, `${jobName} must run ${buildCommand}`);
+    assert(consumerIndex > buildIndex, `${jobName} must build its dependencies before its consumer`);
   }
 });
 
