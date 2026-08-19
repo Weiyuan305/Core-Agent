@@ -11,8 +11,8 @@
     "postgres": {
       "source": "postgres:17-bookworm",
       "platforms": {
-        "linux/amd64": "postgres:17-bookworm@sha256:6e5a6518f9d2ff9e9f4cba2a5a87d8f41b0f067f6f92ac847c344351a6c8d923",
-        "linux/arm64": "postgres:17-bookworm@sha256:3aac91d19d5b7aff4c650dddfacc1a26c436459aafd4eb51ab0bf1748e990dbb"
+        "linux/amd64": "postgres:17-bookworm@sha256:07edf880f0cf3f742c990d23faf92cb19e84923a8bce30f7d8e1a8ab63cae7b3",
+        "linux/arm64": "postgres:17-bookworm@sha256:decbd1e168da79634920f083b37f185bc46267118022ebec7f2e09b4b6c2b239"
       }
     }
   }
