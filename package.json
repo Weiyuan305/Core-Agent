@@ -15,7 +15,7 @@
     "check": "npm run contracts:check && npm run check -w @core-agent/runtime-core && npm run check -w @core-agent/identity-gateway && npm run check -w @core-agent/control-plane-api && npm run check -w @core-agent/control-plane-worker && npm run check -w @core-agent/runtime-supervisor && npm run check -w @core-agent/control-plane-web",
     "test": "npm run test:unit",
     "build:runtime-deps": "npm run contracts:build && npm run build -w @core-agent/runtime-core",
-    "test:unit": "npm run contracts:build && npm run test:runtime && npm run test -w @core-agent/contracts && npm run test -w @core-agent/runtime-core && npm test -w @core-agent/identity-gateway && npm test -w @core-agent/control-plane-web",
+    "test:unit": "npm run build:runtime-deps && npm run test:runtime && npm run test -w @core-agent/contracts && npm run test -w @core-agent/runtime-core && npm test -w @core-agent/identity-gateway && npm test -w @core-agent/control-plane-web",
     "test:postgres": "npm run build:runtime-deps && npm run test:postgres -w @core-agent/runtime-core && npm run test:postgres -w @core-agent/identity-gateway && npm run test:postgres -w @core-agent/control-plane-api",
     "test:integration": "npm run build:runtime-deps && node --import tsx --test --test-concurrency=1 tests/integration/harness-cleanup.test.ts tests/integration/provisioning.test.ts tests/integration/agent-run.test.ts tests/integration/recovery.test.ts tests/integration/security.test.ts tests/integration/conversation-reliability.test.ts",
     "test:runtime": "node --test tests/runtime/*.test.mjs",
