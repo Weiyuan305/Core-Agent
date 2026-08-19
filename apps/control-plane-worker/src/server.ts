@@ -55,6 +55,23 @@ export interface IdentityFinalizerConfiguration {
   readonly providerServiceRoleKeyFile: string;
 }
 
+function databaseTarget(value: string): { host: string; port: number; database: string; user: string } {
+  try {
+    const parsed = new URL(value);
+    const port = parsed.port === "" ? 5432 : Number(parsed.port);
+    const database = decodeURIComponent(parsed.pathname.slice(1));
+    const user = decodeURIComponent(parsed.username);
+    if (parsed.protocol !== "postgresql:" || parsed.hostname.length === 0 || parsed.password !== ""
+      || parsed.search !== "" || parsed.hash !== "" || database.length === 0 || database.includes("/")
+      || user.length === 0 || !Number.isInteger(port) || port < 1 || port > 65_535) {
+      throw new Error();
+    }
+    return { host: parsed.hostname, port, database, user };
+  } catch {
+    throw new Error("Identity finalizer configuration is invalid");
+  }
+}
+
 export function loadIdentityFinalizerConfiguration(
   environment: NodeJS.ProcessEnv,
 ): IdentityFinalizerConfiguration | undefined {
@@ -68,6 +85,16 @@ export function loadIdentityFinalizerConfiguration(
   if (values.every((value) => value === undefined)) return undefined;
   if (values.some((value) => value === undefined)) {
     throw new Error("Identity finalizer configuration is incomplete");
+  }
+  const applicationDatabaseUrl = environment.CONTROL_PLANE_DATABASE_URL?.trim();
+  if (applicationDatabaseUrl === undefined || applicationDatabaseUrl === "") {
+    throw new Error("Identity finalizer configuration is incomplete");
+  }
+  const applicationTarget = databaseTarget(applicationDatabaseUrl);
+  const identityTarget = databaseTarget(values[0]!);
+  if (applicationTarget.host !== identityTarget.host || applicationTarget.port !== identityTarget.port
+    || applicationTarget.database !== identityTarget.database || applicationTarget.user === identityTarget.user) {
+    throw new Error("Identity finalizer configuration is invalid");
   }
   return Object.freeze({
     databaseUrl: values[0]!, databasePasswordFile: values[1]!,

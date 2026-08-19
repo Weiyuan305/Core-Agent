@@ -107,7 +107,6 @@ export interface AccountDeletionFinalizationFacts {
 
 export interface AccountDeletionFinalizationResult {
   readonly kind: "deleted" | "already_terminal" | "not_due";
-  readonly providerSubjects: readonly string[];
 }
 
 interface AccountDeletionRequestCommand {
@@ -575,9 +574,10 @@ async function lockDeletionRecoveryAuthority(
     .where("actor_id", "=", input.actorId)
     .forUpdate().executeTakeFirst();
   const now = await databaseClock(dependencies, trx);
-  if (deletion === undefined || (deletion.status !== "deletion_pending"
-    && !(input.allowCancelled === true && deletion.status === "cancelled"))
-    || now.getTime() >= deletion.scheduled_for.getTime()) {
+  const cancelledRecovery = input.allowCancelled === true
+    && actor.status === "active" && deletion?.status === "cancelled";
+  if (deletion === undefined || (!cancelledRecovery && deletion.status !== "deletion_pending")
+    || (!cancelledRecovery && now.getTime() >= deletion.scheduled_for.getTime())) {
     throw new DomainError("UNAUTHENTICATED", "Deletion recovery authority is unavailable");
   }
   return {
@@ -680,10 +680,8 @@ export async function cancelAccountDeletion(
       .forUpdate().executeTakeFirst();
     const now = await databaseClock(dependencies, trx);
     if (session?.auth_subject_id !== context.authSubjectId || session.status !== "revoked"
-      || session.revocation_reason !== "account_deletion_requested" || session.reauthenticated_at === null
-      || now.getTime() - session.reauthenticated_at.getTime() < 0
-      || now.getTime() - session.reauthenticated_at.getTime() >= recentReauthenticationMs) {
-      throw new DomainError("UNAUTHENTICATED", "Recent deletion recovery reauthentication is required");
+      || session.revocation_reason !== "account_deletion_requested") {
+      throw new DomainError("UNAUTHENTICATED", "Deletion recovery authority is required");
     }
     const deletion = await trx.selectFrom("account_deletions").selectAll()
       .where("account_deletion_id", "=", value.account_deletion_id)
@@ -692,33 +690,40 @@ export async function cancelAccountDeletion(
     if (deletion === undefined || (deletion.status !== "deletion_pending" && deletion.status !== "cancelled")) {
       throw new DomainError("INVALID_STATE_TRANSITION", "Account deletion is not recoverable");
     }
-    if (now.getTime() >= deletion.scheduled_for.getTime()) {
-      throw new DomainError("INVALID_STATE_TRANSITION", "Account deletion recovery period has ended");
-    }
     const memberships = await ordinaryMemberships(trx, context.actorId);
     const scope = memberships[0]!;
     const tenantTransaction: TenantTransaction = { tenantId: scope.tenant_id, trx };
-    const response: AccountDeletionCancellationResult = Object.freeze({
-      schema_version: 1,
-      account_deletion_id: deletion.account_deletion_id,
-      status: "cancelled",
-      resource_version: safeVersion(deletion.resource_version) + 1,
-    });
     const admission = await beginIdempotentCommand<AccountDeletionCancellationResult>(tenantTransaction, {
       key: value.idempotency_key,
       payloadHash: value.payload_hash,
       operation: cancelOperation,
       now,
-      expiresAt: deletion.scheduled_for,
+      expiresAt: deletion.scheduled_for.getTime() > now.getTime()
+        ? deletion.scheduled_for
+        : new Date(now.getTime() + dayMs),
     });
     if (admission.kind === "replay") return admission.response;
     if (admission.kind === "in_progress") throw new DomainError("IDEMPOTENCY_CONFLICT", "Account deletion cancellation is already in progress");
     if (actor.status !== "deletion_pending" || deletion.status !== "deletion_pending") {
       throw new DomainError("INVALID_STATE_TRANSITION", "Account deletion is not pending");
     }
+    if (now.getTime() >= deletion.scheduled_for.getTime()) {
+      throw new DomainError("INVALID_STATE_TRANSITION", "Account deletion recovery period has ended");
+    }
+    if (session.reauthenticated_at === null
+      || now.getTime() - session.reauthenticated_at.getTime() < 0
+      || now.getTime() - session.reauthenticated_at.getTime() >= recentReauthenticationMs) {
+      throw new DomainError("UNAUTHENTICATED", "Recent deletion recovery reauthentication is required");
+    }
     if (safeVersion(deletion.resource_version) !== value.expected_resource_version) {
       throw new DomainError("RESOURCE_VERSION_CONFLICT", "Account deletion version changed");
     }
+    const response: AccountDeletionCancellationResult = Object.freeze({
+      schema_version: 1,
+      account_deletion_id: deletion.account_deletion_id,
+      status: "cancelled",
+      resource_version: safeVersion(deletion.resource_version) + 1,
+    });
     await trx.updateTable("actors").set({
       status: "active",
       resource_version: safeVersion(actor.resource_version) + 1,
@@ -784,7 +789,7 @@ export async function finalizeAccountDeletion(
     const deletionReference = await trx.selectFrom("account_deletions").select("actor_id")
       .where("account_deletion_id", "=", input.accountDeletionId).executeTakeFirst();
     if (deletionReference === undefined) {
-      return { kind: "already_terminal", providerSubjects: [] };
+      return { kind: "already_terminal" };
     }
     const actor = await trx.selectFrom("actors").select(["status", "resource_version"])
       .where("actor_id", "=", deletionReference.actor_id).forUpdate().executeTakeFirstOrThrow();
@@ -792,15 +797,15 @@ export async function finalizeAccountDeletion(
       .where("account_deletion_id", "=", input.accountDeletionId)
       .where("actor_id", "=", deletionReference.actor_id).forUpdate().executeTakeFirst();
     if (deletion === undefined || deletion.status === "cancelled" || deletion.status === "deleted") {
-      return { kind: "already_terminal", providerSubjects: [] };
+      return { kind: "already_terminal" };
     }
     const now = await databaseClock(dependencies, trx);
-    if (now.getTime() < deletion.scheduled_for.getTime()) return { kind: "not_due", providerSubjects: [] };
+    if (now.getTime() < deletion.scheduled_for.getTime()) return { kind: "not_due" };
     if (actor.status !== "deletion_pending") throw new DomainError("INVALID_STATE_TRANSITION", "Actor deletion authority changed");
     const memberships = await ordinaryMemberships(trx, deletion.actor_id);
     const scope = memberships[0]!;
     const subjects = await trx.selectFrom("auth_subjects")
-      .select(["auth_subject_id", "provider_subject"])
+      .select("auth_subject_id")
       .where("actor_id", "=", deletion.actor_id)
       .orderBy("provider_subject")
       .forUpdate().execute();
@@ -811,6 +816,21 @@ export async function finalizeAccountDeletion(
       updated_at: now,
     }).where("actor_id", "=", deletion.actor_id).where("status", "!=", "revoked").execute();
     await trx.deleteFrom("core_sessions").where("actor_id", "=", deletion.actor_id).execute();
+    await trx.updateTable("oauth_transactions").set({
+      actor_id: null,
+      status: "expired",
+      consumed_at: null,
+      pkce_verifier_ciphertext: Uint8Array.of(0),
+      provider_completion_status: "pending",
+      provider_completion_started_at: null,
+      expected_provider_subject_ciphertext: null,
+      provider_subject_ciphertext: null,
+      provider_completion_payload_hash: null,
+      provider_settlement_expires_at: null,
+      provider_completed_at: null,
+      provider_evidence_at: null,
+      updated_at: now,
+    }).where("actor_id", "=", deletion.actor_id).execute();
     await trx.deleteFrom("auth_subjects").where("actor_id", "=", deletion.actor_id).execute();
     await trx.deleteFrom("private_identity_pii").where("actor_id", "=", deletion.actor_id).execute();
     const deletionVersion = safeVersion(deletion.resource_version) + 1;
@@ -844,7 +864,6 @@ export async function finalizeAccountDeletion(
     });
     return Object.freeze({
       kind: "deleted" as const,
-      providerSubjects: Object.freeze(subjects.map((subject) => subject.provider_subject)),
     });
   };
   return dependencies.transaction === undefined

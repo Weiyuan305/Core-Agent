@@ -67,6 +67,7 @@ test("identity finalizer production configuration is all-or-none", () => {
     IDENTITY_DATABASE_URL: "postgresql://core_agent_identity@postgres/core_agent_runtime",
   }), /configuration is incomplete/u);
   assert.deepEqual(loadIdentityFinalizerConfiguration({
+    CONTROL_PLANE_DATABASE_URL: "postgresql://core_agent_app@postgres/core_agent_runtime",
     IDENTITY_DATABASE_URL: "postgresql://core_agent_identity@postgres/core_agent_runtime",
     IDENTITY_DATABASE_PASSWORD_FILE: "/run/identity/database-password",
     IDENTITY_PROVIDER_URL: "https://provider.example.test",
@@ -77,6 +78,20 @@ test("identity finalizer production configuration is all-or-none", () => {
     providerUrl: "https://provider.example.test",
     providerServiceRoleKeyFile: "/run/identity/service-role-key",
   });
+  for (const identityDatabaseUrl of [
+    "postgresql://core_agent_identity@other-postgres/core_agent_runtime",
+    "postgresql://core_agent_identity@postgres/other_database",
+    "postgresql://core_agent_identity@postgres:5433/core_agent_runtime",
+    "postgresql://core_agent_app@postgres/core_agent_runtime",
+  ]) {
+    assert.throws(() => loadIdentityFinalizerConfiguration({
+      CONTROL_PLANE_DATABASE_URL: "postgresql://core_agent_app@postgres/core_agent_runtime",
+      IDENTITY_DATABASE_URL: identityDatabaseUrl,
+      IDENTITY_DATABASE_PASSWORD_FILE: "/run/identity/database-password",
+      IDENTITY_PROVIDER_URL: "https://provider.example.test",
+      IDENTITY_PROVIDER_SERVICE_ROLE_KEY_FILE: "/run/identity/service-role-key",
+    }), /configuration is invalid/u);
+  }
 });
 
 test("Worker claims account finalization only with both protected identity dependencies", () => {

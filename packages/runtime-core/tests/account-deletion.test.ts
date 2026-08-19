@@ -62,7 +62,7 @@ type CancelDeletion = (
 type FinalizeDeletion = (
   dependencies: Pick<DeletionDependencies, "db"> & { readonly databaseNow?: () => Promise<Date> },
   input: { readonly accountDeletionId: string },
-) => Promise<{ kind: "deleted" | "already_terminal" | "not_due"; providerSubjects: readonly string[] }>;
+) => Promise<{ kind: "deleted" | "already_terminal" | "not_due" }>;
 type LoadDeletionFinalization = (
   db: Kysely<RuntimeDatabase>,
   accountDeletionId: string,
@@ -172,6 +172,18 @@ async function seedDeletionAuthority(mode: "b2c" | "b2b" = "b2c"): Promise<void>
     device_label: "Deletion Browser", created_at: now, last_seen_at: now,
     idle_expires_at: new Date(now.getTime() + dayMs), absolute_expires_at: new Date(now.getTime() + 2 * dayMs),
     reauthenticated_at: now, revocation_reason: null, resource_version: 1, updated_at: now,
+  }).execute();
+  await db.insertInto("oauth_transactions").values({
+    oauth_transaction_id: "oauth_deletion_apple_link", provider: "supabase", flow_kind: "apple_link",
+    actor_id: context.actorId, client_kind: "web", state_digest: Buffer.alloc(32, 0x31),
+    nonce_digest: Buffer.alloc(32, 0x32), pkce_verifier_ciphertext: Buffer.alloc(33, 0x33),
+    redirect_uri: "https://app.example.test/auth/apple/callback", status: "pending",
+    expires_at: new Date(now.getTime() + dayMs), consumed_at: null,
+    provider_completion_status: "provider_completed", provider_completion_started_at: now,
+    expected_provider_subject_ciphertext: null, provider_subject_ciphertext: Buffer.alloc(33, 0x34),
+    provider_completion_payload_hash: `sha256:${"3".repeat(64)}`,
+    provider_settlement_expires_at: new Date(now.getTime() + dayMs + 30 * 60_000),
+    provider_completed_at: now, provider_evidence_at: now, created_at: now, updated_at: now,
   }).execute();
   await db.insertInto("runtime_containers").values({
     tenant_id: "tenant_deletion", container_id: "runtime_deletion", schema_version: 1,
@@ -321,6 +333,12 @@ test("cancellation requires the exact provider identity and recent deletion-revo
     schema_version: 1, account_deletion_id: response.account_deletion_id, status: "cancelled", resource_version: 2,
   });
   assert.deepEqual(await cancelAccountDeletion({ db }, context, command(cancelFacts)), cancelled);
+  await db.updateTable("core_sessions").set({ reauthenticated_at: new Date(0) })
+    .where("session_id", "=", context.sessionId).execute();
+  await db.updateTable("account_deletions").set({ scheduled_for: new Date(0) })
+    .where("account_deletion_id", "=", response.account_deletion_id).execute();
+  assert.deepEqual(await cancelAccountDeletion({ db }, context, command(cancelFacts)), cancelled,
+    "a committed cancellation must replay after its former recovery deadline and reauthentication window");
   assert.equal((await db.selectFrom("actors").select("status").executeTakeFirstOrThrow()).status, "active");
   assert.equal((await db.selectFrom("memberships").select("status").executeTakeFirstOrThrow()).status, "active");
   assert.equal((await db.selectFrom("core_sessions").select("status").executeTakeFirstOrThrow()).status, "revoked");
@@ -445,11 +463,8 @@ test("finalization erases authentication PII atomically and pseudonymizes retain
 
   const first = await finalizeAccountDeletion({ db }, { accountDeletionId: response.account_deletion_id });
   assert.equal(first.kind, "deleted");
-  assert.equal(first.providerSubjects.length, 52);
-  assert.equal(first.providerSubjects.at(0), "provider-subject-000");
-  assert.equal(first.providerSubjects.at(-1), "provider-subject-deletion");
   const replay = await finalizeAccountDeletion({ db }, { accountDeletionId: response.account_deletion_id });
-  assert.deepEqual(replay, { kind: "already_terminal", providerSubjects: [] });
+  assert.deepEqual(replay, { kind: "already_terminal" });
 
   const actor = await db.selectFrom("actors").select(["status", "display_name"]).executeTakeFirstOrThrow();
   assert.equal(actor.status, "deleted");
@@ -457,6 +472,25 @@ test("finalization erases authentication PII atomically and pseudonymizes retain
   assert.equal((await db.selectFrom("core_sessions").select("session_id").execute()).length, 0);
   assert.equal((await db.selectFrom("auth_subjects").select("auth_subject_id").execute()).length, 0);
   assert.equal((await db.selectFrom("private_identity_pii").select("actor_id").execute()).length, 0);
+  const oauth = await db.selectFrom("oauth_transactions").select([
+    "actor_id", "status", "pkce_verifier_ciphertext", "provider_completion_status",
+    "provider_subject_ciphertext", "provider_completion_payload_hash",
+  ]).executeTakeFirstOrThrow();
+  assert.deepEqual({
+    actorId: oauth.actor_id,
+    status: oauth.status,
+    pkceBytes: oauth.pkce_verifier_ciphertext.length,
+    completionStatus: oauth.provider_completion_status,
+    providerSubjectCiphertext: oauth.provider_subject_ciphertext,
+    completionPayloadHash: oauth.provider_completion_payload_hash,
+  }, {
+    actorId: null,
+    status: "expired",
+    pkceBytes: 1,
+    completionStatus: "pending",
+    providerSubjectCiphertext: null,
+    completionPayloadHash: null,
+  });
   assert.equal((await db.selectFrom("tenants").select("tenant_id").execute()).length, 1);
   assert.equal((await db.selectFrom("memberships").select("membership_id").execute()).length, 1);
   assert.equal((await db.selectFrom("profiles").select("profile_id").execute()).length, 1);
@@ -484,6 +518,12 @@ test("finalization rolls back Session AuthSubject PII and Actor state together w
     assert.equal((await db.selectFrom("core_sessions").select("status").executeTakeFirstOrThrow()).status, "revoked");
     assert.equal((await db.selectFrom("auth_subjects").select("auth_subject_id").execute()).length, 1);
     assert.equal((await db.selectFrom("private_identity_pii").select("actor_id").execute()).length, 1);
+    const oauth = await db.selectFrom("oauth_transactions")
+      .select(["actor_id", "pkce_verifier_ciphertext", "provider_subject_ciphertext"])
+      .executeTakeFirstOrThrow();
+    assert.equal(oauth.actor_id, context.actorId);
+    assert.equal(oauth.pkce_verifier_ciphertext.length, 33);
+    assert.equal(oauth.provider_subject_ciphertext?.length, 33);
     assert.equal((await db.selectFrom("account_deletions").select("status").executeTakeFirstOrThrow()).status, "deletion_pending");
     assert.equal((await db.selectFrom("product_events").select("event_id").where("event_type", "=", "account.deleted").execute()).length, 0);
   } finally {

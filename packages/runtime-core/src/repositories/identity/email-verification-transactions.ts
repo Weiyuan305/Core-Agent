@@ -986,6 +986,13 @@ export async function consumeEmailVerificationTransaction(
       await trx.updateTable("email_verification_transactions").set({
         status: "consumed",
         consumed_at: now,
+        normalized_email_hmac: Buffer.alloc(32),
+        binding_ciphertext: Buffer.alloc(33),
+        expected_provider_subject_hmac: Buffer.alloc(32),
+        expected_provider_subject_ciphertext: Buffer.alloc(33),
+        verified_provider_subject_hmac: Buffer.alloc(32),
+        verified_subject_ciphertext: Buffer.alloc(33),
+        provider_verification_proof_hmac: Buffer.alloc(32),
         updated_at: now,
       }).where("email_verification_transaction_id", "=", input.verificationId).execute();
       return { ...binding, verifiedSubject: subject };

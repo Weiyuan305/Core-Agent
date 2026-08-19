@@ -1306,7 +1306,14 @@ function productionOperations(
             .where("status", "=", "active").forUpdate().executeTakeFirst();
           if (subject === undefined) throw new DomainError("UNAUTHENTICATED", "Password-reset subject is not registered");
           await revokeCoreSessionsInTransaction({ db }, trx, { actorId: subject.actor_id, reason: "password_reset" });
-          await trx.updateTable("oauth_transactions").set({ status: "consumed", consumed_at: now, updated_at: now })
+          await trx.updateTable("oauth_transactions").set({
+            status: "consumed", consumed_at: now,
+            pkce_verifier_ciphertext: Buffer.from([0]),
+            provider_completion_status: "pending", provider_completion_started_at: null,
+            expected_provider_subject_ciphertext: null, provider_subject_ciphertext: null,
+            provider_completion_payload_hash: null, provider_settlement_expires_at: null,
+            provider_completed_at: null, provider_evidence_at: null, updated_at: now,
+          })
             .where("oauth_transaction_id", "=", payload.transaction_id).executeTakeFirstOrThrow();
           return { kind: "settled" as const, response: { schema_version: 1 } };
         }, { isolationLevel: "serializable" });

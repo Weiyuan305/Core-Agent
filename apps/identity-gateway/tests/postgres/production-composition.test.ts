@@ -2290,9 +2290,17 @@ test("production composition atomically verifies email, registers Task 3, issues
       "select status from core_sessions where session_id = any($1::text[]) order by session_id",
       [[issued.session.session_id, resetSiblingSession.session.session_id]],
     )).rows.every((row) => row.status === "revoked"), true);
-    assert.equal((await pool.query(
-      "select status from oauth_transactions where oauth_transaction_id = $1", [resetTransactionId],
-    )).rows[0]?.status, "consumed");
+    assert.deepEqual((await pool.query(`select status, octet_length(pkce_verifier_ciphertext)::int as pkce_bytes,
+      provider_completion_status, provider_completion_started_at,
+      expected_provider_subject_ciphertext, provider_subject_ciphertext,
+      provider_completion_payload_hash, provider_settlement_expires_at,
+      provider_completed_at, provider_evidence_at
+      from oauth_transactions where oauth_transaction_id = $1`, [resetTransactionId])).rows[0], {
+      status: "consumed", pkce_bytes: 1, provider_completion_status: "pending",
+      provider_completion_started_at: null, expected_provider_subject_ciphertext: null,
+      provider_subject_ciphertext: null, provider_completion_payload_hash: null,
+      provider_settlement_expires_at: null, provider_completed_at: null, provider_evidence_at: null,
+    });
     await resetApp.close();
 
     const expiredResetTransactionId = "oauth_composition_password_reset_expired_settlement";

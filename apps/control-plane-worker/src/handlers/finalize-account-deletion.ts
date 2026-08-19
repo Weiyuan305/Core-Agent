@@ -26,20 +26,11 @@ export interface AccountDeletionFinalizationPort {
   fail(job: AccountDeletionFinalizationJob, summary: string): Promise<boolean>;
 }
 
-function boundedSummary(error: unknown): string {
-  const message = error instanceof Error ? error.message : "Account deletion finalization failed";
-  return message
-    .replace(/Bearer\s+\S+/giu, "Bearer [REDACTED]")
-    .replace(/\b(token|password|secret)=\S+/giu, "$1=[REDACTED]")
-    .slice(0, 1_000) || "Account deletion finalization failed";
-}
-
 async function settleFailure(
   port: AccountDeletionFinalizationPort,
   job: AccountDeletionFinalizationJob,
-  error: unknown,
+  summary: string,
 ): Promise<HandlerResult> {
-  const summary = boundedSummary(error);
   if (job.attemptCount < job.maxAttempts) {
     if (!await port.retry(job, summary)) return { kind: "failed", summary: "Worker job lease lost" };
     return { kind: "retry", summary };
@@ -53,16 +44,25 @@ export async function handleFinalizeAccountDeletion(
   job: AccountDeletionFinalizationJob,
   signal: AbortSignal,
 ): Promise<HandlerResult> {
+  let failureSummary = "Account deletion authority is unavailable";
   try {
     if (signal.aborted) return { kind: "failed", summary: "Worker job lease lost" };
     let facts = await port.load(job, null, 50);
-    if (facts.kind !== "due") {
+    if (facts.kind === "not_due") {
+      return settleFailure(port, job, "Account deletion finalization is not due");
+    }
+    if (facts.kind === "not_found") {
+      return settleFailure(port, job, "Account deletion authority is unavailable");
+    }
+    if (facts.kind === "cancelled" || facts.kind === "deleted") {
       if (!await port.succeed(job)) return { kind: "failed", summary: "Worker job lease lost" };
       return { kind: "succeeded" };
     }
+    failureSummary = "Account deletion effect fencing is unavailable";
     if (job.effectState === "pre_effect" && !await port.markEffectDispatched(job)) {
       return { kind: "failed", summary: "Worker job lease lost" };
     }
+    failureSummary = "Identity provider deletion is unavailable";
     let cursor: string | null = null;
     for (;;) {
       for (const providerSubject of facts.providerSubjects) {
@@ -79,12 +79,14 @@ export async function handleFinalizeAccountDeletion(
       if (facts.kind !== "due") throw new Error("Account deletion finalization authority changed while paging");
     }
     if (signal.aborted) return { kind: "failed", summary: "Worker job lease lost" };
+    failureSummary = "Account deletion Core finalization is unavailable";
     const finalized = await port.finalize(job);
     if (finalized === "not_due") throw new Error("Account deletion database deadline changed");
+    failureSummary = "Account deletion job settlement is unavailable";
     if (!await port.succeed(job)) return { kind: "failed", summary: "Worker job lease lost" };
     return { kind: "succeeded" };
-  } catch (error) {
+  } catch {
     if (signal.aborted) return { kind: "failed", summary: "Worker job lease lost" };
-    return settleFailure(port, job, error);
+    return settleFailure(port, job, failureSummary);
   }
 }

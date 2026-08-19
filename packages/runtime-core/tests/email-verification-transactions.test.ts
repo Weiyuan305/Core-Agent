@@ -172,14 +172,27 @@ test("durable email verification converges starts across restart and consumes ex
     clientKind: "web", deviceLabel: "Browser", normalizedEmail: "student@example.test", flowKind: "b2c",
     verifiedSubject,
   });
-  const consumed = (await pool.query<{ status: string; consumed_at: Date | null; provider_hmac_bytes: number }>(
-    `select status, consumed_at, octet_length(verified_provider_subject_hmac)::int as provider_hmac_bytes
+  const consumed = (await pool.query<{
+    status: string; consumed_at: Date | null; normalized_email_hmac: Buffer; binding_ciphertext: Buffer;
+    expected_provider_subject_hmac: Buffer; expected_provider_subject_ciphertext: Buffer;
+    verified_provider_subject_hmac: Buffer; verified_subject_ciphertext: Buffer;
+    provider_verification_proof_hmac: Buffer;
+  }>(
+    `select status, consumed_at, normalized_email_hmac, binding_ciphertext,
+       expected_provider_subject_hmac, expected_provider_subject_ciphertext,
+       verified_provider_subject_hmac, verified_subject_ciphertext, provider_verification_proof_hmac
      from email_verification_transactions where email_verification_transaction_id = $1`,
     [first.verificationId],
   )).rows[0]!;
   assert.equal(consumed.status, "consumed");
   assert.equal(consumed.consumed_at?.toISOString(), now.toISOString());
-  assert.equal(consumed.provider_hmac_bytes, 32);
+  assert.deepEqual(consumed.normalized_email_hmac, Buffer.alloc(32));
+  assert.deepEqual(consumed.binding_ciphertext, Buffer.alloc(33));
+  assert.deepEqual(consumed.expected_provider_subject_hmac, Buffer.alloc(32));
+  assert.deepEqual(consumed.expected_provider_subject_ciphertext, Buffer.alloc(33));
+  assert.deepEqual(consumed.verified_provider_subject_hmac, Buffer.alloc(32));
+  assert.deepEqual(consumed.verified_subject_ciphertext, Buffer.alloc(33));
+  assert.deepEqual(consumed.provider_verification_proof_hmac, Buffer.alloc(32));
 });
 
 test("unknown provider-start outcome has a database-clock lease and the exact key can reacquire", async () => {
