@@ -98,6 +98,22 @@ function input(overrides: Partial<ConsumeInput> = {}): ConsumeInput {
   };
 }
 
+async function stableConcurrencyWindowMs(): Promise<number> {
+  const result = await administratorPool.query<{ now_ms: string }>(
+    "select floor(extract(epoch from clock_timestamp()) * 1000)::bigint::text as now_ms",
+  );
+  const nowMs = Number(result.rows[0]?.now_ms);
+  assert.equal(Number.isSafeInteger(nowMs), true);
+  const maximumWindowMs = 30 * 24 * 60 * 60 * 1_000;
+  const boundarySafetyMs = 120_000;
+  for (let index = 0; index < 64; index += 1) {
+    const windowMs = maximumWindowMs - index * 7_919;
+    const elapsedMs = nowMs % windowMs;
+    if (elapsedMs > boundarySafetyMs && windowMs - elapsedMs > boundarySafetyMs) return windowMs;
+  }
+  throw new Error("database clock is too close to every concurrency-test window boundary");
+}
+
 test.before(async () => {
   await ensureIdentityRoles();
   const password = randomBytes(32).toString("base64url");
@@ -220,8 +236,9 @@ test("explicit route-client and server-account dimensions never collapse into a 
 
 test("concurrent public attempts share one atomic PostgreSQL counter", async () => {
   const consumePublicRateLimit = requiredFunction<ConsumePublicRateLimit>("consumePublicRateLimit");
+  const windowMs = await stableConcurrencyWindowMs();
   const results = await Promise.all(Array.from({ length: 20 }, () => (
-    consumePublicRateLimit({ db: identityDb, hmacKey }, input({ limit: 5 }))
+    consumePublicRateLimit({ db: identityDb, hmacKey }, input({ limit: 5, windowMs }))
   )));
   assert.equal(results.filter((retryAfterMs) => retryAfterMs === null).length, 5);
   assert.equal(results.filter((retryAfterMs) => typeof retryAfterMs === "number" && retryAfterMs > 0).length, 15);
