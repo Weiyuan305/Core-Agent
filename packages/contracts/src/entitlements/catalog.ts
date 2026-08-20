@@ -13,6 +13,11 @@ const canonicalSemverPattern = `^${canonicalSemverBody}$`;
 const contractRefPattern = `^[a-z0-9][a-z0-9._/-]{0,127}@${canonicalSemverBody}$`;
 const npmPackageNamePattern = "(?:[a-z0-9][a-z0-9._~-]*|@[a-z0-9][a-z0-9._~-]*/[a-z0-9][a-z0-9._~-]*)";
 const canonicalSha512Base64Pattern = "[A-Za-z0-9+/]{85}[AQgw]==";
+const ociRegistryLabelPattern = "[a-z0-9]+(?:-[a-z0-9]+)*";
+const ociRegistryPattern = `${ociRegistryLabelPattern}(?:\\.${ociRegistryLabelPattern})*`;
+const ociPortPattern = "(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])";
+const ociPathComponentPattern = "[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*";
+const canonicalOciRefPattern = `^oci:(?:${ociRegistryPattern}(?::${ociPortPattern})?/)?${ociPathComponentPattern}(?:/${ociPathComponentPattern})*@sha256:[a-f0-9]{64}$`;
 
 export const CanonicalSemanticVersionSchema = Type.String({
   minLength: 5,
@@ -22,7 +27,7 @@ export const CanonicalSemanticVersionSchema = Type.String({
 
 export const ImmutableArtifactRefSchema = Type.Union([
   Type.String({
-    pattern: "^oci:(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?/)?[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?(?:/[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)*@sha256:[a-f0-9]{64}$",
+    pattern: canonicalOciRefPattern,
   }),
   Type.String({
     pattern: `^npm:${npmPackageNamePattern}@${canonicalSemverBody}#sha512-${canonicalSha512Base64Pattern}$`,
@@ -215,9 +220,23 @@ export function validateCatalogContractInput(value: unknown): ContractViolation[
 }
 
 function compareMember(left: PackMemberRef, right: PackMemberRef): number {
-  const leftKey = `${left.capability_id}\0${left.capability_version_id}\0${left.version}`;
-  const rightKey = `${right.capability_id}\0${right.capability_version_id}\0${right.version}`;
-  return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+  for (const [leftPart, rightPart] of [
+    [left.capability_id, right.capability_id],
+    [left.capability_version_id, right.capability_version_id],
+    [left.version, right.version],
+  ] as const) {
+    if (leftPart < rightPart) return -1;
+    if (leftPart > rightPart) return 1;
+  }
+  return 0;
+}
+
+function memberIdentity(member: PackMemberRef): string {
+  return JSON.stringify([
+    member.capability_id,
+    member.capability_version_id,
+    member.version,
+  ]);
 }
 
 export function validateCapabilityVersionAuthority(
@@ -320,7 +339,7 @@ export function validatePackVersion(
   const exactMembers = new Set<string>();
   const capabilityIds = new Set<string>();
   for (const member of pack.members) {
-    const exactKey = `${member.capability_id}\0${member.capability_version_id}\0${member.version}`;
+    const exactKey = memberIdentity(member);
     if (exactMembers.has(exactKey)) {
       return [violation("PACK_MEMBER_DUPLICATE", "members", "Pack members must be unique")];
     }

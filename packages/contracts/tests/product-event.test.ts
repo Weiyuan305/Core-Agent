@@ -69,11 +69,11 @@ const knownEvents = [
   { event_type: "runtime.command_accepted", payload: { container_id: "container_demo", command: "restart", desired_state: "running" } },
   { event_type: "error.reported", payload: { error_id: "error_demo", code: "APPROVAL_REQUIRED", category: "authorization" } },
   { event_type: "pack.release_selected", payload: { tenant_pack_release_id: "release_demo", pack_product_id: "pack_demo", pack_version_id: "pack_version_demo", generation: 2, status: "current", resource_version: 1 } },
-  { event_type: "entitlement.activated", payload: { entitlement_id: "entitlement_demo", pack_product_id: "pack_demo", status: "active", resource_version: 1 } },
+  { event_type: "entitlement.activated", payload: { entitlement_id: "entitlement_demo", pack_product_id: "pack_demo", status: "active", reason_code: "platform_grant", resource_version: 1 } },
   { event_type: "entitlement.suspended", payload: { entitlement_id: "entitlement_demo", pack_product_id: "pack_demo", status: "suspended", reason_code: "administrator_suspended", resource_version: 2 } },
   { event_type: "entitlement.revoked", payload: { entitlement_id: "entitlement_demo", pack_product_id: "pack_demo", status: "revoked", reason_code: "platform_revoked", resource_version: 3 } },
   { event_type: "entitlement.expired", payload: { entitlement_id: "entitlement_demo", pack_product_id: "pack_demo", status: "expired", reason_code: "validity_expired", resource_version: 4 } },
-  { event_type: "assignment.created", payload: { assignment_id: "assignment_demo", entitlement_id: "entitlement_demo", profile_id: "profile_demo", status: "preparing", resource_version: 1 } },
+  { event_type: "assignment.created", payload: { assignment_id: "assignment_demo", entitlement_id: "entitlement_demo", profile_id: "profile_demo", status: "preparing", reason_code: "seat_assigned", resource_version: 1 } },
   { event_type: "assignment.revoked", payload: { assignment_id: "assignment_demo", entitlement_id: "entitlement_demo", profile_id: "profile_demo", status: "revoked", reason_code: "administrator_revoked", resource_version: 2 } },
   { event_type: "entitlement_snapshot.changed", payload: { profile_id: "profile_demo", entitlement_snapshot_ref: { snapshot_id: "snapshot_demo", version: 2, evaluated_at: "2026-08-20T01:00:00Z" }, resource_version: 2 } },
   { event_type: "service.preparing", payload: { profile_id: "profile_demo", generation: 2, entitlement_snapshot_ref: { snapshot_id: "snapshot_demo", version: 2, evaluated_at: "2026-08-20T01:00:00Z" }, state: "preparing" } },
@@ -95,6 +95,77 @@ test("accepts all approved entitlement and service event types across strict fam
   for (const event of knownEvents) {
     assert.equal(validator.Check({ ...base, ...event }), true, event.event_type);
     assert.equal(validator.Check({ ...base, ...event, payload: { ...event.payload, unlisted: true } }), false, `${event.event_type} strict payload`);
+  }
+});
+
+test("entitlement events exhaustively enforce event-specific reason vocabularies", () => {
+  const entitlementReasons = [
+    "platform_grant",
+    "administrator_suspended",
+    "administrator_reactivated",
+    "platform_revoked",
+    "validity_expired",
+  ] as const;
+  const assignmentReasons = [
+    "seat_assigned",
+    "administrator_suspended",
+    "authority_suspended",
+    "validity_expired",
+    "runtime_preparation_failed",
+    "administrator_revoked",
+  ] as const;
+  const cases = [
+    {
+      event_type: "entitlement.activated",
+      payload: { entitlement_id: "entitlement_demo", pack_product_id: "pack_demo", status: "active", resource_version: 1 },
+      reasons: entitlementReasons,
+      allowed: new Set<string>(["platform_grant", "administrator_reactivated"]),
+    },
+    {
+      event_type: "entitlement.suspended",
+      payload: { entitlement_id: "entitlement_demo", pack_product_id: "pack_demo", status: "suspended", resource_version: 1 },
+      reasons: entitlementReasons,
+      allowed: new Set<string>(["administrator_suspended"]),
+    },
+    {
+      event_type: "entitlement.revoked",
+      payload: { entitlement_id: "entitlement_demo", pack_product_id: "pack_demo", status: "revoked", resource_version: 1 },
+      reasons: entitlementReasons,
+      allowed: new Set<string>(["platform_revoked"]),
+    },
+    {
+      event_type: "entitlement.expired",
+      payload: { entitlement_id: "entitlement_demo", pack_product_id: "pack_demo", status: "expired", resource_version: 1 },
+      reasons: entitlementReasons,
+      allowed: new Set<string>(["validity_expired"]),
+    },
+    {
+      event_type: "assignment.created",
+      payload: { assignment_id: "assignment_demo", entitlement_id: "entitlement_demo", profile_id: "profile_demo", status: "preparing", resource_version: 1 },
+      reasons: assignmentReasons,
+      allowed: new Set<string>(["seat_assigned"]),
+    },
+    {
+      event_type: "assignment.revoked",
+      payload: { assignment_id: "assignment_demo", entitlement_id: "entitlement_demo", profile_id: "profile_demo", status: "revoked", resource_version: 1 },
+      reasons: assignmentReasons,
+      allowed: new Set<string>(["administrator_revoked"]),
+    },
+  ] as const;
+  const validator = Schema.Compile(EntitlementEventSchema);
+
+  for (const eventCase of cases) {
+    for (const reason_code of eventCase.reasons) {
+      assert.equal(
+        validator.Check({
+          ...base,
+          event_type: eventCase.event_type,
+          payload: { ...eventCase.payload, reason_code },
+        }),
+        eventCase.allowed.has(reason_code),
+        `${eventCase.event_type}:${reason_code}`,
+      );
+    }
   }
 });
 

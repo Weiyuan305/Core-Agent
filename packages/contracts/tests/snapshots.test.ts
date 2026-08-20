@@ -118,6 +118,36 @@ test("snapshot validation rejects unsorted, duplicate, and conflicting capabilit
   );
 });
 
+test("Snapshot tuple identity and ordering remain injective when opaque ids contain NUL", () => {
+  const collisionCapabilities = [
+    {
+      capability_id: "capability.a",
+      capability_version_id: "capability.b\0version",
+      version: "1.0.0",
+    },
+    {
+      capability_id: "capability.a\0capability.b",
+      capability_version_id: "version",
+      version: "1.0.0",
+    },
+  ];
+  const collisionAuthority = {
+    first_release: true,
+    capability_versions: collisionCapabilities.map((reference) => ({
+      ...authoritativeCapabilityVersions[0]!,
+      ...reference,
+    })),
+  };
+  assert.deepEqual(validateEntitlementSnapshot({
+    ...snapshot,
+    capabilities: collisionCapabilities,
+  }, collisionAuthority), []);
+  assert.deepEqual(validateEntitlementSnapshot({
+    ...snapshot,
+    capabilities: [...collisionCapabilities].reverse(),
+  }, collisionAuthority).map((item) => item.code), ["SNAPSHOT_CAPABILITIES_NOT_SORTED"]);
+});
+
 test("snapshot capability triples require exact reviewed allowed authority", () => {
   const [firstAuthority, secondAuthority] = authoritativeCapabilityVersions;
   const nonExecuting = {

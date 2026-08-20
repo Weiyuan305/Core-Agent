@@ -7779,6 +7779,18 @@
                   "minLength": 1,
                   "type": "string"
                 },
+                "reason_code": {
+                  "anyOf": [
+                    {
+                      "const": "platform_grant",
+                      "type": "string"
+                    },
+                    {
+                      "const": "administrator_reactivated",
+                      "type": "string"
+                    }
+                  ]
+                },
                 "resource_version": {
                   "minimum": 1,
                   "type": "integer"
@@ -7792,6 +7804,7 @@
                 "entitlement_id",
                 "pack_product_id",
                 "status",
+                "reason_code",
                 "resource_version"
               ],
               "type": "object"
@@ -7969,28 +7982,8 @@
                   "type": "string"
                 },
                 "reason_code": {
-                  "anyOf": [
-                    {
-                      "const": "platform_grant",
-                      "type": "string"
-                    },
-                    {
-                      "const": "administrator_suspended",
-                      "type": "string"
-                    },
-                    {
-                      "const": "administrator_reactivated",
-                      "type": "string"
-                    },
-                    {
-                      "const": "platform_revoked",
-                      "type": "string"
-                    },
-                    {
-                      "const": "validity_expired",
-                      "type": "string"
-                    }
-                  ]
+                  "const": "administrator_suspended",
+                  "type": "string"
                 },
                 "resource_version": {
                   "minimum": 1,
@@ -8183,28 +8176,8 @@
                   "type": "string"
                 },
                 "reason_code": {
-                  "anyOf": [
-                    {
-                      "const": "platform_grant",
-                      "type": "string"
-                    },
-                    {
-                      "const": "administrator_suspended",
-                      "type": "string"
-                    },
-                    {
-                      "const": "administrator_reactivated",
-                      "type": "string"
-                    },
-                    {
-                      "const": "platform_revoked",
-                      "type": "string"
-                    },
-                    {
-                      "const": "validity_expired",
-                      "type": "string"
-                    }
-                  ]
+                  "const": "platform_revoked",
+                  "type": "string"
                 },
                 "resource_version": {
                   "minimum": 1,
@@ -8397,28 +8370,8 @@
                   "type": "string"
                 },
                 "reason_code": {
-                  "anyOf": [
-                    {
-                      "const": "platform_grant",
-                      "type": "string"
-                    },
-                    {
-                      "const": "administrator_suspended",
-                      "type": "string"
-                    },
-                    {
-                      "const": "administrator_reactivated",
-                      "type": "string"
-                    },
-                    {
-                      "const": "platform_revoked",
-                      "type": "string"
-                    },
-                    {
-                      "const": "validity_expired",
-                      "type": "string"
-                    }
-                  ]
+                  "const": "validity_expired",
+                  "type": "string"
                 },
                 "resource_version": {
                   "minimum": 1,
@@ -8615,6 +8568,10 @@
                   "minLength": 1,
                   "type": "string"
                 },
+                "reason_code": {
+                  "const": "seat_assigned",
+                  "type": "string"
+                },
                 "resource_version": {
                   "minimum": 1,
                   "type": "integer"
@@ -8629,6 +8586,7 @@
                 "entitlement_id",
                 "profile_id",
                 "status",
+                "reason_code",
                 "resource_version"
               ],
               "type": "object"
@@ -8811,32 +8769,8 @@
                   "type": "string"
                 },
                 "reason_code": {
-                  "anyOf": [
-                    {
-                      "const": "seat_assigned",
-                      "type": "string"
-                    },
-                    {
-                      "const": "administrator_suspended",
-                      "type": "string"
-                    },
-                    {
-                      "const": "authority_suspended",
-                      "type": "string"
-                    },
-                    {
-                      "const": "validity_expired",
-                      "type": "string"
-                    },
-                    {
-                      "const": "runtime_preparation_failed",
-                      "type": "string"
-                    },
-                    {
-                      "const": "administrator_revoked",
-                      "type": "string"
-                    }
-                  ]
+                  "const": "administrator_revoked",
+                  "type": "string"
                 },
                 "resource_version": {
                   "minimum": 1,

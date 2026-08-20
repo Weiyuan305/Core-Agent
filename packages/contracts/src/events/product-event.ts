@@ -25,10 +25,6 @@ import {
 } from "../runtime/resources.js";
 import { MembershipStatusSchema } from "../tenant/identity.js";
 import { CoreSessionRevocationReasonCodeSchema } from "../identity/authority.js";
-import {
-  AssignmentReasonCodeSchema,
-  EntitlementReasonCodeSchema,
-} from "../entitlements/authority.js";
 import { ServiceFailureReasonCodeSchema } from "../entitlements/snapshots.js";
 
 const EmbeddedStudentRefSchema = Type.Omit(
@@ -456,27 +452,31 @@ const EntitlementActivatedEventSchema = createEventBranch("entitlement.activated
   entitlement_id: OpaqueIdSchema,
   pack_product_id: OpaqueIdSchema,
   status: Type.Literal("active"),
+  reason_code: Type.Union([
+    Type.Literal("platform_grant"),
+    Type.Literal("administrator_reactivated"),
+  ]),
   resource_version: ResourceVersionSchema,
 });
 const EntitlementSuspendedEventSchema = createEventBranch("entitlement.suspended", {
   entitlement_id: OpaqueIdSchema,
   pack_product_id: OpaqueIdSchema,
   status: Type.Literal("suspended"),
-  reason_code: EntitlementReasonCodeSchema,
+  reason_code: Type.Literal("administrator_suspended"),
   resource_version: ResourceVersionSchema,
 });
 const EntitlementRevokedEventSchema = createEventBranch("entitlement.revoked", {
   entitlement_id: OpaqueIdSchema,
   pack_product_id: OpaqueIdSchema,
   status: Type.Literal("revoked"),
-  reason_code: EntitlementReasonCodeSchema,
+  reason_code: Type.Literal("platform_revoked"),
   resource_version: ResourceVersionSchema,
 });
 const EntitlementExpiredEventSchema = createEventBranch("entitlement.expired", {
   entitlement_id: OpaqueIdSchema,
   pack_product_id: OpaqueIdSchema,
   status: Type.Literal("expired"),
-  reason_code: EntitlementReasonCodeSchema,
+  reason_code: Type.Literal("validity_expired"),
   resource_version: ResourceVersionSchema,
 });
 const AssignmentCreatedEventSchema = createEventBranch("assignment.created", {
@@ -484,6 +484,7 @@ const AssignmentCreatedEventSchema = createEventBranch("assignment.created", {
   entitlement_id: OpaqueIdSchema,
   profile_id: OpaqueIdSchema,
   status: Type.Literal("preparing"),
+  reason_code: Type.Literal("seat_assigned"),
   resource_version: ResourceVersionSchema,
 });
 const AssignmentRevokedEventSchema = createEventBranch("assignment.revoked", {
@@ -491,7 +492,7 @@ const AssignmentRevokedEventSchema = createEventBranch("assignment.revoked", {
   entitlement_id: OpaqueIdSchema,
   profile_id: OpaqueIdSchema,
   status: Type.Literal("revoked"),
-  reason_code: AssignmentReasonCodeSchema,
+  reason_code: Type.Literal("administrator_revoked"),
   resource_version: ResourceVersionSchema,
 });
 const EntitlementSnapshotChangedEventSchema = createEventBranch("entitlement_snapshot.changed", {

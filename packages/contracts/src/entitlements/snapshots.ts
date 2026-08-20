@@ -104,8 +104,24 @@ function validateSortedIds(
   return [];
 }
 
-function capabilityKey(capability: SnapshotCapability): string {
-  return `${capability.capability_id}\0${capability.capability_version_id}\0${capability.version}`;
+function capabilityIdentity(capability: SnapshotCapability): string {
+  return JSON.stringify([
+    capability.capability_id,
+    capability.capability_version_id,
+    capability.version,
+  ]);
+}
+
+function compareCapability(left: SnapshotCapability, right: SnapshotCapability): number {
+  for (const [leftPart, rightPart] of [
+    [left.capability_id, right.capability_id],
+    [left.capability_version_id, right.capability_version_id],
+    [left.version, right.version],
+  ] as const) {
+    if (leftPart < rightPart) return -1;
+    if (leftPart > rightPart) return 1;
+  }
+  return 0;
 }
 
 export function validateEntitlementSnapshot(
@@ -127,7 +143,7 @@ export function validateEntitlementSnapshot(
   const exact = new Set<string>();
   const capabilityIds = new Set<string>();
   for (const capability of snapshot.capabilities) {
-    const key = capabilityKey(capability);
+    const key = capabilityIdentity(capability);
     if (exact.has(key)) {
       return [violation(
         "SNAPSHOT_CAPABILITY_DUPLICATE",
@@ -146,7 +162,7 @@ export function validateEntitlementSnapshot(
     capabilityIds.add(capability.capability_id);
   }
   for (let index = 1; index < snapshot.capabilities.length; index += 1) {
-    if (capabilityKey(snapshot.capabilities[index - 1]!) >= capabilityKey(snapshot.capabilities[index]!)) {
+    if (compareCapability(snapshot.capabilities[index - 1]!, snapshot.capabilities[index]!) >= 0) {
       return [violation(
         "SNAPSHOT_CAPABILITIES_NOT_SORTED",
         "capabilities",

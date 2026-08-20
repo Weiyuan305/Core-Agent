@@ -136,6 +136,37 @@ test("immutable npm artifacts require canonical names, versions, and exact SHA-5
   }
 });
 
+test("immutable OCI artifacts use canonical lowercase distribution coordinates", () => {
+  const digest = `sha256:${"d".repeat(64)}`;
+  for (const artifactRef of [
+    `oci:registry.example.invalid/eduapply/read@${digest}`,
+    `oci:registry.example.invalid:5000/eduapply/read-only@${digest}`,
+    `oci:eduapply/repo.name@${digest}`,
+    `oci:eduapply/repo_name@${digest}`,
+  ]) {
+    assert.equal(Schema.Check(ImmutableArtifactRefSchema, artifactRef), true, artifactRef);
+  }
+  for (const artifactRef of [
+    `oci:Registry.example.invalid/eduapply/read@${digest}`,
+    `oci:registry.example.invalid/EduApply/read@${digest}`,
+    `oci:registry.example.invalid/-eduapply/read@${digest}`,
+    `oci:registry.example.invalid/eduapply/read.@${digest}`,
+    `oci:registry.example.invalid/eduapply/repo..name@${digest}`,
+    `oci:registry.example.invalid/eduapply/repo._name@${digest}`,
+    `oci:registry.example.invalid/eduapply//read@${digest}`,
+    `oci:registry.example.invalid/eduapply/./read@${digest}`,
+    `oci:registry.example.invalid/eduapply/../read@${digest}`,
+    `oci:https://registry.example.invalid/eduapply/read@${digest}`,
+    `oci:registry.example.invalid/eduapply/read:latest@${digest}`,
+    `oci:registry.example.invalid:0/eduapply/read@${digest}`,
+    `oci:registry.example.invalid:0001/eduapply/read@${digest}`,
+    `oci:registry.example.invalid:65536/eduapply/read@${digest}`,
+    `oci:registry.example.invalid:abc/eduapply/read@${digest}`,
+  ]) {
+    assert.equal(Schema.Check(ImmutableArtifactRefSchema, artifactRef), false, artifactRef);
+  }
+});
+
 test("capability versions reject mutable artifacts, arbitrary URLs, ranges, and non-canonical versions", () => {
   for (const artifact_ref of [
     "oci:registry.example.invalid/eduapply/read:latest",
@@ -211,6 +242,39 @@ test("pack version validation rejects duplicate and unsorted capability members"
       members: [member, { ...member, capability_version_id: "capability_version.eduapply.read.2", version: "2.0.0" }],
     }, capabilityAuthority).map((item) => item.code),
     ["PACK_CAPABILITY_DUPLICATE"],
+  );
+});
+
+test("Pack tuple identity and ordering remain injective when opaque ids contain NUL", () => {
+  const collisionMembers = [
+    {
+      capability_id: "capability.a",
+      capability_version_id: "capability.b\0version",
+      version: "1.0.0",
+    },
+    {
+      capability_id: "capability.a\0capability.b",
+      capability_version_id: "version",
+      version: "1.0.0",
+    },
+  ];
+  const collisionAuthority = {
+    first_release: true,
+    capability_versions: collisionMembers.map((reference) => ({
+      ...capabilityVersion,
+      ...reference,
+    })),
+  };
+  assert.deepEqual(
+    validatePackVersion({ ...packVersion, members: collisionMembers }, collisionAuthority),
+    [],
+  );
+  assert.deepEqual(
+    validatePackVersion(
+      { ...packVersion, members: [...collisionMembers].reverse() },
+      collisionAuthority,
+    ).map((item) => item.code),
+    ["PACK_MEMBERS_NOT_SORTED"],
   );
 });
 

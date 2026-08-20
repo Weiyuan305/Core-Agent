@@ -56,36 +56,91 @@ const EntitlementBaseFields = {
   external_order_ref: OpaqueIdSchema,
   valid_from: UtcTimestampSchema,
   expires_at: Type.Optional(UtcTimestampSchema),
-  status: EntitlementStatusSchema,
-  reason_code: EntitlementReasonCodeSchema,
+} as const;
+
+const B2BEntitlementFields = {
+  tenant_mode: Type.Literal("b2b"),
+  assignment_mode: Type.Literal("seat"),
+  seat_quantity: Type.Integer({ minimum: 1 }),
+} as const;
+
+const B2CEntitlementFields = {
+  tenant_mode: Type.Literal("b2c"),
+  assignment_mode: Type.Literal("automatic"),
+} as const;
+
+const ActiveEntitlementFields = {
+  status: Type.Literal("active"),
+  reason_code: Type.Union([
+    Type.Literal("platform_grant"),
+    Type.Literal("administrator_reactivated"),
+  ]),
+} as const;
+
+const SuspendedEntitlementFields = {
+  status: Type.Literal("suspended"),
+  reason_code: Type.Literal("administrator_suspended"),
+} as const;
+
+const ExpiredEntitlementFields = {
+  status: Type.Literal("expired"),
+  reason_code: Type.Literal("validity_expired"),
+} as const;
+
+const RevokedEntitlementFields = {
+  status: Type.Literal("revoked"),
+  reason_code: Type.Literal("platform_revoked"),
 } as const;
 
 export const EntitlementSchema = Type.Union([
-  Type.Object({
-    ...EntitlementBaseFields,
-    tenant_mode: Type.Literal("b2b"),
-    assignment_mode: Type.Literal("seat"),
-    seat_quantity: Type.Integer({ minimum: 1 }),
-  }, { additionalProperties: false }),
-  Type.Object({
-    ...EntitlementBaseFields,
-    tenant_mode: Type.Literal("b2c"),
-    assignment_mode: Type.Literal("automatic"),
-  }, { additionalProperties: false }),
+  Type.Object({ ...EntitlementBaseFields, ...B2BEntitlementFields, ...ActiveEntitlementFields }, { additionalProperties: false }),
+  Type.Object({ ...EntitlementBaseFields, ...B2BEntitlementFields, ...SuspendedEntitlementFields }, { additionalProperties: false }),
+  Type.Object({ ...EntitlementBaseFields, ...B2BEntitlementFields, ...ExpiredEntitlementFields }, { additionalProperties: false }),
+  Type.Object({ ...EntitlementBaseFields, ...B2BEntitlementFields, ...RevokedEntitlementFields }, { additionalProperties: false }),
+  Type.Object({ ...EntitlementBaseFields, ...B2CEntitlementFields, ...ActiveEntitlementFields }, { additionalProperties: false }),
+  Type.Object({ ...EntitlementBaseFields, ...B2CEntitlementFields, ...SuspendedEntitlementFields }, { additionalProperties: false }),
+  Type.Object({ ...EntitlementBaseFields, ...B2CEntitlementFields, ...ExpiredEntitlementFields }, { additionalProperties: false }),
+  Type.Object({ ...EntitlementBaseFields, ...B2CEntitlementFields, ...RevokedEntitlementFields }, { additionalProperties: false }),
 ], { $id: "core-agent://v1/entitlement" });
 
-export const EntitlementAssignmentSchema = Type.Object(
-  {
-    ...ResourceMetadataFields,
-    assignment_id: OpaqueIdSchema,
-    tenant_id: OpaqueIdSchema,
-    entitlement_id: OpaqueIdSchema,
-    profile_id: OpaqueIdSchema,
-    status: AssignmentStatusSchema,
-    reason_code: AssignmentReasonCodeSchema,
-  },
-  { additionalProperties: false, $id: "core-agent://v1/entitlement-assignment" },
-);
+const AssignmentBaseFields = {
+  ...ResourceMetadataFields,
+  assignment_id: OpaqueIdSchema,
+  tenant_id: OpaqueIdSchema,
+  entitlement_id: OpaqueIdSchema,
+  profile_id: OpaqueIdSchema,
+} as const;
+
+export const EntitlementAssignmentSchema = Type.Union([
+  Type.Object({
+    ...AssignmentBaseFields,
+    status: Type.Union([Type.Literal("preparing"), Type.Literal("available")]),
+    reason_code: Type.Literal("seat_assigned"),
+  }, { additionalProperties: false }),
+  Type.Object({
+    ...AssignmentBaseFields,
+    status: Type.Literal("suspended"),
+    reason_code: Type.Union([
+      Type.Literal("administrator_suspended"),
+      Type.Literal("authority_suspended"),
+    ]),
+  }, { additionalProperties: false }),
+  Type.Object({
+    ...AssignmentBaseFields,
+    status: Type.Literal("expired"),
+    reason_code: Type.Literal("validity_expired"),
+  }, { additionalProperties: false }),
+  Type.Object({
+    ...AssignmentBaseFields,
+    status: Type.Literal("failed"),
+    reason_code: Type.Literal("runtime_preparation_failed"),
+  }, { additionalProperties: false }),
+  Type.Object({
+    ...AssignmentBaseFields,
+    status: Type.Literal("revoked"),
+    reason_code: Type.Literal("administrator_revoked"),
+  }, { additionalProperties: false }),
+], { $id: "core-agent://v1/entitlement-assignment" });
 
 export type Entitlement = Static<typeof EntitlementSchema>;
 export type EntitlementAssignment = Static<typeof EntitlementAssignmentSchema>;

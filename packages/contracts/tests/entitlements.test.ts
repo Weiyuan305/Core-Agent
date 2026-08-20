@@ -85,6 +85,40 @@ test("entitlement schema discriminates positive b2b seats from b2c automatic app
   }
 });
 
+test("entitlement resources exhaustively bind each status to truthful reasons", () => {
+  const statuses = ["active", "suspended", "expired", "revoked"] as const;
+  const reasons = [
+    "platform_grant",
+    "administrator_suspended",
+    "administrator_reactivated",
+    "platform_revoked",
+    "validity_expired",
+  ] as const;
+  const allowed = new Set([
+    "active:platform_grant",
+    "active:administrator_reactivated",
+    "suspended:administrator_suspended",
+    "expired:validity_expired",
+    "revoked:platform_revoked",
+  ]);
+  const resource = {
+    ...entitlementBase,
+    tenant_mode: "b2b",
+    assignment_mode: "seat",
+    seat_quantity: 1,
+  };
+
+  for (const status of statuses) {
+    for (const reason_code of reasons) {
+      assert.equal(
+        Schema.Check(EntitlementSchema, { ...resource, status, reason_code }),
+        allowed.has(`${status}:${reason_code}`),
+        `${status}:${reason_code}`,
+      );
+    }
+  }
+});
+
 test("entitlement semantic validation rejects an inverted validity window", () => {
   const invalid = {
     ...entitlementBase,
@@ -113,6 +147,44 @@ test("assignment resource remains tenant scoped and closed", () => {
   assert.equal(Schema.Check(EntitlementAssignmentSchema, assignment), true);
   assert.equal(Schema.Check(EntitlementAssignmentSchema, { ...assignment, external_order_ref: "private" }), false);
   assert.equal(Schema.Check(EntitlementAssignmentSchema, { ...assignment, status: "ready" }), false);
+});
+
+test("assignment resources exhaustively bind each status to truthful reasons", () => {
+  const statuses = ["preparing", "available", "suspended", "expired", "failed", "revoked"] as const;
+  const reasons = [
+    "seat_assigned",
+    "administrator_suspended",
+    "authority_suspended",
+    "validity_expired",
+    "runtime_preparation_failed",
+    "administrator_revoked",
+  ] as const;
+  const allowed = new Set([
+    "preparing:seat_assigned",
+    "available:seat_assigned",
+    "suspended:administrator_suspended",
+    "suspended:authority_suspended",
+    "expired:validity_expired",
+    "failed:runtime_preparation_failed",
+    "revoked:administrator_revoked",
+  ]);
+  const resource = {
+    ...metadata,
+    assignment_id: "assignment_demo",
+    tenant_id: "tenant_demo",
+    entitlement_id: "entitlement_demo",
+    profile_id: "profile_demo",
+  };
+
+  for (const status of statuses) {
+    for (const reason_code of reasons) {
+      assert.equal(
+        Schema.Check(EntitlementAssignmentSchema, { ...resource, status, reason_code }),
+        allowed.has(`${status}:${reason_code}`),
+        `${status}:${reason_code}`,
+      );
+    }
+  }
 });
 
 test("grant command accepts only exact platform manual b2b or b2c authority", () => {

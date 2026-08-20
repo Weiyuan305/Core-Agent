@@ -302,6 +302,9 @@ export function validateTrustedRequestContext(
   return violations;
 }
 
+/**
+ * Mandatory validation gate for every consumer authorizing entitlement-backed capabilities.
+ */
 export function validateEntitlementAwareTrustedRequestContext(
   context: TrustedRequestContext,
   authority: EntitlementAwareTrustedContextAuthority,
