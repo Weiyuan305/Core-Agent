@@ -7,7 +7,7 @@
     "build": "vite build && tsc -p tsconfig.server.json",
     "check": "tsc -p tsconfig.client.json && npm run build && npm test",
     "start": "node dist/server/server/main.js",
-    "test": "vitest run --exclude tests/web-chat.spec.ts",
+    "test": "vitest run --exclude tests/web-chat.spec.ts --exclude tests/web-auth.spec.ts",
     "test:browser": "playwright test"
   },
   "dependencies": {

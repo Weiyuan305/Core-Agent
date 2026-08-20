@@ -55,8 +55,142 @@ class ClientGatewayError extends Error {
 }
 
 export interface BuildClientGatewayAppOptions {
-  readonly port: ManagedChatPort;
+  readonly port?: ManagedChatPort;
+  readonly authProxy?: IdentityGatewayProxyOptions;
   readonly staticRoot: string;
+}
+
+export interface IdentityGatewayProxyOptions {
+  readonly origin: string;
+  readonly publicOrigin: string;
+  readonly fetchImpl?: typeof fetch;
+}
+
+const MAX_AUTH_BODY_BYTES = 64 * 1_024;
+
+function exactOrigin(value: string, allowPublic: boolean): URL | undefined {
+  try {
+    const parsed = new URL(value);
+    const loopback = parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost" || parsed.hostname === "[::1]";
+    if (
+      (!allowPublic && (parsed.protocol !== "http:" || !loopback))
+      || (allowPublic && parsed.protocol !== "https:" && !(parsed.protocol === "http:" && loopback))
+      || parsed.username !== ""
+      || parsed.password !== ""
+      || parsed.pathname !== "/"
+      || parsed.search !== ""
+      || parsed.hash !== ""
+      || (!allowPublic && parsed.port === "")
+    ) return undefined;
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+function validChatPort(value: ManagedChatPort | undefined): value is ManagedChatPort {
+  return value !== undefined
+    && typeof value.createConversation === "function"
+    && typeof value.runPrompt === "function"
+    && typeof value.restartApiWorker === "function";
+}
+
+function validAuthProxy(value: IdentityGatewayProxyOptions | undefined): value is IdentityGatewayProxyOptions {
+  return value !== undefined
+    && exactOrigin(value.origin, false) !== undefined
+    && exactOrigin(value.publicOrigin, true) !== undefined
+    && (value.fetchImpl === undefined || typeof value.fetchImpl === "function");
+}
+
+async function readBoundedResponse(response: Response): Promise<Uint8Array> {
+  const declared = response.headers.get("content-length");
+  if (declared !== null && (!/^\d{1,10}$/u.test(declared) || Number(declared) > MAX_AUTH_BODY_BYTES)) {
+    throw new ClientGatewayError("CLIENT_CONFIGURATION_INVALID", 502);
+  }
+  if (response.body === null) return new Uint8Array();
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const result = await reader.read();
+      if (result.done) break;
+      total += result.value.byteLength;
+      if (total > MAX_AUTH_BODY_BYTES) {
+        await reader.cancel();
+        throw new ClientGatewayError("CLIENT_CONFIGURATION_INVALID", 502);
+      }
+      chunks.push(result.value);
+    }
+    const bounded = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bounded.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return bounded;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+async function proxyIdentityRequest(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  options: IdentityGatewayProxyOptions,
+): Promise<FastifyReply> {
+  if (request.method !== "GET" && request.method !== "POST") {
+    throw new ClientGatewayError("CLIENT_INPUT_INVALID", 405);
+  }
+  const pathname = new URL(request.url, "http://gateway.invalid").pathname;
+  if (!pathname.startsWith("/auth/v1/") || request.url !== pathname) {
+    throw new ClientGatewayError("CLIENT_INPUT_INVALID", 400);
+  }
+  let body: string | undefined;
+  if (request.method === "POST") {
+    body = JSON.stringify(request.body);
+    if (Buffer.byteLength(body, "utf8") > MAX_AUTH_BODY_BYTES) {
+      throw new ClientGatewayError("CLIENT_INPUT_INVALID", 413);
+    }
+  }
+  const headers = new Headers({ accept: "application/json", host: new URL(options.publicOrigin).host });
+  const origin = rawHeader(request, "origin");
+  const cookieHeader = rawHeader(request, "cookie");
+  const csrf = rawHeader(request, csrfHeaderName);
+  if (origin !== undefined) headers.set("origin", origin);
+  if (cookieHeader !== undefined) headers.set("cookie", cookieHeader);
+  if (csrf !== undefined) headers.set(csrfHeaderName, csrf);
+  if (body !== undefined) headers.set("content-type", "application/json");
+  headers.set("x-forwarded-for", request.ip);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const requestInit: RequestInit = {
+      method: request.method,
+      headers,
+      redirect: "manual",
+      signal: controller.signal,
+    };
+    if (body !== undefined) requestInit.body = body;
+    const response = await (options.fetchImpl ?? fetch)(`${options.origin}${pathname}`, requestInit);
+    const responseBytes = await readBoundedResponse(response);
+    const contentType = response.headers.get("content-type");
+    if (contentType === null || !/^application\/json(?:\s*;|$)/iu.test(contentType)) {
+      throw new ClientGatewayError("CLIENT_CONFIGURATION_INVALID", 502);
+    }
+    const cookies = response.headers.getSetCookie();
+    if (cookies.length > 0) reply.header("set-cookie", cookies);
+    const retryAfter = response.headers.get("retry-after");
+    if (retryAfter !== null && /^\d{1,5}$/u.test(retryAfter)) reply.header("retry-after", retryAfter);
+    reply.type("application/json");
+    return reply.code(response.status).send(Buffer.from(responseBytes));
+  } catch (error) {
+    if (error instanceof ClientGatewayError) throw error;
+    throw new ClientGatewayError("CLIENT_CONFIGURATION_INVALID", 502);
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function envelope(code: ClientPublicErrorCode): ClientErrorEnvelope {
@@ -163,10 +297,10 @@ function createStreamWriter(reply: FastifyReply): ClientStreamWriter {
 }
 
 export async function buildClientGatewayApp(options: BuildClientGatewayAppOptions): Promise<FastifyInstance> {
+  const chatPort = options?.port;
+  const authProxy = options?.authProxy;
   if (
-    typeof options?.port?.createConversation !== "function"
-    || typeof options.port.runPrompt !== "function"
-    || typeof options.port.restartApiWorker !== "function"
+    validChatPort(chatPort) === validAuthProxy(authProxy)
     || typeof options.staticRoot !== "string"
     || options.staticRoot.length < 1
     || options.staticRoot.length > 4_096
@@ -175,28 +309,15 @@ export async function buildClientGatewayApp(options: BuildClientGatewayAppOption
 
   const app = Fastify({
     logger: false,
-    bodyLimit: 8 * 1_024,
+    bodyLimit: authProxy === undefined ? 8 * 1_024 : MAX_AUTH_BODY_BYTES,
     onProtoPoisoning: "error",
     onConstructorPoisoning: "error",
     ajv: { customOptions: { coerceTypes: false, removeAdditional: false, useDefaults: false } },
   });
   await app.register(cookie);
-  const sessionStore = createBrowserSessionStore();
-  const conversationStore = createClientConversationStore();
-  const retryStore = createRetryStore();
-  const activeRuns = new Set<string>();
-  let restarting = false;
-
-  let initialConversation;
-  try {
-    initialConversation = conversationStore.add(await options.port.createConversation());
-  } catch {
-    await app.close();
-    throw new Error("CLIENT_CONVERSATION_FAILED");
-  }
 
   app.addHook("onRequest", async (request) => {
-    const decision = validateBrowserRequest(request.raw.rawHeaders);
+    const decision = validateBrowserRequest(request.raw.rawHeaders, authProxy?.publicOrigin);
     if (!decision.ok) throw new ClientGatewayError(decision.code, 400);
   });
   app.addHook("onSend", async (_request, reply, payload) => {
@@ -214,7 +335,30 @@ export async function buildClientGatewayApp(options: BuildClientGatewayAppOption
     void reply.code(gatewayError.statusCode).send(envelope(gatewayError.code));
   });
 
-  app.get("/client/v1/bootstrap", async (_request, reply) => {
+  app.get("/client/v1/config", async () => Object.freeze({
+    schema_version: 1 as const,
+    mode: authProxy === undefined ? "synthetic_demo" as const : "public_auth" as const,
+  }));
+
+  if (authProxy !== undefined) {
+    app.all("/auth/v1/*", async (request, reply) => proxyIdentityRequest(request, reply, authProxy));
+  }
+
+  if (chatPort !== undefined) {
+    const sessionStore = createBrowserSessionStore();
+    const conversationStore = createClientConversationStore();
+    const retryStore = createRetryStore();
+    const activeRuns = new Set<string>();
+    let restarting = false;
+    let initialConversation;
+    try {
+      initialConversation = conversationStore.add(await chatPort.createConversation());
+    } catch {
+      await app.close();
+      throw new Error("CLIENT_CONVERSATION_FAILED");
+    }
+
+    app.get("/client/v1/bootstrap", async (_request, reply) => {
     const session = issueBrowserSession(sessionStore);
     reply.header("set-cookie", session.setCookie);
     return Object.freeze({
@@ -224,20 +368,20 @@ export async function buildClientGatewayApp(options: BuildClientGatewayAppOption
       conversations: conversationStore.list(),
       selectedConversationId: initialConversation.id,
     });
-  });
+    });
 
-  app.get("/client/v1/health", async () => Object.freeze({ state: "ready" as const }));
+    app.get("/client/v1/health", async () => Object.freeze({ state: "ready" as const }));
 
-  app.post("/client/v1/conversations", async (request, reply) => {
+    app.post("/client/v1/conversations", async (request, reply) => {
     assertMutationSession(request, sessionStore);
     if (!exactEmptyRecord(request.body)) throw new ClientGatewayError("CLIENT_INPUT_INVALID", 400);
     try {
-      const conversation = conversationStore.add(await options.port.createConversation());
+      const conversation = conversationStore.add(await chatPort.createConversation());
       return reply.code(201).send(conversation);
     } catch {
       throw new ClientGatewayError("CLIENT_CONVERSATION_FAILED", 502);
     }
-  });
+    });
 
   app.post<{ Params: { conversationId: string } }>(
     "/client/v1/conversations/:conversationId/runs",
@@ -253,7 +397,7 @@ export async function buildClientGatewayApp(options: BuildClientGatewayAppOption
       const stream = createStreamWriter(reply);
 
       try {
-        const result = await options.port.runPrompt(internalConversationId, message, {
+        const result = await chatPort.runPrompt(internalConversationId, message, {
           onStarted() {
             stream.begin();
             stream.write({ type: "run.started" });
@@ -321,7 +465,7 @@ export async function buildClientGatewayApp(options: BuildClientGatewayAppOption
             stream.write(frame);
           };
           try {
-            const result = await options.port.runPrompt(
+            const result = await chatPort.runPrompt(
               internalConversationId,
               parent.originalMessage,
               {
@@ -388,14 +532,15 @@ export async function buildClientGatewayApp(options: BuildClientGatewayAppOption
     if (restarting) throw new ClientGatewayError("CLIENT_RUN_BUSY", 409);
     restarting = true;
     try {
-      await options.port.restartApiWorker();
+      await chatPort.restartApiWorker();
       return Object.freeze({ state: "ready" as const });
     } catch {
       throw new ClientGatewayError("CLIENT_RESTART_FAILED", 502);
     } finally {
       restarting = false;
     }
-  });
+    });
+  }
 
   await app.register(fastifyStatic, {
     root: options.staticRoot,
