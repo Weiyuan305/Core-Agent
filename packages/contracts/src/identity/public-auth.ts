@@ -398,21 +398,21 @@ const CompanyMemberEffectiveStatusSchema = Type.Union([
 const CompanyMemberAdminRolesSchema = Type.Unsafe<["admin"]>({
   type: "array",
   prefixItems: [Type.Literal("admin")],
-  items: false,
+  items: { type: "string", enum: ["admin"] },
   minItems: 1,
   maxItems: 1,
 });
 const CompanyMemberConsultantRolesSchema = Type.Unsafe<["consultant"]>({
   type: "array",
   prefixItems: [Type.Literal("consultant")],
-  items: false,
+  items: { type: "string", enum: ["consultant"] },
   minItems: 1,
   maxItems: 1,
 });
 const CompanyMemberAdminConsultantRolesSchema = Type.Unsafe<["admin", "consultant"]>({
   type: "array",
   prefixItems: [Type.Literal("admin"), Type.Literal("consultant")],
-  items: false,
+  items: { type: "string", enum: ["admin", "consultant"] },
   minItems: 2,
   maxItems: 2,
 });

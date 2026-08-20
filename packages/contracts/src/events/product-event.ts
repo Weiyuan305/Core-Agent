@@ -330,6 +330,14 @@ const IdentityRegisteredEventSchema = createEventBranch("identity.registered", {
   profile_id: OpaqueIdSchema,
   resource_version: ResourceVersionSchema,
 });
+const AuthSubjectReplacedEventSchema = createEventBranch("auth_subject.replaced", {
+  actor_id: OpaqueIdSchema,
+  old_auth_subject_id: OpaqueIdSchema,
+  new_auth_subject_id: OpaqueIdSchema,
+  old_status: Type.Literal("revoked"),
+  new_status: Type.Literal("active"),
+  resource_version: ResourceVersionSchema,
+});
 const InvitationCreatedEventSchema = createEventBranch("invitation.created", {
   invitation_id: OpaqueIdSchema,
   membership_id: OpaqueIdSchema,
@@ -403,6 +411,7 @@ const AccountDeletedEventSchema = createEventBranch("account.deleted", {
 
 const IdentityEventBranchSchemas = [
   IdentityRegisteredEventSchema,
+  AuthSubjectReplacedEventSchema,
   InvitationCreatedEventSchema,
   InvitationAcceptedEventSchema,
   InvitationRevokedEventSchema,

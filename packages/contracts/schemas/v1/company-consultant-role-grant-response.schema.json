@@ -26,7 +26,13 @@
       "type": "string"
     },
     "roles": {
-      "items": false,
+      "items": {
+        "enum": [
+          "admin",
+          "consultant"
+        ],
+        "type": "string"
+      },
       "maxItems": 2,
       "minItems": 2,
       "prefixItems": [

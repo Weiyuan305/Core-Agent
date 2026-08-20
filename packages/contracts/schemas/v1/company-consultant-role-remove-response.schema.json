@@ -26,7 +26,12 @@
       "type": "string"
     },
     "roles": {
-      "items": false,
+      "items": {
+        "enum": [
+          "admin"
+        ],
+        "type": "string"
+      },
       "maxItems": 1,
       "minItems": 1,
       "prefixItems": [

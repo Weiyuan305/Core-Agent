@@ -76,7 +76,7 @@ test("accepts a typed message delta and rejects hidden reasoning", () => {
   assert.equal(validator.Check({ ...event, payload: { ...event.payload, chain_of_thought: "private" } }), false);
 });
 
-test("accepts all 22 approved event types across ten strict families", () => {
+test("accepts all 23 approved event types across ten strict families", () => {
   assert.equal(new Set(knownEvents.map(({ event_type }) => event_type)).size, 22);
   const validator = Schema.Compile(ProductEventSchema);
   for (const event of knownEvents) {
