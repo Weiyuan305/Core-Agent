@@ -40,7 +40,11 @@ export async function readEventsAfter(
     .where("sequence", ">", String(afterSequence))
     .orderBy("sequence", "asc")
     .limit(limit)
-    .execute({ signal, inflightQueryAbortStrategy: "cancel query" });
+    // Let the bounded SELECT settle on the owned pool after an SSE abort. The
+    // PostgreSQL cancellation strategy creates a second control Client whose
+    // asynchronous close is not owned by Kysely's pool lifecycle, so it can
+    // reconnect after teardown has already observed zero target backends.
+    .execute({ signal, inflightQueryAbortStrategy: "ignore query" });
   return rows.map((row) => {
     const event = {
       schema_version: row.schema_version,

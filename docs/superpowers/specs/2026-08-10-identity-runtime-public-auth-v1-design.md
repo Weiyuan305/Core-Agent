@@ -1,6 +1,6 @@
 # Identity Runtime and Public Auth v1 Design
 
-**Status:** Approved design; implementation not started
+**Status:** Implementation complete; real provider acceptance pending before public deployment
 **Date:** 2026-08-10
 **Primary surfaces:** B2B consultant Web, B2C student Web
 **Future surfaces:** iPhone and macOS clients

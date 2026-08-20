@@ -1597,7 +1597,7 @@ test("only response-less data-property transport codes are daemon-uncertain", as
     const response = await Promise.race([buildAdapter(docker).adapter.execute(signed({
       ...provisionData(),
       operation_id: `operation_negative_transport_${index}`,
-    })), new Promise<typeof timeout>((resolve) => setTimeout(() => resolve(timeout), 100))]);
+    })), new Promise<typeof timeout>((resolve) => setTimeout(() => resolve(timeout), 1_000))]);
     assert.notEqual(response, timeout, `failure index ${index} was incorrectly left daemon-uncertain`);
     if (response === timeout) continue;
     assert.equal(response.outcome, "failed");

@@ -7,6 +7,7 @@ import test from "node:test";
 const repositoryDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "repositories");
 const runtimeCommandMigration = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations", "004_runtime_command_intent.sql");
 const identityTables = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "db", "identity-tables.ts");
+const eventsRepository = join(repositoryDirectory, "events.ts");
 const tenantOwnedTables = new Set([
   "tenants", "memberships", "profiles", "runtime_containers", "conversations", "sessions", "agent_runs", "messages",
   "idempotency_records", "worker_jobs", "product_events", "audit_events", "outbox", "stream_sequences", "stream_cursors", "secret_references",
@@ -231,6 +232,12 @@ test("static gate accepts bounded execute options without weakening tenant scope
       .execute({ signal, inflightQueryAbortStrategy: "cancel query" });
   `;
   assert.deepEqual(findRepositoryQuerySafetyViolations("safe-options.ts", safe), []);
+});
+
+test("event stream abort does not launch an unowned PostgreSQL cancellation connection", async () => {
+  const source = await readFile(eventsRepository, "utf8");
+  assert.match(source, /inflightQueryAbortStrategy:\s*"ignore query"/u);
+  assert.doesNotMatch(source, /inflightQueryAbortStrategy:\s*"cancel query"/u);
 });
 
 test("static gate requires a top-level insert tenant and checks tenant joins from unowned roots", () => {

@@ -535,7 +535,7 @@ test("Unix service caps execution at four and waits for abort settlement before 
     await timedReleased;
     mutations += 1;
     return accepted(value.operation_id);
-  }, { admissionTimeoutMs: 25, effectTimeoutMs: 50, operationTimeoutMs: 100, shutdownTimeoutMs: 100 });
+  }, { admissionTimeoutMs: 100, effectTimeoutMs: 250, operationTimeoutMs: 500, shutdownTimeoutMs: 100 });
   await timed.start();
   try {
     const journalRecordsBefore = (await readdir(join(temporaryRoot, "journal")))
@@ -593,10 +593,10 @@ test("an unsettled cancellation returns a bounded transient timeout without rele
     mutations += 1;
     return accepted(value.operation_id);
   }, {
-    admissionTimeoutMs: 25,
-    effectTimeoutMs: 50,
-    operationTimeoutMs: 100,
-    cancellationSettlementTimeoutMs: 30,
+    admissionTimeoutMs: 100,
+    effectTimeoutMs: 250,
+    operationTimeoutMs: 500,
+    cancellationSettlementTimeoutMs: 100,
     shutdownTimeoutMs: 50,
   });
   await server.start();

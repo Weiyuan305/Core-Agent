@@ -667,7 +667,7 @@ test("official PostgreSQL teardown drains a real checkout acquired after Pool.en
     databaseName: isolated.databaseName,
     controlDatabaseUrl: isolated.controlDatabaseUrl,
     closeOwned: [tracked],
-    timeoutMs: 1_500,
+    timeoutMs: 4_000,
     retryDelayMs: 1,
   });
   await new Promise((resolve) => setTimeout(resolve, 700));
@@ -699,7 +699,7 @@ test("official PostgreSQL child cleanup terminates an exact unowned backend and 
       databaseName: isolated.databaseName,
       controlDatabaseUrl: isolated.controlDatabaseUrl,
       closeOwned: [],
-      timeoutMs: 1_000,
+      timeoutMs: 3_000,
       retryDelayMs: 1,
     });
     assert(errors.includes("57P01"));

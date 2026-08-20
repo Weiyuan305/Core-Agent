@@ -352,7 +352,7 @@ test("cancellation requires the exact provider identity and recent deletion-revo
     .where("account_deletion_id", "=", boundary.account_deletion_id).execute();
   await db.updateTable("core_sessions").set({ reauthenticated_at: deadline })
     .where("session_id", "=", context.sessionId).execute();
-  await assert.rejects(cancelAccountDeletion({ db }, context, command({
+  await assert.rejects(cancelAccountDeletion({ db, databaseNow: async () => deadline }, context, command({
     ...cancelFacts, idempotency_key: "cancel-at-boundary", account_deletion_id: boundary.account_deletion_id,
   })), (error: unknown) => error instanceof DomainError && error.code === "INVALID_STATE_TRANSITION");
 });

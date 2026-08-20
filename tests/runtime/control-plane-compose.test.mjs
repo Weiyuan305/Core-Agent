@@ -1514,7 +1514,7 @@ test("runtime network preparation owns exact private backplane and provider-capa
   }
 });
 
-test("runtime network preparation accepts Docker 29 empty IPAM options encoding", async () => {
+test("runtime network preparation accepts Docker Desktop defaults and empty IPAM options encoding", async () => {
   const moduleUrl = pathToFileURL(pathFromRoot("scripts/prepare-runtime-network.mjs")).href;
   const network = await import(`${moduleUrl}?docker29=${Date.now()}`);
   const backplaneInspection = JSON.stringify({
@@ -1536,7 +1536,11 @@ test("runtime network preparation accepts Docker 29 empty IPAM options encoding"
     Scope: "local",
     Ingress: false,
     EnableIPv6: false,
-    Options: { "com.docker.network.bridge.enable_ip_masquerade": "true" },
+    Options: {
+      "com.docker.network.bridge.enable_ip_masquerade": "true",
+      "com.docker.network.enable_ipv4": "true",
+      "com.docker.network.enable_ipv6": "false",
+    },
     IPAM: {
       Driver: "default",
       Options: {},

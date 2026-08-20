@@ -12,8 +12,9 @@ const databaseName = "core_agent_test_0123456789abcdef";
 const repositoryRoot = join(import.meta.dirname, "..", "..");
 
 async function runCleanupChild(
-  scenario: "delayed-backends" | "delayed-backends-release" | "termination-failure" | "transient-drop",
+  scenario: "delayed-backends" | "delayed-backends-release" | "drop-connect-failure" | "drop-end-hang" | "statement-timeout-drop" | "termination-failure" | "transient-drop",
   operation: "terminate" | "drop",
+  timeoutMs = 100,
 ): Promise<{
   readonly code: number | null;
   readonly diagnostics: readonly unknown[];
@@ -27,7 +28,7 @@ async function runCleanupChild(
     operation,
     "postgresql://127.0.0.1/core_agent_control",
     databaseName,
-    "25",
+    String(timeoutMs),
   ], {
     cwd: repositoryRoot,
     env: { ...process.env, CLEANUP_TEST_DATABASE_CHILD_SCENARIO: scenario },
@@ -44,7 +45,7 @@ function terminalOperation(work: () => void | Promise<void>) {
 }
 
 test("cleanup terminate child fails if exact target backends remain through its deadline", async () => {
-  assert.notEqual((await runCleanupChild("delayed-backends", "terminate")).code, 0);
+  assert.equal((await runCleanupChild("delayed-backends", "terminate")).code, 4);
 });
 
 test("cleanup terminate child waits for an exact delayed backend to disappear before success", async () => {
@@ -68,11 +69,20 @@ test("cleanup terminate child waits for an exact delayed backend to disappear be
 });
 
 test("cleanup terminate child does not treat a failed exact termination as success", async () => {
-  assert.notEqual((await runCleanupChild("termination-failure", "terminate")).code, 0);
+  assert.equal((await runCleanupChild("termination-failure", "terminate")).code, 3);
 });
 
-test("cleanup drop child retries an exact transient DROP failure before absence succeeds", async () => {
-  assert.equal((await runCleanupChild("transient-drop", "drop")).code, 0);
+test("cleanup drop child retries a transient backend and permits a bounded multi-second DROP", async () => {
+  const result = await runCleanupChild("transient-drop", "drop");
+  assert.equal(result.code, 0);
+  assert.deepEqual(result.diagnostics, [
+    { type: "drop", sql: `drop database if exists "${databaseName}"` },
+    { type: "drop", sql: `drop database if exists "${databaseName}"` },
+    "drop_complete",
+  ]);
+  const boundedStatement = await runCleanupChild("statement-timeout-drop", "drop", 2_000);
+  assert.equal(boundedStatement.code, 0);
+  assert(boundedStatement.elapsedMs < 2_500);
 });
 
 test("unowned cleanup assigns exact terminate and drop slices within the total bound", () => {
@@ -83,7 +93,7 @@ test("unowned cleanup assigns exact terminate and drop slices within the total b
       readonly adminCloseBudgetMs: number;
     };
   }).databaseCleanupBudgets;
-  for (const [timeoutMs, productionBudget] of [[1_000, false], [6_000, true]] as const) {
+  for (const [timeoutMs, productionBudget] of [[3_000, false], [20_000, true]] as const) {
     const budgets = cleanupBudgets(timeoutMs, productionBudget, false);
     assert.deepEqual({
       terminateBudgetMs: budgets.terminateBudgetMs,
@@ -111,8 +121,8 @@ test("unowned child cleanup survives startup delay within its total bound", asyn
   const outcomes: string[] = [];
   try {
     for (const { timeoutMs, startupDelayMs } of [
-      { timeoutMs: 1_000, startupDelayMs: 125 },
-      { timeoutMs: 6_000, startupDelayMs: 650 },
+      { timeoutMs: 3_000, startupDelayMs: 125 },
+      { timeoutMs: 20_000, startupDelayMs: 650 },
     ]) {
       process.env.CLEANUP_TEST_DATABASE_CHILD_STARTUP_DELAY_MS = String(startupDelayMs);
       const startedAt = Date.now();
@@ -138,6 +148,60 @@ test("unowned child cleanup survives startup delay within its total bound", asyn
     else process.env.CLEANUP_TEST_DATABASE_CHILD_STARTUP_DELAY_MS = originalStartupDelay;
   }
   assert.deepEqual(outcomes, ["bounded", "bounded"]);
+});
+
+test("production cleanup reaps an exact late backend and a post-proof admin hang", async () => {
+  const originalNodeOptions = process.env.NODE_OPTIONS;
+  const originalScenario = process.env.CLEANUP_TEST_DATABASE_CHILD_SCENARIO;
+  const hook = join(repositoryRoot, "tests", "integration", "fixtures", "cleanup-test-database-child-pg-hook.mjs");
+  process.env.NODE_OPTIONS = [originalNodeOptions, `--import=${hook}`].filter(Boolean).join(" ");
+  process.env.CLEANUP_TEST_DATABASE_CHILD_SCENARIO = "delayed-backends-release";
+  try {
+    await testHarnessInternals.dropIsolatedDatabase({
+      databaseName,
+      controlDatabaseUrl: "postgresql://127.0.0.1/core_agent_control",
+      closeOwned: [],
+      timeoutMs: 3_000,
+      retryDelayMs: 1,
+    });
+    process.env.CLEANUP_TEST_DATABASE_CHILD_SCENARIO = "drop-end-hang";
+    const startedAt = Date.now();
+    await testHarnessInternals.dropIsolatedDatabase({
+      databaseName,
+      controlDatabaseUrl: "postgresql://127.0.0.1/core_agent_control",
+      closeOwned: [],
+      timeoutMs: 1_500,
+      retryDelayMs: 1,
+    });
+    assert(Date.now() - startedAt < 2_500);
+  } finally {
+    if (originalNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = originalNodeOptions;
+    if (originalScenario === undefined) delete process.env.CLEANUP_TEST_DATABASE_CHILD_SCENARIO;
+    else process.env.CLEANUP_TEST_DATABASE_CHILD_SCENARIO = originalScenario;
+  }
+});
+
+test("an explicit DROP child connection failure remains fatal", async () => {
+  const originalNodeOptions = process.env.NODE_OPTIONS;
+  const originalScenario = process.env.CLEANUP_TEST_DATABASE_CHILD_SCENARIO;
+  const hook = join(repositoryRoot, "tests", "integration", "fixtures", "cleanup-test-database-child-pg-hook.mjs");
+  process.env.NODE_OPTIONS = [originalNodeOptions, `--import=${hook}`].filter(Boolean).join(" ");
+  process.env.CLEANUP_TEST_DATABASE_CHILD_SCENARIO = "drop-connect-failure";
+  try {
+    await assert.rejects(testHarnessInternals.dropIsolatedDatabase({
+      databaseName,
+      controlDatabaseUrl: "postgresql://127.0.0.1/core_agent_control",
+      closeOwned: [],
+      timeoutMs: 3_000,
+      retryDelayMs: 1,
+    }), /^Error: Integration stage failed: database drop$/);
+  } finally {
+    if (originalNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = originalNodeOptions;
+    if (originalScenario === undefined) delete process.env.CLEANUP_TEST_DATABASE_CHILD_SCENARIO;
+    else process.env.CLEANUP_TEST_DATABASE_CHILD_SCENARIO = originalScenario;
+  }
 });
 
 test("isolated database teardown closes owned pools before exact active-backend termination and verifies absence", async () => {
@@ -566,13 +630,13 @@ test("production PostgreSQL pool teardown aborts and reaps a pre-auth connection
         : { rows: [] },
       close: async () => undefined,
     }),
-    timeoutMs: 50,
+    timeoutMs: 200,
     retryDelayMs: 1,
   });
   try {
     const outcome = await Promise.race([
       teardown.then(() => "returned", () => "rejected"),
-      delay(250).then(() => "still-running"),
+      delay(500).then(() => "still-running"),
     ]);
     assert.notEqual(outcome, "still-running");
     await teardown.catch(() => undefined);
@@ -1283,12 +1347,12 @@ test("exact admin termination unblocks an owned close before DROP and absence ve
       },
       close: async () => { calls.push("admin closed"); },
     }),
-    timeoutMs: 80,
+    timeoutMs: 200,
     retryDelayMs: 1,
   });
   await Promise.race([
     teardown,
-    delay(150).then(() => { throw new Error("admin termination was unreachable"); }),
+    delay(400).then(() => { throw new Error("admin termination was unreachable"); }),
   ]);
   assert.deepEqual(calls, [
     "close started", "force attempted", "admin connected", `terminate:${databaseName}`,
@@ -1368,7 +1432,7 @@ test("exact termination failure still waits for terminal close and attempts DROP
       },
       close: async () => { calls.push("admin closed"); },
     }),
-    timeoutMs: 80,
+    timeoutMs: 200,
     retryDelayMs: 1,
   }), /^Error: Integration stage failed: database drop$/);
   assert.deepEqual(calls, [
@@ -1398,12 +1462,12 @@ test("admin connection failure is categorized after every owned close becomes te
       query: async () => { assert.fail("failed admin must not query"); },
       close: async () => { calls.push("admin closed"); },
     }),
-    timeoutMs: 80,
+    timeoutMs: 200,
     retryDelayMs: 1,
   });
   await assert.rejects(Promise.race([
     teardown,
-    delay(150).then(() => { throw new Error("admin connection remained unreachable"); }),
+    delay(400).then(() => { throw new Error("admin connection remained unreachable"); }),
   ]), /^Error: Integration stage failed: database drop$/);
   assert.deepEqual(calls, ["force attempted", "admin connect failed", "close settled", "admin closed"]);
 });

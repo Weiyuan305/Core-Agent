@@ -1,5 +1,5 @@
 import { constants, createReadStream } from "node:fs";
-import { lstat, open, opendir } from "node:fs/promises";
+import { lstat, open, opendir, readFile } from "node:fs/promises";
 import { basename, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -7,15 +7,14 @@ const arguments_ = process.argv.slice(2);
 let sentinelText;
 let sentinelBuffer;
 let explicitArtifactPaths;
-try {
-  await main();
-} catch {
-  // Never delegate scanner failures to Node's uncaught-exception formatter.
-  process.exitCode = 2;
-}
 
 async function main() {
-  if (arguments_[0] === "--secret-file") {
+  if (arguments_[0] === "--identity-acceptance-report") {
+    if (arguments_.length !== 2) return invalid();
+    const valid = await validateIdentityAcceptanceReport(resolve(arguments_[1]));
+    if (!valid) process.exitCode = 1;
+    return;
+  } else if (arguments_[0] === "--secret-file") {
     if (arguments_.length < 2) return invalid();
     sentinelBuffer = await readProtectedSentinel(resolve(arguments_[1]));
     explicitArtifactPaths = arguments_.slice(2);
@@ -46,6 +45,72 @@ async function main() {
     }
   } finally {
     if (sentinelText === undefined) sentinelBuffer.fill(0);
+  }
+}
+
+const acceptanceReportKeys = new Set([
+  "schema_version", "acceptance_mode", "started_at", "finished_at", "status",
+  "cleanup_status", "known_limitations", "stages", "failure_code",
+]);
+const acceptanceStageKeys = new Set(["code", "status", "duration_ms"]);
+const acceptanceStageCodes = new Set([
+  "PREFLIGHT", "EMAIL_VERIFICATION", "PASSWORD_SIGN_IN", "PASSWORD_REAUTHENTICATION",
+  "PASSWORD_RESET", "APPLE_SAME_EMAIL_LINK", "APPLE_RELAY_MANUAL_LINK", "GLOBAL_LOGOUT", "CLEANUP",
+]);
+const acceptanceStageOrder = [
+  "PREFLIGHT", "EMAIL_VERIFICATION", "PASSWORD_SIGN_IN", "PASSWORD_REAUTHENTICATION",
+  "PASSWORD_RESET", "APPLE_SAME_EMAIL_LINK", "APPLE_RELAY_MANUAL_LINK", "GLOBAL_LOGOUT",
+];
+
+function exactObject(value, allowed, required) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  return keys.every((key) => allowed.has(key)) && required.every((key) => keys.includes(key));
+}
+
+async function validateIdentityAcceptanceReport(path) {
+  try {
+    const metadata = await lstat(path);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1
+      || metadata.uid !== process.getuid?.() || (metadata.mode & 0o7777) !== 0o600
+      || metadata.size < 1 || metadata.size > 64 * 1024) {
+      return false;
+    }
+    const report = JSON.parse(await readFile(path, "utf8"));
+    const required = [
+      "schema_version", "acceptance_mode", "started_at", "finished_at", "status",
+      "cleanup_status", "known_limitations", "stages",
+    ];
+    if (!exactObject(report, acceptanceReportKeys, required)
+      || report.schema_version !== 1 || report.acceptance_mode !== "real_supabase_apple"
+      || !Array.isArray(report.known_limitations) || report.known_limitations.length !== 1
+      || report.known_limitations[0] !== "MFA_NOT_ENABLED" || !Array.isArray(report.stages)
+      || report.stages.length < 2 || report.stages.length > acceptanceStageCodes.size) return false;
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(report.started_at)
+      || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(report.finished_at)
+      || !Number.isFinite(Date.parse(report.started_at)) || !Number.isFinite(Date.parse(report.finished_at))
+      || Date.parse(report.finished_at) < Date.parse(report.started_at)) return false;
+    if (report.status !== "passed" && report.status !== "failed") return false;
+    if (report.cleanup_status !== "passed" && report.cleanup_status !== "failed") return false;
+    if (!report.stages.every((stage) => exactObject(stage, acceptanceStageKeys, [...acceptanceStageKeys])
+      && acceptanceStageCodes.has(stage.code) && (stage.status === "passed" || stage.status === "failed")
+      && Number.isSafeInteger(stage.duration_ms) && stage.duration_ms >= 0)) return false;
+    const codes = report.stages.map((stage) => stage.code);
+    if (new Set(codes).size !== codes.length || codes.at(-1) !== "CLEANUP") return false;
+    const execution = report.stages.slice(0, -1);
+    if (execution.some((stage, index) => stage.code !== acceptanceStageOrder[index])) return false;
+    const failedExecution = execution.findIndex((stage) => stage.status === "failed");
+    if (failedExecution !== -1 && (failedExecution !== execution.length - 1
+      || execution.slice(0, failedExecution).some((stage) => stage.status !== "passed"))) return false;
+    if (report.status === "passed") return !("failure_code" in report)
+      && report.cleanup_status === "passed" && report.stages.length === acceptanceStageCodes.size
+      && report.stages.every((stage) => stage.status === "passed");
+    return typeof report.failure_code === "string"
+      && /^(?:PREFLIGHT|EMAIL_VERIFICATION|PASSWORD_SIGN_IN|PASSWORD_REAUTHENTICATION|PASSWORD_RESET|APPLE_SAME_EMAIL_LINK|APPLE_RELAY_MANUAL_LINK|GLOBAL_LOGOUT|CLEANUP)_FAILED$/u.test(report.failure_code)
+      && report.stages.some((stage) => stage.status === "failed")
+      && (failedExecution !== -1 || report.stages.at(-1)?.status === "failed");
+  } catch {
+    return false;
   }
 }
 
@@ -184,4 +249,11 @@ function displayIdentifier(identifier, repositoryRoot) {
   return repositoryRelative.length > 0 && !repositoryRelative.startsWith(`..${sep}`) && repositoryRelative !== ".."
     ? repositoryRelative
     : basename(absolute);
+}
+
+try {
+  await main();
+} catch {
+  // Never delegate scanner failures to Node's uncaught-exception formatter.
+  process.exitCode = 2;
 }
