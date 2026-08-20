@@ -1,0 +1,25 @@
+{
+  "schema_key": "capability-version",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": {
+    "schema_version": 1,
+    "resource_version": 1,
+    "created_at": "2026-08-20T01:00:00Z",
+    "updated_at": "2026-08-20T01:00:00Z",
+    "capability_version_id": "capability_version.eduapply.read.1",
+    "capability_id": "capability.eduapply.read",
+    "version": "1.0.0",
+    "kind": "mcp",
+    "artifact_ref": "manifest:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "contract_ref": "eduapply.contracts@1.0.0",
+    "risk_class": "read",
+    "approval_requirement": "none",
+    "compatibility": {
+      "core_contract_version": "0.7.0",
+      "domain_contract_version": "1.0.0",
+      "runtime_protocol_version": "1.0.0",
+      "tenant_modes": ["b2b", "b2c"]
+    },
+    "status": "reviewed"
+  }
+}

@@ -10,7 +10,7 @@
     "check": "npm run build && npm test"
   },
   "dependencies": {
-    "@core-agent/contracts": "0.6.0",
+    "@core-agent/contracts": "0.7.0",
     "@core-agent/runtime-core": "0.1.0",
     "kysely": "0.29.4",
     "pg": "8.22.0",

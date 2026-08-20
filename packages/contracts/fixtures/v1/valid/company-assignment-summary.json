@@ -1,0 +1,12 @@
+{
+  "schema_key": "company-assignment-summary",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": {
+    "schema_version": 1,
+    "assignment_id": "assignment_demo",
+    "profile_id": "profile_demo",
+    "profile_display_name": "Consultant Demo",
+    "service_display_name": "EduApply",
+    "service_state": "available"
+  }
+}

@@ -90,6 +90,18 @@
           "type": "string"
         },
         {
+          "const": "SEAT_EXHAUSTED",
+          "type": "string"
+        },
+        {
+          "const": "CAPABILITY_CONFLICT",
+          "type": "string"
+        },
+        {
+          "const": "SERVICE_PREPARING",
+          "type": "string"
+        },
+        {
           "const": "APPROVAL_REQUIRED",
           "type": "string"
         },

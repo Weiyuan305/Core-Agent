@@ -1,0 +1,12 @@
+{
+  "schema_key": "select-tenant-pack-release-request",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": {
+    "schema_version": 1,
+    "idempotency_key": "idem_release_demo",
+    "payload_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "tenant_id": "tenant_demo",
+    "pack_product_id": "pack.eduapply",
+    "pack_version_id": "pack_version.eduapply.1"
+  }
+}

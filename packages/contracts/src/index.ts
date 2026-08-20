@@ -1,10 +1,14 @@
-export const CONTRACT_PACKAGE_VERSION = "0.6.0" as const;
+export const CONTRACT_PACKAGE_VERSION = "0.7.0" as const;
 export const WIRE_SCHEMA_VERSION = 1 as const;
 
 export * from "./common/primitives.js";
 export * from "./common/validation.js";
 export * from "./runtime/refs.js";
 export * from "./runtime/failures.js";
+export * from "./entitlements/catalog.js";
+export * from "./entitlements/authority.js";
+export * from "./entitlements/snapshots.js";
+export * from "./entitlements/public-api.js";
 export * from "./tenant/identity.js";
 export * from "./identity/authority.js";
 export * from "./identity/public-auth.js";

@@ -1,0 +1,27 @@
+{
+  "$id": "core-agent://v1/apple-identity-link-response",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "auth_subject_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "linked": {
+      "const": true,
+      "type": "boolean"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    }
+  },
+  "required": [
+    "schema_version",
+    "auth_subject_id",
+    "linked"
+  ],
+  "type": "object"
+}

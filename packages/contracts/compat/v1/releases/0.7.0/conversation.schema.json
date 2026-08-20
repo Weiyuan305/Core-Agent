@@ -1,0 +1,137 @@
+{
+  "$id": "core-agent://v1/conversation",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "case_ref": {
+      "$id": "core-agent://v1/case-ref",
+      "additionalProperties": false,
+      "properties": {
+        "capability_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "case_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "source_system": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "source_version": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "student_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "case_id",
+        "student_id",
+        "capability_id"
+      ],
+      "type": "object"
+    },
+    "conversation_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "created_by_actor_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "profile_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "status": {
+      "anyOf": [
+        {
+          "const": "active",
+          "type": "string"
+        },
+        {
+          "const": "archived",
+          "type": "string"
+        },
+        {
+          "const": "closed",
+          "type": "string"
+        }
+      ]
+    },
+    "student_ref": {
+      "$id": "core-agent://v1/student-ref",
+      "additionalProperties": false,
+      "properties": {
+        "source_system": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "source_version": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "student_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "student_id",
+        "source_system"
+      ],
+      "type": "object"
+    },
+    "tenant_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "resource_version",
+    "created_at",
+    "updated_at",
+    "conversation_id",
+    "tenant_id",
+    "profile_id",
+    "created_by_actor_id",
+    "status"
+  ],
+  "type": "object"
+}

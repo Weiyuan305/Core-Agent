@@ -1,0 +1,137 @@
+{
+  "$id": "core-agent://v1/grant-entitlement-request",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "assignment_mode": {
+          "const": "seat",
+          "type": "string"
+        },
+        "expires_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+          "type": "string"
+        },
+        "external_order_ref": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "idempotency_key": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "pack_product_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "payload_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "title": "SchemaVersion",
+          "type": "number"
+        },
+        "seat_quantity": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "source": {
+          "const": "platform_manual",
+          "type": "string"
+        },
+        "tenant_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "tenant_mode": {
+          "const": "b2b",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "idempotency_key",
+        "payload_hash",
+        "tenant_id",
+        "pack_product_id",
+        "source",
+        "external_order_ref",
+        "tenant_mode",
+        "assignment_mode",
+        "seat_quantity"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "assignment_mode": {
+          "const": "automatic",
+          "type": "string"
+        },
+        "expires_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+          "type": "string"
+        },
+        "external_order_ref": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "idempotency_key": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "pack_product_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "payload_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "title": "SchemaVersion",
+          "type": "number"
+        },
+        "source": {
+          "const": "platform_manual",
+          "type": "string"
+        },
+        "tenant_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "tenant_mode": {
+          "const": "b2c",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "idempotency_key",
+        "payload_hash",
+        "tenant_id",
+        "pack_product_id",
+        "source",
+        "external_order_ref",
+        "tenant_mode",
+        "assignment_mode"
+      ],
+      "type": "object"
+    }
+  ]
+}

@@ -10,6 +10,33 @@ import {
 } from "./common/primitives.js";
 import { ErrorEnvelopeSchema } from "./errors/error-envelope.js";
 import {
+  CapabilitySchema,
+  CapabilityVersionSchema,
+  PackMemberSchema,
+  PackProductSchema,
+  PackVersionSchema,
+  TenantPackReleaseSchema,
+} from "./entitlements/catalog.js";
+import {
+  EntitlementAssignmentSchema,
+  EntitlementSchema,
+} from "./entitlements/authority.js";
+import {
+  CapabilityServiceProjectionSchema,
+  EntitlementSnapshotSchema,
+  ProfileSnapshotPointerSchema,
+} from "./entitlements/snapshots.js";
+import {
+  AssignPackSeatRequestSchema,
+  ChangeEntitlementStatusRequestSchema,
+  CompanyAssignmentSummarySchema,
+  CompanyServiceSummarySchema,
+  GrantEntitlementRequestSchema,
+  RevokePackSeatRequestSchema,
+  SelectTenantPackReleaseRequestSchema,
+  StudentServiceSummarySchema,
+} from "./entitlements/public-api.js";
+import {
   AccountDeletionSchema,
   AuthSubjectSchema,
   CoreSessionSchema,
@@ -110,6 +137,25 @@ export const ContractSchemas = {
   "case-ref": CaseRefSchema,
   "entitlement-snapshot-ref": EntitlementSnapshotRefSchema,
   "consent-snapshot-ref": ConsentSnapshotRefSchema,
+  capability: CapabilitySchema,
+  "capability-version": CapabilityVersionSchema,
+  "pack-product": PackProductSchema,
+  "pack-member": PackMemberSchema,
+  "pack-version": PackVersionSchema,
+  "tenant-pack-release": TenantPackReleaseSchema,
+  entitlement: EntitlementSchema,
+  "entitlement-assignment": EntitlementAssignmentSchema,
+  "entitlement-snapshot": EntitlementSnapshotSchema,
+  "profile-snapshot-pointer": ProfileSnapshotPointerSchema,
+  "capability-service-projection": CapabilityServiceProjectionSchema,
+  "company-service-summary": CompanyServiceSummarySchema,
+  "student-service-summary": StudentServiceSummarySchema,
+  "company-assignment-summary": CompanyAssignmentSummarySchema,
+  "select-tenant-pack-release-request": SelectTenantPackReleaseRequestSchema,
+  "grant-entitlement-request": GrantEntitlementRequestSchema,
+  "change-entitlement-status-request": ChangeEntitlementStatusRequestSchema,
+  "assign-pack-seat-request": AssignPackSeatRequestSchema,
+  "revoke-pack-seat-request": RevokePackSeatRequestSchema,
   tenant: TenantSchema,
   actor: ActorSchema,
   membership: MembershipSchema,

@@ -1,0 +1,15 @@
+{
+  "schema_key": "company-service-summary",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": {
+    "schema_version": 1,
+    "service_id": "service_demo",
+    "display_name": "EduApply",
+    "valid_from": "2026-08-20T01:00:00Z",
+    "expires_at": "2027-08-20T01:00:00Z",
+    "service_state": "available",
+    "used_seats": 2,
+    "total_seats": 3,
+    "available_seats": 1
+  }
+}

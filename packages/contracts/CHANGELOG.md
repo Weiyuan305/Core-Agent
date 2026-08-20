@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.7.0 - 2026-08-20
+
+- Add closed Capability, immutable Capability Version, Pack Product, exact Pack
+  Version/member, and Tenant Pack Release resources.
+- Add platform-manual B2B seat and B2C automatic Entitlement authority,
+  Assignment, immutable effective Snapshot, current pointer, and Runtime service
+  projection contracts.
+- Add calm company/student service summaries and versioned management commands
+  without exposing Capability internals, commercial payloads, tool schemas, secrets,
+  or Runtime details.
+- Extend ProductEvent, Trusted Context validation, and stable errors for Entitlement,
+  seat, effective-snapshot, and service preparation lifecycles.
+- Append the immutable 0.7.0 schema release without modifying accepted 0.2.0
+  through 0.6.0 snapshots.
+
 ## 0.6.0 - 2026-08-17
 
 - Add the closed Apple identity link-start request with current password and the

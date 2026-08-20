@@ -4540,6 +4540,18 @@
                       "type": "string"
                     },
                     {
+                      "const": "SEAT_EXHAUSTED",
+                      "type": "string"
+                    },
+                    {
+                      "const": "CAPABILITY_CONFLICT",
+                      "type": "string"
+                    },
+                    {
+                      "const": "SERVICE_PREPARING",
+                      "type": "string"
+                    },
+                    {
                       "const": "APPROVAL_REQUIRED",
                       "type": "string"
                     },
@@ -7386,6 +7398,2316 @@
                 "actor_id",
                 "status",
                 "resource_version"
+              ],
+              "type": "object"
+            },
+            "profile_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "request_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "run_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "schema_version": {
+              "const": 1,
+              "title": "SchemaVersion",
+              "type": "number"
+            },
+            "sequence": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "student_ref": {
+              "additionalProperties": false,
+              "properties": {
+                "source_system": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_version": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "student_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "student_id",
+                "source_system"
+              ],
+              "type": "object"
+            },
+            "task_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "tenant_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "trace_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema_version",
+            "event_id",
+            "occurred_at",
+            "sequence",
+            "tenant_id",
+            "request_id",
+            "trace_id",
+            "correlation_id",
+            "causation_id",
+            "event_type",
+            "payload"
+          ],
+          "type": "object"
+        }
+      ],
+      "x-extensible-union": true
+    },
+    {
+      "$id": "core-agent://v1/entitlement-event",
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "approval_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "capability_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "case_ref": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "case_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_system": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_version": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "student_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "case_id",
+                "student_id",
+                "capability_id"
+              ],
+              "type": "object"
+            },
+            "causation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "conversation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "correlation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "event_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "event_type": {
+              "const": "pack.release_selected",
+              "type": "string",
+              "x-extensible-union": true
+            },
+            "occurred_at": {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+              "type": "string"
+            },
+            "payload": {
+              "additionalProperties": false,
+              "properties": {
+                "generation": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "pack_product_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "pack_version_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "resource_version": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "status": {
+                  "const": "current",
+                  "type": "string"
+                },
+                "tenant_pack_release_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "tenant_pack_release_id",
+                "pack_product_id",
+                "pack_version_id",
+                "generation",
+                "status",
+                "resource_version"
+              ],
+              "type": "object"
+            },
+            "profile_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "request_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "run_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "schema_version": {
+              "const": 1,
+              "title": "SchemaVersion",
+              "type": "number"
+            },
+            "sequence": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "student_ref": {
+              "additionalProperties": false,
+              "properties": {
+                "source_system": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_version": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "student_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "student_id",
+                "source_system"
+              ],
+              "type": "object"
+            },
+            "task_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "tenant_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "trace_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema_version",
+            "event_id",
+            "occurred_at",
+            "sequence",
+            "tenant_id",
+            "request_id",
+            "trace_id",
+            "correlation_id",
+            "causation_id",
+            "event_type",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "approval_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "capability_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "case_ref": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "case_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_system": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_version": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "student_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "case_id",
+                "student_id",
+                "capability_id"
+              ],
+              "type": "object"
+            },
+            "causation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "conversation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "correlation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "event_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "event_type": {
+              "const": "entitlement.activated",
+              "type": "string",
+              "x-extensible-union": true
+            },
+            "occurred_at": {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+              "type": "string"
+            },
+            "payload": {
+              "additionalProperties": false,
+              "properties": {
+                "entitlement_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "pack_product_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "resource_version": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "status": {
+                  "const": "active",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "entitlement_id",
+                "pack_product_id",
+                "status",
+                "resource_version"
+              ],
+              "type": "object"
+            },
+            "profile_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "request_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "run_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "schema_version": {
+              "const": 1,
+              "title": "SchemaVersion",
+              "type": "number"
+            },
+            "sequence": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "student_ref": {
+              "additionalProperties": false,
+              "properties": {
+                "source_system": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_version": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "student_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "student_id",
+                "source_system"
+              ],
+              "type": "object"
+            },
+            "task_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "tenant_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "trace_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema_version",
+            "event_id",
+            "occurred_at",
+            "sequence",
+            "tenant_id",
+            "request_id",
+            "trace_id",
+            "correlation_id",
+            "causation_id",
+            "event_type",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "approval_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "capability_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "case_ref": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "case_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_system": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_version": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "student_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "case_id",
+                "student_id",
+                "capability_id"
+              ],
+              "type": "object"
+            },
+            "causation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "conversation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "correlation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "event_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "event_type": {
+              "const": "entitlement.suspended",
+              "type": "string",
+              "x-extensible-union": true
+            },
+            "occurred_at": {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+              "type": "string"
+            },
+            "payload": {
+              "additionalProperties": false,
+              "properties": {
+                "entitlement_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "pack_product_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "reason_code": {
+                  "anyOf": [
+                    {
+                      "const": "platform_grant",
+                      "type": "string"
+                    },
+                    {
+                      "const": "administrator_suspended",
+                      "type": "string"
+                    },
+                    {
+                      "const": "administrator_reactivated",
+                      "type": "string"
+                    },
+                    {
+                      "const": "platform_revoked",
+                      "type": "string"
+                    },
+                    {
+                      "const": "validity_expired",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "resource_version": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "status": {
+                  "const": "suspended",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "entitlement_id",
+                "pack_product_id",
+                "status",
+                "reason_code",
+                "resource_version"
+              ],
+              "type": "object"
+            },
+            "profile_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "request_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "run_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "schema_version": {
+              "const": 1,
+              "title": "SchemaVersion",
+              "type": "number"
+            },
+            "sequence": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "student_ref": {
+              "additionalProperties": false,
+              "properties": {
+                "source_system": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_version": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "student_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "student_id",
+                "source_system"
+              ],
+              "type": "object"
+            },
+            "task_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "tenant_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "trace_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema_version",
+            "event_id",
+            "occurred_at",
+            "sequence",
+            "tenant_id",
+            "request_id",
+            "trace_id",
+            "correlation_id",
+            "causation_id",
+            "event_type",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "approval_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "capability_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "case_ref": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "case_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_system": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_version": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "student_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "case_id",
+                "student_id",
+                "capability_id"
+              ],
+              "type": "object"
+            },
+            "causation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "conversation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "correlation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "event_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "event_type": {
+              "const": "entitlement.revoked",
+              "type": "string",
+              "x-extensible-union": true
+            },
+            "occurred_at": {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+              "type": "string"
+            },
+            "payload": {
+              "additionalProperties": false,
+              "properties": {
+                "entitlement_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "pack_product_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "reason_code": {
+                  "anyOf": [
+                    {
+                      "const": "platform_grant",
+                      "type": "string"
+                    },
+                    {
+                      "const": "administrator_suspended",
+                      "type": "string"
+                    },
+                    {
+                      "const": "administrator_reactivated",
+                      "type": "string"
+                    },
+                    {
+                      "const": "platform_revoked",
+                      "type": "string"
+                    },
+                    {
+                      "const": "validity_expired",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "resource_version": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "status": {
+                  "const": "revoked",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "entitlement_id",
+                "pack_product_id",
+                "status",
+                "reason_code",
+                "resource_version"
+              ],
+              "type": "object"
+            },
+            "profile_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "request_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "run_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "schema_version": {
+              "const": 1,
+              "title": "SchemaVersion",
+              "type": "number"
+            },
+            "sequence": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "student_ref": {
+              "additionalProperties": false,
+              "properties": {
+                "source_system": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_version": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "student_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "student_id",
+                "source_system"
+              ],
+              "type": "object"
+            },
+            "task_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "tenant_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "trace_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema_version",
+            "event_id",
+            "occurred_at",
+            "sequence",
+            "tenant_id",
+            "request_id",
+            "trace_id",
+            "correlation_id",
+            "causation_id",
+            "event_type",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "approval_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "capability_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "case_ref": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "case_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_system": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_version": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "student_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "case_id",
+                "student_id",
+                "capability_id"
+              ],
+              "type": "object"
+            },
+            "causation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "conversation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "correlation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "event_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "event_type": {
+              "const": "entitlement.expired",
+              "type": "string",
+              "x-extensible-union": true
+            },
+            "occurred_at": {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+              "type": "string"
+            },
+            "payload": {
+              "additionalProperties": false,
+              "properties": {
+                "entitlement_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "pack_product_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "reason_code": {
+                  "anyOf": [
+                    {
+                      "const": "platform_grant",
+                      "type": "string"
+                    },
+                    {
+                      "const": "administrator_suspended",
+                      "type": "string"
+                    },
+                    {
+                      "const": "administrator_reactivated",
+                      "type": "string"
+                    },
+                    {
+                      "const": "platform_revoked",
+                      "type": "string"
+                    },
+                    {
+                      "const": "validity_expired",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "resource_version": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "status": {
+                  "const": "expired",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "entitlement_id",
+                "pack_product_id",
+                "status",
+                "reason_code",
+                "resource_version"
+              ],
+              "type": "object"
+            },
+            "profile_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "request_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "run_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "schema_version": {
+              "const": 1,
+              "title": "SchemaVersion",
+              "type": "number"
+            },
+            "sequence": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "student_ref": {
+              "additionalProperties": false,
+              "properties": {
+                "source_system": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_version": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "student_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "student_id",
+                "source_system"
+              ],
+              "type": "object"
+            },
+            "task_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "tenant_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "trace_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema_version",
+            "event_id",
+            "occurred_at",
+            "sequence",
+            "tenant_id",
+            "request_id",
+            "trace_id",
+            "correlation_id",
+            "causation_id",
+            "event_type",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "approval_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "capability_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "case_ref": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "case_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_system": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_version": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "student_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "case_id",
+                "student_id",
+                "capability_id"
+              ],
+              "type": "object"
+            },
+            "causation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "conversation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "correlation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "event_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "event_type": {
+              "const": "assignment.created",
+              "type": "string",
+              "x-extensible-union": true
+            },
+            "occurred_at": {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+              "type": "string"
+            },
+            "payload": {
+              "additionalProperties": false,
+              "properties": {
+                "assignment_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "entitlement_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "profile_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "resource_version": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "status": {
+                  "const": "preparing",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "assignment_id",
+                "entitlement_id",
+                "profile_id",
+                "status",
+                "resource_version"
+              ],
+              "type": "object"
+            },
+            "profile_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "request_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "run_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "schema_version": {
+              "const": 1,
+              "title": "SchemaVersion",
+              "type": "number"
+            },
+            "sequence": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "student_ref": {
+              "additionalProperties": false,
+              "properties": {
+                "source_system": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_version": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "student_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "student_id",
+                "source_system"
+              ],
+              "type": "object"
+            },
+            "task_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "tenant_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "trace_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema_version",
+            "event_id",
+            "occurred_at",
+            "sequence",
+            "tenant_id",
+            "request_id",
+            "trace_id",
+            "correlation_id",
+            "causation_id",
+            "event_type",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "approval_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "capability_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "case_ref": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "case_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_system": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_version": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "student_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "case_id",
+                "student_id",
+                "capability_id"
+              ],
+              "type": "object"
+            },
+            "causation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "conversation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "correlation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "event_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "event_type": {
+              "const": "assignment.revoked",
+              "type": "string",
+              "x-extensible-union": true
+            },
+            "occurred_at": {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+              "type": "string"
+            },
+            "payload": {
+              "additionalProperties": false,
+              "properties": {
+                "assignment_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "entitlement_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "profile_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "reason_code": {
+                  "anyOf": [
+                    {
+                      "const": "seat_assigned",
+                      "type": "string"
+                    },
+                    {
+                      "const": "administrator_suspended",
+                      "type": "string"
+                    },
+                    {
+                      "const": "authority_suspended",
+                      "type": "string"
+                    },
+                    {
+                      "const": "validity_expired",
+                      "type": "string"
+                    },
+                    {
+                      "const": "runtime_preparation_failed",
+                      "type": "string"
+                    },
+                    {
+                      "const": "administrator_revoked",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "resource_version": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "status": {
+                  "const": "revoked",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "assignment_id",
+                "entitlement_id",
+                "profile_id",
+                "status",
+                "reason_code",
+                "resource_version"
+              ],
+              "type": "object"
+            },
+            "profile_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "request_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "run_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "schema_version": {
+              "const": 1,
+              "title": "SchemaVersion",
+              "type": "number"
+            },
+            "sequence": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "student_ref": {
+              "additionalProperties": false,
+              "properties": {
+                "source_system": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_version": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "student_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "student_id",
+                "source_system"
+              ],
+              "type": "object"
+            },
+            "task_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "tenant_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "trace_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema_version",
+            "event_id",
+            "occurred_at",
+            "sequence",
+            "tenant_id",
+            "request_id",
+            "trace_id",
+            "correlation_id",
+            "causation_id",
+            "event_type",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "approval_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "capability_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "case_ref": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "case_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_system": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_version": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "student_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "case_id",
+                "student_id",
+                "capability_id"
+              ],
+              "type": "object"
+            },
+            "causation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "conversation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "correlation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "event_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "event_type": {
+              "const": "entitlement_snapshot.changed",
+              "type": "string",
+              "x-extensible-union": true
+            },
+            "occurred_at": {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+              "type": "string"
+            },
+            "payload": {
+              "additionalProperties": false,
+              "properties": {
+                "entitlement_snapshot_ref": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "evaluated_at": {
+                      "format": "date-time",
+                      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+                      "type": "string"
+                    },
+                    "snapshot_id": {
+                      "maxLength": 255,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "version": {
+                      "minimum": 1,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "snapshot_id",
+                    "version",
+                    "evaluated_at"
+                  ],
+                  "type": "object"
+                },
+                "profile_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "resource_version": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "profile_id",
+                "entitlement_snapshot_ref",
+                "resource_version"
+              ],
+              "type": "object"
+            },
+            "profile_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "request_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "run_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "schema_version": {
+              "const": 1,
+              "title": "SchemaVersion",
+              "type": "number"
+            },
+            "sequence": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "student_ref": {
+              "additionalProperties": false,
+              "properties": {
+                "source_system": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_version": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "student_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "student_id",
+                "source_system"
+              ],
+              "type": "object"
+            },
+            "task_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "tenant_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "trace_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema_version",
+            "event_id",
+            "occurred_at",
+            "sequence",
+            "tenant_id",
+            "request_id",
+            "trace_id",
+            "correlation_id",
+            "causation_id",
+            "event_type",
+            "payload"
+          ],
+          "type": "object"
+        }
+      ],
+      "x-extensible-union": true
+    },
+    {
+      "$id": "core-agent://v1/service-event",
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "approval_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "capability_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "case_ref": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "case_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_system": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_version": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "student_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "case_id",
+                "student_id",
+                "capability_id"
+              ],
+              "type": "object"
+            },
+            "causation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "conversation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "correlation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "event_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "event_type": {
+              "const": "service.preparing",
+              "type": "string",
+              "x-extensible-union": true
+            },
+            "occurred_at": {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+              "type": "string"
+            },
+            "payload": {
+              "additionalProperties": false,
+              "properties": {
+                "entitlement_snapshot_ref": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "evaluated_at": {
+                      "format": "date-time",
+                      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+                      "type": "string"
+                    },
+                    "snapshot_id": {
+                      "maxLength": 255,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "version": {
+                      "minimum": 1,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "snapshot_id",
+                    "version",
+                    "evaluated_at"
+                  ],
+                  "type": "object"
+                },
+                "generation": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "profile_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "state": {
+                  "const": "preparing",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "profile_id",
+                "generation",
+                "entitlement_snapshot_ref",
+                "state"
+              ],
+              "type": "object"
+            },
+            "profile_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "request_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "run_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "schema_version": {
+              "const": 1,
+              "title": "SchemaVersion",
+              "type": "number"
+            },
+            "sequence": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "student_ref": {
+              "additionalProperties": false,
+              "properties": {
+                "source_system": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_version": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "student_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "student_id",
+                "source_system"
+              ],
+              "type": "object"
+            },
+            "task_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "tenant_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "trace_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema_version",
+            "event_id",
+            "occurred_at",
+            "sequence",
+            "tenant_id",
+            "request_id",
+            "trace_id",
+            "correlation_id",
+            "causation_id",
+            "event_type",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "approval_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "capability_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "case_ref": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "case_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_system": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_version": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "student_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "case_id",
+                "student_id",
+                "capability_id"
+              ],
+              "type": "object"
+            },
+            "causation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "conversation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "correlation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "event_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "event_type": {
+              "const": "service.available",
+              "type": "string",
+              "x-extensible-union": true
+            },
+            "occurred_at": {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+              "type": "string"
+            },
+            "payload": {
+              "additionalProperties": false,
+              "properties": {
+                "entitlement_snapshot_ref": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "evaluated_at": {
+                      "format": "date-time",
+                      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+                      "type": "string"
+                    },
+                    "snapshot_id": {
+                      "maxLength": 255,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "version": {
+                      "minimum": 1,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "snapshot_id",
+                    "version",
+                    "evaluated_at"
+                  ],
+                  "type": "object"
+                },
+                "generation": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "profile_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "state": {
+                  "const": "available",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "profile_id",
+                "generation",
+                "entitlement_snapshot_ref",
+                "state"
+              ],
+              "type": "object"
+            },
+            "profile_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "request_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "run_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "schema_version": {
+              "const": 1,
+              "title": "SchemaVersion",
+              "type": "number"
+            },
+            "sequence": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "student_ref": {
+              "additionalProperties": false,
+              "properties": {
+                "source_system": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_version": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "student_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "student_id",
+                "source_system"
+              ],
+              "type": "object"
+            },
+            "task_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "tenant_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "trace_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema_version",
+            "event_id",
+            "occurred_at",
+            "sequence",
+            "tenant_id",
+            "request_id",
+            "trace_id",
+            "correlation_id",
+            "causation_id",
+            "event_type",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "approval_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "capability_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "case_ref": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "case_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_system": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_version": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "student_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "case_id",
+                "student_id",
+                "capability_id"
+              ],
+              "type": "object"
+            },
+            "causation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "conversation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "correlation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "event_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "event_type": {
+              "const": "service.failed",
+              "type": "string",
+              "x-extensible-union": true
+            },
+            "occurred_at": {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+              "type": "string"
+            },
+            "payload": {
+              "additionalProperties": false,
+              "properties": {
+                "entitlement_snapshot_ref": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "evaluated_at": {
+                      "format": "date-time",
+                      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+                      "type": "string"
+                    },
+                    "snapshot_id": {
+                      "maxLength": 255,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "version": {
+                      "minimum": 1,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "snapshot_id",
+                    "version",
+                    "evaluated_at"
+                  ],
+                  "type": "object"
+                },
+                "generation": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "profile_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "reason_code": {
+                  "anyOf": [
+                    {
+                      "const": "runtime_preparation_failed",
+                      "type": "string"
+                    },
+                    {
+                      "const": "runtime_health_check_failed",
+                      "type": "string"
+                    },
+                    {
+                      "const": "capability_manifest_mismatch",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "state": {
+                  "const": "failed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "profile_id",
+                "generation",
+                "entitlement_snapshot_ref",
+                "state",
+                "reason_code"
               ],
               "type": "object"
             },

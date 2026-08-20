@@ -1,0 +1,115 @@
+{
+  "$id": "core-agent://v1/entitlement-assignment",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "assignment_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "entitlement_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "profile_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "reason_code": {
+      "anyOf": [
+        {
+          "const": "seat_assigned",
+          "type": "string"
+        },
+        {
+          "const": "administrator_suspended",
+          "type": "string"
+        },
+        {
+          "const": "authority_suspended",
+          "type": "string"
+        },
+        {
+          "const": "validity_expired",
+          "type": "string"
+        },
+        {
+          "const": "runtime_preparation_failed",
+          "type": "string"
+        },
+        {
+          "const": "administrator_revoked",
+          "type": "string"
+        }
+      ]
+    },
+    "resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "status": {
+      "anyOf": [
+        {
+          "const": "preparing",
+          "type": "string"
+        },
+        {
+          "const": "available",
+          "type": "string"
+        },
+        {
+          "const": "suspended",
+          "type": "string"
+        },
+        {
+          "const": "expired",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "type": "string"
+        },
+        {
+          "const": "revoked",
+          "type": "string"
+        }
+      ]
+    },
+    "tenant_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "resource_version",
+    "created_at",
+    "updated_at",
+    "assignment_id",
+    "tenant_id",
+    "entitlement_id",
+    "profile_id",
+    "status",
+    "reason_code"
+  ],
+  "type": "object"
+}

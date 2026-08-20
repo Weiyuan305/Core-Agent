@@ -1,0 +1,65 @@
+{
+  "$id": "core-agent://v1/company-assignment-summary",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "assignment_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "profile_display_name": {
+      "maxLength": 200,
+      "minLength": 1,
+      "type": "string"
+    },
+    "profile_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "service_display_name": {
+      "maxLength": 200,
+      "minLength": 1,
+      "type": "string"
+    },
+    "service_state": {
+      "anyOf": [
+        {
+          "const": "preparing",
+          "type": "string"
+        },
+        {
+          "const": "available",
+          "type": "string"
+        },
+        {
+          "const": "suspended",
+          "type": "string"
+        },
+        {
+          "const": "expired",
+          "type": "string"
+        },
+        {
+          "const": "unavailable",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "assignment_id",
+    "profile_id",
+    "profile_display_name",
+    "service_display_name",
+    "service_state"
+  ],
+  "type": "object"
+}

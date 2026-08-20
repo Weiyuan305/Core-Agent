@@ -1,0 +1,12 @@
+{
+  "schema_key": "assign-pack-seat-request",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": {
+    "schema_version": 1,
+    "idempotency_key": "idem_assign_demo",
+    "payload_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "entitlement_id": "entitlement_demo",
+    "expected_resource_version": 1,
+    "profile_id": "profile_demo"
+  }
+}

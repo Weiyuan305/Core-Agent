@@ -1,0 +1,201 @@
+{
+  "$id": "core-agent://v1/capability-version",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "approval_requirement": {
+      "anyOf": [
+        {
+          "const": "none",
+          "type": "string"
+        },
+        {
+          "const": "user_confirmation",
+          "type": "string"
+        },
+        {
+          "const": "human_approval",
+          "type": "string"
+        }
+      ]
+    },
+    "artifact_ref": {
+      "anyOf": [
+        {
+          "pattern": "^oci:[A-Za-z0-9][A-Za-z0-9./:_-]{0,511}@sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        {
+          "pattern": "^npm:@?[A-Za-z0-9._/-]+@(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)#sha512-[A-Za-z0-9+/=]+$",
+          "type": "string"
+        },
+        {
+          "pattern": "^manifest:sha256:[a-f0-9]{64}$",
+          "type": "string"
+        }
+      ]
+    },
+    "capability_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "capability_version_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "compatibility": {
+      "additionalProperties": false,
+      "properties": {
+        "core_contract_version": {
+          "maxLength": 128,
+          "minLength": 5,
+          "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$",
+          "type": "string"
+        },
+        "domain_contract_version": {
+          "maxLength": 128,
+          "minLength": 5,
+          "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$",
+          "type": "string"
+        },
+        "runtime_protocol_version": {
+          "maxLength": 128,
+          "minLength": 5,
+          "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$",
+          "type": "string"
+        },
+        "tenant_modes": {
+          "items": {
+            "anyOf": [
+              {
+                "const": "b2b",
+                "type": "string"
+              },
+              {
+                "const": "b2c",
+                "type": "string"
+              }
+            ]
+          },
+          "maxItems": 2,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "core_contract_version",
+        "domain_contract_version",
+        "runtime_protocol_version",
+        "tenant_modes"
+      ],
+      "type": "object"
+    },
+    "contract_ref": {
+      "maxLength": 256,
+      "minLength": 7,
+      "pattern": "^[a-z0-9][a-z0-9._/-]{0,127}@(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "kind": {
+      "anyOf": [
+        {
+          "const": "mcp",
+          "type": "string"
+        },
+        {
+          "const": "skill",
+          "type": "string"
+        },
+        {
+          "const": "policy",
+          "type": "string"
+        }
+      ]
+    },
+    "resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "risk_class": {
+      "anyOf": [
+        {
+          "const": "read",
+          "type": "string"
+        },
+        {
+          "const": "draft_write",
+          "type": "string"
+        },
+        {
+          "const": "external_write",
+          "type": "string"
+        },
+        {
+          "const": "privileged",
+          "type": "string"
+        }
+      ]
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "status": {
+      "anyOf": [
+        {
+          "const": "draft",
+          "type": "string"
+        },
+        {
+          "const": "reviewed",
+          "type": "string"
+        },
+        {
+          "const": "retired",
+          "type": "string"
+        },
+        {
+          "const": "blocked",
+          "type": "string"
+        }
+      ]
+    },
+    "updated_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "version": {
+      "maxLength": 128,
+      "minLength": 5,
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "resource_version",
+    "created_at",
+    "updated_at",
+    "capability_version_id",
+    "capability_id",
+    "version",
+    "kind",
+    "artifact_ref",
+    "contract_ref",
+    "risk_class",
+    "approval_requirement",
+    "compatibility",
+    "status"
+  ],
+  "type": "object"
+}

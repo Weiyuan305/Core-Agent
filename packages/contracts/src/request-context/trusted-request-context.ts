@@ -12,6 +12,7 @@ import {
   CaseRefSchema,
   ConsentSnapshotRefSchema,
   EntitlementSnapshotRefSchema,
+  type EntitlementSnapshotRef,
   StudentRefSchema,
   validateCaseScope,
 } from "../runtime/refs.js";
@@ -96,6 +97,10 @@ export interface TrustedContextAuthority {
     owner_actor_id: string;
     status: Static<typeof ProfileStatusSchema>;
   };
+  entitlement_snapshot?: {
+    snapshot_ref: EntitlementSnapshotRef;
+    capability_ids: readonly string[];
+  };
 }
 
 const MAX_CONTEXT_TTL_NANOSECONDS = 300_000_000_000n;
@@ -105,6 +110,51 @@ export function validateTrustedRequestContext(
   authority: TrustedContextAuthority,
 ): ContractViolation[] {
   const violations: ContractViolation[] = [];
+
+  for (let index = 1; index < context.capability_ids.length; index += 1) {
+    if (context.capability_ids[index - 1]! >= context.capability_ids[index]!) {
+      violations.push(
+        violation(
+          "CAPABILITY_IDS_NOT_SORTED",
+          "capability_ids",
+          "Trusted context Capability ids must use canonical order",
+        ),
+      );
+      break;
+    }
+  }
+
+  if (authority.entitlement_snapshot !== undefined) {
+    const effectiveRef = authority.entitlement_snapshot.snapshot_ref;
+    const contextRef = context.entitlement_snapshot_ref;
+    if (
+      contextRef.snapshot_id !== effectiveRef.snapshot_id
+      || contextRef.version !== effectiveRef.version
+      || contextRef.evaluated_at !== effectiveRef.evaluated_at
+    ) {
+      violations.push(
+        violation(
+          "ENTITLEMENT_SNAPSHOT_MISMATCH",
+          "entitlement_snapshot_ref",
+          "Trusted context must reference the effective entitlement snapshot",
+        ),
+      );
+    }
+    if (
+      context.capability_ids.length !== authority.entitlement_snapshot.capability_ids.length
+      || context.capability_ids.some((capabilityId, index) => (
+        capabilityId !== authority.entitlement_snapshot!.capability_ids[index]
+      ))
+    ) {
+      violations.push(
+        violation(
+          "ENTITLEMENT_CAPABILITIES_MISMATCH",
+          "capability_ids",
+          "Trusted context Capability ids must match the effective entitlement snapshot",
+        ),
+      );
+    }
+  }
 
   if (authority.membership.status !== "active") {
     violations.push(

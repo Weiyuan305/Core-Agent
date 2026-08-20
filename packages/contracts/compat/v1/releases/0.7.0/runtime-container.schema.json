@@ -1,0 +1,166 @@
+{
+  "$id": "core-agent://v1/runtime-container",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "container_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "desired_state": {
+      "anyOf": [
+        {
+          "const": "running",
+          "type": "string"
+        },
+        {
+          "const": "stopped",
+          "type": "string"
+        },
+        {
+          "const": "deleted",
+          "type": "string"
+        }
+      ]
+    },
+    "failure_summary": {
+      "maxLength": 1000,
+      "type": "string"
+    },
+    "generation": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "health_status": {
+      "anyOf": [
+        {
+          "const": "unknown",
+          "type": "string"
+        },
+        {
+          "const": "healthy",
+          "type": "string"
+        },
+        {
+          "const": "degraded",
+          "type": "string"
+        },
+        {
+          "const": "unhealthy",
+          "type": "string"
+        }
+      ]
+    },
+    "image_ref": {
+      "pattern": "^.+@sha256:[a-f0-9]{64}$",
+      "type": "string"
+    },
+    "last_probed_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "observed_state": {
+      "anyOf": [
+        {
+          "const": "requested",
+          "type": "string"
+        },
+        {
+          "const": "provisioning",
+          "type": "string"
+        },
+        {
+          "const": "starting",
+          "type": "string"
+        },
+        {
+          "const": "ready",
+          "type": "string"
+        },
+        {
+          "const": "draining",
+          "type": "string"
+        },
+        {
+          "const": "upgrading",
+          "type": "string"
+        },
+        {
+          "const": "recovering",
+          "type": "string"
+        },
+        {
+          "const": "stopping",
+          "type": "string"
+        },
+        {
+          "const": "stopped",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "type": "string"
+        },
+        {
+          "const": "deleting",
+          "type": "string"
+        },
+        {
+          "const": "deleted",
+          "type": "string"
+        }
+      ]
+    },
+    "resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "runtime_kind": {
+      "const": "hermes",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "tenant_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "volume_ref": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "resource_version",
+    "created_at",
+    "updated_at",
+    "container_id",
+    "tenant_id",
+    "runtime_kind",
+    "desired_state",
+    "observed_state",
+    "image_ref",
+    "generation",
+    "volume_ref",
+    "health_status"
+  ],
+  "type": "object"
+}

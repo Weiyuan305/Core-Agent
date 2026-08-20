@@ -1,0 +1,13 @@
+{
+  "schema_key": "change-entitlement-status-request",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": {
+    "schema_version": 1,
+    "idempotency_key": "idem_entitlement_status_demo",
+    "payload_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "entitlement_id": "entitlement_demo",
+    "expected_resource_version": 1,
+    "status": "suspended",
+    "reason_code": "administrator_suspended"
+  }
+}

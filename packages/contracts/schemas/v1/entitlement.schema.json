@@ -1,0 +1,303 @@
+{
+  "$id": "core-agent://v1/entitlement",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "assignment_mode": {
+          "const": "seat",
+          "type": "string"
+        },
+        "created_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+          "type": "string"
+        },
+        "entitlement_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "expires_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+          "type": "string"
+        },
+        "external_order_ref": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "pack_product_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "pack_version": {
+          "maxLength": 128,
+          "minLength": 5,
+          "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$",
+          "type": "string"
+        },
+        "pack_version_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "reason_code": {
+          "anyOf": [
+            {
+              "const": "platform_grant",
+              "type": "string"
+            },
+            {
+              "const": "administrator_suspended",
+              "type": "string"
+            },
+            {
+              "const": "administrator_reactivated",
+              "type": "string"
+            },
+            {
+              "const": "platform_revoked",
+              "type": "string"
+            },
+            {
+              "const": "validity_expired",
+              "type": "string"
+            }
+          ]
+        },
+        "resource_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "schema_version": {
+          "const": 1,
+          "title": "SchemaVersion",
+          "type": "number"
+        },
+        "seat_quantity": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "source": {
+          "const": "platform_manual",
+          "type": "string"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "const": "active",
+              "type": "string"
+            },
+            {
+              "const": "suspended",
+              "type": "string"
+            },
+            {
+              "const": "expired",
+              "type": "string"
+            },
+            {
+              "const": "revoked",
+              "type": "string"
+            }
+          ]
+        },
+        "tenant_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "tenant_mode": {
+          "const": "b2b",
+          "type": "string"
+        },
+        "tenant_pack_release_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+          "type": "string"
+        },
+        "valid_from": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "resource_version",
+        "created_at",
+        "updated_at",
+        "entitlement_id",
+        "tenant_id",
+        "pack_product_id",
+        "tenant_pack_release_id",
+        "pack_version_id",
+        "pack_version",
+        "source",
+        "external_order_ref",
+        "valid_from",
+        "status",
+        "reason_code",
+        "tenant_mode",
+        "assignment_mode",
+        "seat_quantity"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "assignment_mode": {
+          "const": "automatic",
+          "type": "string"
+        },
+        "created_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+          "type": "string"
+        },
+        "entitlement_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "expires_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+          "type": "string"
+        },
+        "external_order_ref": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "pack_product_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "pack_version": {
+          "maxLength": 128,
+          "minLength": 5,
+          "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$",
+          "type": "string"
+        },
+        "pack_version_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "reason_code": {
+          "anyOf": [
+            {
+              "const": "platform_grant",
+              "type": "string"
+            },
+            {
+              "const": "administrator_suspended",
+              "type": "string"
+            },
+            {
+              "const": "administrator_reactivated",
+              "type": "string"
+            },
+            {
+              "const": "platform_revoked",
+              "type": "string"
+            },
+            {
+              "const": "validity_expired",
+              "type": "string"
+            }
+          ]
+        },
+        "resource_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "schema_version": {
+          "const": 1,
+          "title": "SchemaVersion",
+          "type": "number"
+        },
+        "source": {
+          "const": "platform_manual",
+          "type": "string"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "const": "active",
+              "type": "string"
+            },
+            {
+              "const": "suspended",
+              "type": "string"
+            },
+            {
+              "const": "expired",
+              "type": "string"
+            },
+            {
+              "const": "revoked",
+              "type": "string"
+            }
+          ]
+        },
+        "tenant_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "tenant_mode": {
+          "const": "b2c",
+          "type": "string"
+        },
+        "tenant_pack_release_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+          "type": "string"
+        },
+        "valid_from": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "resource_version",
+        "created_at",
+        "updated_at",
+        "entitlement_id",
+        "tenant_id",
+        "pack_product_id",
+        "tenant_pack_release_id",
+        "pack_version_id",
+        "pack_version",
+        "source",
+        "external_order_ref",
+        "valid_from",
+        "status",
+        "reason_code",
+        "tenant_mode",
+        "assignment_mode"
+      ],
+      "type": "object"
+    }
+  ]
+}

@@ -374,6 +374,47 @@ test("context schema rejects duplicate capabilities, duplicate audience, and unk
   assert.equal(validator.Check({ ...context, untrusted: true }), false);
 });
 
+test("trusted context capability ids must be in canonical sorted order", () => {
+  assert.deepEqual(
+    validateTrustedRequestContext({
+      ...context,
+      capability_ids: ["housing.read", "eduapply.application"],
+    }, authority).map((item) => item.code),
+    ["CAPABILITY_IDS_NOT_SORTED"],
+  );
+});
+
+test("trusted context must exactly match the effective entitlement snapshot", () => {
+  const effectiveAuthority: TrustedContextAuthority = {
+    ...authority,
+    entitlement_snapshot: {
+      snapshot_ref: context.entitlement_snapshot_ref,
+      capability_ids: context.capability_ids,
+    },
+  };
+  assert.deepEqual(validateTrustedRequestContext(context, effectiveAuthority), []);
+  assert.deepEqual(
+    validateTrustedRequestContext(context, {
+      ...effectiveAuthority,
+      entitlement_snapshot: {
+        ...effectiveAuthority.entitlement_snapshot!,
+        snapshot_ref: { ...context.entitlement_snapshot_ref, version: 8 },
+      },
+    }).map((item) => item.code),
+    ["ENTITLEMENT_SNAPSHOT_MISMATCH"],
+  );
+  assert.deepEqual(
+    validateTrustedRequestContext(context, {
+      ...effectiveAuthority,
+      entitlement_snapshot: {
+        ...effectiveAuthority.entitlement_snapshot!,
+        capability_ids: ["housing.read"],
+      },
+    }).map((item) => item.code),
+    ["ENTITLEMENT_CAPABILITIES_MISMATCH"],
+  );
+});
+
 test("signed envelope rejects schema and algorithm conflicts without claiming signature validity", () => {
   const wrongSchema = {
     schema_version: 2,

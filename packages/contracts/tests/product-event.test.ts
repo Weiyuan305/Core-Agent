@@ -13,6 +13,7 @@ import {
   ErrorCategorySchema,
   ErrorEnvelopeSchema,
   ErrorReportedEventSchema,
+  EntitlementEventSchema,
   MembershipRoleSchema,
   MessageCreatedEventSchema,
   MessageCompletedEventSchema,
@@ -24,6 +25,7 @@ import {
   TaskEventSchema,
   TaskStatusSchema,
   ToolEventSchema,
+  ServiceEventSchema,
   classifyProductEvent,
   validateProductEventConsistency,
   type ProductEvent,
@@ -66,6 +68,17 @@ const knownEvents = [
   { event_type: "runtime.status_changed", payload: { container_id: "container_demo", observed_state: "ready" } },
   { event_type: "runtime.command_accepted", payload: { container_id: "container_demo", command: "restart", desired_state: "running" } },
   { event_type: "error.reported", payload: { error_id: "error_demo", code: "APPROVAL_REQUIRED", category: "authorization" } },
+  { event_type: "pack.release_selected", payload: { tenant_pack_release_id: "release_demo", pack_product_id: "pack_demo", pack_version_id: "pack_version_demo", generation: 2, status: "current", resource_version: 1 } },
+  { event_type: "entitlement.activated", payload: { entitlement_id: "entitlement_demo", pack_product_id: "pack_demo", status: "active", resource_version: 1 } },
+  { event_type: "entitlement.suspended", payload: { entitlement_id: "entitlement_demo", pack_product_id: "pack_demo", status: "suspended", reason_code: "administrator_suspended", resource_version: 2 } },
+  { event_type: "entitlement.revoked", payload: { entitlement_id: "entitlement_demo", pack_product_id: "pack_demo", status: "revoked", reason_code: "platform_revoked", resource_version: 3 } },
+  { event_type: "entitlement.expired", payload: { entitlement_id: "entitlement_demo", pack_product_id: "pack_demo", status: "expired", reason_code: "validity_expired", resource_version: 4 } },
+  { event_type: "assignment.created", payload: { assignment_id: "assignment_demo", entitlement_id: "entitlement_demo", profile_id: "profile_demo", status: "preparing", resource_version: 1 } },
+  { event_type: "assignment.revoked", payload: { assignment_id: "assignment_demo", entitlement_id: "entitlement_demo", profile_id: "profile_demo", status: "revoked", reason_code: "administrator_revoked", resource_version: 2 } },
+  { event_type: "entitlement_snapshot.changed", payload: { profile_id: "profile_demo", entitlement_snapshot_ref: { snapshot_id: "snapshot_demo", version: 2, evaluated_at: "2026-08-20T01:00:00Z" }, resource_version: 2 } },
+  { event_type: "service.preparing", payload: { profile_id: "profile_demo", generation: 2, entitlement_snapshot_ref: { snapshot_id: "snapshot_demo", version: 2, evaluated_at: "2026-08-20T01:00:00Z" }, state: "preparing" } },
+  { event_type: "service.available", payload: { profile_id: "profile_demo", generation: 2, entitlement_snapshot_ref: { snapshot_id: "snapshot_demo", version: 2, evaluated_at: "2026-08-20T01:00:00Z" }, state: "available" } },
+  { event_type: "service.failed", payload: { profile_id: "profile_demo", generation: 2, entitlement_snapshot_ref: { snapshot_id: "snapshot_demo", version: 2, evaluated_at: "2026-08-20T01:00:00Z" }, state: "failed", reason_code: "runtime_preparation_failed" } },
 ] as const;
 
 test("accepts a typed message delta and rejects hidden reasoning", () => {
@@ -76,8 +89,8 @@ test("accepts a typed message delta and rejects hidden reasoning", () => {
   assert.equal(validator.Check({ ...event, payload: { ...event.payload, chain_of_thought: "private" } }), false);
 });
 
-test("accepts all 23 approved event types across ten strict families", () => {
-  assert.equal(new Set(knownEvents.map(({ event_type }) => event_type)).size, 22);
+test("accepts all approved entitlement and service event types across strict families", () => {
+  assert.equal(new Set(knownEvents.map(({ event_type }) => event_type)).size, 33);
   const validator = Schema.Compile(ProductEventSchema);
   for (const event of knownEvents) {
     assert.equal(validator.Check({ ...base, ...event }), true, event.event_type);
@@ -326,6 +339,8 @@ test("marks only event and error-code extension points extensible", () => {
     ToolEventSchema,
     RuntimeEventSchema,
     ErrorReportedEventSchema,
+    EntitlementEventSchema,
+    ServiceEventSchema,
   ] as const;
   assert.equal(ProductEventSchema["x-extensible-union"], true);
   for (const eventSchema of eventTypeSchemas) {
@@ -369,8 +384,41 @@ test("runtime errors add the accepted stable machine codes", () => {
     "RUNTIME_NOT_READY",
     "SUPERVISOR_REJECTED",
     "DEPENDENCY_TIMEOUT",
+    "ENTITLEMENT_DENIED",
+    "SEAT_EXHAUSTED",
+    "CAPABILITY_CONFLICT",
+    "SERVICE_PREPARING",
   ]) {
     assert.equal(validator.Check(code), true, code);
+  }
+});
+
+test("entitlement and service event payloads reject commercial and runtime internals", () => {
+  const validator = Schema.Compile(ProductEventSchema);
+  const safeEvent = {
+    ...base,
+    event_type: "service.failed",
+    payload: {
+      profile_id: "profile_demo",
+      generation: 2,
+      entitlement_snapshot_ref: {
+        snapshot_id: "snapshot_demo",
+        version: 2,
+        evaluated_at: "2026-08-20T01:00:00Z",
+      },
+      state: "failed",
+      reason_code: "runtime_preparation_failed",
+    },
+  };
+  assert.equal(validator.Check(safeEvent), true);
+  for (const field of [
+    "artifact_ref", "contract_ref", "external_order_ref", "price", "receipt",
+    "tool_schema", "secret", "failure_summary", "container_id", "image_id",
+  ] as const) {
+    assert.equal(validator.Check({
+      ...safeEvent,
+      payload: { ...safeEvent.payload, [field]: "private" },
+    }), false, field);
   }
 });
 

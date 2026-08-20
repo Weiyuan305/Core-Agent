@@ -1,0 +1,26 @@
+{
+  "schema_key": "entitlement-snapshot",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": {
+    "schema_version": 1,
+    "resource_version": 1,
+    "created_at": "2026-08-20T01:00:00Z",
+    "updated_at": "2026-08-20T01:00:00Z",
+    "snapshot_id": "snapshot_demo",
+    "tenant_id": "tenant_demo",
+    "profile_id": "profile_demo",
+    "version": 1,
+    "evaluated_at": "2026-08-20T01:00:00Z",
+    "source_entitlement_ids": ["entitlement_demo"],
+    "source_assignment_ids": ["assignment_demo"],
+    "source_release_ids": ["tenant_release.demo.eduapply.1"],
+    "capabilities": [
+      {
+        "capability_id": "capability.eduapply.read",
+        "capability_version_id": "capability_version.eduapply.read.1",
+        "version": "1.0.0"
+      }
+    ],
+    "canonical_input_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  }
+}
