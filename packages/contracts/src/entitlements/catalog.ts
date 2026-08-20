@@ -13,11 +13,12 @@ const canonicalSemverPattern = `^${canonicalSemverBody}$`;
 const contractRefPattern = `^[a-z0-9][a-z0-9._/-]{0,127}@${canonicalSemverBody}$`;
 const npmPackageNamePattern = "(?:[a-z0-9][a-z0-9._~-]*|@[a-z0-9][a-z0-9._~-]*/[a-z0-9][a-z0-9._~-]*)";
 const canonicalSha512Base64Pattern = "[A-Za-z0-9+/]{85}[AQgw]==";
+const npmPackageLengthBoundary = `(?=.{1,214}@${canonicalSemverBody}#sha512-${canonicalSha512Base64Pattern}$)`;
 const ociRegistryLabelPattern = "[a-z0-9]+(?:-[a-z0-9]+)*";
 const ociRegistryPattern = `${ociRegistryLabelPattern}(?:\\.${ociRegistryLabelPattern})*`;
 const ociPortPattern = "(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])";
 const ociPathComponentPattern = "[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*";
-const canonicalOciRefPattern = `^oci:(?:${ociRegistryPattern}(?::${ociPortPattern})?/)?${ociPathComponentPattern}(?:/${ociPathComponentPattern})*@sha256:[a-f0-9]{64}$`;
+const canonicalOciRefPattern = `^oci:(?=.{1,255}@sha256:[a-f0-9]{64}$)(?:${ociRegistryPattern}(?::${ociPortPattern})?/)?${ociPathComponentPattern}(?:/${ociPathComponentPattern})*@sha256:[a-f0-9]{64}$`;
 
 export const CanonicalSemanticVersionSchema = Type.String({
   minLength: 5,
@@ -30,7 +31,7 @@ export const ImmutableArtifactRefSchema = Type.Union([
     pattern: canonicalOciRefPattern,
   }),
   Type.String({
-    pattern: `^npm:${npmPackageNamePattern}@${canonicalSemverBody}#sha512-${canonicalSha512Base64Pattern}$`,
+    pattern: `^npm:${npmPackageLengthBoundary}${npmPackageNamePattern}@${canonicalSemverBody}#sha512-${canonicalSha512Base64Pattern}$`,
   }),
   Type.String({ pattern: "^manifest:sha256:[a-f0-9]{64}$" }),
 ]);

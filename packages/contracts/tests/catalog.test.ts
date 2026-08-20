@@ -136,6 +136,31 @@ test("immutable npm artifacts require canonical names, versions, and exact SHA-5
   }
 });
 
+test("immutable npm artifact package identities enforce the independent 214-character limit", () => {
+  const unscoped214 = "a".repeat(214);
+  const unscoped215 = "a".repeat(215);
+  const scoped214 = `@${"s".repeat(100)}/${"p".repeat(112)}`;
+  const scoped215 = `@${"s".repeat(100)}/${"p".repeat(113)}`;
+  const longPrerelease = `1.2.3-${"a".repeat(100)}`;
+  assert.equal(unscoped214.length, 214);
+  assert.equal(scoped214.length, 214);
+
+  for (const artifactRef of [
+    `npm:${unscoped214}@0.0.0#sha512-${exactSha512Digest}`,
+    `npm:${scoped214}@0.0.0#sha512-${exactSha512Digest}`,
+    `npm:${unscoped214}@${longPrerelease}#sha512-${exactSha512Digest}`,
+  ]) {
+    assert.equal(Schema.Check(ImmutableArtifactRefSchema, artifactRef), true, artifactRef);
+  }
+  for (const artifactRef of [
+    `npm:${unscoped215}@0.0.0#sha512-${exactSha512Digest}`,
+    `npm:${scoped215}@0.0.0#sha512-${exactSha512Digest}`,
+    `npm:${unscoped215}@${longPrerelease}#sha512-${exactSha512Digest}`,
+  ]) {
+    assert.equal(Schema.Check(ImmutableArtifactRefSchema, artifactRef), false, artifactRef);
+  }
+});
+
 test("immutable OCI artifacts use canonical lowercase distribution coordinates", () => {
   const digest = `sha256:${"d".repeat(64)}`;
   for (const artifactRef of [
@@ -165,6 +190,21 @@ test("immutable OCI artifacts use canonical lowercase distribution coordinates",
   ]) {
     assert.equal(Schema.Check(ImmutableArtifactRefSchema, artifactRef), false, artifactRef);
   }
+});
+
+test("immutable OCI artifact coordinates enforce the independent 255-character limit", () => {
+  const coordinate255 = "a".repeat(255);
+  const coordinate256 = "a".repeat(256);
+  const digest = `sha256:${"e".repeat(64)}`;
+  assert.equal(coordinate255.length, 255);
+  assert.equal(
+    Schema.Check(ImmutableArtifactRefSchema, `oci:${coordinate255}@${digest}`),
+    true,
+  );
+  assert.equal(
+    Schema.Check(ImmutableArtifactRefSchema, `oci:${coordinate256}@${digest}`),
+    false,
+  );
 });
 
 test("capability versions reject mutable artifacts, arbitrary URLs, ranges, and non-canonical versions", () => {
