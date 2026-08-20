@@ -15,7 +15,7 @@ Identity Gateway `0.1.0`, and pinned Supabase JS/Auth JS `2.112.2`.
 - Rollback readiness: forward-only schema, public-auth kill switch, Session
   revocation, previous Gateway binary, and provider dual-mapping window are
   documented in the operations runbook.
-- Implementation commit: `PENDING_IMPLEMENTATION_COMMIT`.
+- Implementation commit: `b1454ea63a55adc83b330eb50fc012b16b129a75`.
 
 ## Mandatory commands
 
@@ -118,7 +118,6 @@ returns a no-store static page, and closes.
   account, token, or report was used or retained; public deployment therefore
   remains **NO-GO**.
 
-Do not reinterpret deterministic success as a live-provider pass. Replace
-`PENDING_IMPLEMENTATION_COMMIT` above only with the reviewed implementation
-commit and attach only a scanner-approved closed provider report when the
-interactive acceptance is eventually run.
+Do not reinterpret deterministic success as a live-provider pass. Attach only
+a scanner-approved closed provider report when the interactive acceptance is
+eventually run.

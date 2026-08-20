@@ -93,4 +93,4 @@
   NO-GO until an approved disposable run produces a scanner-approved passed report
   and exact provider cleanup proof.
 - Report: `.superpowers/sdd/task-12-report.md`.
-- Implementation commit: `PENDING_IMPLEMENTATION_COMMIT`.
+- Implementation commit: `b1454ea63a55adc83b330eb50fc012b16b129a75`.
