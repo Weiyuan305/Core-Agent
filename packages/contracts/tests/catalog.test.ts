@@ -192,19 +192,26 @@ test("immutable OCI artifacts use canonical lowercase distribution coordinates",
   }
 });
 
-test("immutable OCI artifact coordinates enforce the independent 255-character limit", () => {
-  const coordinate255 = "a".repeat(255);
-  const coordinate256 = "a".repeat(256);
+test("immutable OCI artifact repository paths enforce the domain-excluded 255-character limit", () => {
+  const repositoryPath255 = "a".repeat(255);
+  const repositoryPath256 = "a".repeat(256);
   const digest = `sha256:${"e".repeat(64)}`;
-  assert.equal(coordinate255.length, 255);
-  assert.equal(
-    Schema.Check(ImmutableArtifactRefSchema, `oci:${coordinate255}@${digest}`),
-    true,
-  );
-  assert.equal(
-    Schema.Check(ImmutableArtifactRefSchema, `oci:${coordinate256}@${digest}`),
-    false,
-  );
+  assert.equal(repositoryPath255.length, 255);
+
+  for (const artifactRef of [
+    `oci:${repositoryPath255}@${digest}`,
+    `oci:registry.example.invalid/${repositoryPath255}@${digest}`,
+    `oci:registry.example.invalid:5000/${repositoryPath255}@${digest}`,
+  ]) {
+    assert.equal(Schema.Check(ImmutableArtifactRefSchema, artifactRef), true, artifactRef);
+  }
+  for (const artifactRef of [
+    `oci:${repositoryPath256}@${digest}`,
+    `oci:registry.example.invalid/${repositoryPath256}@${digest}`,
+    `oci:registry.example.invalid:5000/${repositoryPath256}@${digest}`,
+  ]) {
+    assert.equal(Schema.Check(ImmutableArtifactRefSchema, artifactRef), false, artifactRef);
+  }
 });
 
 test("capability versions reject mutable artifacts, arbitrary URLs, ranges, and non-canonical versions", () => {

@@ -18,7 +18,8 @@ const ociRegistryLabelPattern = "[a-z0-9]+(?:-[a-z0-9]+)*";
 const ociRegistryPattern = `${ociRegistryLabelPattern}(?:\\.${ociRegistryLabelPattern})*`;
 const ociPortPattern = "(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])";
 const ociPathComponentPattern = "[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*";
-const canonicalOciRefPattern = `^oci:(?=.{1,255}@sha256:[a-f0-9]{64}$)(?:${ociRegistryPattern}(?::${ociPortPattern})?/)?${ociPathComponentPattern}(?:/${ociPathComponentPattern})*@sha256:[a-f0-9]{64}$`;
+const ociRepositoryPathLengthBoundary = "(?=.{1,255}@sha256:[a-f0-9]{64}$)";
+const canonicalOciRefPattern = `^oci:(?:${ociRegistryPattern}(?::${ociPortPattern})?/)?${ociRepositoryPathLengthBoundary}${ociPathComponentPattern}(?:/${ociPathComponentPattern})*@sha256:[a-f0-9]{64}$`;
 
 export const CanonicalSemanticVersionSchema = Type.String({
   minLength: 5,
