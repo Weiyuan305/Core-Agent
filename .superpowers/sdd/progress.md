@@ -61,3 +61,19 @@
 - Environment: native disposable PostgreSQL 17 with SCRAM; no Colima/Docker.
 - Report: `.superpowers/sdd/task-8-report.md`.
 - Implementation commit: `3597901191`.
+
+## Task 11 — Provider replacement and full identity boundary
+
+- Status: COMPLETE_WITH_ENVIRONMENT_LIMITATIONS
+- Branch: `feat/identity-provider-replacement-v1`
+- Base: `45a6e28456`
+- Result: deterministic fake-provider B2C/B2B slices, real PostgreSQL provider
+  replacement without business-ID rewrites, current-authority Ed25519 Control
+  Plane verification, and default-CI identity wiring are implemented.
+- Verification: unit Runtime193/Contracts182/Core89/Gateway129/Web153; Contracts
+  full check; replacement PG5; Gateway PG2; API PG15; integration96; browser40
+  with 2 configured skips; compatibility/history/scans pass.
+- Environment: local PostgreSQL 17 is real but trust-only; Colima/Docker is absent,
+  so GitHub CI remains the final protected SCRAM topology proof.
+- Report: `.superpowers/sdd/task-11-report.md`.
+- Implementation commit: `a00704613a`.
