@@ -102,6 +102,10 @@
           "type": "string"
         },
         {
+          "const": "EVENT_PROFILE_ID_MISMATCH",
+          "type": "string"
+        },
+        {
           "const": "APPROVAL_REQUIRED",
           "type": "string"
         },

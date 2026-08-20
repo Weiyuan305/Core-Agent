@@ -380,6 +380,8 @@ test("trusted context capability ids must be in canonical sorted order", () => {
   const entitlementAuthority: EntitlementAwareTrustedContextAuthority = {
     ...authority,
     entitlement_snapshot: {
+      tenant_id: context.tenant_id,
+      profile_id: context.profile_id,
       snapshot_ref: context.entitlement_snapshot_ref,
       capability_ids: ["eduapply.application", "housing.read"],
     },
@@ -401,6 +403,8 @@ test("trusted context must exactly match the effective entitlement snapshot", ()
   const effectiveAuthority: EntitlementAwareTrustedContextAuthority = {
     ...authority,
     entitlement_snapshot: {
+      tenant_id: context.tenant_id,
+      profile_id: context.profile_id,
       snapshot_ref: context.entitlement_snapshot_ref,
       capability_ids: context.capability_ids,
     },
@@ -442,6 +446,101 @@ test("trusted context must exactly match the effective entitlement snapshot", ()
       },
     }).map((item) => item.code),
     ["ENTITLEMENT_AUTHORITY_CAPABILITIES_NOT_CANONICAL", "ENTITLEMENT_CAPABILITIES_MISMATCH"],
+  );
+});
+
+test("entitlement snapshot authority binds tenant and profile scope", () => {
+  const effectiveAuthority: EntitlementAwareTrustedContextAuthority = {
+    ...authority,
+    entitlement_snapshot: {
+      tenant_id: context.tenant_id,
+      profile_id: context.profile_id,
+      snapshot_ref: context.entitlement_snapshot_ref,
+      capability_ids: context.capability_ids,
+    },
+  };
+  assert.deepEqual(
+    validateEntitlementAwareTrustedRequestContext(context, {
+      ...effectiveAuthority,
+      entitlement_snapshot: {
+        ...effectiveAuthority.entitlement_snapshot,
+        tenant_id: "tenant_other",
+      },
+    }).map((item) => ({ code: item.code, path: item.path })),
+    [{
+      code: "ENTITLEMENT_AUTHORITY_TENANT_MISMATCH",
+      path: "authority.entitlement_snapshot.tenant_id",
+    }],
+  );
+  assert.deepEqual(
+    validateEntitlementAwareTrustedRequestContext(context, {
+      ...effectiveAuthority,
+      entitlement_snapshot: {
+        ...effectiveAuthority.entitlement_snapshot,
+        profile_id: "profile_other",
+      },
+    }).map((item) => ({ code: item.code, path: item.path })),
+    [{
+      code: "ENTITLEMENT_AUTHORITY_PROFILE_MISMATCH",
+      path: "authority.entitlement_snapshot.profile_id",
+    }],
+  );
+});
+
+test("entitlement snapshot authority is closed and requires tenant/profile scope", () => {
+  const complete = {
+    tenant_id: context.tenant_id,
+    profile_id: context.profile_id,
+    snapshot_ref: context.entitlement_snapshot_ref,
+    capability_ids: context.capability_ids,
+  };
+  const { tenant_id: _tenantId, ...withoutTenant } = complete;
+  const { profile_id: _profileId, ...withoutProfile } = complete;
+  for (const entitlement_snapshot of [
+    withoutTenant,
+    withoutProfile,
+    { ...complete, unexpected: true },
+  ]) {
+    assert.deepEqual(
+      validateEntitlementAwareTrustedRequestContext(context, {
+        ...authority,
+        entitlement_snapshot,
+      } as unknown as EntitlementAwareTrustedContextAuthority).map((item) => ({
+        code: item.code,
+        path: item.path,
+      })),
+      [{
+        code: "ENTITLEMENT_AUTHORITY_REQUIRED",
+        path: "authority.entitlement_snapshot",
+      }],
+    );
+  }
+});
+
+test("entitlement snapshot authority rejects accessors without invoking them", () => {
+  let getterCalls = 0;
+  const hostileAuthority = { ...authority } as unknown as EntitlementAwareTrustedContextAuthority;
+  Object.defineProperty(hostileAuthority, "entitlement_snapshot", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return {
+        tenant_id: context.tenant_id,
+        profile_id: context.profile_id,
+        snapshot_ref: context.entitlement_snapshot_ref,
+        capability_ids: context.capability_ids,
+      };
+    },
+  });
+
+  const violations = validateEntitlementAwareTrustedRequestContext(context, hostileAuthority);
+  assert.equal(getterCalls, 0);
+  assert.deepEqual(
+    violations.map((item) => ({ code: item.code, path: item.path })),
+    [{
+      code: "ENTITLEMENT_AUTHORITY_REQUIRED",
+      path: "authority.entitlement_snapshot",
+    }],
   );
 });
 

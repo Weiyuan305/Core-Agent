@@ -119,6 +119,37 @@ test("entitlement resources exhaustively bind each status to truthful reasons", 
   }
 });
 
+test("expired B2B and B2C entitlements require expires_at", () => {
+  const expiredBase = {
+    ...entitlementBase,
+    status: "expired",
+    reason_code: "validity_expired",
+  };
+  const expired = [
+    {
+      ...expiredBase,
+      tenant_mode: "b2b",
+      assignment_mode: "seat",
+      seat_quantity: 1,
+    },
+    {
+      ...expiredBase,
+      tenant_mode: "b2c",
+      assignment_mode: "automatic",
+    },
+  ] as const;
+
+  for (const entitlement of expired) {
+    assert.equal(Schema.Check(EntitlementSchema, entitlement), true, entitlement.tenant_mode);
+    const { expires_at: _expiresAt, ...withoutExpiry } = entitlement;
+    assert.equal(
+      Schema.Check(EntitlementSchema, withoutExpiry),
+      false,
+      `${entitlement.tenant_mode} missing expires_at`,
+    );
+  }
+});
+
 test("entitlement semantic validation rejects an inverted validity window", () => {
   const invalid = {
     ...entitlementBase,

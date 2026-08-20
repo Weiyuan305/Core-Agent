@@ -165,6 +165,7 @@ test("immutable OCI artifacts use canonical lowercase distribution coordinates",
   const digest = `sha256:${"d".repeat(64)}`;
   for (const artifactRef of [
     `oci:registry.example.invalid/eduapply/read@${digest}`,
+    `oci:xn--registry.example/eduapply/read@${digest}`,
     `oci:registry.example.invalid:5000/eduapply/read-only@${digest}`,
     `oci:eduapply/repo.name@${digest}`,
     `oci:eduapply/repo_name@${digest}`,
@@ -192,6 +193,17 @@ test("immutable OCI artifacts use canonical lowercase distribution coordinates",
   }
 });
 
+test("immutable OCI registry-looking components cannot fall through as repository paths", () => {
+  const digest = `sha256:${"f".repeat(64)}`;
+  assert.equal(
+    Schema.Check(
+      ImmutableArtifactRefSchema,
+      `oci:registry_bad.example/repo@${digest}`,
+    ),
+    false,
+  );
+});
+
 test("immutable OCI artifact repository paths enforce the domain-excluded 255-character limit", () => {
   const repositoryPath255 = "a".repeat(255);
   const repositoryPath256 = "a".repeat(256);
@@ -204,7 +216,7 @@ test("immutable OCI artifact repository paths enforce the domain-excluded 255-ch
   for (const artifactRef of [
     `oci:${repositoryPath255}@${digest}`,
     `oci:${unqualifiedPath255}@${digest}`,
-    `oci:registry.example.invalid/${repositoryPath255}@${digest}`,
+    `oci:xn--registry.example/${repositoryPath255}@${digest}`,
     `oci:registry:5000/${repositoryPath255}@${digest}`,
     `oci:localhost/${repositoryPath255}@${digest}`,
   ]) {
@@ -213,7 +225,7 @@ test("immutable OCI artifact repository paths enforce the domain-excluded 255-ch
   for (const artifactRef of [
     `oci:${repositoryPath256}@${digest}`,
     `oci:${unqualifiedPath256}@${digest}`,
-    `oci:registry.example.invalid/${repositoryPath256}@${digest}`,
+    `oci:xn--registry.example/${repositoryPath256}@${digest}`,
     `oci:registry:5000/${repositoryPath256}@${digest}`,
     `oci:localhost/${repositoryPath256}@${digest}`,
   ]) {

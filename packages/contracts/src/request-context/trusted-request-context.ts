@@ -1,4 +1,5 @@
 import Type, { type Static } from "typebox";
+import Schema from "typebox/schema";
 
 import {
   OpaqueIdSchema,
@@ -99,14 +100,63 @@ export interface TrustedContextAuthority {
   };
 }
 
+const EntitlementSnapshotAuthoritySchema = Type.Object(
+  {
+    tenant_id: OpaqueIdSchema,
+    profile_id: OpaqueIdSchema,
+    snapshot_ref: EntitlementSnapshotRefSchema,
+    capability_ids: Type.Array(OpaqueIdSchema, { uniqueItems: true }),
+  },
+  { additionalProperties: false },
+);
+
 export interface EntitlementAwareTrustedContextAuthority extends TrustedContextAuthority {
   entitlement_snapshot: {
+    tenant_id: string;
+    profile_id: string;
     snapshot_ref: EntitlementSnapshotRef;
     capability_ids: readonly string[];
   };
 }
 
 const MAX_CONTEXT_TTL_NANOSECONDS = 300_000_000_000n;
+
+function isAccessorSafePlainData(value: unknown, seen: Set<object>): boolean {
+  if (value === null || typeof value !== "object") return true;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  const prototype = Object.getPrototypeOf(value);
+  if (Array.isArray(value)) {
+    if (prototype !== Array.prototype) return false;
+  } else if (prototype !== Object.prototype && prototype !== null) {
+    return false;
+  }
+  for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
+    if (descriptor.get !== undefined || descriptor.set !== undefined || !("value" in descriptor)) {
+      return false;
+    }
+    if (!isAccessorSafePlainData(descriptor.value, seen)) return false;
+  }
+  seen.delete(value);
+  return true;
+}
+
+function readEntitlementSnapshotAuthority(
+  authority: EntitlementAwareTrustedContextAuthority,
+): Static<typeof EntitlementSnapshotAuthoritySchema> | undefined {
+  const descriptor = Object.getOwnPropertyDescriptor(authority, "entitlement_snapshot");
+  if (
+    descriptor === undefined
+    || descriptor.get !== undefined
+    || descriptor.set !== undefined
+    || !("value" in descriptor)
+    || !isAccessorSafePlainData(descriptor.value, new Set())
+    || !Schema.Check(EntitlementSnapshotAuthoritySchema, descriptor.value)
+  ) {
+    return undefined;
+  }
+  return descriptor.value as Static<typeof EntitlementSnapshotAuthoritySchema>;
+}
 
 export function validateTrustedRequestContext(
   context: TrustedRequestContext,
@@ -310,22 +360,35 @@ export function validateEntitlementAwareTrustedRequestContext(
   authority: EntitlementAwareTrustedContextAuthority,
 ): ContractViolation[] {
   const violations = validateTrustedRequestContext(context, authority);
-  const entitlementAuthority = (
-    authority as Partial<EntitlementAwareTrustedContextAuthority>
-  ).entitlement_snapshot;
-  if (
-    entitlementAuthority === undefined
-    || entitlementAuthority === null
-    || entitlementAuthority.snapshot_ref === undefined
-    || entitlementAuthority.snapshot_ref === null
-    || !Array.isArray(entitlementAuthority.capability_ids)
-  ) {
+  const entitlementAuthority = readEntitlementSnapshotAuthority(authority);
+  if (entitlementAuthority === undefined) {
     violations.push(violation(
       "ENTITLEMENT_AUTHORITY_REQUIRED",
       "authority.entitlement_snapshot",
-      "Entitlement-aware validation requires the authoritative snapshot and Capability ids",
+      "Entitlement-aware validation requires closed authoritative tenant, profile, snapshot, and Capability facts",
     ));
     return violations;
+  }
+
+  if (
+    entitlementAuthority.tenant_id !== context.tenant_id
+    || entitlementAuthority.tenant_id !== authority.profile.tenant_id
+  ) {
+    violations.push(violation(
+      "ENTITLEMENT_AUTHORITY_TENANT_MISMATCH",
+      "authority.entitlement_snapshot.tenant_id",
+      "Entitlement snapshot tenant must match the trusted context and authoritative profile",
+    ));
+  }
+  if (
+    entitlementAuthority.profile_id !== context.profile_id
+    || entitlementAuthority.profile_id !== authority.profile.profile_id
+  ) {
+    violations.push(violation(
+      "ENTITLEMENT_AUTHORITY_PROFILE_MISMATCH",
+      "authority.entitlement_snapshot.profile_id",
+      "Entitlement snapshot profile must match the trusted context and authoritative profile",
+    ));
   }
 
   for (let index = 1; index < context.capability_ids.length; index += 1) {

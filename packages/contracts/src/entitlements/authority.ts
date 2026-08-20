@@ -85,6 +85,7 @@ const SuspendedEntitlementFields = {
 const ExpiredEntitlementFields = {
   status: Type.Literal("expired"),
   reason_code: Type.Literal("validity_expired"),
+  expires_at: UtcTimestampSchema,
 } as const;
 
 const RevokedEntitlementFields = {

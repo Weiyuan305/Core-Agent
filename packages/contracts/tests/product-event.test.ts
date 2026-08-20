@@ -296,6 +296,53 @@ test("producer consistency gate accepts matching or absent association ids", () 
   assert.deepEqual(validateProductEventConsistency(associationAbsent), []);
 });
 
+test("producer consistency rejects Assignment and Service profile association mismatches", () => {
+  const mismatches = [
+    {
+      ...base,
+      profile_id: "profile_envelope",
+      event_type: "assignment.created",
+      payload: {
+        assignment_id: "assignment_demo",
+        entitlement_id: "entitlement_demo",
+        profile_id: "profile_payload",
+        status: "preparing",
+        reason_code: "seat_assigned",
+        resource_version: 1,
+      },
+    },
+    {
+      ...base,
+      profile_id: "profile_envelope",
+      event_type: "service.preparing",
+      payload: {
+        profile_id: "profile_payload",
+        generation: 1,
+        entitlement_snapshot_ref: {
+          snapshot_id: "snapshot_demo",
+          version: 1,
+          evaluated_at: "2026-08-20T01:00:00Z",
+        },
+        state: "preparing",
+      },
+    },
+  ] as const;
+
+  for (const event of mismatches) {
+    assert.deepEqual(
+      validateProductEventConsistency(event as ProductEvent).map((item) => ({
+        code: item.code,
+        path: item.path,
+      })),
+      [{
+        code: "EVENT_PROFILE_ID_MISMATCH",
+        path: "payload.profile_id",
+      }],
+      event.event_type,
+    );
+  }
+});
+
 test("producer consistency gate reports stable association mismatches", () => {
   const mismatches = [
     {
@@ -459,6 +506,7 @@ test("runtime errors add the accepted stable machine codes", () => {
     "SEAT_EXHAUSTED",
     "CAPABILITY_CONFLICT",
     "SERVICE_PREPARING",
+    "EVENT_PROFILE_ID_MISMATCH",
   ]) {
     assert.equal(validator.Check(code), true, code);
   }

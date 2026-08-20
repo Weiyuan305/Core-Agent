@@ -616,6 +616,7 @@ export function classifyProductEvent(value: unknown): "known" | "unknown" | "inv
 
 const associationIdChecks = [
   ["tenant_id", "EVENT_TENANT_ID_MISMATCH"],
+  ["profile_id", "EVENT_PROFILE_ID_MISMATCH"],
   ["conversation_id", "EVENT_CONVERSATION_ID_MISMATCH"],
   ["run_id", "EVENT_RUN_ID_MISMATCH"],
   ["task_id", "EVENT_TASK_ID_MISMATCH"],
