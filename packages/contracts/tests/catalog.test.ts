@@ -58,6 +58,11 @@ const capabilityVersion = {
   status: "reviewed",
 };
 
+const capabilityAuthority = {
+  first_release: true,
+  capability_versions: [capabilityVersion],
+};
+
 const packVersion = {
   ...metadata,
   pack_version_id: "pack_version.eduapply.1",
@@ -96,21 +101,26 @@ test("capability catalog resources accept exact reviewed immutable metadata", ()
   ]) {
     assert.equal(Schema.Check(CapabilityVersionSchema, { ...capabilityVersion, artifact_ref }), true, artifact_ref);
   }
+  for (const version of ["1.2.3-0", "1.2.3-alpha.1"] as const) {
+    assert.equal(Schema.Check(CapabilityVersionSchema, { ...capabilityVersion, version }), true, version);
+  }
 });
 
 test("capability versions reject mutable artifacts, arbitrary URLs, ranges, and non-canonical versions", () => {
   for (const artifact_ref of [
     "oci:registry.example.invalid/eduapply/read:latest",
+    `oci:registry.example.invalid/eduapply/read:latest@sha256:${"b".repeat(64)}`,
+    `oci:registry.example.invalid/eduapply/read:stable@sha256:${"b".repeat(64)}`,
     "npm:@eduapply/contracts@^2.1.0#sha512-YWJjZA==",
     "https://downloads.example.invalid/capability.tar.gz",
     `manifest:sha256:${"A".repeat(64)}`,
   ]) {
     assert.equal(Schema.Check(CapabilityVersionSchema, { ...capabilityVersion, artifact_ref }), false, artifact_ref);
   }
-  for (const version of ["1.2", "v1.2.3", "01.2.3", "1.02.3", "1.2.03", "1.2.3+build", "^1.2.3", "latest"] as const) {
+  for (const version of ["1.2", "v1.2.3", "01.2.3", "1.02.3", "1.2.03", "1.2.3-01", "1.2.3-alpha.01", "1.2.3+build", "^1.2.3", "latest"] as const) {
     assert.equal(Schema.Check(CapabilityVersionSchema, { ...capabilityVersion, version }), false, version);
   }
-  for (const contract_ref of ["eduapply.contracts@^2.1.0", "https://example.invalid/contracts/2.1.0", "latest"] as const) {
+  for (const contract_ref of ["eduapply.contracts@2.1.0-01", "eduapply.contracts@^2.1.0", "https://example.invalid/contracts/2.1.0", "latest"] as const) {
     assert.equal(Schema.Check(CapabilityVersionSchema, { ...capabilityVersion, contract_ref }), false, contract_ref);
   }
 });
@@ -142,7 +152,7 @@ test("pack catalog resources contain a sorted non-empty exact member set", () =>
   assert.equal(Schema.Check(PackProductSchema, product), true);
   assert.equal(Schema.Check(PackMemberSchema, storedMember), true);
   assert.equal(Schema.Check(PackVersionSchema, packVersion), true);
-  assert.deepEqual(validatePackVersion(packVersion), []);
+  assert.deepEqual(validatePackVersion(packVersion, capabilityAuthority), []);
   assert.equal(Schema.Check(TenantPackReleaseSchema, release), true);
   assert.equal(Schema.Check(PackVersionSchema, { ...packVersion, members: [] }), false);
   assert.equal(Schema.Check(PackVersionSchema, {
@@ -158,19 +168,82 @@ test("pack version validation rejects duplicate and unsorted capability members"
     version: "1.0.0",
   };
   assert.deepEqual(
-    validatePackVersion({ ...packVersion, members: [second, member] }).map((item) => item.code),
+    validatePackVersion({ ...packVersion, members: [second, member] }, capabilityAuthority).map((item) => item.code),
     ["PACK_MEMBERS_NOT_SORTED"],
   );
   assert.deepEqual(
-    validatePackVersion({ ...packVersion, members: [member, { ...member }] }).map((item) => item.code),
+    validatePackVersion({ ...packVersion, members: [member, { ...member }] }, capabilityAuthority).map((item) => item.code),
     ["PACK_MEMBER_DUPLICATE"],
   );
   assert.deepEqual(
     validatePackVersion({
       ...packVersion,
       members: [member, { ...member, capability_version_id: "capability_version.eduapply.read.2", version: "2.0.0" }],
-    }).map((item) => item.code),
+    }, capabilityAuthority).map((item) => item.code),
     ["PACK_CAPABILITY_DUPLICATE"],
+  );
+});
+
+test("published Pack members require exact reviewed Capability Version authority", () => {
+  assert.deepEqual(
+    validatePackVersion(packVersion, { ...capabilityAuthority, capability_versions: [] }).map((item) => item.code),
+    ["CAPABILITY_VERSION_AUTHORITY_MISSING"],
+  );
+  assert.deepEqual(
+    validatePackVersion(packVersion, {
+      ...capabilityAuthority,
+      capability_versions: [{ ...capabilityVersion, version: "1.2.4" }],
+    }).map((item) => item.code),
+    ["CAPABILITY_VERSION_AUTHORITY_MISMATCH"],
+  );
+  for (const status of ["draft", "retired"] as const) {
+    assert.deepEqual(
+      validatePackVersion(packVersion, {
+        ...capabilityAuthority,
+        capability_versions: [{ ...capabilityVersion, status }],
+      }).map((item) => item.code),
+      ["CAPABILITY_VERSION_NOT_REVIEWED"],
+      status,
+    );
+  }
+  assert.deepEqual(
+    validatePackVersion(packVersion, {
+      ...capabilityAuthority,
+      capability_versions: [{ ...capabilityVersion, status: "blocked" }],
+    }).map((item) => item.code),
+    ["CAPABILITY_VERSION_BLOCKED"],
+  );
+});
+
+test("first-release Pack authority allows reviewed reads and placeholder manifests only", () => {
+  const nonExecuting = {
+    ...capabilityVersion,
+    kind: "policy" as const,
+    artifact_ref: `manifest:sha256:${"c".repeat(64)}`,
+    risk_class: "draft_write" as const,
+  };
+  assert.deepEqual(validatePackVersion(packVersion, capabilityAuthority), []);
+  assert.deepEqual(validatePackVersion(packVersion, {
+    ...capabilityAuthority,
+    capability_versions: [nonExecuting],
+  }), []);
+
+  for (const risk_class of ["external_write", "privileged"] as const) {
+    assert.deepEqual(
+      validatePackVersion(packVersion, {
+        ...capabilityAuthority,
+        capability_versions: [{ ...capabilityVersion, risk_class }],
+      }).map((item) => item.code),
+      ["CAPABILITY_VERSION_RISK_FORBIDDEN"],
+      risk_class,
+    );
+  }
+  assert.deepEqual(
+    validatePackVersion(packVersion, {
+      ...capabilityAuthority,
+      capability_versions: [{ ...capabilityVersion, risk_class: "draft_write" }],
+    }).map((item) => item.code),
+    ["CAPABILITY_VERSION_RISK_FORBIDDEN"],
   );
 });
 

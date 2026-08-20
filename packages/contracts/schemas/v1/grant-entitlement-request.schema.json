@@ -9,6 +9,10 @@
           "const": "seat",
           "type": "string"
         },
+        "expected_resource_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
         "expires_at": {
           "format": "date-time",
           "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
@@ -64,6 +68,7 @@
         "pack_product_id",
         "source",
         "external_order_ref",
+        "expected_resource_version",
         "tenant_mode",
         "assignment_mode",
         "seat_quantity"
@@ -76,6 +81,10 @@
         "assignment_mode": {
           "const": "automatic",
           "type": "string"
+        },
+        "expected_resource_version": {
+          "minimum": 1,
+          "type": "integer"
         },
         "expires_at": {
           "format": "date-time",
@@ -128,6 +137,7 @@
         "pack_product_id",
         "source",
         "external_order_ref",
+        "expected_resource_version",
         "tenant_mode",
         "assignment_mode"
       ],

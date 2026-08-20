@@ -1,4 +1,5 @@
 import Type, { type Static } from "typebox";
+import Schema from "typebox/schema";
 
 import {
   OpaqueIdSchema,
@@ -7,6 +8,7 @@ import {
   UtcTimestampSchema,
 } from "../common/primitives.js";
 import { IdempotencyRequestSchema } from "../runtime/idempotency.js";
+import { type ContractViolation, violation } from "../common/validation.js";
 import {
   EntitlementSourceSchema,
 } from "./authority.js";
@@ -63,6 +65,7 @@ export const SelectTenantPackReleaseRequestSchema = Type.Object(
     tenant_id: OpaqueIdSchema,
     pack_product_id: OpaqueIdSchema,
     pack_version_id: OpaqueIdSchema,
+    expected_resource_version: ResourceVersionSchema,
   },
   { additionalProperties: false, $id: "core-agent://v1/select-tenant-pack-release-request" },
 );
@@ -73,6 +76,7 @@ const GrantEntitlementFields = {
   pack_product_id: OpaqueIdSchema,
   source: EntitlementSourceSchema,
   external_order_ref: OpaqueIdSchema,
+  expected_resource_version: ResourceVersionSchema,
   expires_at: Type.Optional(UtcTimestampSchema),
 } as const;
 
@@ -142,3 +146,49 @@ export type GrantEntitlementRequest = Static<typeof GrantEntitlementRequestSchem
 export type ChangeEntitlementStatusRequest = Static<typeof ChangeEntitlementStatusRequestSchema>;
 export type AssignPackSeatRequest = Static<typeof AssignPackSeatRequestSchema>;
 export type RevokePackSeatRequest = Static<typeof RevokePackSeatRequestSchema>;
+
+function isAccessorSafePlainObject(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  return Object.values(Object.getOwnPropertyDescriptors(value)).every(
+    (descriptor) => descriptor.get === undefined
+      && descriptor.set === undefined
+      && "value" in descriptor,
+  );
+}
+
+export function validateCompanyServiceSummary(value: unknown): ContractViolation[] {
+  if (!isAccessorSafePlainObject(value)) {
+    return [violation(
+      "COMPANY_SERVICE_SUMMARY_NOT_PLAIN_DATA",
+      "$",
+      "Company service summary must be accessor-free plain data",
+    )];
+  }
+  if (!Schema.Check(CompanyServiceSummarySchema, value)) {
+    return [violation(
+      "COMPANY_SERVICE_SUMMARY_INVALID",
+      "$",
+      "Company service summary must satisfy its structural contract",
+    )];
+  }
+
+  const summary = value as CompanyServiceSummary;
+  const violations: ContractViolation[] = [];
+  if (summary.used_seats > summary.total_seats) {
+    violations.push(violation(
+      "COMPANY_SERVICE_SEATS_EXCEEDED",
+      "used_seats",
+      "Used seats cannot exceed total seats",
+    ));
+  }
+  if (summary.available_seats !== summary.total_seats - summary.used_seats) {
+    violations.push(violation(
+      "COMPANY_SERVICE_SEATS_INCONSISTENT",
+      "available_seats",
+      "Available seats must equal total seats minus used seats",
+    ));
+  }
+  return violations;
+}

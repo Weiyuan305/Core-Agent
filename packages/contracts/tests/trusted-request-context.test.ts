@@ -6,10 +6,12 @@ import {
   SignedTrustedRequestContextSchema,
   TrustedRequestContextSchema,
   validateSignedContextEnvelope,
+  validateEntitlementAwareTrustedRequestContext,
   validateTrustedRequestContext,
   type SignedTrustedRequestContext,
   type TrustedRequestContext,
   type TrustedContextAuthority,
+  type EntitlementAwareTrustedContextAuthority,
 } from "../src/index.js";
 
 const context: TrustedRequestContext = {
@@ -375,43 +377,71 @@ test("context schema rejects duplicate capabilities, duplicate audience, and unk
 });
 
 test("trusted context capability ids must be in canonical sorted order", () => {
+  const entitlementAuthority: EntitlementAwareTrustedContextAuthority = {
+    ...authority,
+    entitlement_snapshot: {
+      snapshot_ref: context.entitlement_snapshot_ref,
+      capability_ids: ["eduapply.application", "housing.read"],
+    },
+  };
   assert.deepEqual(
-    validateTrustedRequestContext({
+    validateEntitlementAwareTrustedRequestContext({
       ...context,
       capability_ids: ["housing.read", "eduapply.application"],
-    }, authority).map((item) => item.code),
-    ["CAPABILITY_IDS_NOT_SORTED"],
+    }, entitlementAuthority).map((item) => item.code),
+    ["CAPABILITY_IDS_NOT_SORTED", "ENTITLEMENT_CAPABILITIES_MISMATCH"],
   );
+  assert.deepEqual(validateTrustedRequestContext({
+    ...context,
+    capability_ids: ["housing.read", "eduapply.application"],
+  }, authority), []);
 });
 
 test("trusted context must exactly match the effective entitlement snapshot", () => {
-  const effectiveAuthority: TrustedContextAuthority = {
+  const effectiveAuthority: EntitlementAwareTrustedContextAuthority = {
     ...authority,
     entitlement_snapshot: {
       snapshot_ref: context.entitlement_snapshot_ref,
       capability_ids: context.capability_ids,
     },
   };
-  assert.deepEqual(validateTrustedRequestContext(context, effectiveAuthority), []);
+  assert.deepEqual(validateEntitlementAwareTrustedRequestContext(context, effectiveAuthority), []);
   assert.deepEqual(
-    validateTrustedRequestContext(context, {
+    validateEntitlementAwareTrustedRequestContext(context, {
       ...effectiveAuthority,
       entitlement_snapshot: {
-        ...effectiveAuthority.entitlement_snapshot!,
+        ...effectiveAuthority.entitlement_snapshot,
         snapshot_ref: { ...context.entitlement_snapshot_ref, version: 8 },
       },
     }).map((item) => item.code),
     ["ENTITLEMENT_SNAPSHOT_MISMATCH"],
   );
   assert.deepEqual(
-    validateTrustedRequestContext(context, {
+    validateEntitlementAwareTrustedRequestContext(context, {
       ...effectiveAuthority,
       entitlement_snapshot: {
-        ...effectiveAuthority.entitlement_snapshot!,
+        ...effectiveAuthority.entitlement_snapshot,
         capability_ids: ["housing.read"],
       },
     }).map((item) => item.code),
     ["ENTITLEMENT_CAPABILITIES_MISMATCH"],
+  );
+  assert.deepEqual(
+    validateEntitlementAwareTrustedRequestContext(
+      context,
+      authority as EntitlementAwareTrustedContextAuthority,
+    ).map((item) => item.code),
+    ["ENTITLEMENT_AUTHORITY_REQUIRED"],
+  );
+  assert.deepEqual(
+    validateEntitlementAwareTrustedRequestContext(context, {
+      ...effectiveAuthority,
+      entitlement_snapshot: {
+        ...effectiveAuthority.entitlement_snapshot,
+        capability_ids: ["housing.read", "eduapply.application"],
+      },
+    }).map((item) => item.code),
+    ["ENTITLEMENT_AUTHORITY_CAPABILITIES_NOT_CANONICAL", "ENTITLEMENT_CAPABILITIES_MISMATCH"],
   );
 });
 

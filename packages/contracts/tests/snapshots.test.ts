@@ -48,9 +48,31 @@ const snapshotRef = {
   evaluated_at: snapshot.evaluated_at,
 };
 
+const authoritativeCapabilityVersions = snapshot.capabilities.map((capability) => ({
+  ...metadata,
+  ...capability,
+  kind: "mcp" as const,
+  artifact_ref: `oci:registry.example.invalid/${capability.capability_id}@sha256:${"a".repeat(64)}`,
+  contract_ref: "core.capabilities@1.0.0",
+  risk_class: "read" as const,
+  approval_requirement: "none" as const,
+  compatibility: {
+    core_contract_version: "0.7.0",
+    domain_contract_version: "1.0.0",
+    runtime_protocol_version: "1.0.0",
+    tenant_modes: ["b2b" as const, "b2c" as const],
+  },
+  status: "reviewed" as const,
+}));
+
+const capabilityAuthority = {
+  first_release: true,
+  capability_versions: authoritativeCapabilityVersions,
+};
+
 test("entitlement snapshot accepts sorted exact source and capability identities", () => {
   assert.equal(Schema.Check(EntitlementSnapshotSchema, snapshot), true);
-  assert.deepEqual(validateEntitlementSnapshot(snapshot), []);
+  assert.deepEqual(validateEntitlementSnapshot(snapshot, capabilityAuthority), []);
   assert.deepEqual(validateEntitlementSnapshotRef(snapshot, snapshotRef), []);
   assert.equal(Schema.Check(EntitlementSnapshotSchema, { ...snapshot, extra: true }), false);
   assert.equal(Schema.Check(EntitlementSnapshotSchema, {
@@ -67,7 +89,7 @@ test("snapshot validation rejects unsorted and duplicate source references", () 
   ] as const;
   for (const [field, value, code] of cases) {
     assert.deepEqual(
-      validateEntitlementSnapshot({ ...snapshot, [field]: value }).map((item) => item.code),
+      validateEntitlementSnapshot({ ...snapshot, [field]: value }, capabilityAuthority).map((item) => item.code),
       [code],
       field,
     );
@@ -77,11 +99,11 @@ test("snapshot validation rejects unsorted and duplicate source references", () 
 test("snapshot validation rejects unsorted, duplicate, and conflicting capability triples", () => {
   const [first, second] = snapshot.capabilities;
   assert.deepEqual(
-    validateEntitlementSnapshot({ ...snapshot, capabilities: [second!, first!] }).map((item) => item.code),
+    validateEntitlementSnapshot({ ...snapshot, capabilities: [second!, first!] }, capabilityAuthority).map((item) => item.code),
     ["SNAPSHOT_CAPABILITIES_NOT_SORTED"],
   );
   assert.deepEqual(
-    validateEntitlementSnapshot({ ...snapshot, capabilities: [first!, { ...first! }] }).map((item) => item.code),
+    validateEntitlementSnapshot({ ...snapshot, capabilities: [first!, { ...first! }] }, capabilityAuthority).map((item) => item.code),
     ["SNAPSHOT_CAPABILITY_DUPLICATE"],
   );
   assert.deepEqual(
@@ -91,8 +113,73 @@ test("snapshot validation rejects unsorted, duplicate, and conflicting capabilit
         first!,
         { ...first!, capability_version_id: "capability_version.eduapply.read.2", version: "2.0.0" },
       ],
-    }).map((item) => item.code),
+    }, capabilityAuthority).map((item) => item.code),
     ["SNAPSHOT_CAPABILITY_CONFLICT"],
+  );
+});
+
+test("snapshot capability triples require exact reviewed allowed authority", () => {
+  const [firstAuthority, secondAuthority] = authoritativeCapabilityVersions;
+  const nonExecuting = {
+    ...firstAuthority!,
+    kind: "policy" as const,
+    artifact_ref: `manifest:sha256:${"c".repeat(64)}`,
+    risk_class: "draft_write" as const,
+  };
+  assert.deepEqual(validateEntitlementSnapshot(snapshot, {
+    ...capabilityAuthority,
+    capability_versions: [nonExecuting, secondAuthority!],
+  }), []);
+  assert.deepEqual(
+    validateEntitlementSnapshot(snapshot, {
+      ...capabilityAuthority,
+      capability_versions: [firstAuthority!],
+    }).map((item) => item.code),
+    ["CAPABILITY_VERSION_AUTHORITY_MISSING"],
+  );
+  assert.deepEqual(
+    validateEntitlementSnapshot(snapshot, {
+      ...capabilityAuthority,
+      capability_versions: [{ ...firstAuthority!, capability_id: "capability.wrong" }, secondAuthority!],
+    }).map((item) => item.code),
+    ["CAPABILITY_VERSION_AUTHORITY_MISMATCH"],
+  );
+  assert.deepEqual(
+    validateEntitlementSnapshot(snapshot, {
+      ...capabilityAuthority,
+      capability_versions: [{ ...firstAuthority!, status: "draft" }, secondAuthority!],
+    }).map((item) => item.code),
+    ["CAPABILITY_VERSION_NOT_REVIEWED"],
+  );
+  assert.deepEqual(
+    validateEntitlementSnapshot(snapshot, {
+      ...capabilityAuthority,
+      capability_versions: [{ ...firstAuthority!, status: "retired" }, secondAuthority!],
+    }).map((item) => item.code),
+    ["CAPABILITY_VERSION_NOT_REVIEWED"],
+  );
+  assert.deepEqual(
+    validateEntitlementSnapshot(snapshot, {
+      ...capabilityAuthority,
+      capability_versions: [{ ...firstAuthority!, status: "blocked" }, secondAuthority!],
+    }).map((item) => item.code),
+    ["CAPABILITY_VERSION_BLOCKED"],
+  );
+  for (const risk_class of ["external_write", "privileged"] as const) {
+    assert.deepEqual(
+      validateEntitlementSnapshot(snapshot, {
+        ...capabilityAuthority,
+        capability_versions: [{ ...firstAuthority!, risk_class }, secondAuthority!],
+      }).map((item) => item.code),
+      ["CAPABILITY_VERSION_RISK_FORBIDDEN"],
+    );
+  }
+  assert.deepEqual(
+    validateEntitlementSnapshot(snapshot, {
+      ...capabilityAuthority,
+      capability_versions: [{ ...firstAuthority!, risk_class: "draft_write" }, secondAuthority!],
+    }).map((item) => item.code),
+    ["CAPABILITY_VERSION_RISK_FORBIDDEN"],
   );
 });
 

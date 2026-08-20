@@ -9,6 +9,7 @@
     "pack_product_id": "pack.eduapply",
     "source": "platform_manual",
     "external_order_ref": "order_demo_001",
+    "expected_resource_version": 1,
     "expires_at": "2027-08-20T01:00:00Z",
     "tenant_mode": "b2b",
     "assignment_mode": "seat",

@@ -10,7 +10,11 @@ import {
   EntitlementSnapshotRefSchema,
   type EntitlementSnapshotRef,
 } from "../runtime/refs.js";
-import { CanonicalSemanticVersionSchema } from "./catalog.js";
+import {
+  CanonicalSemanticVersionSchema,
+  type CapabilityVersionAuthority,
+  validateCapabilityVersionAuthority,
+} from "./catalog.js";
 
 export const CanonicalSha256Schema = Type.String({ pattern: "^sha256:[a-f0-9]{64}$" });
 
@@ -109,6 +113,7 @@ export function validateEntitlementSnapshot(
     EntitlementSnapshot,
     "source_entitlement_ids" | "source_assignment_ids" | "source_release_ids" | "capabilities"
   >,
+  authority: CapabilityVersionAuthority,
 ): ContractViolation[] {
   const sourceChecks = [
     validateSortedIds(snapshot.source_entitlement_ids, "source_entitlement_ids", "SNAPSHOT_ENTITLEMENTS_DUPLICATE", "SNAPSHOT_ENTITLEMENTS_NOT_SORTED"),
@@ -149,7 +154,7 @@ export function validateEntitlementSnapshot(
       )];
     }
   }
-  return [];
+  return validateCapabilityVersionAuthority(snapshot.capabilities, authority);
 }
 
 export function validateEntitlementSnapshotRef(

@@ -13,7 +13,9 @@ import {
   EntitlementStatusSchema,
   GrantEntitlementRequestSchema,
   PublicServiceStateSchema,
+  SelectTenantPackReleaseRequestSchema,
   StudentServiceSummarySchema,
+  validateCompanyServiceSummary,
   validateEntitlement,
 } from "../src/index.js";
 
@@ -122,6 +124,7 @@ test("grant command accepts only exact platform manual b2b or b2c authority", ()
     pack_product_id: "pack.eduapply",
     source: "platform_manual",
     external_order_ref: "order_demo_001",
+    expected_resource_version: 2,
     expires_at: "2027-08-20T01:00:00Z",
     tenant_mode: "b2b",
     assignment_mode: "seat",
@@ -131,6 +134,27 @@ test("grant command accepts only exact platform manual b2b or b2c authority", ()
   assert.equal(Schema.Check(GrantEntitlementRequestSchema, { ...command, source: "stripe" }), false);
   assert.equal(Schema.Check(GrantEntitlementRequestSchema, { ...command, seat_quantity: 0 }), false);
   assert.equal(Schema.Check(GrantEntitlementRequestSchema, { ...command, receipt: "private" }), false);
+  const { expected_resource_version: _version, ...withoutVersion } = command;
+  assert.equal(Schema.Check(GrantEntitlementRequestSchema, withoutVersion), false);
+  assert.equal(Schema.Check(GrantEntitlementRequestSchema, { ...command, expected_resource_version: 0 }), false);
+  assert.equal(Schema.Check(GrantEntitlementRequestSchema, { ...command, expected_resource_version: 1.5 }), false);
+});
+
+test("Pack release selection requires positive optimistic concurrency authority", () => {
+  const command = {
+    schema_version: 1,
+    idempotency_key: "idem_select_release",
+    payload_hash: `sha256:${"a".repeat(64)}`,
+    tenant_id: "tenant_demo",
+    pack_product_id: "pack.eduapply",
+    pack_version_id: "pack_version.eduapply.1",
+    expected_resource_version: 2,
+  };
+  assert.equal(Schema.Check(SelectTenantPackReleaseRequestSchema, command), true);
+  const { expected_resource_version: _version, ...withoutVersion } = command;
+  assert.equal(Schema.Check(SelectTenantPackReleaseRequestSchema, withoutVersion), false);
+  assert.equal(Schema.Check(SelectTenantPackReleaseRequestSchema, { ...command, expected_resource_version: 0 }), false);
+  assert.equal(Schema.Check(SelectTenantPackReleaseRequestSchema, { ...command, expected_resource_version: 1.5 }), false);
 });
 
 test("entitlement status commands cannot forge database-clock expiry", () => {
@@ -174,12 +198,38 @@ test("company summaries expose only calm seat and validity fields", () => {
     service_state: "available",
   };
   assert.equal(Schema.Check(CompanyServiceSummarySchema, summary), true);
+  assert.deepEqual(validateCompanyServiceSummary(summary), []);
   for (const field of [
     "artifact_ref", "contract_ref", "capability_ids", "external_order_ref",
     "price", "receipt", "tool_schema", "secret", "failure_summary",
   ] as const) {
     assert.equal(Schema.Check(CompanyServiceSummarySchema, { ...summary, [field]: "private" }), false, field);
   }
+  assert.deepEqual(
+    validateCompanyServiceSummary({ ...summary, used_seats: 4 }).map((item) => item.code),
+    ["COMPANY_SERVICE_SEATS_EXCEEDED", "COMPANY_SERVICE_SEATS_INCONSISTENT"],
+  );
+  assert.deepEqual(
+    validateCompanyServiceSummary({ ...summary, available_seats: 2 }).map((item) => item.code),
+    ["COMPANY_SERVICE_SEATS_INCONSISTENT"],
+  );
+});
+
+test("company summary validation rejects accessors without invoking them", () => {
+  let getterCalls = 0;
+  const hostile = Object.create(null) as Record<string, unknown>;
+  Object.defineProperty(hostile, "used_seats", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return 1;
+    },
+  });
+  assert.deepEqual(
+    validateCompanyServiceSummary(hostile).map((item) => item.code),
+    ["COMPANY_SERVICE_SUMMARY_NOT_PLAIN_DATA"],
+  );
+  assert.equal(getterCalls, 0);
 });
 
 test("student summaries never expose raw capability or commercial internals", () => {

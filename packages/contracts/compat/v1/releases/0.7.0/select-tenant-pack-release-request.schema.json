@@ -3,6 +3,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "expected_resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
     "idempotency_key": {
       "maxLength": 255,
       "minLength": 1,
@@ -39,7 +43,8 @@
     "payload_hash",
     "tenant_id",
     "pack_product_id",
-    "pack_version_id"
+    "pack_version_id",
+    "expected_resource_version"
   ],
   "type": "object"
 }

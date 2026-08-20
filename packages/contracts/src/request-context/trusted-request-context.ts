@@ -97,7 +97,10 @@ export interface TrustedContextAuthority {
     owner_actor_id: string;
     status: Static<typeof ProfileStatusSchema>;
   };
-  entitlement_snapshot?: {
+}
+
+export interface EntitlementAwareTrustedContextAuthority extends TrustedContextAuthority {
+  entitlement_snapshot: {
     snapshot_ref: EntitlementSnapshotRef;
     capability_ids: readonly string[];
   };
@@ -110,51 +113,6 @@ export function validateTrustedRequestContext(
   authority: TrustedContextAuthority,
 ): ContractViolation[] {
   const violations: ContractViolation[] = [];
-
-  for (let index = 1; index < context.capability_ids.length; index += 1) {
-    if (context.capability_ids[index - 1]! >= context.capability_ids[index]!) {
-      violations.push(
-        violation(
-          "CAPABILITY_IDS_NOT_SORTED",
-          "capability_ids",
-          "Trusted context Capability ids must use canonical order",
-        ),
-      );
-      break;
-    }
-  }
-
-  if (authority.entitlement_snapshot !== undefined) {
-    const effectiveRef = authority.entitlement_snapshot.snapshot_ref;
-    const contextRef = context.entitlement_snapshot_ref;
-    if (
-      contextRef.snapshot_id !== effectiveRef.snapshot_id
-      || contextRef.version !== effectiveRef.version
-      || contextRef.evaluated_at !== effectiveRef.evaluated_at
-    ) {
-      violations.push(
-        violation(
-          "ENTITLEMENT_SNAPSHOT_MISMATCH",
-          "entitlement_snapshot_ref",
-          "Trusted context must reference the effective entitlement snapshot",
-        ),
-      );
-    }
-    if (
-      context.capability_ids.length !== authority.entitlement_snapshot.capability_ids.length
-      || context.capability_ids.some((capabilityId, index) => (
-        capabilityId !== authority.entitlement_snapshot!.capability_ids[index]
-      ))
-    ) {
-      violations.push(
-        violation(
-          "ENTITLEMENT_CAPABILITIES_MISMATCH",
-          "capability_ids",
-          "Trusted context Capability ids must match the effective entitlement snapshot",
-        ),
-      );
-    }
-  }
 
   if (authority.membership.status !== "active") {
     violations.push(
@@ -339,6 +297,79 @@ export function validateTrustedRequestContext(
         "Original actor must equal the effective actor without delegation",
       ),
     );
+  }
+
+  return violations;
+}
+
+export function validateEntitlementAwareTrustedRequestContext(
+  context: TrustedRequestContext,
+  authority: EntitlementAwareTrustedContextAuthority,
+): ContractViolation[] {
+  const violations = validateTrustedRequestContext(context, authority);
+  const entitlementAuthority = (
+    authority as Partial<EntitlementAwareTrustedContextAuthority>
+  ).entitlement_snapshot;
+  if (
+    entitlementAuthority === undefined
+    || entitlementAuthority === null
+    || entitlementAuthority.snapshot_ref === undefined
+    || entitlementAuthority.snapshot_ref === null
+    || !Array.isArray(entitlementAuthority.capability_ids)
+  ) {
+    violations.push(violation(
+      "ENTITLEMENT_AUTHORITY_REQUIRED",
+      "authority.entitlement_snapshot",
+      "Entitlement-aware validation requires the authoritative snapshot and Capability ids",
+    ));
+    return violations;
+  }
+
+  for (let index = 1; index < context.capability_ids.length; index += 1) {
+    if (context.capability_ids[index - 1]! >= context.capability_ids[index]!) {
+      violations.push(violation(
+        "CAPABILITY_IDS_NOT_SORTED",
+        "capability_ids",
+        "Trusted context Capability ids must use canonical order",
+      ));
+      break;
+    }
+  }
+  for (let index = 1; index < entitlementAuthority.capability_ids.length; index += 1) {
+    if (entitlementAuthority.capability_ids[index - 1]! >= entitlementAuthority.capability_ids[index]!) {
+      violations.push(violation(
+        "ENTITLEMENT_AUTHORITY_CAPABILITIES_NOT_CANONICAL",
+        "authority.entitlement_snapshot.capability_ids",
+        "Authoritative Capability ids must be unique and canonically sorted",
+      ));
+      break;
+    }
+  }
+
+  const effectiveRef = entitlementAuthority.snapshot_ref;
+  const contextRef = context.entitlement_snapshot_ref;
+  if (
+    contextRef.snapshot_id !== effectiveRef.snapshot_id
+    || contextRef.version !== effectiveRef.version
+    || contextRef.evaluated_at !== effectiveRef.evaluated_at
+  ) {
+    violations.push(violation(
+      "ENTITLEMENT_SNAPSHOT_MISMATCH",
+      "entitlement_snapshot_ref",
+      "Trusted context must reference the effective entitlement snapshot",
+    ));
+  }
+  if (
+    context.capability_ids.length !== entitlementAuthority.capability_ids.length
+    || context.capability_ids.some((capabilityId, index) => (
+      capabilityId !== entitlementAuthority.capability_ids[index]
+    ))
+  ) {
+    violations.push(violation(
+      "ENTITLEMENT_CAPABILITIES_MISMATCH",
+      "capability_ids",
+      "Trusted context Capability ids must match the effective entitlement snapshot",
+    ));
   }
 
   return violations;

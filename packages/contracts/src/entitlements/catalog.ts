@@ -7,8 +7,10 @@ import {
 import { type ContractViolation, violation } from "../common/validation.js";
 import { TenantModeSchema } from "../tenant/identity.js";
 
-const canonicalSemverPattern = "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$";
-const contractRefPattern = "^[a-z0-9][a-z0-9._/-]{0,127}@(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$";
+const semverPrereleaseIdentifier = "(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)";
+const canonicalSemverBody = `(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-${semverPrereleaseIdentifier}(?:\\.${semverPrereleaseIdentifier})*)?`;
+const canonicalSemverPattern = `^${canonicalSemverBody}$`;
+const contractRefPattern = `^[a-z0-9][a-z0-9._/-]{0,127}@${canonicalSemverBody}$`;
 
 export const CanonicalSemanticVersionSchema = Type.String({
   minLength: 5,
@@ -17,7 +19,9 @@ export const CanonicalSemanticVersionSchema = Type.String({
 });
 
 export const ImmutableArtifactRefSchema = Type.Union([
-  Type.String({ pattern: "^oci:[A-Za-z0-9][A-Za-z0-9./:_-]{0,511}@sha256:[a-f0-9]{64}$" }),
+  Type.String({
+    pattern: "^oci:(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?/)?[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?(?:/[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)*@sha256:[a-f0-9]{64}$",
+  }),
   Type.String({ pattern: "^npm:@?[A-Za-z0-9._/-]+@(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)#sha512-[A-Za-z0-9+/=]+$" }),
   Type.String({ pattern: "^manifest:sha256:[a-f0-9]{64}$" }),
 ]);
@@ -172,6 +176,11 @@ export type PackMemberRef = Static<typeof PackMemberRefSchema>;
 export type PackVersion = Static<typeof PackVersionSchema>;
 export type TenantPackRelease = Static<typeof TenantPackReleaseSchema>;
 
+export interface CapabilityVersionAuthority {
+  first_release: boolean;
+  capability_versions: readonly CapabilityVersion[];
+}
+
 function isPlainData(value: unknown, seen: Set<object>): boolean {
   if (value === null || typeof value !== "object") return true;
   if (seen.has(value)) return false;
@@ -207,8 +216,90 @@ function compareMember(left: PackMemberRef, right: PackMemberRef): number {
   return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
 }
 
+export function validateCapabilityVersionAuthority(
+  references: readonly PackMemberRef[],
+  authority: CapabilityVersionAuthority,
+): ContractViolation[] {
+  if (
+    authority === undefined
+    || authority === null
+    || !Array.isArray(authority.capability_versions)
+    || typeof authority.first_release !== "boolean"
+  ) {
+    return [violation(
+      "CAPABILITY_VERSION_AUTHORITY_REQUIRED",
+      "authority",
+      "Exact authoritative Capability Version records are required",
+    )];
+  }
+
+  for (let index = 0; index < references.length; index += 1) {
+    const reference = references[index]!;
+    const records = authority.capability_versions.filter(
+      (candidate) => candidate.capability_version_id === reference.capability_version_id,
+    );
+    if (records.length === 0) {
+      return [violation(
+        "CAPABILITY_VERSION_AUTHORITY_MISSING",
+        `capabilities[${index}]`,
+        "Referenced Capability Version is absent from authoritative records",
+      )];
+    }
+    if (records.length > 1) {
+      return [violation(
+        "CAPABILITY_VERSION_AUTHORITY_AMBIGUOUS",
+        `capabilities[${index}]`,
+        "Authoritative records must contain one Capability Version per identifier",
+      )];
+    }
+
+    const record = records[0]!;
+    if (
+      record.capability_id !== reference.capability_id
+      || record.version !== reference.version
+    ) {
+      return [violation(
+        "CAPABILITY_VERSION_AUTHORITY_MISMATCH",
+        `capabilities[${index}]`,
+        "Capability reference must exactly match its authoritative Version record",
+      )];
+    }
+    if (record.status === "blocked") {
+      return [violation(
+        "CAPABILITY_VERSION_BLOCKED",
+        `capabilities[${index}]`,
+        "Blocked Capability Versions cannot become effective",
+      )];
+    }
+    if (record.status !== "reviewed") {
+      return [violation(
+        "CAPABILITY_VERSION_NOT_REVIEWED",
+        `capabilities[${index}]`,
+        "Only reviewed Capability Versions can become effective",
+      )];
+    }
+    if (
+      authority.first_release
+      && (
+        record.risk_class === "external_write"
+        || record.risk_class === "privileged"
+        || (record.risk_class === "draft_write" && !record.artifact_ref.startsWith("manifest:sha256:"))
+      )
+    ) {
+      return [violation(
+        "CAPABILITY_VERSION_RISK_FORBIDDEN",
+        `capabilities[${index}].risk_class`,
+        "First release permits only reviewed reads or non-executing placeholder manifests",
+      )];
+    }
+  }
+
+  return [];
+}
+
 export function validatePackVersion(
   pack: Pick<PackVersion, "members">,
+  authority: CapabilityVersionAuthority,
 ): ContractViolation[] {
   const exactMembers = new Set<string>();
   const capabilityIds = new Set<string>();
@@ -232,5 +323,5 @@ export function validatePackVersion(
       return [violation("PACK_MEMBERS_NOT_SORTED", "members", "Pack members must use canonical order")];
     }
   }
-  return [];
+  return validateCapabilityVersionAuthority(pack.members, authority);
 }

@@ -7,6 +7,7 @@
     "payload_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "tenant_id": "tenant_demo",
     "pack_product_id": "pack.eduapply",
-    "pack_version_id": "pack_version.eduapply.1"
+    "pack_version_id": "pack_version.eduapply.1",
+    "expected_resource_version": 1
   }
 }
