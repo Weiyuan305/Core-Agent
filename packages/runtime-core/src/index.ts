@@ -219,6 +219,14 @@ export {
   type RegisterInvitedIdentityDependencies,
 } from "./services/identity/register-invited-identity.js";
 export {
+  replaceAuthProviderSubject,
+  type ReplacementAuthSubjectInput,
+  type ReplaceAuthProviderSubjectCommand,
+  type ReplaceAuthProviderSubjectContext,
+  type ReplaceAuthProviderSubjectDependencies,
+  type ReplaceAuthProviderSubjectResult,
+} from "./services/identity/replace-auth-provider.js";
+export {
   loadActorIdentityAuthority,
   type ActorIdentityAuthority,
 } from "./repositories/identity/identity-authority.js";

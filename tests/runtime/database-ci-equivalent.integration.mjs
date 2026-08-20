@@ -194,9 +194,13 @@ async function runCiEquivalentScenario({ injectedFailure = false, injectedOutput
     assert.match(postgresOutput, /trusted context binds and admits one AgentRun/u);
     assert.match(postgresOutput, /deletion request is one serializable Actor-first transition/u);
     assert.match(postgresOutput, /account-deletion finalizer fences provider effects/u);
+    assert.match(postgresOutput, /provider replacement preserves business identifiers and atomically revokes old authority and every Core Session/u);
     const integrationOutput = protectedRun("npm", ["run", "test:integration"], environment, credential, credentialFile);
     assertNodeTestSummaries(integrationOutput, [expectedCounts.integration.testCount]);
     assert.match(integrationOutput, /provision, converse, stream, restart, and resume/u);
+    assert.match(integrationOutput, /fake-provider B2C slice enforces Cookie CSRF reauthentication outage revocation deletion recovery and public-safe errors/u);
+    assert.match(integrationOutput, /fake-provider invited B2B slice preserves invitation-only onboarding and server-derived platform cross-company access/u);
+    assert.match(integrationOutput, /trusted context derives Control Plane Actor Membership Profile and role from current PostgreSQL authority/u);
     protectedRun("docker", ["logs", container], environment, credential, credentialFile);
     const changed = spawnSync("git", ["diff", "--name-only", "-z"], { cwd: repositoryRoot, env: environment, encoding: "buffer" });
     const untracked = spawnSync("git", ["ls-files", "--others", "--exclude-standard", "-z"], { cwd: repositoryRoot, env: environment, encoding: "buffer" });

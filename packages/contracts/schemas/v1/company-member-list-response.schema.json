@@ -25,7 +25,12 @@
                 "type": "integer"
               },
               "roles": {
-                "items": false,
+                "items": {
+                  "enum": [
+                    "admin"
+                  ],
+                  "type": "string"
+                },
                 "maxItems": 1,
                 "minItems": 1,
                 "prefixItems": [
@@ -79,7 +84,12 @@
                 "type": "integer"
               },
               "roles": {
-                "items": false,
+                "items": {
+                  "enum": [
+                    "admin"
+                  ],
+                  "type": "string"
+                },
                 "maxItems": 1,
                 "minItems": 1,
                 "prefixItems": [
@@ -133,7 +143,12 @@
                 "type": "integer"
               },
               "roles": {
-                "items": false,
+                "items": {
+                  "enum": [
+                    "consultant"
+                  ],
+                  "type": "string"
+                },
                 "maxItems": 1,
                 "minItems": 1,
                 "prefixItems": [
@@ -187,7 +202,12 @@
                 "type": "integer"
               },
               "roles": {
-                "items": false,
+                "items": {
+                  "enum": [
+                    "admin"
+                  ],
+                  "type": "string"
+                },
                 "maxItems": 1,
                 "minItems": 1,
                 "prefixItems": [
@@ -266,7 +286,12 @@
                 "type": "string"
               },
               "roles": {
-                "items": false,
+                "items": {
+                  "enum": [
+                    "admin"
+                  ],
+                  "type": "string"
+                },
                 "maxItems": 1,
                 "minItems": 1,
                 "prefixItems": [
@@ -336,7 +361,12 @@
                 "type": "string"
               },
               "roles": {
-                "items": false,
+                "items": {
+                  "enum": [
+                    "admin"
+                  ],
+                  "type": "string"
+                },
                 "maxItems": 1,
                 "minItems": 1,
                 "prefixItems": [
@@ -406,7 +436,12 @@
                 "type": "string"
               },
               "roles": {
-                "items": false,
+                "items": {
+                  "enum": [
+                    "admin"
+                  ],
+                  "type": "string"
+                },
                 "maxItems": 1,
                 "minItems": 1,
                 "prefixItems": [
@@ -476,7 +511,12 @@
                 "type": "string"
               },
               "roles": {
-                "items": false,
+                "items": {
+                  "enum": [
+                    "admin"
+                  ],
+                  "type": "string"
+                },
                 "maxItems": 1,
                 "minItems": 1,
                 "prefixItems": [
@@ -546,7 +586,12 @@
                 "type": "string"
               },
               "roles": {
-                "items": false,
+                "items": {
+                  "enum": [
+                    "consultant"
+                  ],
+                  "type": "string"
+                },
                 "maxItems": 1,
                 "minItems": 1,
                 "prefixItems": [
@@ -616,7 +661,12 @@
                 "type": "string"
               },
               "roles": {
-                "items": false,
+                "items": {
+                  "enum": [
+                    "consultant"
+                  ],
+                  "type": "string"
+                },
                 "maxItems": 1,
                 "minItems": 1,
                 "prefixItems": [
@@ -686,7 +736,12 @@
                 "type": "string"
               },
               "roles": {
-                "items": false,
+                "items": {
+                  "enum": [
+                    "consultant"
+                  ],
+                  "type": "string"
+                },
                 "maxItems": 1,
                 "minItems": 1,
                 "prefixItems": [
@@ -756,7 +811,13 @@
                 "type": "string"
               },
               "roles": {
-                "items": false,
+                "items": {
+                  "enum": [
+                    "admin",
+                    "consultant"
+                  ],
+                  "type": "string"
+                },
                 "maxItems": 2,
                 "minItems": 2,
                 "prefixItems": [
@@ -830,7 +891,13 @@
                 "type": "string"
               },
               "roles": {
-                "items": false,
+                "items": {
+                  "enum": [
+                    "admin",
+                    "consultant"
+                  ],
+                  "type": "string"
+                },
                 "maxItems": 2,
                 "minItems": 2,
                 "prefixItems": [
@@ -904,7 +971,13 @@
                 "type": "string"
               },
               "roles": {
-                "items": false,
+                "items": {
+                  "enum": [
+                    "admin",
+                    "consultant"
+                  ],
+                  "type": "string"
+                },
                 "maxItems": 2,
                 "minItems": 2,
                 "prefixItems": [

@@ -805,6 +805,7 @@ test("identity events use bounded ID, state, reason-code, and version payloads",
   };
   const events = [
     ["identity.registered", { actor_id: "actor_01", tenant_id: "tenant_01", membership_id: "membership_01", profile_id: "profile_01", resource_version: 1 }],
+    ["auth_subject.replaced", { actor_id: "actor_01", old_auth_subject_id: "auth_01", new_auth_subject_id: "auth_02", old_status: "revoked", new_status: "active", resource_version: 2 }],
     ["invitation.created", { invitation_id: "invitation_01", membership_id: "membership_01", status: "pending", resource_version: 1 }],
     ["invitation.accepted", { invitation_id: "invitation_01", membership_id: "membership_01", actor_id: "actor_01", status: "accepted", resource_version: 2 }],
     ["invitation.changed", { invitation_id: "invitation_01", membership_id: "membership_01", status: "revoked", resource_version: 2 }],

@@ -61,6 +61,9 @@ jobs:
       - name: Run unit builds and tests
         run: npm run check
 
+      - name: Run public identity boundary tests
+        run: npm run test:identity
+
       - name: Scan tracked evidence for the CI sentinel
         run: node scripts/verify-no-secret.mjs synthetic-ci-sentinel-runtime-v1
 
@@ -192,7 +195,7 @@ jobs:
       - name: Bootstrap exact test database role prerequisites
         run: node scripts/run-protected-ci-command.mjs --secret-file "$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- node scripts/bootstrap-test-database-roles.mjs
 
-      - name: Run fake Supervisor and Hermes full slice
+      - name: Run fake provider Supervisor and Hermes full slice
         run: node scripts/run-protected-ci-command.mjs --secret-file "$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- npm run test:integration
 
       - name: Release scanned PostgreSQL service logs

@@ -1,6 +1,6 @@
 {
   "runtimeCorePostgres": {
-    "testCount": 354,
+    "testCount": 359,
     "suitePaths": [
       "tests/migrations.test.ts",
       "tests/tenant-isolation.test.ts",
@@ -23,7 +23,8 @@
       "tests/public-rate-limits.test.ts",
       "tests/email-verification-transactions.test.ts",
       "tests/trusted-context-authority.test.ts",
-      "tests/account-deletion.test.ts"
+      "tests/account-deletion.test.ts",
+      "tests/replace-auth-provider.test.ts"
     ]
   },
   "identityGatewayPostgres": {
@@ -33,6 +34,6 @@
     "testCount": 15
   },
   "integration": {
-    "testCount": 93
+    "testCount": 96
   }
 }
