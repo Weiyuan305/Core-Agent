@@ -75,7 +75,11 @@ async function installShippedSchema9(environment, credentials, legacyContainer) 
 }
 
 function composeArguments(project, ...args) {
-  return ["compose", "--project-name", project, "--file", composeFile, ...args];
+  // Every helper service intentionally resolves to the same fixed application
+  // image. Docker Desktop's containerd image store cannot atomically export
+  // that tag from several concurrent BuildKit targets, so keep this security
+  // topology deterministic across the hosted and desktop engines.
+  return ["compose", "--parallel", "1", "--project-name", project, "--file", composeFile, ...args];
 }
 
 async function protectedFile(path, value) {
@@ -170,7 +174,11 @@ async function scenario(kind) {
         "--platform", platform,
         lock.images.postgres.platforms[platform],
       );
-      docker("exec", legacyContainer, "sh", "-ceu", "until pg_isready -U core_agent_bootstrap -d core_agent_runtime >/dev/null 2>&1; do sleep 1; done");
+      // The official image's temporary init server accepts Unix-socket
+      // connections before docker-entrypoint shuts it down. TCP is enabled
+      // only by the final server, so this avoids installing schema into a
+      // backend that is about to receive an administrator shutdown.
+      docker("exec", legacyContainer, "sh", "-ceu", "until pg_isready -h 127.0.0.1 -U core_agent_bootstrap -d core_agent_runtime >/dev/null 2>&1; do sleep 1; done");
       const legacyHba = docker("exec", legacyContainer, "sh", "-ceu", "awk 'NF && $1 !~ /^#/ {print}' /var/lib/postgresql/data/pg_hba.conf");
       assert.match(legacyHba, /host all all all trust/u);
       await installShippedSchema9(environment, credentialValues, legacyContainer);

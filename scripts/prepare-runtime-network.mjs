@@ -53,6 +53,14 @@ function exactRecord(value, expected) {
     && Object.entries(expected).every(([key, item]) => value[key] === item);
 }
 
+function exactEgressOptions(value, expected) {
+  return exactRecord(value, expected) || exactRecord(value, {
+    ...expected,
+    "com.docker.network.enable_ipv4": "true",
+    "com.docker.network.enable_ipv6": "false",
+  });
+}
+
 async function docker(args, environment) {
   const { stdout } = await execFileAsync("docker", args, {
     encoding: "utf8",
@@ -87,7 +95,7 @@ function validateInspection(raw, contract) {
     value.Scope !== "local"
     || value.Ingress !== false
     || value.EnableIPv6 !== false
-    || !exactRecord(value.Options, contract.options)
+    || !exactEgressOptions(value.Options, contract.options)
     || typeof value.IPAM !== "object" || value.IPAM === null || Array.isArray(value.IPAM)
     || Object.keys(value.IPAM).length !== 3
     || value.IPAM.Driver !== "default"
