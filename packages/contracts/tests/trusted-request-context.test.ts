@@ -545,8 +545,22 @@ test("entitlement snapshot authority rejects accessors without invoking them", (
 });
 
 test("entitlement snapshot authority rejects nested accessors without invoking them", () => {
+  const completeAuthority: EntitlementAwareTrustedContextAuthority = {
+    ...authority,
+    entitlement_snapshot: {
+      tenant_id: context.tenant_id,
+      profile_id: context.profile_id,
+      snapshot_ref: context.entitlement_snapshot_ref,
+      capability_ids: context.capability_ids,
+    },
+  };
+  assert.deepEqual(
+    validateEntitlementAwareTrustedRequestContext(context, completeAuthority),
+    [],
+  );
+
   let getterCalls = 0;
-  const snapshotRef = { ...context.entitlement_snapshot_ref };
+  const snapshotRef = { ...completeAuthority.entitlement_snapshot.snapshot_ref };
   Object.defineProperty(snapshotRef, "evaluated_at", {
     enumerable: true,
     get() {
@@ -555,12 +569,12 @@ test("entitlement snapshot authority rejects nested accessors without invoking t
     },
   });
   const hostileAuthority = {
-    ...authority,
+    ...completeAuthority,
     entitlement_snapshot: {
-      ...authority.entitlement_snapshot,
+      ...completeAuthority.entitlement_snapshot,
       snapshot_ref: snapshotRef,
     },
-  } as unknown as EntitlementAwareTrustedContextAuthority;
+  } as EntitlementAwareTrustedContextAuthority;
 
   const violations = validateEntitlementAwareTrustedRequestContext(context, hostileAuthority);
   assert.equal(getterCalls, 0);
@@ -574,20 +588,43 @@ test("entitlement snapshot authority rejects nested accessors without invoking t
 });
 
 test("entitlement snapshot authority rejects cyclic nested authority data", () => {
-  const snapshotRef = {
-    ...context.entitlement_snapshot_ref,
-  } as Record<string, unknown>;
-  snapshotRef.cycle = snapshotRef;
-  const cyclicAuthority = {
+  const completeAuthority: EntitlementAwareTrustedContextAuthority = {
     ...authority,
     entitlement_snapshot: {
-      ...authority.entitlement_snapshot,
-      snapshot_ref: snapshotRef,
+      tenant_id: context.tenant_id,
+      profile_id: context.profile_id,
+      snapshot_ref: context.entitlement_snapshot_ref,
+      capability_ids: context.capability_ids,
     },
-  } as unknown as EntitlementAwareTrustedContextAuthority;
+  };
+  assert.deepEqual(
+    validateEntitlementAwareTrustedRequestContext(context, completeAuthority),
+    [],
+  );
+
+  const capabilityIds = [...completeAuthority.entitlement_snapshot.capability_ids];
+  Object.defineProperty(capabilityIds, "nestedData", {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value: {},
+  });
+  const nestedAuthority: EntitlementAwareTrustedContextAuthority = {
+    ...completeAuthority,
+    entitlement_snapshot: {
+      ...completeAuthority.entitlement_snapshot,
+      capability_ids: capabilityIds,
+    },
+  };
+  assert.deepEqual(
+    validateEntitlementAwareTrustedRequestContext(context, nestedAuthority),
+    [],
+  );
+
+  Object.defineProperty(capabilityIds, "nestedData", { value: capabilityIds });
 
   assert.deepEqual(
-    validateEntitlementAwareTrustedRequestContext(context, cyclicAuthority).map((item) => ({
+    validateEntitlementAwareTrustedRequestContext(context, nestedAuthority).map((item) => ({
       code: item.code,
       path: item.path,
     })),
