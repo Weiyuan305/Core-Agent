@@ -195,20 +195,27 @@ test("immutable OCI artifacts use canonical lowercase distribution coordinates",
 test("immutable OCI artifact repository paths enforce the domain-excluded 255-character limit", () => {
   const repositoryPath255 = "a".repeat(255);
   const repositoryPath256 = "a".repeat(256);
+  const unqualifiedPath255 = `a/${"b".repeat(253)}`;
+  const unqualifiedPath256 = `a/${"b".repeat(254)}`;
   const digest = `sha256:${"e".repeat(64)}`;
   assert.equal(repositoryPath255.length, 255);
+  assert.equal(unqualifiedPath255.length, 255);
 
   for (const artifactRef of [
     `oci:${repositoryPath255}@${digest}`,
+    `oci:${unqualifiedPath255}@${digest}`,
     `oci:registry.example.invalid/${repositoryPath255}@${digest}`,
-    `oci:registry.example.invalid:5000/${repositoryPath255}@${digest}`,
+    `oci:registry:5000/${repositoryPath255}@${digest}`,
+    `oci:localhost/${repositoryPath255}@${digest}`,
   ]) {
     assert.equal(Schema.Check(ImmutableArtifactRefSchema, artifactRef), true, artifactRef);
   }
   for (const artifactRef of [
     `oci:${repositoryPath256}@${digest}`,
+    `oci:${unqualifiedPath256}@${digest}`,
     `oci:registry.example.invalid/${repositoryPath256}@${digest}`,
-    `oci:registry.example.invalid:5000/${repositoryPath256}@${digest}`,
+    `oci:registry:5000/${repositoryPath256}@${digest}`,
+    `oci:localhost/${repositoryPath256}@${digest}`,
   ]) {
     assert.equal(Schema.Check(ImmutableArtifactRefSchema, artifactRef), false, artifactRef);
   }
