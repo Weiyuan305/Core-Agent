@@ -343,6 +343,26 @@ test("producer consistency rejects Assignment and Service profile association mi
   }
 });
 
+test("producer profile mismatch code stays internal to ContractViolation", () => {
+  const event = {
+    ...base,
+    profile_id: "profile_envelope",
+    event_type: "assignment.created",
+    payload: {
+      assignment_id: "assignment_demo",
+      entitlement_id: "entitlement_demo",
+      profile_id: "profile_payload",
+      status: "preparing",
+      reason_code: "seat_assigned",
+      resource_version: 1,
+    },
+  } as ProductEvent;
+
+  const [violation] = validateProductEventConsistency(event);
+  assert.equal(violation?.code, "EVENT_PROFILE_ID_MISMATCH");
+  assert.equal(Schema.Check(StableErrorCodeSchema, violation?.code), false);
+});
+
 test("producer consistency gate reports stable association mismatches", () => {
   const mismatches = [
     {
@@ -506,7 +526,6 @@ test("runtime errors add the accepted stable machine codes", () => {
     "SEAT_EXHAUSTED",
     "CAPABILITY_CONFLICT",
     "SERVICE_PREPARING",
-    "EVENT_PROFILE_ID_MISMATCH",
   ]) {
     assert.equal(validator.Check(code), true, code);
   }

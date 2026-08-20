@@ -544,6 +544,60 @@ test("entitlement snapshot authority rejects accessors without invoking them", (
   );
 });
 
+test("entitlement snapshot authority rejects nested accessors without invoking them", () => {
+  let getterCalls = 0;
+  const snapshotRef = { ...context.entitlement_snapshot_ref };
+  Object.defineProperty(snapshotRef, "evaluated_at", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return context.entitlement_snapshot_ref.evaluated_at;
+    },
+  });
+  const hostileAuthority = {
+    ...authority,
+    entitlement_snapshot: {
+      ...authority.entitlement_snapshot,
+      snapshot_ref: snapshotRef,
+    },
+  } as unknown as EntitlementAwareTrustedContextAuthority;
+
+  const violations = validateEntitlementAwareTrustedRequestContext(context, hostileAuthority);
+  assert.equal(getterCalls, 0);
+  assert.deepEqual(
+    violations.map((item) => ({ code: item.code, path: item.path })),
+    [{
+      code: "ENTITLEMENT_AUTHORITY_REQUIRED",
+      path: "authority.entitlement_snapshot",
+    }],
+  );
+});
+
+test("entitlement snapshot authority rejects cyclic nested authority data", () => {
+  const snapshotRef = {
+    ...context.entitlement_snapshot_ref,
+  } as Record<string, unknown>;
+  snapshotRef.cycle = snapshotRef;
+  const cyclicAuthority = {
+    ...authority,
+    entitlement_snapshot: {
+      ...authority.entitlement_snapshot,
+      snapshot_ref: snapshotRef,
+    },
+  } as unknown as EntitlementAwareTrustedContextAuthority;
+
+  assert.deepEqual(
+    validateEntitlementAwareTrustedRequestContext(context, cyclicAuthority).map((item) => ({
+      code: item.code,
+      path: item.path,
+    })),
+    [{
+      code: "ENTITLEMENT_AUTHORITY_REQUIRED",
+      path: "authority.entitlement_snapshot",
+    }],
+  );
+});
+
 test("signed envelope rejects schema and algorithm conflicts without claiming signature validity", () => {
   const wrongSchema = {
     schema_version: 2,
