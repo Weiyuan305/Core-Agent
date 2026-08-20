@@ -76,7 +76,12 @@ const integrationTemporaryRoot = join(
   ".tmp",
 );
 const databaseNamePattern = /^core_agent_test_[a-f0-9]{16}$/;
-const externalStageTimeoutMs = 6_000;
+// A fresh Docker Desktop VM can spend more than twelve seconds starting and
+// reaping the two isolated PostgreSQL cleanup children while the test runner
+// is CPU-bound. Keep the successful path unchanged, but reserve a realistic
+// terminal deadline so cleanup does not report failure after the exact target
+// has already been removed.
+const externalStageTimeoutMs = 20_000;
 const cleanupStageTimeoutMs = 2_000;
 const sentinelScanNodeBudget = 100_000;
 const integrationTrustedContextKey = generateKeyPairSync("ed25519");
@@ -436,11 +441,15 @@ async function settleOwnedDatabaseResource(
     .finally(() => { terminal = true; });
   if (!await settlesBefore(close, now() + gracefulBudgetMs, now)) {
     controller.abort();
-    const forceDeadline = now() + forceBudgetMs;
-    const abortGraceDeadline = Math.min(forceDeadline, now() + 5);
+    const abortGraceBudgetMs = Math.min(5, Math.max(1, Math.floor(forceBudgetMs / 2)));
+    const abortGraceDeadline = now() + abortGraceBudgetMs;
     if (!await settlesBefore(close, abortGraceDeadline, now)) {
       try {
         const force = Promise.resolve().then(() => resource.forceClose());
+        // Start the force deadline after the abort observation. Reusing a
+        // deadline captured before that timer fires makes a delayed event-loop
+        // turn misclassify an immediately successful force close as a timeout.
+        const forceDeadline = now() + Math.max(1, forceBudgetMs - abortGraceBudgetMs);
         if (!await settlesBefore(force.then(() => undefined, () => undefined), forceDeadline, now)) {
           failure = new Error("Integration owned database force timed out");
         } else {
@@ -853,7 +862,7 @@ async function dropIsolatedDatabase(options: {
     const terminalDeadline = now() + ownedTerminalBudgetMs;
     await Promise.all(ownedSettlements.map(async (settlement) => {
       const terminal = settlement.terminal()
-        || await settlesBefore(settlement.close, Math.min(terminalDeadline, now() + 5), now);
+        || await settlesBefore(settlement.close, Math.min(terminalDeadline, now() + 25), now);
       if (!terminal) {
         const resource = options.closeOwned[settlement.index]!;
         try {
@@ -875,35 +884,68 @@ async function dropIsolatedDatabase(options: {
     try { cleanupControlUrl = new URL(options.controlDatabaseUrl); }
     catch { throw new Error("Integration stage failed: database drop"); }
     if (cleanupControlUrl.password !== "") throw new Error("Integration stage failed: database drop");
-    const runCleanupChild = async (operation: "terminate" | "drop", budgetMs: number): Promise<number> => {
-      const remaining = Math.max(1, budgetMs);
-      const child = spawn(process.execPath, [
-        join(repositoryRoot, "scripts", "cleanup-test-database-child.mjs"),
-        operation,
-        options.controlDatabaseUrl!,
-        options.databaseName,
-        String(remaining),
-      ], { cwd: repositoryRoot, env: process.env, stdio: "ignore", detached: process.platform !== "win32" });
-      let timer: NodeJS.Timeout | undefined;
-      const status = await new Promise<number>((resolve) => {
-        let spawnFailed = false;
-        child.once("error", () => { spawnFailed = true; });
-        child.once("close", (code) => resolve(!spawnFailed && code === 0 ? 0 : 1));
-        timer = setTimeout(() => {
-          try {
-            if (child.pid !== undefined && process.platform !== "win32") process.kill(-child.pid, "SIGKILL");
-            else child.kill("SIGKILL");
-          } catch { child.kill("SIGKILL"); }
-        }, remaining);
-      });
-      if (timer !== undefined) clearTimeout(timer);
-      return status;
+    type CleanupChildStatus = "completed" | "incomplete" | "failed";
+    const runCleanupChild = async (operation: "terminate" | "drop", budgetMs: number): Promise<CleanupChildStatus> => {
+      const deadline = Date.now() + budgetMs;
+      const transientSpawnCodes = new Set(["EAGAIN", "EMFILE", "ENFILE"]);
+      while (true) {
+        const remaining = Math.max(1, deadline - Date.now());
+        const child = spawn(process.execPath, [
+          join(repositoryRoot, "scripts", "cleanup-test-database-child.mjs"),
+          operation,
+          options.controlDatabaseUrl!,
+          options.databaseName,
+          String(remaining),
+        ], {
+          cwd: repositoryRoot,
+          env: process.env,
+          stdio: ["ignore", "ignore", "ignore", "ipc"],
+          detached: process.platform !== "win32",
+        });
+        let dropComplete = false;
+        child.on("message", (message) => {
+          if (message === "drop_complete") dropComplete = true;
+        });
+        let timer: NodeJS.Timeout | undefined;
+        const outcome = await new Promise<{
+          readonly status: CleanupChildStatus;
+          readonly transientSpawnFailure: boolean;
+        }>((resolve) => {
+          let settled = false;
+          const finish = (status: CleanupChildStatus, transientSpawnFailure = false): void => {
+            if (settled) return;
+            settled = true;
+            if (timer !== undefined) clearTimeout(timer);
+            resolve({ status, transientSpawnFailure });
+          };
+          child.once("error", (error: NodeJS.ErrnoException) => {
+            finish("failed", error.code !== undefined && transientSpawnCodes.has(error.code));
+          });
+          child.once("close", (code) => {
+            if (operation === "drop" && dropComplete) finish("completed");
+            else if (code === 0) finish("completed");
+            else if (operation === "terminate" && (code === 4 || code === null)) finish("incomplete");
+            else finish("failed");
+          });
+          timer = setTimeout(() => {
+            try {
+              if (child.pid !== undefined && process.platform !== "win32") process.kill(-child.pid, "SIGKILL");
+              else child.kill("SIGKILL");
+            } catch { child.kill("SIGKILL"); }
+          }, remaining);
+        });
+        if (!outcome.transientSpawnFailure || Date.now() >= deadline) return outcome.status;
+        await sleep(Math.min(25, Math.max(1, deadline - Date.now())));
+      }
     };
-    const terminateStatus = await runCleanupChild("terminate", terminateBudgetMs);
     await settleOwnedTerminally();
-    const dropStatus = await runCleanupChild("drop", dropBudgetMs);
+    // One killable child repeatedly terminates only exact target-database
+    // backends, performs a plain DROP, and proves catalog absence. Keeping the
+    // terminate and DROP loop in one process closes the late-backend race
+    // without relying on an uninterruptible DROP ... WITH (FORCE).
+    const dropStatus = await runCleanupChild("drop", terminateBudgetMs + dropBudgetMs);
     const failures = [
-      ...(terminateStatus === 0 && dropStatus === 0 ? [] : ["database drop"]),
+      ...(dropStatus === "completed" ? [] : ["database drop"]),
       ...(ownedFailures.length > 0 ? ["owned database connections"] : []),
     ];
     if (failures.length === 1) throw new Error(`Integration stage failed: ${failures[0]}`);
@@ -2292,7 +2334,12 @@ export class IntegrationHarness {
       : runRead
         ? pathParts.at(-1)!
         : `run_context_${conversationId}`;
-    const issuedAt = new Date();
+    const issuedAt = (await this.#childPool.query<{ now: Date }>(
+      "select clock_timestamp() as now",
+    )).rows[0]?.now;
+    if (!(issuedAt instanceof Date) || !Number.isFinite(issuedAt.getTime())) {
+      throw new Error("Integration trusted-context database clock is unavailable");
+    }
     const context: TrustedRequestContext = {
       schema_version: 1,
       tenant_mode: tenant?.tenant_mode === "b2c" ? "b2c" : "b2b",

@@ -1,6 +1,6 @@
 # ADR 0009: Shared Identity Gateway and Provider-Independent Authority
 
-**Status:** Accepted for implementation
+**Status:** Implementation complete; real provider acceptance pending before public deployment
 **Date:** 2026-08-10
 
 ## Context
@@ -112,3 +112,20 @@ public identity flows. The adapter retains a path to self-hosting later.
 - [Entitlement and Capability Registry v1](../superpowers/specs/2026-08-10-entitlement-capability-registry-v1-design.md)
 - [Control Plane Contracts v1](../superpowers/specs/2026-08-03-control-plane-contracts-v1-design.md)
 - [Control Plane Runtime v1](../superpowers/specs/2026-08-03-control-plane-runtime-v1-design.md)
+
+## Operational acceptance
+
+The decision is implemented through Identity schema `12`, Contracts `0.6.0`,
+Identity Gateway `0.1.0`, and the provider-independent authority/session/context
+services. Deterministic release evidence and the optional live-provider result
+are tracked separately: default CI contains no Supabase or Apple credentials,
+and public deployment remains blocked until a redacted opt-in acceptance report
+passes.
+
+Deployment, key/provider rotation, kill-switch, Session-revocation, and
+forward-only rollback procedures are in
+[Identity Runtime and Public Auth v1 operations](../operations/identity-runtime-public-auth-v1.md).
+The release matrix is in
+[Identity Runtime and Public Auth v1 test evidence](../testing/identity-runtime-public-auth-v1.md),
+and residual security limits are in
+[Runtime v1 and public Identity threat model](../security/runtime-v1-threat-model.md).

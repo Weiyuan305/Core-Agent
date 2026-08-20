@@ -77,3 +77,20 @@
   so GitHub CI remains the final protected SCRAM topology proof.
 - Report: `.superpowers/sdd/task-11-report.md`.
 - Implementation commit: `a00704613a`.
+
+## Task 12 — Provider acceptance and release evidence
+
+- Status: COMPLETE_WITH_PROVIDER_ACCEPTANCE_PENDING
+- Branch: `feat/identity-provider-acceptance-v1`
+- Base: `4d5c0335d1b21b66f1a3983fae7cecfb6216fac9`
+- Result: opt-in closed-report Supabase/Apple acceptance driver, report scanner,
+  deployment/rollback/rotation operations guide, threat-model/testing evidence,
+  and deterministic final release gates are implemented.
+- Verification: root check PASS; root unit Runtime200/Contracts182/Core90/Gateway129/Web153;
+  browser40 with2 configured skips; acceptance7; cleanup48; official protected
+  database CI3/3 with Runtime Core359/Gateway2/API15/integration98.
+- Provider status: live Supabase/Apple acceptance NOT_RUN; public deployment remains
+  NO-GO until an approved disposable run produces a scanner-approved passed report
+  and exact provider cleanup proof.
+- Report: `.superpowers/sdd/task-12-report.md`.
+- Implementation commit: `PENDING_IMPLEMENTATION_COMMIT`.
