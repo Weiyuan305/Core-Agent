@@ -183,6 +183,26 @@ test("snapshot capability triples require exact reviewed allowed authority", () 
   );
 });
 
+test("Snapshot authority diagnostics identify capability and authoritative record fields", () => {
+  const [firstAuthority, secondAuthority] = authoritativeCapabilityVersions;
+  assert.equal(validateEntitlementSnapshot(snapshot, {
+    ...capabilityAuthority,
+    capability_versions: [firstAuthority!],
+  })[0]?.path, "capabilities[1].capability_version_id");
+  assert.equal(validateEntitlementSnapshot(snapshot, {
+    ...capabilityAuthority,
+    capability_versions: [{ ...firstAuthority!, capability_id: "capability.wrong" }, secondAuthority!],
+  })[0]?.path, "capabilities[0].capability_id");
+  assert.equal(validateEntitlementSnapshot(snapshot, {
+    ...capabilityAuthority,
+    capability_versions: [{ ...firstAuthority!, status: "retired" }, secondAuthority!],
+  })[0]?.path, "authority.capability_versions[0].status");
+  assert.equal(validateEntitlementSnapshot(snapshot, {
+    ...capabilityAuthority,
+    capability_versions: [{ ...firstAuthority!, risk_class: "external_write" }, secondAuthority!],
+  })[0]?.path, "authority.capability_versions[0].risk_class");
+});
+
 test("snapshot reference must exactly identify the effective immutable snapshot", () => {
   for (const ref of [
     { ...snapshotRef, snapshot_id: "snapshot_other" },

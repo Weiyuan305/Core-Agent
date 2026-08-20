@@ -9,6 +9,7 @@ import {
   CapabilitySchema,
   CapabilityVersionSchema,
   CapabilityVersionStatusSchema,
+  ImmutableArtifactRefSchema,
   PackMemberSchema,
   PackProductSchema,
   PackVersionSchema,
@@ -63,6 +64,8 @@ const capabilityAuthority = {
   capability_versions: [capabilityVersion],
 };
 
+const exactSha512Digest = Buffer.alloc(64, 0x61).toString("base64");
+
 const packVersion = {
   ...metadata,
   pack_version_id: "pack_version.eduapply.1",
@@ -96,13 +99,40 @@ test("capability catalog resources accept exact reviewed immutable metadata", ()
 
   for (const artifact_ref of [
     `oci:registry.example.invalid/eduapply/read@sha256:${"b".repeat(64)}`,
-    "npm:@eduapply/contracts@2.1.0#sha512-YWJjZA==",
+    `npm:@eduapply/contracts@2.1.0#sha512-${exactSha512Digest}`,
     `manifest:sha256:${"c".repeat(64)}`,
   ]) {
     assert.equal(Schema.Check(CapabilityVersionSchema, { ...capabilityVersion, artifact_ref }), true, artifact_ref);
   }
   for (const version of ["1.2.3-0", "1.2.3-alpha.1"] as const) {
     assert.equal(Schema.Check(CapabilityVersionSchema, { ...capabilityVersion, version }), true, version);
+  }
+});
+
+test("immutable npm artifacts require canonical names, versions, and exact SHA-512 SRI bytes", () => {
+  for (const artifactRef of [
+    `npm:core-agent-capability@1.2.3-alpha.1#sha512-${exactSha512Digest}`,
+    `npm:@eduapply/contracts@2.1.0#sha512-${exactSha512Digest}`,
+  ]) {
+    assert.equal(Schema.Check(ImmutableArtifactRefSchema, artifactRef), true, artifactRef);
+  }
+
+  const nonCanonicalPaddingBits = `${exactSha512Digest.slice(0, -3)}B==`;
+  for (const artifactRef of [
+    `npm:../../mutable-local@1.0.0#sha512-${exactSha512Digest}`,
+    `npm:/tmp/mutable-local@1.0.0#sha512-${exactSha512Digest}`,
+    `npm://server/mutable-local@1.0.0#sha512-${exactSha512Digest}`,
+    `npm:@eduapply//contracts@1.0.0#sha512-${exactSha512Digest}`,
+    `npm:EduApply@1.0.0#sha512-${exactSha512Digest}`,
+    `npm:@EduApply/contracts@1.0.0#sha512-${exactSha512Digest}`,
+    `npm:eduapply@1.0.0-01#sha512-${exactSha512Digest}`,
+    "npm:eduapply@1.0.0#sha512-YWJjZA==",
+    `npm:eduapply@1.0.0#sha512-${nonCanonicalPaddingBits}`,
+    `npm:eduapply@1.0.0#sha512-${exactSha512Digest.slice(0, -2)}=`,
+    `npm:eduapply@1.0.0#sha512-${exactSha512Digest.slice(0, -2)}===`,
+    `npm:eduapply@1.0.0#sha512-${exactSha512Digest.slice(0, -4)}*A==`,
+  ]) {
+    assert.equal(Schema.Check(ImmutableArtifactRefSchema, artifactRef), false, artifactRef);
   }
 });
 
@@ -213,6 +243,29 @@ test("published Pack members require exact reviewed Capability Version authority
     }).map((item) => item.code),
     ["CAPABILITY_VERSION_BLOCKED"],
   );
+});
+
+test("Pack authority diagnostics identify member and authoritative record fields", () => {
+  assert.deepEqual(
+    validatePackVersion(packVersion, { ...capabilityAuthority, capability_versions: [] })[0],
+    {
+      code: "CAPABILITY_VERSION_AUTHORITY_MISSING",
+      path: "members[0].capability_version_id",
+      message: "Referenced Capability Version is absent from authoritative records",
+    },
+  );
+  assert.equal(validatePackVersion(packVersion, {
+    ...capabilityAuthority,
+    capability_versions: [{ ...capabilityVersion, version: "1.2.4" }],
+  })[0]?.path, "members[0].version");
+  assert.equal(validatePackVersion(packVersion, {
+    ...capabilityAuthority,
+    capability_versions: [{ ...capabilityVersion, status: "blocked" }],
+  })[0]?.path, "authority.capability_versions[0].status");
+  assert.equal(validatePackVersion(packVersion, {
+    ...capabilityAuthority,
+    capability_versions: [{ ...capabilityVersion, risk_class: "privileged" }],
+  })[0]?.path, "authority.capability_versions[0].risk_class");
 });
 
 test("first-release Pack authority allows reviewed reads and placeholder manifests only", () => {

@@ -154,7 +154,7 @@ export function validateEntitlementSnapshot(
       )];
     }
   }
-  return validateCapabilityVersionAuthority(snapshot.capabilities, authority);
+  return validateCapabilityVersionAuthority(snapshot.capabilities, authority, "capabilities");
 }
 
 export function validateEntitlementSnapshotRef(
