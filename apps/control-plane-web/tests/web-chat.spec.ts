@@ -151,6 +151,7 @@ test("keeps the selected Conversation visible in a constrained scrolling list", 
     await expect(page.getByRole("navigation", { name: "学生与对话" })).toBeVisible();
   }
   const conversationRows = page.locator(".conversation-row");
+  await expect(page.locator('.conversation-row[aria-current="page"]')).toHaveCount(1);
   let expectedConversationCount = await conversationRows.count();
   for (let index = 0; index < 11; index += 1) {
     await page.getByRole("button", { name: "新建对话" }).click();
