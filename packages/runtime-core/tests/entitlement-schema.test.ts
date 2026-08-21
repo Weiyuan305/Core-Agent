@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { cp, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -35,6 +36,29 @@ const newTables = [
   "runtime_activity",
   "tenant_pack_releases",
 ] as const;
+
+interface SnapshotHashInput {
+  sourceEntitlementIds?: readonly string[];
+  sourceAssignmentIds?: readonly string[];
+  sourceReleaseIds?: readonly string[];
+  capabilities?: readonly {
+    capability_id: string;
+    capability_version_id: string;
+    version: string;
+  }[];
+}
+
+function canonicalSnapshotHash(input: SnapshotHashInput): string {
+  const canonical = JSON.stringify({
+    capabilities: [...(input.capabilities ?? [])],
+    source_assignment_ids: [...(input.sourceAssignmentIds ?? [])],
+    source_entitlement_ids: [...(input.sourceEntitlementIds ?? [])],
+    source_release_ids: [...(input.sourceReleaseIds ?? [])],
+  });
+  return `sha256:${createHash("sha256")
+    .update(`core-agent-entitlement-snapshot-v1\0${canonical}`, "utf8")
+    .digest("hex")}`;
+}
 
 async function resetDatabase(): Promise<void> {
   await pool.query("drop schema public cascade; create schema public;");
@@ -160,7 +184,11 @@ async function seedCatalogAndEntitlement(
     `insert into tenant_pack_releases (
        tenant_pack_release_id, tenant_id, pack_product_id, pack_version_id, pack_version,
        generation, status, resource_version, created_at, updated_at
-     ) values ('release_read', $1, 'pack_product_read', 'pack_version_read', '1.0.0', 1, 'current', 1, $2, $2)`,
+     ) values ('release_read', $1, 'pack_product_read', 'pack_version_read', '1.0.0', 1, 'preparing', 1, $2, $2)`,
+    [tenantId, now],
+  );
+  await pool.query(
+    "update tenant_pack_releases set status = 'current', resource_version = 2, updated_at = $2 where tenant_id = $1 and tenant_pack_release_id = 'release_read'",
     [tenantId, now],
   );
   await pool.query(
@@ -179,6 +207,89 @@ async function seedCatalogAndEntitlement(
 
 function constraintName(error: unknown): string | undefined {
   return (error as { constraint?: string }).constraint;
+}
+
+async function insertSnapshotAggregate(
+  client: PoolClient,
+  input: {
+    snapshotId: string;
+    tenantId: string;
+    profileId: string;
+    snapshotVersion?: number;
+    sourceEntitlementIds?: readonly string[];
+    sourceAssignmentIds?: readonly string[];
+    sourceReleaseIds?: readonly string[];
+    capabilities?: readonly {
+      capability_id: string;
+      capability_version_id: string;
+      version: string;
+    }[];
+    canonicalInputHash?: string;
+    evaluatedAt?: Date;
+  },
+): Promise<void> {
+  const sources = [
+    ["entitlement", input.sourceEntitlementIds ?? []],
+    ["assignment", input.sourceAssignmentIds ?? []],
+    ["release", input.sourceReleaseIds ?? []],
+  ] as const;
+  const capabilities = input.capabilities ?? [];
+  const canonicalInputHash = input.canonicalInputHash ?? canonicalSnapshotHash({
+    sourceEntitlementIds: input.sourceEntitlementIds,
+    sourceAssignmentIds: input.sourceAssignmentIds,
+    sourceReleaseIds: input.sourceReleaseIds,
+    capabilities,
+  });
+  await client.query(
+    `insert into entitlement_snapshots (
+       snapshot_id, tenant_id, profile_id, snapshot_version, evaluated_at,
+       canonical_input_hash, resource_version
+     ) values ($1, $2, $3, $4, $5, $6, 1)`,
+    [
+      input.snapshotId,
+      input.tenantId,
+      input.profileId,
+      input.snapshotVersion ?? 1,
+      input.evaluatedAt ?? new Date("2000-01-01T00:00:00.000Z"),
+      canonicalInputHash,
+    ],
+  );
+  for (const [sourceKind, sourceIds] of sources) {
+    for (const [index, sourceId] of sourceIds.entries()) {
+      await client.query(
+        `insert into entitlement_snapshot_sources (
+           tenant_id, profile_id, snapshot_id, source_kind, source_id, source_order
+         ) values ($1, $2, $3, $4, $5, $6)`,
+        [input.tenantId, input.profileId, input.snapshotId, sourceKind, sourceId, index + 1],
+      );
+    }
+  }
+  for (const [index, capability] of capabilities.entries()) {
+    await client.query(
+      `insert into entitlement_snapshot_capabilities (
+         tenant_id, profile_id, snapshot_id, capability_id, capability_version_id,
+         version, capability_order
+       ) values ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        input.tenantId,
+        input.profileId,
+        input.snapshotId,
+        capability.capability_id,
+        capability.capability_version_id,
+        capability.version,
+        index + 1,
+      ],
+    );
+  }
+}
+
+async function seedAvailableAssignment(tenantId: string, assignmentId = "assignment_read"): Promise<void> {
+  await pool.query(
+    `insert into entitlement_assignments (
+       assignment_id, tenant_id, entitlement_id, profile_id, status, reason_code, resource_version
+     ) values ($1, $2, 'entitlement_read', $3, 'available', 'seat_assigned', 1)`,
+    [assignmentId, tenantId, `profile_${tenantId}`],
+  );
 }
 
 async function withTransaction<T>(operation: (client: PoolClient) => Promise<T>): Promise<T> {
@@ -330,30 +441,20 @@ test("schema 13 authority ACLs are private and grant only reviewed service opera
 test("catalog, release, and snapshot history is fail-closed immutable", async () => {
   await applyMigrations(pool, migrationsDirectory);
   await seedCatalogAndEntitlement("tenant_immutable");
-  const now = new Date("2026-08-21T00:00:00.000Z");
-  await withTransaction(async (client) => {
-    await client.query(
-      `insert into entitlement_snapshots (
-         snapshot_id, tenant_id, profile_id, snapshot_version, canonical_input_hash, resource_version
-       ) values ('snapshot_immutable', 'tenant_immutable', 'profile_tenant_immutable', 1, $1, 1)`,
-      [`sha256:${"b".repeat(64)}`],
-    );
-    await client.query(
-      `insert into entitlement_snapshot_sources (
-         tenant_id, profile_id, snapshot_id, source_kind, source_id, source_order, created_at
-       ) values ('tenant_immutable', 'profile_tenant_immutable', 'snapshot_immutable', 'entitlement', 'entitlement_read', 1, $1)`,
-      [now],
-    );
-    await client.query(
-      `insert into entitlement_snapshot_capabilities (
-         tenant_id, profile_id, snapshot_id, capability_id, capability_version_id, version, capability_order, created_at
-       ) values (
-         'tenant_immutable', 'profile_tenant_immutable', 'snapshot_immutable',
-         'capability_read', 'capability_version_read', '1.0.0', 1, $1
-       )`,
-      [now],
-    );
-  });
+  await seedAvailableAssignment("tenant_immutable");
+  await withTransaction((client) => insertSnapshotAggregate(client, {
+    snapshotId: "snapshot_immutable",
+    tenantId: "tenant_immutable",
+    profileId: "profile_tenant_immutable",
+    sourceEntitlementIds: ["entitlement_read"],
+    sourceAssignmentIds: ["assignment_read"],
+    sourceReleaseIds: ["release_read"],
+    capabilities: [{
+      capability_id: "capability_read",
+      capability_version_id: "capability_version_read",
+      version: "1.0.0",
+    }],
+  }));
 
   const mutations: readonly [string, string][] = [
     ["update capability_versions set artifact_ref = 'manifest:sha256:" + "c".repeat(64) + "' where capability_version_id = 'capability_version_read'", "capability_versions_reviewed_immutable_check"],
@@ -454,6 +555,13 @@ test("catalog admission enforces Contracts 0.7 exact refs and publishable canoni
     pool.query("update pack_versions set status = 'published' where pack_version_id = 'pack_empty'"),
     (error) => constraintName(error) === "pack_versions_publishable_members_check",
   );
+  const packValidator = await pool.query<{ definition: string }>(
+    "select pg_get_functiondef('enforce_pack_version_immutability()'::regprocedure) as definition",
+  );
+  assert.match(
+    packValidator.rows[0]!.definition,
+    /order by member\.capability_id collate "C",\s*member\.capability_version_id collate "C",\s*member\.version collate "C"/iu,
+  );
 
   await pool.query(
     `insert into capability_versions (
@@ -497,8 +605,9 @@ test("catalog admission enforces Contracts 0.7 exact refs and publishable canoni
 
   await pool.query(
     `insert into pack_versions (pack_version_id, pack_product_id, version, status, resource_version, created_at, updated_at)
-     values ('pack_not_published', 'pack_product_read', '6.0.0', 'reviewed', 1, now(), now())`,
+     values ('pack_not_published', 'pack_product_read', '6.0.0', 'draft', 1, now(), now())`,
   );
+  await pool.query("update pack_versions set status = 'reviewed' where pack_version_id = 'pack_not_published'");
   await assert.rejects(
     pool.query(
       `insert into tenant_pack_releases (
@@ -507,6 +616,192 @@ test("catalog admission enforces Contracts 0.7 exact refs and publishable canoni
        ) values ('release_not_published', 'tenant_catalog_admission', 'pack_product_read', 'pack_not_published', '6.0.0', 2, 'preparing', 1)`,
     ),
     (error) => constraintName(error) === "tenant_pack_releases_published_pack_check",
+  );
+});
+
+test("review round 3 catalog validators fail closed on NULL, missing fields, and non-draft Pack insertion", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await seedCatalogAndEntitlement("tenant_catalog_hostile");
+  const validators = await pool.query<{
+    artifact_null: boolean;
+    compatibility_null: boolean;
+    contract_null: boolean;
+    semver_null: boolean;
+  }>(`select
+    core_agent_is_canonical_semver(null) is false as semver_null,
+    core_agent_is_exact_contract_ref(null) is false as contract_null,
+    core_agent_is_immutable_artifact_ref(null) is false as artifact_null,
+    core_agent_is_valid_capability_compatibility(null) is false as compatibility_null`);
+  assert.deepEqual(validators.rows[0], {
+    artifact_null: true,
+    compatibility_null: true,
+    contract_null: true,
+    semver_null: true,
+  });
+  await assert.rejects(
+    pool.query(
+      `insert into capability_versions (
+         capability_version_id, capability_id, version, kind, artifact_ref, contract_ref,
+         risk_class, approval_requirement, compatibility_json, status, resource_version, created_at, updated_at
+       ) values (
+         'capability_missing_compatibility', 'capability_read', '8.0.0', 'mcp', $1,
+         'foobar@', 'read', 'none', '{}'::jsonb, 'draft', 1, now(), now()
+       )`,
+      [`manifest:sha256:${"b".repeat(64)}`],
+    ),
+    (error) => [
+      "capability_versions_exact_contract_ref_check",
+      "capability_versions_compatibility_object_check",
+    ].includes(constraintName(error) ?? ""),
+  );
+  await assert.rejects(
+    pool.query(
+      `insert into pack_versions (
+         pack_version_id, pack_product_id, version, status, resource_version, created_at, updated_at
+       ) values ('pack_insert_reviewed', 'pack_product_read', '8.0.0', 'reviewed', 1, now(), now())`,
+    ),
+    (error) => constraintName(error) === "pack_versions_initial_status_check",
+  );
+});
+
+test("review round 3 Pack publication validates NEW product semantics and freezes published Product modes", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await seedCatalogAndEntitlement("tenant_pack_product_semantics");
+  await assert.rejects(
+    pool.query(
+      "update pack_products set tenant_modes = array['b2b']::text[] where pack_product_id = 'pack_product_read'",
+    ),
+    (error) => constraintName(error) === "pack_products_published_semantics_immutable_check",
+  );
+
+  await pool.query(
+    `insert into pack_products (
+       pack_product_id, display_name, tenant_modes, resource_version, created_at, updated_at
+     ) values
+       ('pack_product_b2b_only', 'B2B only', array['b2b'], 1, now(), now()),
+       ('pack_product_b2c_only', 'B2C only', array['b2c'], 1, now(), now())`,
+  );
+  await pool.query(
+    `insert into capability_versions (
+       capability_version_id, capability_id, version, kind, artifact_ref, contract_ref,
+       risk_class, approval_requirement, compatibility_json, status, resource_version, created_at, updated_at
+     ) values (
+       'capability_version_b2b_only', 'capability_read', '8.1.0', 'mcp', $1,
+       'synthetic/read@8.1.0', 'read', 'none',
+       '{"core_contract_version":"0.7.0","domain_contract_version":"1.0.0","runtime_protocol_version":"1.0.0","tenant_modes":["b2b"]}'::jsonb,
+       'reviewed', 1, now(), now()
+     )`,
+    [`manifest:sha256:${"c".repeat(64)}`],
+  );
+  await pool.query(
+    `insert into pack_versions (
+       pack_version_id, pack_product_id, version, status, resource_version, created_at, updated_at
+     ) values ('pack_new_product_bypass', 'pack_product_b2b_only', '8.1.0', 'draft', 1, now(), now())`,
+  );
+  await pool.query(
+    `insert into pack_members (
+       pack_member_id, pack_version_id, member_order, capability_id, capability_version_id,
+       version, resource_version, created_at, updated_at
+     ) values (
+       'member_new_product_bypass', 'pack_new_product_bypass', 1, 'capability_read',
+       'capability_version_b2b_only', '8.1.0', 1, now(), now()
+     )`,
+  );
+  await pool.query("update pack_versions set status = 'reviewed' where pack_version_id = 'pack_new_product_bypass'");
+  await assert.rejects(
+    pool.query(
+      `update pack_versions
+       set pack_product_id = 'pack_product_b2c_only', status = 'published'
+       where pack_version_id = 'pack_new_product_bypass'`,
+    ),
+    (error) => constraintName(error) === "pack_versions_publishable_members_check",
+  );
+});
+
+test("review round 3 Entitlements bind canonical Tenant mode and Pack Product mode", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await seedCatalogAndEntitlement("tenant_mode_binding");
+  await assert.rejects(
+    pool.query(
+      `insert into entitlements (
+         entitlement_id, tenant_id, pack_product_id, tenant_pack_release_id, pack_version_id,
+         pack_version, source, external_order_ref, tenant_mode, assignment_mode, seat_quantity,
+         expires_at, status, reason_code, resource_version
+       ) values (
+         'entitlement_wrong_tenant_mode', 'tenant_mode_binding', 'pack_product_read', 'release_read',
+         'pack_version_read', '1.0.0', 'platform_manual', 'order_wrong_mode', 'b2c', 'automatic', null,
+         clock_timestamp() + interval '30 days', 'active', 'platform_grant', 1
+       )`,
+    ),
+    (error) => constraintName(error) === "entitlements_tenant_mode_fkey",
+  );
+
+  await seedIdentityGraph("tenant_product_mode_binding", "b2c");
+  await pool.query(
+    `insert into pack_products (
+       pack_product_id, display_name, tenant_modes, resource_version, created_at, updated_at
+     ) values ('pack_product_b2b_release', 'B2B release', array['b2b'], 1, now(), now())`,
+  );
+  await pool.query(
+    `insert into pack_versions (
+       pack_version_id, pack_product_id, version, status, resource_version, created_at, updated_at
+     ) values ('pack_version_b2b_release', 'pack_product_b2b_release', '9.0.0', 'draft', 1, now(), now())`,
+  );
+  await pool.query(
+    `insert into pack_members (
+       pack_member_id, pack_version_id, member_order, capability_id, capability_version_id, version,
+       resource_version, created_at, updated_at
+     ) values (
+       'pack_member_b2b_release', 'pack_version_b2b_release', 1, 'capability_read',
+       'capability_version_read', '1.0.0', 1, now(), now()
+     )`,
+  );
+  await pool.query("update pack_versions set status = 'reviewed' where pack_version_id = 'pack_version_b2b_release'");
+  await pool.query("update pack_versions set status = 'published' where pack_version_id = 'pack_version_b2b_release'");
+  await pool.query(
+    `insert into tenant_pack_releases (
+       tenant_pack_release_id, tenant_id, pack_product_id, pack_version_id, pack_version,
+       generation, status, resource_version
+     ) values (
+       'release_b2b_for_b2c', 'tenant_product_mode_binding', 'pack_product_b2b_release',
+       'pack_version_b2b_release', '9.0.0', 1, 'preparing', 1
+     )`,
+  );
+  await pool.query("update tenant_pack_releases set status = 'current' where tenant_pack_release_id = 'release_b2b_for_b2c'");
+  await assert.rejects(
+    pool.query(
+      `insert into entitlements (
+         entitlement_id, tenant_id, pack_product_id, tenant_pack_release_id, pack_version_id,
+         pack_version, source, external_order_ref, tenant_mode, assignment_mode, seat_quantity,
+         expires_at, status, reason_code, resource_version
+       ) values (
+         'entitlement_unsupported_product_mode', 'tenant_product_mode_binding', 'pack_product_b2b_release',
+         'release_b2b_for_b2c', 'pack_version_b2b_release', '9.0.0', 'platform_manual',
+         'order_unsupported_product_mode', 'b2c', 'automatic', null,
+         clock_timestamp() + interval '30 days', 'active', 'platform_grant', 1
+       )`,
+    ),
+    (error) => constraintName(error) === "entitlements_pack_product_mode_check",
+  );
+});
+
+test("review round 3 Tenant Pack Release insertion starts only in preparing", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await seedCatalogAndEntitlement("tenant_release_insert_state");
+  await pool.query(
+    "update tenant_pack_releases set status = 'superseded' where tenant_pack_release_id = 'release_read'",
+  );
+  await assert.rejects(
+    pool.query(
+      `insert into tenant_pack_releases (
+         tenant_pack_release_id, tenant_id, pack_product_id, pack_version_id, pack_version,
+         generation, status, resource_version
+       ) values (
+         'release_direct_current', 'tenant_release_insert_state', 'pack_product_read',
+         'pack_version_read', '1.0.0', 2, 'current', 1
+       )`,
+    ),
+    (error) => constraintName(error) === "tenant_pack_releases_initial_status_check",
   );
 });
 
@@ -532,28 +827,21 @@ test("Capability and Pack status transitions cannot downgrade then mutate frozen
 test("Snapshot children are same-transaction sealed and validate typed same-Tenant release authority", async () => {
   await applyMigrations(pool, migrationsDirectory);
   await seedCatalogAndEntitlement("tenant_snapshot_authority");
+  await seedAvailableAssignment("tenant_snapshot_authority");
   await seedIdentityGraph("tenant_snapshot_other");
-  await withTransaction(async (client) => {
-    await client.query(
-      `insert into entitlement_snapshots (
-         snapshot_id, tenant_id, profile_id, snapshot_version, canonical_input_hash, resource_version
-       ) values ('snapshot_valid', 'tenant_snapshot_authority', 'profile_tenant_snapshot_authority', 1, $1, 1)`,
-      [`sha256:${"1".repeat(64)}`],
-    );
-    await client.query(
-      `insert into entitlement_snapshot_sources (
-         tenant_id, profile_id, snapshot_id, source_kind, source_id, source_order
-       ) values ('tenant_snapshot_authority', 'profile_tenant_snapshot_authority', 'snapshot_valid', 'release', 'release_read', 1)`,
-    );
-    await client.query(
-      `insert into entitlement_snapshot_capabilities (
-         tenant_id, profile_id, snapshot_id, capability_id, capability_version_id, version, capability_order
-       ) values (
-         'tenant_snapshot_authority', 'profile_tenant_snapshot_authority', 'snapshot_valid',
-         'capability_read', 'capability_version_read', '1.0.0', 1
-       )`,
-    );
-  });
+  await withTransaction((client) => insertSnapshotAggregate(client, {
+    snapshotId: "snapshot_valid",
+    tenantId: "tenant_snapshot_authority",
+    profileId: "profile_tenant_snapshot_authority",
+    sourceEntitlementIds: ["entitlement_read"],
+    sourceAssignmentIds: ["assignment_read"],
+    sourceReleaseIds: ["release_read"],
+    capabilities: [{
+      capability_id: "capability_read",
+      capability_version_id: "capability_version_read",
+      version: "1.0.0",
+    }],
+  }));
   await assert.rejects(
     pool.query(
       `insert into entitlement_snapshot_sources (
@@ -568,7 +856,7 @@ test("Snapshot children are same-transaction sealed and validate typed same-Tena
         `insert into entitlement_snapshots (
            snapshot_id, tenant_id, profile_id, snapshot_version, canonical_input_hash, resource_version
          ) values ('snapshot_cross_tenant', 'tenant_snapshot_other', 'profile_tenant_snapshot_other', 1, $1, 1)`,
-        [`sha256:${"2".repeat(64)}`],
+        [canonicalSnapshotHash({ sourceReleaseIds: ["release_read"] })],
       );
       await client.query(
         `insert into entitlement_snapshot_sources (
@@ -583,6 +871,7 @@ test("Snapshot children are same-transaction sealed and validate typed same-Tena
 test("Snapshot capabilities must be reviewed first-release-safe Pack members reachable from a source release", async () => {
   await applyMigrations(pool, migrationsDirectory);
   await seedCatalogAndEntitlement("tenant_snapshot_capability");
+  await seedAvailableAssignment("tenant_snapshot_capability");
   await pool.query(
     `insert into capabilities (capability_id, display_name, owning_domain, kind, resource_version, created_at, updated_at)
      values ('capability_unreachable', 'Unreachable', 'synthetic', 'skill', 1, now(), now())`,
@@ -598,27 +887,270 @@ test("Snapshot capabilities must be reviewed first-release-safe Pack members rea
     [`manifest:sha256:${"8".repeat(64)}`],
   );
   await assert.rejects(
-    withTransaction(async (client) => {
-      await client.query(
-        `insert into entitlement_snapshots (
-           snapshot_id, tenant_id, profile_id, snapshot_version, canonical_input_hash, resource_version
-         ) values ('snapshot_unreachable', 'tenant_snapshot_capability', 'profile_tenant_snapshot_capability', 1, $1, 1)`,
-        [`sha256:${"3".repeat(64)}`],
-      );
-      await client.query(
-        `insert into entitlement_snapshot_sources (
-           tenant_id, profile_id, snapshot_id, source_kind, source_id, source_order
-         ) values ('tenant_snapshot_capability', 'profile_tenant_snapshot_capability', 'snapshot_unreachable', 'release', 'release_read', 1)`,
-      );
-      await client.query(
-        `insert into entitlement_snapshot_capabilities (
-           tenant_id, profile_id, snapshot_id, capability_id, capability_version_id, version, capability_order
-         ) values (
-           'tenant_snapshot_capability', 'profile_tenant_snapshot_capability', 'snapshot_unreachable',
-           'capability_unreachable', 'capability_version_unreachable', '1.0.0', 1
-         )`,
-      );
-    }),
+    withTransaction((client) => insertSnapshotAggregate(client, {
+      snapshotId: "snapshot_unreachable",
+      tenantId: "tenant_snapshot_capability",
+      profileId: "profile_tenant_snapshot_capability",
+      sourceEntitlementIds: ["entitlement_read"],
+      sourceAssignmentIds: ["assignment_read"],
+      sourceReleaseIds: ["release_read"],
+      capabilities: [{
+        capability_id: "capability_unreachable",
+        capability_version_id: "capability_version_unreachable",
+        version: "1.0.0",
+      }],
+    })),
+    (error) => constraintName(error) === "entitlement_snapshots_capability_authority_check",
+  );
+});
+
+test("review round 3 Snapshot creation uses DB truth, exact canonical hash, and one top-level xid across savepoints", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await seedCatalogAndEntitlement("tenant_snapshot_creation_truth");
+  await seedAvailableAssignment("tenant_snapshot_creation_truth");
+  const capability = {
+    capability_id: "capability_read",
+    capability_version_id: "capability_version_read",
+    version: "1.0.0",
+  } as const;
+  const canonicalInputHash = canonicalSnapshotHash({
+    sourceEntitlementIds: ["entitlement_read"],
+    sourceAssignmentIds: ["assignment_read"],
+    sourceReleaseIds: ["release_read"],
+    capabilities: [capability],
+  });
+  const callerTimestamp = new Date("2000-01-01T00:00:00.000Z");
+  const databaseBefore = (await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now;
+  await withTransaction(async (client) => {
+    await client.query(
+      `insert into entitlement_snapshots (
+         snapshot_id, tenant_id, profile_id, snapshot_version, evaluated_at,
+         canonical_input_hash, resource_version
+       ) values (
+         'snapshot_creation_truth', 'tenant_snapshot_creation_truth',
+         'profile_tenant_snapshot_creation_truth', 1, $1, $2, 1
+       )`,
+      [callerTimestamp, canonicalInputHash],
+    );
+    await client.query("savepoint snapshot_children");
+    await client.query(
+      `insert into entitlement_snapshot_sources (
+         tenant_id, profile_id, snapshot_id, source_kind, source_id, source_order
+       ) values
+         ('tenant_snapshot_creation_truth', 'profile_tenant_snapshot_creation_truth', 'snapshot_creation_truth', 'entitlement', 'entitlement_read', 1),
+         ('tenant_snapshot_creation_truth', 'profile_tenant_snapshot_creation_truth', 'snapshot_creation_truth', 'assignment', 'assignment_read', 1),
+         ('tenant_snapshot_creation_truth', 'profile_tenant_snapshot_creation_truth', 'snapshot_creation_truth', 'release', 'release_read', 1)`,
+    );
+    await client.query(
+      `insert into entitlement_snapshot_capabilities (
+         tenant_id, profile_id, snapshot_id, capability_id, capability_version_id, version, capability_order
+       ) values (
+         'tenant_snapshot_creation_truth', 'profile_tenant_snapshot_creation_truth', 'snapshot_creation_truth',
+         'capability_read', 'capability_version_read', '1.0.0', 1
+       )`,
+    );
+    await client.query("release savepoint snapshot_children");
+  });
+  const stored = await pool.query<{ canonical_input_hash: string; creation_xid: string; evaluated_at: Date }>(
+    `select canonical_input_hash, creation_xid::text, evaluated_at
+     from entitlement_snapshots where snapshot_id = 'snapshot_creation_truth'`,
+  );
+  const databaseAfter = (await pool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now;
+  assert.equal(stored.rows[0]?.canonical_input_hash, canonicalInputHash);
+  assert.match(stored.rows[0]?.creation_xid ?? "", /^[1-9][0-9]*$/u);
+  assert.ok(stored.rows[0]!.evaluated_at >= databaseBefore);
+  assert.ok(stored.rows[0]!.evaluated_at <= databaseAfter);
+  assert.notEqual(stored.rows[0]!.evaluated_at.toISOString(), callerTimestamp.toISOString());
+  assert.deepEqual(
+    (await pool.query<{ type: string }>(
+      `select format_type(attribute.atttypid, attribute.atttypmod) as type
+       from pg_attribute attribute
+       where attribute.attrelid = 'entitlement_snapshots'::regclass
+         and attribute.attname = 'creation_xid' and not attribute.attisdropped`,
+    )).rows,
+    [{ type: "xid8" }],
+  );
+  const validator = await pool.query<{ definition: string }>(
+    "select pg_get_functiondef('validate_entitlement_snapshot_aggregate()'::regprocedure) as definition",
+  );
+  assert.match(validator.rows[0]!.definition, /order by source\.source_id collate "C"/iu);
+  assert.match(
+    validator.rows[0]!.definition,
+    /order by capability\.capability_id collate "C",\s*capability\.capability_version_id collate "C",\s*capability\.version collate "C"/iu,
+  );
+});
+
+test("review round 3 Snapshot canonical hash cannot be caller-forged", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await seedCatalogAndEntitlement("tenant_snapshot_hash");
+  await seedAvailableAssignment("tenant_snapshot_hash");
+  await assert.rejects(
+    withTransaction((client) => insertSnapshotAggregate(client, {
+      snapshotId: "snapshot_forged_hash",
+      tenantId: "tenant_snapshot_hash",
+      profileId: "profile_tenant_snapshot_hash",
+      sourceEntitlementIds: ["entitlement_read"],
+      sourceAssignmentIds: ["assignment_read"],
+      sourceReleaseIds: ["release_read"],
+      capabilities: [{
+        capability_id: "capability_read",
+        capability_version_id: "capability_version_read",
+        version: "1.0.0",
+      }],
+      canonicalInputHash: `sha256:${"0".repeat(64)}`,
+    })),
+    (error) => constraintName(error) === "entitlement_snapshots_canonical_input_authority_check",
+  );
+});
+
+test("review round 3 Snapshot authority rejects bare releases, expired rights, and unassigned B2B rights", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await seedCatalogAndEntitlement("tenant_snapshot_bare_release");
+  await assert.rejects(
+    withTransaction((client) => insertSnapshotAggregate(client, {
+      snapshotId: "snapshot_bare_release",
+      tenantId: "tenant_snapshot_bare_release",
+      profileId: "profile_tenant_snapshot_bare_release",
+      sourceReleaseIds: ["release_read"],
+      capabilities: [{
+        capability_id: "capability_read",
+        capability_version_id: "capability_version_read",
+        version: "1.0.0",
+      }],
+    })),
+    (error) => constraintName(error) === "entitlement_snapshots_source_commercial_authority_check",
+  );
+
+  await resetDatabase();
+  await applyMigrations(pool, migrationsDirectory);
+  await seedCatalogAndEntitlement("tenant_snapshot_expired");
+  await seedAvailableAssignment("tenant_snapshot_expired");
+  await pool.query(
+    `update entitlements
+     set valid_from = clock_timestamp() - interval '2 days',
+         expires_at = clock_timestamp() - interval '1 day'
+     where entitlement_id = 'entitlement_read'`,
+  );
+  await assert.rejects(
+    withTransaction((client) => insertSnapshotAggregate(client, {
+      snapshotId: "snapshot_expired",
+      tenantId: "tenant_snapshot_expired",
+      profileId: "profile_tenant_snapshot_expired",
+      sourceEntitlementIds: ["entitlement_read"],
+      sourceAssignmentIds: ["assignment_read"],
+      sourceReleaseIds: ["release_read"],
+      capabilities: [{
+        capability_id: "capability_read",
+        capability_version_id: "capability_version_read",
+        version: "1.0.0",
+      }],
+    })),
+    (error) => constraintName(error) === "entitlement_snapshots_source_commercial_authority_check",
+  );
+
+  await resetDatabase();
+  await applyMigrations(pool, migrationsDirectory);
+  await seedCatalogAndEntitlement("tenant_snapshot_unassigned");
+  await assert.rejects(
+    withTransaction((client) => insertSnapshotAggregate(client, {
+      snapshotId: "snapshot_unassigned",
+      tenantId: "tenant_snapshot_unassigned",
+      profileId: "profile_tenant_snapshot_unassigned",
+      sourceEntitlementIds: ["entitlement_read"],
+      sourceReleaseIds: ["release_read"],
+      capabilities: [{
+        capability_id: "capability_read",
+        capability_version_id: "capability_version_read",
+        version: "1.0.0",
+      }],
+    })),
+    (error) => constraintName(error) === "entitlement_snapshots_source_commercial_authority_check",
+  );
+});
+
+test("review round 3 B2C automatic Snapshot is valid without Assignment", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await seedCatalogAndEntitlement("tenant_snapshot_b2c", { tenantMode: "b2c" });
+  await withTransaction((client) => insertSnapshotAggregate(client, {
+    snapshotId: "snapshot_b2c",
+    tenantId: "tenant_snapshot_b2c",
+    profileId: "profile_tenant_snapshot_b2c",
+    sourceEntitlementIds: ["entitlement_read"],
+    sourceReleaseIds: ["release_read"],
+    capabilities: [{
+      capability_id: "capability_read",
+      capability_version_id: "capability_version_read",
+      version: "1.0.0",
+    }],
+  }));
+});
+
+test("review round 3 Snapshot Capability must come from a source Entitlement release", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await seedCatalogAndEntitlement("tenant_snapshot_entitlement_release");
+  await seedAvailableAssignment("tenant_snapshot_entitlement_release");
+  await pool.query(
+    `insert into capabilities (
+       capability_id, display_name, owning_domain, kind, resource_version, created_at, updated_at
+     ) values ('capability_other_release', 'Other release', 'synthetic', 'mcp', 1, now(), now())`,
+  );
+  await pool.query(
+    `insert into capability_versions (
+       capability_version_id, capability_id, version, kind, artifact_ref, contract_ref,
+       risk_class, approval_requirement, compatibility_json, status, resource_version, created_at, updated_at
+     ) values (
+       'capability_version_other_release', 'capability_other_release', '1.0.0', 'mcp', $1,
+       'synthetic/other@1.0.0', 'read', 'none',
+       '{"core_contract_version":"0.7.0","domain_contract_version":"1.0.0","runtime_protocol_version":"1.0.0","tenant_modes":["b2b"]}'::jsonb,
+       'reviewed', 1, now(), now()
+     )`,
+    [`manifest:sha256:${"d".repeat(64)}`],
+  );
+  await pool.query(
+    `insert into pack_products (
+       pack_product_id, display_name, tenant_modes, resource_version, created_at, updated_at
+     ) values ('pack_product_other_release', 'Other release', array['b2b'], 1, now(), now())`,
+  );
+  await pool.query(
+    `insert into pack_versions (
+       pack_version_id, pack_product_id, version, status, resource_version, created_at, updated_at
+     ) values ('pack_version_other_release', 'pack_product_other_release', '1.0.0', 'draft', 1, now(), now())`,
+  );
+  await pool.query(
+    `insert into pack_members (
+       pack_member_id, pack_version_id, member_order, capability_id, capability_version_id, version,
+       resource_version, created_at, updated_at
+     ) values (
+       'pack_member_other_release', 'pack_version_other_release', 1, 'capability_other_release',
+       'capability_version_other_release', '1.0.0', 1, now(), now()
+     )`,
+  );
+  await pool.query("update pack_versions set status = 'reviewed' where pack_version_id = 'pack_version_other_release'");
+  await pool.query("update pack_versions set status = 'published' where pack_version_id = 'pack_version_other_release'");
+  await pool.query(
+    `insert into tenant_pack_releases (
+       tenant_pack_release_id, tenant_id, pack_product_id, pack_version_id, pack_version,
+       generation, status, resource_version
+     ) values (
+       'release_other', 'tenant_snapshot_entitlement_release', 'pack_product_other_release',
+       'pack_version_other_release', '1.0.0', 1, 'preparing', 1
+     )`,
+  );
+  await pool.query("update tenant_pack_releases set status = 'current' where tenant_pack_release_id = 'release_other'");
+  await assert.rejects(
+    withTransaction((client) => insertSnapshotAggregate(client, {
+      snapshotId: "snapshot_capability_other_release",
+      tenantId: "tenant_snapshot_entitlement_release",
+      profileId: "profile_tenant_snapshot_entitlement_release",
+      sourceEntitlementIds: ["entitlement_read"],
+      sourceAssignmentIds: ["assignment_read"],
+      sourceReleaseIds: ["release_read"],
+      capabilities: [{
+        capability_id: "capability_other_release",
+        capability_version_id: "capability_version_other_release",
+        version: "1.0.0",
+      }],
+    })),
     (error) => constraintName(error) === "entitlement_snapshots_capability_authority_check",
   );
 });
@@ -794,9 +1326,14 @@ test("Tenant releases enforce irreversible rollout generations", async () => {
       `insert into tenant_pack_releases (
          tenant_pack_release_id, tenant_id, pack_product_id, pack_version_id, pack_version,
          generation, status, resource_version
-       ) values ($1, 'tenant_release_state', 'pack_product_read', 'pack_version_read', '1.0.0', $2, $3, 1)`,
-      [releaseId, generation, status],
+       ) values ($1, 'tenant_release_state', 'pack_product_read', 'pack_version_read', '1.0.0', $2, 'preparing', 1)`,
+      [releaseId, generation],
     );
+    if (status === "superseded") {
+      await pool.query("update tenant_pack_releases set status = 'superseded' where tenant_pack_release_id = 'release_read'");
+      await pool.query("update tenant_pack_releases set status = 'current' where tenant_pack_release_id = $1", [releaseId]);
+    }
+    await pool.query("update tenant_pack_releases set status = $2 where tenant_pack_release_id = $1", [releaseId, status]);
     await assert.rejects(
       pool.query("update tenant_pack_releases set status = 'current' where tenant_pack_release_id = $1", [releaseId]),
       (error) => constraintName(error) === "tenant_pack_releases_status_transition_check",
@@ -811,7 +1348,7 @@ test("core_agent_app can perform only Task 8 release transition and pointer CAS 
     `insert into entitlement_snapshots (
        snapshot_id, tenant_id, profile_id, snapshot_version, canonical_input_hash, resource_version
      ) values ('snapshot_app_worker', 'tenant_app_worker', 'profile_tenant_app_worker', 1, $1, 1)`,
-    [`sha256:${"a".repeat(64)}`],
+    [canonicalSnapshotHash({})],
   );
   await withTransaction(async (client) => {
     await client.query("set local role core_agent_app");
@@ -863,7 +1400,7 @@ test("audit actors and projection releases are exact same-Tenant composite autho
       `insert into entitlement_snapshots (
          snapshot_id, tenant_id, profile_id, snapshot_version, canonical_input_hash, resource_version
        ) values ('snapshot_other_projection', 'tenant_composite_other', 'profile_tenant_composite_other', 1, $1, 1)`,
-      [`sha256:${"4".repeat(64)}`],
+      [canonicalSnapshotHash({})],
     );
   });
   await assert.rejects(
@@ -883,14 +1420,21 @@ test("audit actors and projection releases are exact same-Tenant composite autho
 test("current Snapshot pointer advances only through expected-version CAS", async () => {
   await applyMigrations(pool, migrationsDirectory);
   await seedCatalogAndEntitlement("tenant_pointer");
-  for (const [id, version, digest] of [["snapshot_pointer_1", 1, "e"], ["snapshot_pointer_2", 2, "f"]] as const) {
-    await pool.query(
-      `insert into entitlement_snapshots (
-         snapshot_id, tenant_id, profile_id, snapshot_version, canonical_input_hash, resource_version
-       ) values ($1, 'tenant_pointer', 'profile_tenant_pointer', $2, $3, 1)`,
-      [id, version, `sha256:${digest.repeat(64)}`],
-    );
-  }
+  await seedAvailableAssignment("tenant_pointer");
+  await withTransaction((client) => insertSnapshotAggregate(client, {
+    snapshotId: "snapshot_pointer_1",
+    tenantId: "tenant_pointer",
+    profileId: "profile_tenant_pointer",
+  }));
+  await withTransaction((client) => insertSnapshotAggregate(client, {
+    snapshotId: "snapshot_pointer_2",
+    tenantId: "tenant_pointer",
+    profileId: "profile_tenant_pointer",
+    snapshotVersion: 2,
+    sourceEntitlementIds: ["entitlement_read"],
+    sourceAssignmentIds: ["assignment_read"],
+    sourceReleaseIds: ["release_read"],
+  }));
 
   const inserted = await pool.query<{ resource_version: string }>(
     "select resource_version::text from advance_profile_snapshot_pointer($1, $2, $3, $4)",
@@ -923,14 +1467,21 @@ test("current Snapshot pointer advances only through expected-version CAS", asyn
 test("concurrent absent Snapshot pointer initialization serializes on the canonical Profile", async () => {
   await applyMigrations(pool, migrationsDirectory);
   await seedCatalogAndEntitlement("tenant_pointer_init");
-  for (const [id, version, digest] of [["snapshot_init_1", 1, "6"], ["snapshot_init_2", 2, "7"]] as const) {
-    await pool.query(
-      `insert into entitlement_snapshots (
-         snapshot_id, tenant_id, profile_id, snapshot_version, canonical_input_hash, resource_version
-       ) values ($1, 'tenant_pointer_init', 'profile_tenant_pointer_init', $2, $3, 1)`,
-      [id, version, `sha256:${digest.repeat(64)}`],
-    );
-  }
+  await seedAvailableAssignment("tenant_pointer_init");
+  await withTransaction((client) => insertSnapshotAggregate(client, {
+    snapshotId: "snapshot_init_1",
+    tenantId: "tenant_pointer_init",
+    profileId: "profile_tenant_pointer_init",
+  }));
+  await withTransaction((client) => insertSnapshotAggregate(client, {
+    snapshotId: "snapshot_init_2",
+    tenantId: "tenant_pointer_init",
+    profileId: "profile_tenant_pointer_init",
+    snapshotVersion: 2,
+    sourceEntitlementIds: ["entitlement_read"],
+    sourceAssignmentIds: ["assignment_read"],
+    sourceReleaseIds: ["release_read"],
+  }));
   const attempts = await Promise.allSettled([
     pool.query("select * from advance_profile_snapshot_pointer($1, $2, 0, $3)", ["tenant_pointer_init", "profile_tenant_pointer_init", "snapshot_init_1"]),
     pool.query("select * from advance_profile_snapshot_pointer($1, $2, 0, $3)", ["tenant_pointer_init", "profile_tenant_pointer_init", "snapshot_init_2"]),

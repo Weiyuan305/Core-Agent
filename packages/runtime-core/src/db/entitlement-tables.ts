@@ -141,6 +141,7 @@ export interface EntitlementSnapshotTable {
   profile_id: string;
   snapshot_version: EntitlementBigInt;
   evaluated_at: DefaultTimestamp;
+  creation_xid: ColumnType<string, undefined, never>;
   canonical_input_hash: string;
   resource_version: EntitlementBigInt;
   created_at: DefaultTimestamp;

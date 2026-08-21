@@ -2,29 +2,28 @@ create function core_agent_is_canonical_semver(candidate text)
 returns boolean
 language sql
 immutable
-strict
 as $$
-  select char_length(candidate) between 5 and 128
+  select coalesce(char_length(candidate) between 5 and 128
     and candidate ~ '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?$'
+  , false)
 $$;
 
 create function core_agent_is_exact_contract_ref(candidate text)
 returns boolean
 language sql
 immutable
-strict
 as $$
-  select char_length(candidate) between 7 and 256
+  select coalesce(char_length(candidate) between 7 and 256
     and candidate ~ '^[a-z0-9][a-z0-9._/-]{0,127}@'
     and char_length(candidate) - char_length(replace(candidate, '@', '')) = 1
     and core_agent_is_canonical_semver(substring(candidate from '@([^@]+)$'))
+  , false)
 $$;
 
 create function core_agent_is_immutable_artifact_ref(candidate text)
 returns boolean
 language plpgsql
 immutable
-strict
 as $$
 declare
   artifact_body text;
@@ -34,6 +33,7 @@ declare
   repository_path text;
   registry_name text;
 begin
+  if candidate is null then return false; end if;
   if candidate ~ '^manifest:sha256:[a-f0-9]{64}$' then
     return true;
   end if;
@@ -80,11 +80,11 @@ create function core_agent_is_valid_capability_compatibility(candidate jsonb)
 returns boolean
 language plpgsql
 immutable
-strict
 as $$
 declare
   key_count integer;
 begin
+  if candidate is null then return false; end if;
   if jsonb_typeof(candidate) <> 'object' then return false; end if;
   select count(*)::integer into key_count from jsonb_object_keys(candidate);
   return key_count = 4
@@ -190,6 +190,9 @@ alter table memberships
   add constraint memberships_tenant_membership_actor_key
   unique (tenant_id, membership_id, actor_id);
 
+alter table tenants
+  add constraint tenants_tenant_mode_ref_key unique (tenant_id, tenant_mode);
+
 create table platform_authority_audit (
   platform_authority_audit_id text primary key,
   authority_tenant_id text not null,
@@ -241,7 +244,7 @@ create index tenant_pack_releases_affected_idx
 
 create table entitlements (
   entitlement_id text primary key,
-  tenant_id text not null references tenants(tenant_id),
+  tenant_id text not null,
   pack_product_id text not null,
   tenant_pack_release_id text not null,
   pack_version_id text not null,
@@ -265,6 +268,8 @@ create table entitlements (
   constraint entitlements_release_fkey
     foreign key (tenant_id, tenant_pack_release_id, pack_product_id, pack_version_id, pack_version)
     references tenant_pack_releases(tenant_id, tenant_pack_release_id, pack_product_id, pack_version_id, pack_version),
+  constraint entitlements_tenant_mode_fkey
+    foreign key (tenant_id, tenant_mode) references tenants(tenant_id, tenant_mode),
   constraint entitlements_tenant_ref_key unique (tenant_id, entitlement_id),
   constraint entitlements_order_key unique (tenant_id, source, external_order_ref),
   constraint entitlements_validity_check check (expires_at is null or expires_at > valid_from),
@@ -286,6 +291,36 @@ create index entitlements_active_authority_idx
 create index entitlements_due_expiry_idx
   on entitlements (status, expires_at, tenant_id, entitlement_id)
   where status = 'active' and expires_at is not null;
+
+create function enforce_entitlement_pack_product_mode()
+returns trigger
+language plpgsql
+as $$
+begin
+  if not exists (
+    select 1
+    from tenant_pack_releases as release
+    join pack_products as product
+      on product.pack_product_id = release.pack_product_id
+    where release.tenant_id = new.tenant_id
+      and release.tenant_pack_release_id = new.tenant_pack_release_id
+      and release.pack_product_id = new.pack_product_id
+      and release.pack_version_id = new.pack_version_id
+      and release.pack_version = new.pack_version
+      and new.tenant_mode = any(product.tenant_modes)
+  ) then
+    raise exception 'Entitlement mode is not supported by its Pack Product release'
+      using errcode = '23514',
+        constraint = 'entitlements_pack_product_mode_check';
+  end if;
+  return new;
+end
+$$;
+
+create trigger entitlements_pack_product_mode_check
+before insert or update of tenant_id, tenant_mode, tenant_pack_release_id,
+  pack_product_id, pack_version_id, pack_version on entitlements
+for each row execute function enforce_entitlement_pack_product_mode();
 
 create table entitlement_assignments (
   assignment_id text primary key,
@@ -415,6 +450,7 @@ create table entitlement_snapshots (
   profile_id text not null,
   snapshot_version bigint not null check (snapshot_version > 0),
   evaluated_at timestamptz not null default clock_timestamp(),
+  creation_xid xid8 not null,
   canonical_input_hash text not null check (canonical_input_hash ~ '^sha256:[a-f0-9]{64}$'),
   resource_version bigint not null check (resource_version > 0),
   created_at timestamptz not null default clock_timestamp(),
@@ -429,6 +465,21 @@ create table entitlement_snapshots (
   constraint entitlement_snapshots_tenant_ref_key
     unique (tenant_id, profile_id, snapshot_id)
 );
+
+create function set_entitlement_snapshot_creation_metadata()
+returns trigger
+language plpgsql
+as $$
+begin
+  new.evaluated_at := clock_timestamp();
+  new.creation_xid := pg_current_xact_id();
+  return new;
+end
+$$;
+
+create trigger entitlement_snapshots_creation_metadata_check
+before insert on entitlement_snapshots
+for each row execute function set_entitlement_snapshot_creation_metadata();
 
 create table entitlement_snapshot_sources (
   tenant_id text not null,
@@ -473,15 +524,15 @@ returns trigger
 language plpgsql
 as $$
 declare
-  snapshot_xid bigint;
+  snapshot_xid xid8;
 begin
-  select snapshot.xmin::text::bigint into snapshot_xid
+  select snapshot.creation_xid into snapshot_xid
   from entitlement_snapshots as snapshot
   where snapshot.tenant_id = new.tenant_id
     and snapshot.profile_id = new.profile_id
     and snapshot.snapshot_id = new.snapshot_id;
 
-  if not found or snapshot_xid <> pg_current_xact_id()::text::bigint then
+  if not found or snapshot_xid <> pg_current_xact_id() then
     raise exception 'Snapshot children must be created with their immutable parent'
       using errcode = '23514',
         constraint = 'entitlement_snapshot_children_creation_transaction_check';
@@ -501,7 +552,29 @@ create function validate_entitlement_snapshot_aggregate()
 returns trigger
 language plpgsql
 as $$
+declare
+  snapshot_evaluated_at timestamptz;
+  snapshot_hash text;
+  entitlement_ids_json text;
+  assignment_ids_json text;
+  release_ids_json text;
+  capabilities_json text;
+  canonical_input text;
+  expected_hash text;
 begin
+  select snapshot.evaluated_at, snapshot.canonical_input_hash
+  into snapshot_evaluated_at, snapshot_hash
+  from entitlement_snapshots as snapshot
+  where snapshot.tenant_id = new.tenant_id
+    and snapshot.profile_id = new.profile_id
+    and snapshot.snapshot_id = new.snapshot_id;
+
+  if not found then
+    raise exception 'Snapshot aggregate parent is missing'
+      using errcode = '23503',
+        constraint = 'entitlement_snapshots_source_authority_check';
+  end if;
+
   if exists (
     select 1
     from entitlement_snapshot_sources as source
@@ -534,10 +607,97 @@ begin
 
   if exists (
     select 1
+    from entitlement_snapshot_sources as source
+    where source.tenant_id = new.tenant_id
+      and source.profile_id = new.profile_id
+      and source.snapshot_id = new.snapshot_id
+      and (
+        (source.source_kind = 'release' and not exists (
+          select 1
+          from entitlement_snapshot_sources as entitlement_source
+          join entitlements as entitlement
+            on entitlement.tenant_id = entitlement_source.tenant_id
+           and entitlement.entitlement_id = entitlement_source.source_id
+          where entitlement_source.tenant_id = source.tenant_id
+            and entitlement_source.profile_id = source.profile_id
+            and entitlement_source.snapshot_id = source.snapshot_id
+            and entitlement_source.source_kind = 'entitlement'
+            and entitlement.tenant_pack_release_id = source.source_id
+        ))
+        or (source.source_kind = 'assignment' and not exists (
+          select 1
+          from entitlement_assignments as assignment
+          join entitlement_snapshot_sources as entitlement_source
+            on entitlement_source.tenant_id = assignment.tenant_id
+           and entitlement_source.profile_id = assignment.profile_id
+           and entitlement_source.snapshot_id = source.snapshot_id
+           and entitlement_source.source_kind = 'entitlement'
+           and entitlement_source.source_id = assignment.entitlement_id
+          where assignment.tenant_id = source.tenant_id
+            and assignment.profile_id = source.profile_id
+            and assignment.assignment_id = source.source_id
+            and assignment.status in ('preparing', 'available')
+        ))
+        or (source.source_kind = 'entitlement' and not exists (
+          select 1
+          from entitlements as entitlement
+          join tenant_pack_releases as release
+            on release.tenant_id = entitlement.tenant_id
+           and release.tenant_pack_release_id = entitlement.tenant_pack_release_id
+           and release.pack_product_id = entitlement.pack_product_id
+           and release.pack_version_id = entitlement.pack_version_id
+           and release.pack_version = entitlement.pack_version
+           and release.status = 'current'
+          join pack_versions as pack
+            on pack.pack_version_id = release.pack_version_id
+           and pack.pack_product_id = release.pack_product_id
+           and pack.version = release.pack_version
+           and pack.status = 'published'
+          join entitlement_snapshot_sources as release_source
+            on release_source.tenant_id = source.tenant_id
+           and release_source.profile_id = source.profile_id
+           and release_source.snapshot_id = source.snapshot_id
+           and release_source.source_kind = 'release'
+           and release_source.source_id = release.tenant_pack_release_id
+          where entitlement.tenant_id = source.tenant_id
+            and entitlement.entitlement_id = source.source_id
+            and entitlement.status = 'active'
+            and entitlement.valid_from <= snapshot_evaluated_at
+            and (entitlement.expires_at is null or snapshot_evaluated_at < entitlement.expires_at)
+            and (
+              (entitlement.tenant_mode = 'b2c'
+                and entitlement.assignment_mode = 'automatic')
+              or (entitlement.tenant_mode = 'b2b'
+                and entitlement.assignment_mode = 'seat'
+                and exists (
+                  select 1
+                  from entitlement_snapshot_sources as assignment_source
+                  join entitlement_assignments as assignment
+                    on assignment.tenant_id = assignment_source.tenant_id
+                   and assignment.profile_id = assignment_source.profile_id
+                   and assignment.assignment_id = assignment_source.source_id
+                   and assignment.entitlement_id = entitlement.entitlement_id
+                   and assignment.status in ('preparing', 'available')
+                  where assignment_source.tenant_id = source.tenant_id
+                    and assignment_source.profile_id = source.profile_id
+                    and assignment_source.snapshot_id = source.snapshot_id
+                    and assignment_source.source_kind = 'assignment'
+                ))
+            )
+        ))
+      )
+  ) then
+    raise exception 'Snapshot sources do not establish active commercial authority'
+      using errcode = '23514',
+        constraint = 'entitlement_snapshots_source_commercial_authority_check';
+  end if;
+
+  if exists (
+    select 1
     from (
       select source.source_order,
         row_number() over (
-          partition by source.source_kind order by source.source_id
+          partition by source.source_kind order by source.source_id collate "C"
         ) as canonical_order
       from entitlement_snapshot_sources as source
       where source.tenant_id = new.tenant_id
@@ -561,16 +721,6 @@ begin
         with source_releases as (
           select release.tenant_pack_release_id
           from entitlement_snapshot_sources as source
-          join tenant_pack_releases as release
-            on release.tenant_id = source.tenant_id
-           and release.tenant_pack_release_id = source.source_id
-          where source.tenant_id = new.tenant_id
-            and source.profile_id = new.profile_id
-            and source.snapshot_id = new.snapshot_id
-            and source.source_kind = 'release'
-          union
-          select release.tenant_pack_release_id
-          from entitlement_snapshot_sources as source
           join entitlements as entitlement
             on entitlement.tenant_id = source.tenant_id
            and entitlement.entitlement_id = source.source_id
@@ -578,28 +728,16 @@ begin
             on release.tenant_id = entitlement.tenant_id
            and release.tenant_pack_release_id = entitlement.tenant_pack_release_id
            and release.status = 'current'
+          join entitlement_snapshot_sources as release_source
+            on release_source.tenant_id = source.tenant_id
+           and release_source.profile_id = source.profile_id
+           and release_source.snapshot_id = source.snapshot_id
+           and release_source.source_kind = 'release'
+           and release_source.source_id = release.tenant_pack_release_id
           where source.tenant_id = new.tenant_id
             and source.profile_id = new.profile_id
             and source.snapshot_id = new.snapshot_id
             and source.source_kind = 'entitlement'
-          union
-          select release.tenant_pack_release_id
-          from entitlement_snapshot_sources as source
-          join entitlement_assignments as assignment
-            on assignment.tenant_id = source.tenant_id
-           and assignment.profile_id = source.profile_id
-           and assignment.assignment_id = source.source_id
-          join entitlements as entitlement
-            on entitlement.tenant_id = assignment.tenant_id
-           and entitlement.entitlement_id = assignment.entitlement_id
-          join tenant_pack_releases as release
-            on release.tenant_id = entitlement.tenant_id
-           and release.tenant_pack_release_id = entitlement.tenant_pack_release_id
-           and release.status = 'current'
-          where source.tenant_id = new.tenant_id
-            and source.profile_id = new.profile_id
-            and source.snapshot_id = new.snapshot_id
-            and source.source_kind = 'assignment'
         )
         select 1
         from capability_versions as capability_version
@@ -638,7 +776,8 @@ begin
     from (
       select capability.capability_order,
         row_number() over (
-          order by capability.capability_id, capability.capability_version_id, capability.version
+          order by capability.capability_id collate "C",
+            capability.capability_version_id collate "C", capability.version collate "C"
         ) as canonical_order
       from entitlement_snapshot_capabilities as capability
       where capability.tenant_id = new.tenant_id
@@ -650,6 +789,65 @@ begin
     raise exception 'Snapshot Capabilities must use canonical order'
       using errcode = '23514',
         constraint = 'entitlement_snapshots_capability_order_check';
+  end if;
+
+  select '[' || coalesce(string_agg(
+    to_json(source.source_id)::text, ',' order by source.source_id collate "C"
+  ), '') || ']'
+  into entitlement_ids_json
+  from entitlement_snapshot_sources as source
+  where source.tenant_id = new.tenant_id
+    and source.profile_id = new.profile_id
+    and source.snapshot_id = new.snapshot_id
+    and source.source_kind = 'entitlement';
+
+  select '[' || coalesce(string_agg(
+    to_json(source.source_id)::text, ',' order by source.source_id collate "C"
+  ), '') || ']'
+  into assignment_ids_json
+  from entitlement_snapshot_sources as source
+  where source.tenant_id = new.tenant_id
+    and source.profile_id = new.profile_id
+    and source.snapshot_id = new.snapshot_id
+    and source.source_kind = 'assignment';
+
+  select '[' || coalesce(string_agg(
+    to_json(source.source_id)::text, ',' order by source.source_id collate "C"
+  ), '') || ']'
+  into release_ids_json
+  from entitlement_snapshot_sources as source
+  where source.tenant_id = new.tenant_id
+    and source.profile_id = new.profile_id
+    and source.snapshot_id = new.snapshot_id
+    and source.source_kind = 'release';
+
+  select '[' || coalesce(string_agg(
+    '{"capability_id":' || to_json(capability.capability_id)::text
+      || ',"capability_version_id":' || to_json(capability.capability_version_id)::text
+      || ',"version":' || to_json(capability.version)::text || '}',
+    ',' order by capability.capability_id collate "C",
+      capability.capability_version_id collate "C", capability.version collate "C"
+  ), '') || ']'
+  into capabilities_json
+  from entitlement_snapshot_capabilities as capability
+  where capability.tenant_id = new.tenant_id
+    and capability.profile_id = new.profile_id
+    and capability.snapshot_id = new.snapshot_id;
+
+  canonical_input := '{"capabilities":' || capabilities_json
+    || ',"source_assignment_ids":' || assignment_ids_json
+    || ',"source_entitlement_ids":' || entitlement_ids_json
+    || ',"source_release_ids":' || release_ids_json || '}';
+  expected_hash := 'sha256:' || encode(sha256(
+    convert_to('core-agent-entitlement-snapshot-v1', 'UTF8')
+      || decode('00', 'hex')
+      || convert_to(canonical_input, 'UTF8')
+  ), 'hex');
+
+  if snapshot_hash <> expected_hash then
+    raise exception 'Snapshot canonical input hash does not match its normalized aggregate'
+      using errcode = '23514',
+        constraint = 'entitlement_snapshots_canonical_input_authority_check';
   end if;
   return new;
 end
@@ -860,6 +1058,8 @@ create index entitlement_snapshot_capabilities_version_fk_idx
   on entitlement_snapshot_capabilities (capability_version_id, capability_id, version);
 create index entitlements_release_fk_idx
   on entitlements (tenant_id, tenant_pack_release_id, pack_product_id, pack_version_id, pack_version);
+create index entitlements_tenant_mode_fk_idx
+  on entitlements (tenant_id, tenant_mode);
 create index pack_members_capability_version_fk_idx
   on pack_members (capability_version_id, capability_id, version);
 create index platform_authority_audit_actor_fk_idx
@@ -940,6 +1140,13 @@ returns trigger
 language plpgsql
 as $$
 begin
+  if tg_op = 'INSERT' then
+    if new.status <> 'draft' then
+      raise exception 'Pack Versions must begin in draft'
+        using errcode = '23514', constraint = 'pack_versions_initial_status_check';
+    end if;
+    return new;
+  end if;
   if tg_op = 'UPDATE' and not (
     (old.status = 'draft' and new.status in ('draft', 'reviewed', 'blocked'))
     or (old.status = 'reviewed' and new.status in ('reviewed', 'published', 'blocked'))
@@ -953,17 +1160,18 @@ begin
   if tg_op = 'UPDATE' and new.status = 'published' and old.status <> 'published' and (
     not exists (
       select 1 from pack_members as member
-      where member.pack_version_id = old.pack_version_id
+      where member.pack_version_id = new.pack_version_id
     )
     or exists (
       select 1
       from (
         select member.member_order,
           row_number() over (
-            order by member.capability_id, member.capability_version_id, member.version
+            order by member.capability_id collate "C",
+              member.capability_version_id collate "C", member.version collate "C"
           ) as canonical_order
         from pack_members as member
-        where member.pack_version_id = old.pack_version_id
+        where member.pack_version_id = new.pack_version_id
       ) as ordered_member
       where ordered_member.member_order <> ordered_member.canonical_order
     )
@@ -975,8 +1183,8 @@ begin
        and capability_version.capability_id = member.capability_id
        and capability_version.version = member.version
       join pack_products as product
-        on product.pack_product_id = old.pack_product_id
-      where member.pack_version_id = old.pack_version_id
+        on product.pack_product_id = new.pack_product_id
+      where member.pack_version_id = new.pack_version_id
         and (
           capability_version.status <> 'reviewed'
           or capability_version.risk_class in ('external_write', 'privileged')
@@ -1014,9 +1222,33 @@ end
 $$;
 
 create trigger pack_versions_published_immutable_check
-before update or delete on pack_versions
+before insert or update or delete on pack_versions
 for each row
 execute function enforce_pack_version_immutability();
+
+create function enforce_pack_product_published_semantics()
+returns trigger
+language plpgsql
+as $$
+begin
+  if old.tenant_modes is distinct from new.tenant_modes
+    and exists (
+      select 1
+      from pack_versions as pack
+      where pack.pack_product_id = old.pack_product_id
+        and pack.status in ('published', 'retired', 'blocked')
+    ) then
+    raise exception 'Published Pack Product tenant modes are immutable'
+      using errcode = '23514',
+        constraint = 'pack_products_published_semantics_immutable_check';
+  end if;
+  return new;
+end
+$$;
+
+create trigger pack_products_published_semantics_immutable_check
+before update of tenant_modes on pack_products
+for each row execute function enforce_pack_product_published_semantics();
 
 create function enforce_pack_member_immutability()
 returns trigger
@@ -1048,6 +1280,10 @@ language plpgsql
 as $$
 begin
   if tg_op = 'INSERT' then
+    if new.status <> 'preparing' then
+      raise exception 'Tenant Pack Releases must begin in preparing'
+        using errcode = '23514', constraint = 'tenant_pack_releases_initial_status_check';
+    end if;
     if not exists (
       select 1 from pack_versions as pack
       where pack.pack_version_id = new.pack_version_id
@@ -1114,6 +1350,7 @@ for each row execute function enforce_entitlement_snapshot_immutability();
 
 alter function enforce_entitlement_assignment_seat_capacity() set search_path = pg_catalog, public;
 alter function enforce_entitlement_consumed_seat_capacity() set search_path = pg_catalog, public;
+alter function enforce_entitlement_pack_product_mode() set search_path = pg_catalog, public;
 alter function enforce_profile_snapshot_pointer_cas() set search_path = pg_catalog, public;
 alter function advance_profile_snapshot_pointer(text, text, bigint, text) set search_path = pg_catalog, public;
 alter function core_agent_is_canonical_semver(text) set search_path = pg_catalog, public;
@@ -1122,10 +1359,12 @@ alter function core_agent_is_immutable_artifact_ref(text) set search_path = pg_c
 alter function core_agent_is_valid_capability_compatibility(jsonb) set search_path = pg_catalog, public;
 alter function enforce_capability_version_immutability() set search_path = pg_catalog, public;
 alter function enforce_pack_version_immutability() set search_path = pg_catalog, public;
+alter function enforce_pack_product_published_semantics() set search_path = pg_catalog, public;
 alter function enforce_pack_member_immutability() set search_path = pg_catalog, public;
 alter function enforce_tenant_pack_release_history_immutability() set search_path = pg_catalog, public;
 alter function enforce_entitlement_snapshot_immutability() set search_path = pg_catalog, public;
 alter function enforce_entitlement_snapshot_child_creation_transaction() set search_path = pg_catalog, public;
+alter function set_entitlement_snapshot_creation_metadata() set search_path = pg_catalog, public;
 alter function validate_entitlement_snapshot_aggregate() set search_path = pg_catalog, public;
 
 revoke all on table
@@ -1159,6 +1398,7 @@ grant select on table profile_snapshot_pointers to core_agent_identity;
 
 revoke all on function enforce_entitlement_assignment_seat_capacity() from public, core_agent_app, core_agent_identity;
 revoke all on function enforce_entitlement_consumed_seat_capacity() from public, core_agent_app, core_agent_identity;
+revoke all on function enforce_entitlement_pack_product_mode() from public, core_agent_app, core_agent_identity;
 revoke all on function enforce_profile_snapshot_pointer_cas() from public, core_agent_app, core_agent_identity;
 revoke all on function advance_profile_snapshot_pointer(text, text, bigint, text) from public, core_agent_app, core_agent_identity;
 revoke all on function core_agent_is_canonical_semver(text) from public, core_agent_app, core_agent_identity;
@@ -1167,10 +1407,12 @@ revoke all on function core_agent_is_immutable_artifact_ref(text) from public, c
 revoke all on function core_agent_is_valid_capability_compatibility(jsonb) from public, core_agent_app, core_agent_identity;
 revoke all on function enforce_capability_version_immutability() from public, core_agent_app, core_agent_identity;
 revoke all on function enforce_pack_version_immutability() from public, core_agent_app, core_agent_identity;
+revoke all on function enforce_pack_product_published_semantics() from public, core_agent_app, core_agent_identity;
 revoke all on function enforce_pack_member_immutability() from public, core_agent_app, core_agent_identity;
 revoke all on function enforce_tenant_pack_release_history_immutability() from public, core_agent_app, core_agent_identity;
 revoke all on function enforce_entitlement_snapshot_immutability() from public, core_agent_app, core_agent_identity;
 revoke all on function enforce_entitlement_snapshot_child_creation_transaction() from public, core_agent_app, core_agent_identity;
+revoke all on function set_entitlement_snapshot_creation_metadata() from public, core_agent_app, core_agent_identity;
 revoke all on function validate_entitlement_snapshot_aggregate() from public, core_agent_app, core_agent_identity;
 grant execute on function core_agent_is_canonical_semver(text), core_agent_is_exact_contract_ref(text), core_agent_is_immutable_artifact_ref(text), core_agent_is_valid_capability_compatibility(jsonb) to core_agent_identity;
 grant execute on function advance_profile_snapshot_pointer(text, text, bigint, text) to core_agent_app, core_agent_identity;

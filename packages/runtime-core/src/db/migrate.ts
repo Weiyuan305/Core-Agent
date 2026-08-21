@@ -116,7 +116,7 @@ const schemaManifestEntries = [
   [10, "identity_authority", "eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381"],
   [11, "password_reset_transactions", "fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393"],
   [12, "email_verification_transactions", "2e7a7d0b8f910ff5253ace5dff1f0cc242224ec432e75621f15f57d93d14af12"],
-  [13, "entitlement_capability_authority", "e54d8b59ebaa7dfd7496a2314ea314fa78f3f0454a56a83284b1ffd803f25909"],
+  [13, "entitlement_capability_authority", "9f686c0ddca1bf7154ef00bf300157985420251fd3261aa4bcea97cc995b0832"],
 ] as const;
 
 const schemaManifests = new Map<number, SchemaManifest>(schemaManifestEntries.map(([version, name, checksum]) => [
@@ -569,6 +569,7 @@ const schema13Columns: readonly LegacyColumnShape[] = [
   ["entitlement_snapshots", "profile_id", "text", true, ""],
   ["entitlement_snapshots", "snapshot_version", "bigint", true, ""],
   ["entitlement_snapshots", "evaluated_at", "timestamp with time zone", true, "clock_timestamp()"],
+  ["entitlement_snapshots", "creation_xid", "xid8", true, ""],
   ["entitlement_snapshots", "canonical_input_hash", "text", true, ""],
   ["entitlement_snapshots", "resource_version", "bigint", true, ""],
   ["entitlement_snapshots", "created_at", "timestamp with time zone", true, "clock_timestamp()"],
@@ -726,7 +727,7 @@ const schema13Constraints: readonly LegacyConstraintShape[] = [
   ["entitlements", "entitlements_source_check", "c", true, "CHECK (source = 'platform_manual'::text)"],
   ["entitlements", "entitlements_status_check", "c", true, "CHECK (status = ANY (ARRAY['active'::text, 'suspended'::text, 'expired'::text, 'revoked'::text]))"],
   ["entitlements", "entitlements_status_reason_check", "c", true, "CHECK (status = 'active'::text AND (reason_code = ANY (ARRAY['platform_grant'::text, 'administrator_reactivated'::text])) OR status = 'suspended'::text AND reason_code = 'administrator_suspended'::text OR status = 'expired'::text AND reason_code = 'validity_expired'::text AND expires_at IS NOT NULL OR status = 'revoked'::text AND reason_code = 'platform_revoked'::text)"],
-  ["entitlements", "entitlements_tenant_id_fkey", "f", true, "FOREIGN KEY (tenant_id) REFERENCES tenants(tenant_id)"],
+  ["entitlements", "entitlements_tenant_mode_fkey", "f", true, "FOREIGN KEY (tenant_id, tenant_mode) REFERENCES tenants(tenant_id, tenant_mode)"],
   ["entitlements", "entitlements_tenant_mode_check", "c", true, "CHECK (tenant_mode = ANY (ARRAY['b2b'::text, 'b2c'::text]))"],
   ["entitlements", "entitlements_tenant_ref_key", "u", true, "UNIQUE (tenant_id, entitlement_id)"],
   ["entitlements", "entitlements_validity_check", "c", true, "CHECK (expires_at IS NULL OR expires_at > valid_from)"],
@@ -811,6 +812,7 @@ const schema13Indexes: readonly LegacyIndexShape[] = [
   ["entitlements", "entitlements_order_key", "CREATE UNIQUE INDEX entitlements_order_key ON public.entitlements USING btree (tenant_id, source, external_order_ref)"],
   ["entitlements", "entitlements_pkey", "CREATE UNIQUE INDEX entitlements_pkey ON public.entitlements USING btree (entitlement_id)"],
   ["entitlements", "entitlements_release_fk_idx", "CREATE INDEX entitlements_release_fk_idx ON public.entitlements USING btree (tenant_id, tenant_pack_release_id, pack_product_id, pack_version_id, pack_version)"],
+  ["entitlements", "entitlements_tenant_mode_fk_idx", "CREATE INDEX entitlements_tenant_mode_fk_idx ON public.entitlements USING btree (tenant_id, tenant_mode)"],
   ["entitlements", "entitlements_tenant_ref_key", "CREATE UNIQUE INDEX entitlements_tenant_ref_key ON public.entitlements USING btree (tenant_id, entitlement_id)"],
   ["pack_members", "pack_members_capability_version_fk_idx", "CREATE INDEX pack_members_capability_version_fk_idx ON public.pack_members USING btree (capability_version_id, capability_id, version)"],
   ["pack_members", "pack_members_capability_key", "CREATE UNIQUE INDEX pack_members_capability_key ON public.pack_members USING btree (pack_version_id, capability_id)"],
@@ -839,20 +841,23 @@ const schema13Indexes: readonly LegacyIndexShape[] = [
 
 const schema13Routines = [
   ["f", "advance_profile_snapshot_pointer", "p_tenant_id text, p_profile_id text, p_expected_resource_version bigint, p_snapshot_id text", "TABLE(resource_version bigint)", true, ["search_path=pg_catalog, public"], "9084a82f86a44ce1260dd62d32c8c5d5"],
-  ["f", "core_agent_is_canonical_semver", "candidate text", "boolean", false, ["search_path=pg_catalog, public"], "c2bf31dbc8fdaef22c6ad3d0163348ee"],
-  ["f", "core_agent_is_exact_contract_ref", "candidate text", "boolean", false, ["search_path=pg_catalog, public"], "6a7062f99a26975f4dd850ce31a14011"],
-  ["f", "core_agent_is_immutable_artifact_ref", "candidate text", "boolean", false, ["search_path=pg_catalog, public"], "227da9054e47af213d660f6f7bb010da"],
-  ["f", "core_agent_is_valid_capability_compatibility", "candidate jsonb", "boolean", false, ["search_path=pg_catalog, public"], "8f8bff721458786255c96ec4da8e1ca7"],
+  ["f", "core_agent_is_canonical_semver", "candidate text", "boolean", false, ["search_path=pg_catalog, public"], "1ed599030c907847f7eb71c6d56249f7"],
+  ["f", "core_agent_is_exact_contract_ref", "candidate text", "boolean", false, ["search_path=pg_catalog, public"], "8fca5ebbc25091381747fc23a9e59858"],
+  ["f", "core_agent_is_immutable_artifact_ref", "candidate text", "boolean", false, ["search_path=pg_catalog, public"], "06fece05a3affff873daf217fcbd3f42"],
+  ["f", "core_agent_is_valid_capability_compatibility", "candidate jsonb", "boolean", false, ["search_path=pg_catalog, public"], "f59dfba1340e4748c5244dac2d65ba27"],
   ["f", "enforce_capability_version_immutability", "", "trigger", false, ["search_path=pg_catalog, public"], "8950aec1785a3266a22869c24f1e8f9e"],
   ["f", "enforce_entitlement_assignment_seat_capacity", "", "trigger", false, ["search_path=pg_catalog, public"], "fc54faa6572c9af7f4e2d498276f3b8e"],
   ["f", "enforce_entitlement_consumed_seat_capacity", "", "trigger", false, ["search_path=pg_catalog, public"], "647fcca2dd031d0b4c70fd116f7c2e46"],
-  ["f", "enforce_entitlement_snapshot_child_creation_transaction", "", "trigger", false, ["search_path=pg_catalog, public"], "dc300af1764887d2b2ae15a65d050d72"],
+  ["f", "enforce_entitlement_pack_product_mode", "", "trigger", false, ["search_path=pg_catalog, public"], "9fe3639ffaf28e06537b6f653c0bad41"],
+  ["f", "enforce_entitlement_snapshot_child_creation_transaction", "", "trigger", false, ["search_path=pg_catalog, public"], "d2d3224941ce10877e487fa8512c5e6a"],
   ["f", "enforce_entitlement_snapshot_immutability", "", "trigger", false, ["search_path=pg_catalog, public"], "7f04273175cf7af59f218abf4e2ff000"],
   ["f", "enforce_pack_member_immutability", "", "trigger", false, ["search_path=pg_catalog, public"], "b3240fa2b668d320c35080ac1e19db9a"],
-  ["f", "enforce_pack_version_immutability", "", "trigger", false, ["search_path=pg_catalog, public"], "153becf8657b6f4f059b9e5f7ddc72aa"],
+  ["f", "enforce_pack_product_published_semantics", "", "trigger", false, ["search_path=pg_catalog, public"], "55e7c0c88b26092d8c569b4701eb7665"],
+  ["f", "enforce_pack_version_immutability", "", "trigger", false, ["search_path=pg_catalog, public"], "b5aa838985c3b5562b816da088431c2e"],
   ["f", "enforce_profile_snapshot_pointer_cas", "", "trigger", false, ["search_path=pg_catalog, public"], "64e7899ab83b4c3353b1c38ff4275649"],
-  ["f", "enforce_tenant_pack_release_history_immutability", "", "trigger", false, ["search_path=pg_catalog, public"], "929b40399da8769a1b92b4277a9be080"],
-  ["f", "validate_entitlement_snapshot_aggregate", "", "trigger", false, ["search_path=pg_catalog, public"], "8856f74e54b4a64584b518543cf49205"],
+  ["f", "enforce_tenant_pack_release_history_immutability", "", "trigger", false, ["search_path=pg_catalog, public"], "a016b5b5630e476cba8db8927a1fabf0"],
+  ["f", "set_entitlement_snapshot_creation_metadata", "", "trigger", false, ["search_path=pg_catalog, public"], "768adafb7334f3d6d2b435c41452314c"],
+  ["f", "validate_entitlement_snapshot_aggregate", "", "trigger", false, ["search_path=pg_catalog, public"], "f173a9574b3dfab70438cfb82ccdb4b0"],
 ] as const;
 
 const schema13Triggers = [
@@ -865,10 +870,13 @@ const schema13Triggers = [
   ["entitlement_snapshot_sources", "entitlement_snapshot_sources_aggregate_authority_check", "O", "CREATE CONSTRAINT TRIGGER entitlement_snapshot_sources_aggregate_authority_check AFTER INSERT ON entitlement_snapshot_sources DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION validate_entitlement_snapshot_aggregate()"],
   ["entitlement_snapshot_sources", "entitlement_snapshot_sources_immutable_check", "O", "CREATE TRIGGER entitlement_snapshot_sources_immutable_check BEFORE DELETE OR UPDATE ON entitlement_snapshot_sources FOR EACH ROW EXECUTE FUNCTION enforce_entitlement_snapshot_immutability()"],
   ["entitlement_snapshots", "entitlement_snapshots_aggregate_authority_check", "O", "CREATE CONSTRAINT TRIGGER entitlement_snapshots_aggregate_authority_check AFTER INSERT ON entitlement_snapshots DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION validate_entitlement_snapshot_aggregate()"],
+  ["entitlement_snapshots", "entitlement_snapshots_creation_metadata_check", "O", "CREATE TRIGGER entitlement_snapshots_creation_metadata_check BEFORE INSERT ON entitlement_snapshots FOR EACH ROW EXECUTE FUNCTION set_entitlement_snapshot_creation_metadata()"],
   ["entitlement_snapshots", "entitlement_snapshots_immutable_check", "O", "CREATE TRIGGER entitlement_snapshots_immutable_check BEFORE DELETE OR UPDATE ON entitlement_snapshots FOR EACH ROW EXECUTE FUNCTION enforce_entitlement_snapshot_immutability()"],
   ["entitlements", "entitlements_consumed_seat_capacity_check", "O", "CREATE TRIGGER entitlements_consumed_seat_capacity_check BEFORE UPDATE OF assignment_mode, seat_quantity ON entitlements FOR EACH ROW EXECUTE FUNCTION enforce_entitlement_consumed_seat_capacity()"],
+  ["entitlements", "entitlements_pack_product_mode_check", "O", "CREATE TRIGGER entitlements_pack_product_mode_check BEFORE INSERT OR UPDATE OF tenant_id, tenant_mode, tenant_pack_release_id, pack_product_id, pack_version_id, pack_version ON entitlements FOR EACH ROW EXECUTE FUNCTION enforce_entitlement_pack_product_mode()"],
   ["pack_members", "pack_members_published_immutable_check", "O", "CREATE TRIGGER pack_members_published_immutable_check BEFORE INSERT OR DELETE OR UPDATE ON pack_members FOR EACH ROW EXECUTE FUNCTION enforce_pack_member_immutability()"],
-  ["pack_versions", "pack_versions_published_immutable_check", "O", "CREATE TRIGGER pack_versions_published_immutable_check BEFORE DELETE OR UPDATE ON pack_versions FOR EACH ROW EXECUTE FUNCTION enforce_pack_version_immutability()"],
+  ["pack_products", "pack_products_published_semantics_immutable_check", "O", "CREATE TRIGGER pack_products_published_semantics_immutable_check BEFORE UPDATE OF tenant_modes ON pack_products FOR EACH ROW EXECUTE FUNCTION enforce_pack_product_published_semantics()"],
+  ["pack_versions", "pack_versions_published_immutable_check", "O", "CREATE TRIGGER pack_versions_published_immutable_check BEFORE INSERT OR DELETE OR UPDATE ON pack_versions FOR EACH ROW EXECUTE FUNCTION enforce_pack_version_immutability()"],
   ["profile_snapshot_pointers", "profile_snapshot_pointers_cas_check", "O", "CREATE TRIGGER profile_snapshot_pointers_cas_check BEFORE INSERT OR DELETE OR UPDATE ON profile_snapshot_pointers FOR EACH ROW EXECUTE FUNCTION enforce_profile_snapshot_pointer_cas()"],
   ["tenant_pack_releases", "tenant_pack_releases_history_immutable_check", "O", "CREATE TRIGGER tenant_pack_releases_history_immutable_check BEFORE INSERT OR DELETE OR UPDATE ON tenant_pack_releases FOR EACH ROW EXECUTE FUNCTION enforce_tenant_pack_release_history_immutability()"],
 ] as const;
@@ -936,6 +944,13 @@ schemaManifests.set(13, {
   }, {
     action: "add",
     after: {
+      schema: "public", relation: "tenants", relkind: "r",
+      name: "tenants_tenant_mode_ref_key", type: "u", validated: true,
+      definition: "UNIQUE (tenant_id, tenant_mode)",
+    },
+  }, {
+    action: "add",
+    after: {
       schema: "public", relation: "runtime_containers", relkind: "r",
       name: "runtime_containers_capability_manifest_digest_check", type: "c", validated: true,
       definition: "CHECK (capability_manifest_digest IS NULL OR capability_manifest_digest ~ '^sha256:[a-f0-9]{64}$'::text)",
@@ -954,6 +969,13 @@ schemaManifests.set(13, {
       schema: "public", relation: "memberships", relkind: "r",
       name: "memberships_tenant_membership_actor_key",
       definition: "CREATE UNIQUE INDEX memberships_tenant_membership_actor_key ON public.memberships USING btree (tenant_id, membership_id, actor_id)",
+    },
+  }, {
+    action: "add",
+    after: {
+      schema: "public", relation: "tenants", relkind: "r",
+      name: "tenants_tenant_mode_ref_key",
+      definition: "CREATE UNIQUE INDEX tenants_tenant_mode_ref_key ON public.tenants USING btree (tenant_id, tenant_mode)",
     },
   }, {
     action: "add",
