@@ -1499,7 +1499,7 @@ test("recorded schema 10 convergence fails closed for a malformed partial identi
   await assert.rejects(applyMigrations(pool, migrationsDirectory), /schema 10 ACL convergence failed/);
 });
 
-test("an unknown migration 014 is rejected before SQL execution or recording", async () => {
+test("an unknown migration 015 is rejected before SQL execution or recording", async () => {
   const directory = await mkdtemp(join(tmpdir(), "core-agent-unknown-migration-"));
   try {
     await cp(migrationsDirectory, directory, { recursive: true });
@@ -1558,7 +1558,7 @@ test("a database above the binary max fails closed", async () => {
   await assert.rejects(applyMigrations(pool, migrationsDirectory), /database schema is newer than this binary/u);
 });
 
-test("a registered migration 014 validates and records atomically", async () => {
+test("a registered migration 015 validates and records atomically", async () => {
   const directory = await mkdtemp(join(tmpdir(), "core-agent-registered-migration-"));
   try {
     await cp(migrationsDirectory, directory, { recursive: true });
@@ -2066,7 +2066,7 @@ test("registered columns validate collation identity and generated semantics ato
   }
 });
 
-test("registered migration 014 forward security objects validate and record in one transaction", async () => {
+test("registered migration 015 forward security objects validate and record in one transaction", async () => {
   const directory = await mkdtemp(join(tmpdir(), "core-agent-forward-security-"));
   try {
     await cp(migrationsDirectory, directory, { recursive: true });
@@ -2119,7 +2119,7 @@ test("registered migration 014 forward security objects validate and record in o
   }
 });
 
-test("registered migration 014 declares exact relation and routine ACL additions", async () => {
+test("registered migration 015 declares exact relation and routine ACL additions", async () => {
   const directory = await mkdtemp(join(tmpdir(), "core-agent-forward-acl-"));
   try {
     await cp(migrationsDirectory, directory, { recursive: true });
@@ -2465,7 +2465,7 @@ test("registered relation identities reject relkind owner and same-name category
   }
 });
 
-test("registered migration 014 amends an existing schema-1 relation atomically", async (t) => {
+test("registered migration 015 amends an existing schema-1 relation atomically", async (t) => {
   const scenarios = [
     { name: "declared add", declaration: "correct", succeeds: true },
     { name: "missing amendment", declaration: "missing", succeeds: false },
@@ -2929,7 +2929,7 @@ test("relation ownership cannot be redeclared by a later manifest", async () => 
   }
 });
 
-test("registered migration 014 union failure rolls back every object and record", async () => {
+test("registered migration 015 union failure rolls back every object and record", async () => {
   const directory = await mkdtemp(join(tmpdir(), "core-agent-forward-union-failure-"));
   try {
     await cp(migrationsDirectory, directory, { recursive: true });
@@ -3015,7 +3015,7 @@ test("recorded schema 10 rejects altered constraint index function owner ACL seq
         await assert.rejects(
           applyMigrations(pool, migrationsDirectory),
           category === "sequence catalog"
-            ? /schema 13 manifest validation failed: relation catalog/u
+            ? /schema 14 manifest validation failed: relation catalog/u
             : /schema 10 (manifest validation|ACL convergence) failed/u,
         );
       }
