@@ -40,7 +40,7 @@ function assertCapabilityCompatibility(input: ValidatedCapabilityCreate, depende
 }
 function assertReplay(value: unknown): asserts value is CapabilityWriteResult { if (value === null || typeof value !== "object" || Array.isArray(value)) throw new DomainError("INTERNAL_ERROR", "Stored catalog response is invalid"); }
 async function appendLifecycle(trx: Transaction<RuntimeDatabase>, scope: { tenantId: string }, context: CatalogCommandContext, key: string, action: string, result: CapabilityWriteResult, now: Date): Promise<void> {
-  await appendCatalogLifecycleEvent(trx, { tenantId: scope.tenantId, eventId: eventId(key, action), streamId: result.capability_version_id, eventType: `catalog.capability.${result.status === "draft" ? "created" : result.status}`, resourceType: "capability_version", resourceId: result.capability_version_id, resourceVersion: result.resource_version, requestId: context.requestId, traceId: context.traceId, occurredAt: now });
+  await appendCatalogLifecycleEvent(trx, { tenantId: scope.tenantId, eventId: eventId(key, action), streamId: result.capability_version_id, eventType: `capability_version.${result.status === "draft" ? "created" : result.status}`, resourceType: "capability_version", resourceId: result.capability_version_id, resourceVersion: result.resource_version, requestId: context.requestId, traceId: context.traceId, occurredAt: now, capabilityId: result.capability_id });
 }
 
 async function transition(dependencies: CatalogCommandDependencies, context: CatalogCommandContext, raw: unknown, desired: "reviewed" | "retired" | "blocked"): Promise<CapabilityWriteResult> {

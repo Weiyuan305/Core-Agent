@@ -28,7 +28,7 @@ async function audit(trx: Transaction<RuntimeDatabase>, scope: { tenantId: strin
 }
 function assertReplay(value: unknown): asserts value is PackWriteResult { if (value === null || typeof value !== "object" || Array.isArray(value)) throw new DomainError("INTERNAL_ERROR", "Stored catalog response is invalid"); }
 async function appendLifecycle(trx: Transaction<RuntimeDatabase>, scope: { tenantId: string }, context: CatalogCommandContext, key: string, action: string, result: PackWriteResult, now: Date): Promise<void> {
-  await appendCatalogLifecycleEvent(trx, { tenantId: scope.tenantId, eventId: eventId(key, action), streamId: result.pack_version_id, eventType: `catalog.pack.${result.status === "draft" ? "created" : result.status}`, resourceType: "pack_version", resourceId: result.pack_version_id, resourceVersion: result.resource_version, requestId: context.requestId, traceId: context.traceId, occurredAt: now });
+  await appendCatalogLifecycleEvent(trx, { tenantId: scope.tenantId, eventId: eventId(key, action), streamId: result.pack_version_id, eventType: `pack_version.${result.status === "draft" ? "created" : result.status}`, resourceType: "pack_version", resourceId: result.pack_version_id, resourceVersion: result.resource_version, requestId: context.requestId, traceId: context.traceId, occurredAt: now, packProductId: result.pack_product_id });
 }
 function canonicalMembers(input: ValidatedPackCreate): readonly { capability_id: string; capability_version_id: string; version: string }[] {
   const compare = (left: string, right: string): number => Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));

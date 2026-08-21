@@ -11,7 +11,7 @@
     "test:browser": "playwright test"
   },
   "dependencies": {
-    "@core-agent/contracts": "0.7.0",
+    "@core-agent/contracts": "0.8.0",
     "@fastify/cookie": "11.1.2",
     "@fastify/static": "10.1.2",
     "fastify": "5.11.2",

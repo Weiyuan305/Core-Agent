@@ -619,3 +619,14 @@ test("error envelope exposes stable machine semantics", () => {
   assert.equal(validator.Check({ ...error, retry_after_ms: -1 }), false);
   assert.equal(validator.Check({ ...error, field_errors: [{ ...error.field_errors[0], raw_input: "private" }] }), false);
 });
+
+test("catalog lifecycle events are known, closed, and redact executable metadata", () => {
+  const catalog = {
+    ...base,
+    event_type: "capability_version.reviewed",
+    payload: { capability_version_id: "capability_version_demo", capability_id: "capability_demo", status: "reviewed", resource_version: 2 },
+  };
+  assert.equal(Schema.Compile(ProductEventSchema).Check(catalog), true);
+  assert.equal(classifyProductEvent(catalog), "known");
+  assert.equal(Schema.Compile(ProductEventSchema).Check({ ...catalog, payload: { ...catalog.payload, artifact_ref: "canary" } }), false);
+});

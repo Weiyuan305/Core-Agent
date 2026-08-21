@@ -517,6 +517,31 @@ export const EntitlementEventSchema = Type.Union(
   { $id: "core-agent://v1/entitlement-event", "x-extensible-union": true },
 );
 
+function createCatalogCapabilityEvent<
+  const EventType extends "capability_version.created" | "capability_version.reviewed" | "capability_version.retired" | "capability_version.blocked",
+  const Status extends "draft" | "reviewed" | "retired" | "blocked",
+>(eventType: EventType, status: Status) {
+  return createEventBranch(eventType, { capability_version_id: OpaqueIdSchema, capability_id: OpaqueIdSchema, status: Type.Literal(status), resource_version: ResourceVersionSchema });
+}
+function createCatalogPackEvent<
+  const EventType extends "pack_version.created" | "pack_version.reviewed" | "pack_version.published" | "pack_version.retired" | "pack_version.blocked",
+  const Status extends "draft" | "reviewed" | "published" | "retired" | "blocked",
+>(eventType: EventType, status: Status) {
+  return createEventBranch(eventType, { pack_version_id: OpaqueIdSchema, pack_product_id: OpaqueIdSchema, status: Type.Literal(status), resource_version: ResourceVersionSchema });
+}
+const CatalogEventBranchSchemas = [
+  createCatalogCapabilityEvent("capability_version.created", "draft"),
+  createCatalogCapabilityEvent("capability_version.reviewed", "reviewed"),
+  createCatalogCapabilityEvent("capability_version.retired", "retired"),
+  createCatalogCapabilityEvent("capability_version.blocked", "blocked"),
+  createCatalogPackEvent("pack_version.created", "draft"),
+  createCatalogPackEvent("pack_version.reviewed", "reviewed"),
+  createCatalogPackEvent("pack_version.published", "published"),
+  createCatalogPackEvent("pack_version.retired", "retired"),
+  createCatalogPackEvent("pack_version.blocked", "blocked"),
+] as const;
+export const CatalogEventSchema = Type.Union([...CatalogEventBranchSchemas], { $id: "core-agent://v1/catalog-event", "x-extensible-union": true });
+
 function createServiceEventBranch<
   const EventType extends "service.preparing" | "service.available",
   const State extends "preparing" | "available",
@@ -575,6 +600,7 @@ const ProductEventBranchSchemas = [
   MessageCreatedEventBranchSchema,
   ...IdentityEventBranchSchemas,
   ...EntitlementEventBranchSchemas,
+  ...CatalogEventBranchSchemas,
   ...ServiceEventBranchSchemas,
 ] as const;
 
@@ -591,6 +617,7 @@ const ProductEventFamilySchemas = [
   MessageCreatedEventSchema,
   IdentityEventSchema,
   EntitlementEventSchema,
+  CatalogEventSchema,
   ServiceEventSchema,
 ] as const;
 

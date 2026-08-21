@@ -98,6 +98,7 @@ import {
 } from "./identity/public-auth.js";
 import {
   MessageCreatedEventSchema,
+  CatalogEventSchema,
   ProductEventEnvelopeSchema,
   ProductEventSchema,
 } from "./events/product-event.js";
@@ -173,6 +174,7 @@ export const ContractSchemas = {
   "product-event-envelope": ProductEventEnvelopeSchema,
   "product-event": ProductEventSchema,
   "message-created-event": MessageCreatedEventSchema,
+  "catalog-event": CatalogEventSchema,
   "audit-event": AuditEventSchema,
   "error-envelope": ErrorEnvelopeSchema,
   "idempotency-request": IdempotencyRequestSchema,

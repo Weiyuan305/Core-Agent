@@ -1,0 +1,22 @@
+{
+  "schema_key": "catalog-event",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": {
+    "schema_version": 1,
+    "event_id": "event_catalog_demo",
+    "occurred_at": "2026-08-21T00:00:00.000Z",
+    "sequence": 1,
+    "tenant_id": "tenant_catalog_demo",
+    "request_id": "request_catalog_demo",
+    "trace_id": "trace_catalog_demo",
+    "correlation_id": "event_catalog_demo",
+    "causation_id": "event_catalog_demo",
+    "event_type": "capability_version.reviewed",
+    "payload": {
+      "capability_version_id": "capability_version_demo",
+      "capability_id": "capability_demo",
+      "status": "reviewed",
+      "resource_version": 2
+    }
+  }
+}

@@ -8,6 +8,7 @@ import { Pool } from "pg";
 
 import { applyMigrations } from "../src/db/migrate.js";
 import { canonicalPayloadHash } from "../src/domain/idempotency.js";
+import { appendCatalogLifecycleEvent } from "../src/repositories/entitlements/catalog.js";
 
 const runtime = await import("../src/index.js") as Record<string, unknown>;
 const databaseUrl = process.env.CONTROL_PLANE_TEST_DATABASE_URL;
@@ -143,7 +144,84 @@ test("accepted catalog writes atomically append a safe lifecycle ProductEvent an
     (select count(*)::int from idempotency_records where status = 'completed') as idempotency`);
   assert.deepEqual(counts.rows, [{ capabilities: 1, audits: 1, events: 1, outbox: 1, idempotency: 1 }]);
   const event = await pool.query("select event_type, payload from product_events");
-  assert.deepEqual(event.rows, [{ event_type: "catalog.capability.created", payload: { resource_id: "capability_version_catalog", resource_type: "capability_version", resource_version: 1, status: "draft" } }]);
+  assert.deepEqual(event.rows, [{ event_type: "capability_version.created", payload: { capability_version_id: "capability_version_catalog", capability_id: "capability_catalog", resource_version: 1, status: "draft" } }]);
+  const readEventsAfter = runtime.readEventsAfter as (context: { db: unknown; tenantId: string }, streamId: string, after: number) => Promise<unknown>;
+  await assert.doesNotReject(() => readEventsAfter({ db: database, tenantId: "tenant_catalog" }, "capability_version_catalog", 0));
+});
+
+test("native PostgreSQL reader reconstructs every closed catalog lifecycle branch and exact replays do not append twice", async () => {
+  const database = (await import("../src/db/database.js")).createRuntimeDatabase(pool);
+  const deps = { ...dependencies, db: database };
+  const readEventsAfter = runtime.readEventsAfter as (context: { db: unknown; tenantId: string }, streamId: string, after: number) => Promise<readonly { event_type: string; payload: Record<string, unknown> }[]>;
+  const eventTypes = async (streamId: string) => (await readEventsAfter({ db: database, tenantId: "tenant_catalog" }, streamId, 0)).map((event) => event.event_type);
+
+  const createCapability = required("createCapabilityVersion");
+  const reviewCapability = required("reviewCapabilityVersion");
+  const retireCapability = required("retireCapabilityVersion");
+  const blockCapability = required("blockCapabilityVersion");
+  await createCapability(deps, context, command(capabilityPayload({ idempotency_key: "reader-capability-retire-create", capability_id: "capability_reader_retire", capability_version_id: "capability_version_reader_retire" })));
+  await reviewCapability(deps, context, command({ schema_version: 1, idempotency_key: "reader-capability-retire-review", capability_version_id: "capability_version_reader_retire", expected_resource_version: 1 }));
+  await retireCapability(deps, context, command({ schema_version: 1, idempotency_key: "reader-capability-retire", capability_version_id: "capability_version_reader_retire", expected_resource_version: 2 }));
+  assert.deepEqual(await eventTypes("capability_version_reader_retire"), ["capability_version.created", "capability_version.reviewed", "capability_version.retired"]);
+
+  await createCapability(deps, context, command(capabilityPayload({ idempotency_key: "reader-capability-block-create", capability_id: "capability_reader_block", capability_version_id: "capability_version_reader_block" })));
+  await reviewCapability(deps, context, command({ schema_version: 1, idempotency_key: "reader-capability-block-review", capability_version_id: "capability_version_reader_block", expected_resource_version: 1 }));
+  await blockCapability(deps, context, command({ schema_version: 1, idempotency_key: "reader-capability-block", capability_version_id: "capability_version_reader_block", expected_resource_version: 2 }));
+  assert.deepEqual(await eventTypes("capability_version_reader_block"), ["capability_version.created", "capability_version.reviewed", "capability_version.blocked"]);
+
+  await createCapability(deps, context, command(capabilityPayload({ idempotency_key: "reader-capability-pack-create", capability_id: "capability_reader_pack", capability_version_id: "capability_version_reader_pack" })));
+  await reviewCapability(deps, context, command({ schema_version: 1, idempotency_key: "reader-capability-pack-review", capability_version_id: "capability_version_reader_pack", expected_resource_version: 1 }));
+
+  const createPack = required("createPackVersion");
+  const reviewPack = required("reviewPackVersion");
+  const publishPack = required("publishPackVersion");
+  const retirePack = required("retirePackVersion");
+  const blockPack = required("blockPackVersion");
+  const packCreate = command(packPayload({ idempotency_key: "reader-pack-create", pack_product_id: "pack_product_reader", pack_version_id: "pack_version_reader", members: [{ capability_id: "capability_reader_pack", capability_version_id: "capability_version_reader_pack", version: "1.0.0" }] }));
+  await createPack(deps, context, packCreate);
+  await assert.doesNotReject(() => createPack(deps, context, packCreate));
+  await reviewPack(deps, context, command({ schema_version: 1, idempotency_key: "reader-pack-review", pack_version_id: "pack_version_reader", expected_resource_version: 1 }));
+  await publishPack(deps, context, command({ schema_version: 1, idempotency_key: "reader-pack-publish", pack_version_id: "pack_version_reader", expected_resource_version: 2 }));
+  await retirePack(deps, context, command({ schema_version: 1, idempotency_key: "reader-pack-retire", pack_version_id: "pack_version_reader", expected_resource_version: 3 }));
+  await blockPack(deps, context, command({ schema_version: 1, idempotency_key: "reader-pack-block", pack_version_id: "pack_version_reader", expected_resource_version: 4 }));
+  assert.deepEqual(await eventTypes("pack_version_reader"), ["pack_version.created", "pack_version.reviewed", "pack_version.published", "pack_version.retired", "pack_version.blocked"]);
+});
+
+test("catalog lifecycle audit, ProductEvent, Outbox, and public failures do not disclose a command canary", async () => {
+  const database = (await import("../src/db/database.js")).createRuntimeDatabase(pool);
+  const deps = { ...dependencies, db: database };
+  const canary = "catalog-canary-never-persisted-in-event";
+  await required("createCapabilityVersion")(deps, context, command(capabilityPayload({ display_name: canary })));
+  const visible = await pool.query(`select
+    (select count(*)::int from platform_authority_audit where concat_ws(' ', action, reason_summary, change_summary, request_id, trace_id) like $1) as audit_count,
+    (select count(*)::int from audit_events where event_json::text like $1) as audit_event_count,
+    (select count(*)::int from product_events where payload::text like $1) as event_count,
+    (select count(*)::int from outbox where concat_ws(' ', outbox_id, event_id, delivery_target, status, last_error_summary) like $1) as outbox_count`, [`%${canary}%`]);
+  assert.deepEqual(visible.rows, [{ audit_count: 0, audit_event_count: 0, event_count: 0, outbox_count: 0 }]);
+  await assert.rejects(
+    () => required("createCapabilityVersion")(deps, context, command(capabilityPayload({ idempotency_key: "canary-error", contract_ref: `synthetic/${canary}@1.0.0` }))),
+    (error: unknown) => error instanceof Error && !error.message.includes(canary) && !JSON.stringify(error).includes(canary),
+  );
+});
+
+test("validated catalog append rejects an unknown canary before allocating a reader cursor or Outbox wakeup", async () => {
+  const database = (await import("../src/db/database.js")).createRuntimeDatabase(pool);
+  const canary = "catalog-canary-unrecognized-event";
+  await database.transaction().execute(async (trx) => {
+    await assert.rejects(
+      () => appendCatalogLifecycleEvent(trx, {
+        tenantId: "tenant_catalog", eventId: "event_catalog_canary", streamId: "stream_catalog_canary",
+        eventType: canary, resourceType: "capability_version", resourceId: "capability_version_canary",
+        resourceVersion: 1, requestId: "request_catalog", traceId: "trace_catalog", occurredAt: now,
+      }),
+      (error: unknown) => error instanceof Error && !error.message.includes(canary),
+    );
+  });
+  const writes = await pool.query(`select
+    (select count(*)::int from stream_sequences where stream_id = 'stream_catalog_canary') as sequences,
+    (select count(*)::int from product_events where stream_id = 'stream_catalog_canary') as events,
+    (select count(*)::int from outbox where event_id = 'event_catalog_canary') as outbox`);
+  assert.deepEqual(writes.rows, [{ sequences: 0, events: 0, outbox: 0 }]);
 });
 
 test("wire-order customer modes hash before persistence normalization and duplicate catalog versions fail safely", async () => {

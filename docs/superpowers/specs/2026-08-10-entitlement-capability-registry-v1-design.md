@@ -5,6 +5,16 @@
 **Depends on:** [Identity Runtime and Public Auth v1](2026-08-10-identity-runtime-public-auth-v1-design.md)
 **Next phase:** Core-Agent Policy Plugin and Capability/MCP Gateway
 
+**2026-08-21 approved amendment:** Contracts 0.7.0 remains immutable. Catalog
+Lifecycle facts are released compatibly as Contracts 0.8.0: the only new branches
+are closed `capability_version.{created,reviewed,retired,blocked}` and
+`pack_version.{created,reviewed,published,retired,blocked}` ProductEvents. Each
+contains only its version ID, stable family/product ID, closed status, and resource
+version. It must not contain artifact or contract references, compatibility details,
+customer/provider text, or secret material. Catalog writes append these validated
+events through the existing transactional ProductEvent/Outbox path; unknown future
+catalog branches remain fail-closed.
+
 ## 1. Decision record
 
 The approved product and architecture decisions are:
@@ -375,11 +385,12 @@ platform-created grants. The UI must not display a fake working checkout button.
 
 ## 12. Events and audit
 
-New ProductEvent families describe bounded lifecycle facts such as Pack release
-selected, Entitlement activated/suspended/revoked/expired, Assignment created/revoked,
-effective snapshot changed, and service preparing/available/failed. Events contain IDs,
-states, versions, and safe reason codes, not prices, receipts, payment payloads,
-Capability secrets, provider configuration, or customer content.
+New ProductEvent families describe bounded lifecycle facts such as Capability/Pack
+catalog lifecycle, Pack release selected, Entitlement activated/suspended/revoked/
+expired, Assignment created/revoked, effective snapshot changed, and service
+preparing/available/failed. Events contain IDs, states, versions, and safe reason
+codes, not prices, receipts, payment payloads, artifact or contract references,
+compatibility details, Capability secrets, provider configuration, or customer content.
 
 Every authorization and mutation emits an AuditEvent with the real Actor,
 Membership, effective role, Tenant, action, decision, outcome, request/trace IDs,

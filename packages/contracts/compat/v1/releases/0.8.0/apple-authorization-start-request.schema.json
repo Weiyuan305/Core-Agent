@@ -1,0 +1,114 @@
+{
+  "$id": "core-agent://v1/apple-authorization-start-request",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "client_kind": {
+          "const": "web",
+          "type": "string"
+        },
+        "device_label": {
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        },
+        "idempotency_key": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "payload_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "redirect_uri": {
+          "format": "uri",
+          "maxLength": 2048,
+          "minLength": 1,
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "title": "SchemaVersion",
+          "type": "number"
+        }
+      },
+      "required": [
+        "schema_version",
+        "idempotency_key",
+        "payload_hash",
+        "client_kind",
+        "redirect_uri"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "client_kind": {
+          "anyOf": [
+            {
+              "const": "iphone",
+              "type": "string"
+            },
+            {
+              "const": "macos",
+              "type": "string"
+            }
+          ]
+        },
+        "device_label": {
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        },
+        "idempotency_key": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "nonce": {
+          "maxLength": 4096,
+          "minLength": 8,
+          "type": "string"
+        },
+        "payload_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "pkce_code_challenge": {
+          "pattern": "^[A-Za-z0-9_-]{43}$",
+          "type": "string"
+        },
+        "pkce_code_challenge_method": {
+          "const": "S256",
+          "type": "string"
+        },
+        "redirect_uri": {
+          "format": "uri",
+          "maxLength": 2048,
+          "minLength": 1,
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "title": "SchemaVersion",
+          "type": "number"
+        }
+      },
+      "required": [
+        "schema_version",
+        "idempotency_key",
+        "payload_hash",
+        "client_kind",
+        "redirect_uri",
+        "nonce",
+        "pkce_code_challenge",
+        "pkce_code_challenge_method"
+      ],
+      "type": "object"
+    }
+  ]
+}

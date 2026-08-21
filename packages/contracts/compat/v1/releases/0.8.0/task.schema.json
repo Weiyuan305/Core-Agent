@@ -1,0 +1,188 @@
+{
+  "$id": "core-agent://v1/task",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "attempt_count": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "capability_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "case_ref": {
+      "$id": "core-agent://v1/case-ref",
+      "additionalProperties": false,
+      "properties": {
+        "capability_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "case_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "source_system": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "source_version": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "student_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "case_id",
+        "student_id",
+        "capability_id"
+      ],
+      "type": "object"
+    },
+    "created_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "dependency_status": {
+      "anyOf": [
+        {
+          "const": "not_checked",
+          "type": "string"
+        },
+        {
+          "const": "ready",
+          "type": "string"
+        },
+        {
+          "const": "blocked",
+          "type": "string"
+        },
+        {
+          "const": "unavailable",
+          "type": "string"
+        }
+      ]
+    },
+    "idempotency_key": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "origin_run_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "result_summary": {
+      "maxLength": 1000,
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "status": {
+      "anyOf": [
+        {
+          "const": "queued",
+          "type": "string"
+        },
+        {
+          "const": "running",
+          "type": "string"
+        },
+        {
+          "const": "waiting_approval",
+          "type": "string"
+        },
+        {
+          "const": "paused",
+          "type": "string"
+        },
+        {
+          "const": "succeeded",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "type": "string"
+        },
+        {
+          "const": "cancelled",
+          "type": "string"
+        }
+      ]
+    },
+    "student_ref": {
+      "$id": "core-agent://v1/student-ref",
+      "additionalProperties": false,
+      "properties": {
+        "source_system": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "source_version": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "student_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "student_id",
+        "source_system"
+      ],
+      "type": "object"
+    },
+    "task_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "tenant_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "resource_version",
+    "created_at",
+    "updated_at",
+    "task_id",
+    "tenant_id",
+    "origin_run_id",
+    "idempotency_key",
+    "status",
+    "attempt_count",
+    "dependency_status"
+  ],
+  "type": "object"
+}

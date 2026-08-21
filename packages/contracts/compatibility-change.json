@@ -1,6 +1,6 @@
 {
-  "package_version": "0.7.0",
+  "package_version": "0.8.0",
   "wire_schema_version": 1,
   "change_level": "minor",
-  "reason": "Add closed Capability catalog, Entitlement authority, immutable Snapshot, public summary, and lifecycle event contracts"
+  "reason": "Add closed Capability-Version and Pack-Version catalog lifecycle ProductEvent branches"
 }

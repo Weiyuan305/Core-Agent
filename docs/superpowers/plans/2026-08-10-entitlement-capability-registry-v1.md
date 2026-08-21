@@ -275,6 +275,17 @@ git commit -m "feat(entitlements): add capability authority schema"
 
 ### Task 3: Implement immutable Capability and Pack catalog review/publication
 
+**2026-08-21 approved implementation amendment:** Preserve the immutable Contracts
+0.7.0 release byte-for-byte and publish compatible Contracts 0.8.0 catalog lifecycle
+ProductEvent branches. Capability versions emit only
+`created/reviewed/retired/blocked`; Pack versions emit only
+`created/reviewed/published/retired/blocked`. Their closed payloads carry only the
+version ID, stable Capability/Pack-product ID, closed status, and resource version.
+The service must call validated `appendProductEvents` so event, Outbox, resource,
+audit, and idempotency commit atomically; `readEventsAfter` must reconstruct every
+emitted branch and exact replay must append none. Historical 0.2.0–0.7.0 releases and
+migrations 010–013 remain untouched.
+
 **Files:**
 
 - Create: `packages/runtime-core/src/repositories/entitlements/catalog.ts`

@@ -60,6 +60,7 @@ test("registry publishes exactly the planned v1 contracts", () => {
     "product-event-envelope",
     "product-event",
     "message-created-event",
+    "catalog-event",
     "audit-event",
     "error-envelope",
     "idempotency-request",

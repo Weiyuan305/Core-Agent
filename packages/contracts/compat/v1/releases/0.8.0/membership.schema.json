@@ -1,0 +1,115 @@
+{
+  "$id": "core-agent://v1/membership",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "actor_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "membership_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "membership_source": {
+      "anyOf": [
+        {
+          "const": "self",
+          "type": "string"
+        },
+        {
+          "const": "company",
+          "type": "string"
+        },
+        {
+          "const": "platform",
+          "type": "string"
+        }
+      ]
+    },
+    "resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "roles": {
+      "items": {
+        "anyOf": [
+          {
+            "const": "admin",
+            "type": "string"
+          },
+          {
+            "const": "consultant",
+            "type": "string"
+          },
+          {
+            "const": "student",
+            "type": "string"
+          }
+        ]
+      },
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "seat_ref": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "status": {
+      "anyOf": [
+        {
+          "const": "invited",
+          "type": "string"
+        },
+        {
+          "const": "active",
+          "type": "string"
+        },
+        {
+          "const": "suspended",
+          "type": "string"
+        },
+        {
+          "const": "revoked",
+          "type": "string"
+        }
+      ]
+    },
+    "tenant_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "resource_version",
+    "created_at",
+    "updated_at",
+    "membership_id",
+    "tenant_id",
+    "actor_id",
+    "roles",
+    "status"
+  ],
+  "type": "object"
+}
