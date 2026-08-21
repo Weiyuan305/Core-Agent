@@ -78,6 +78,23 @@ type LegacyColumnShape = readonly [relation: string, name: string, type: string,
 type LegacyConstraintShape = readonly [relation: string, name: string, type: string, validated: boolean, definition: string];
 type LegacyIndexShape = readonly [relation: string, name: string, definition: string];
 
+function compareCatalogText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function catalogDifference(
+  expected: readonly (readonly unknown[])[],
+  actual: readonly (readonly unknown[])[],
+): string {
+  const length = Math.max(expected.length, actual.length);
+  for (let index = 0; index < length; index += 1) {
+    if (JSON.stringify(expected[index]) !== JSON.stringify(actual[index])) {
+      return ` at index ${index}: expected ${JSON.stringify(expected[index] ?? null)}, actual ${JSON.stringify(actual[index] ?? null)}`;
+    }
+  }
+  return "";
+}
+
 interface SchemaManifest {
   readonly checksum: string;
   readonly columns?: readonly (ColumnShape | LegacyColumnShape)[];
@@ -1640,17 +1657,19 @@ async function validateRegisteredCatalog(
   const expectedTriggers = [...manifests.values()]
     .filter((manifest) => manifest.version <= throughVersion)
     .flatMap((manifest) => manifest.triggers ?? [])
-    .sort((left, right) => `${left[0]}|${left[1]}`.localeCompare(`${right[0]}|${right[1]}`));
+    .sort((left, right) => compareCatalogText(`${left[0]}|${left[1]}`, `${right[0]}|${right[1]}`));
   const actualTriggers = (await client.query<{ definition: string; enabled: string; name: string; relation: string }>(
     `select trigger.tgrelid::regclass::text as relation, trigger.tgname as name,
             trigger.tgenabled as enabled, pg_get_triggerdef(trigger.oid, true) as definition
      from pg_trigger trigger
      where trigger.tgrelid in (select oid from pg_class where relnamespace = 'public'::regnamespace)
-       and not trigger.tgisinternal
-     order by trigger.tgrelid::regclass::text, trigger.tgname`,
-  )).rows.map((row) => [row.relation, row.name, row.enabled, row.definition] as const);
+       and not trigger.tgisinternal`,
+  )).rows.map((row) => [row.relation, row.name, row.enabled, row.definition] as const)
+    .sort((left, right) => compareCatalogText(`${left[0]}|${left[1]}`, `${right[0]}|${right[1]}`));
   if (JSON.stringify(actualTriggers) !== JSON.stringify(expectedTriggers)) {
-    throw new Error(`schema ${throughVersion} manifest validation failed: trigger catalog`);
+    throw new Error(
+      `schema ${throughVersion} manifest validation failed: trigger catalog${catalogDifference(expectedTriggers, actualTriggers)}`,
+    );
   }
 
   const expectedRoutines = [...manifests.values()]

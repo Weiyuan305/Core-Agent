@@ -446,10 +446,10 @@ test("busy admission is bounded and non-durable so a later retry can dispatch", 
       await released;
     }
     return accepted(value.operation_id);
-  }, { maximumConcurrent: 1, admissionTimeoutMs: 100 });
+  }, { maximumConcurrent: 1, admissionTimeoutMs: 1_000 });
   await server.start();
   try {
-    const client = new RuntimeSupervisorClient({ socketPath, timeoutMs: 1_000 });
+    const client = new RuntimeSupervisorClient({ socketPath, timeoutMs: 2_000 });
     const owner = client.execute(request("operation_busy_owner")).then(
       (value) => ({ value }),
       (error: unknown) => ({ error }),

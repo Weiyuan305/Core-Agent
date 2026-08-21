@@ -1025,6 +1025,7 @@ test("uncertain gateway cleanup remains non-terminal until restart reconciliatio
   const request = signed();
   let settled = false;
   const pending = journal.run(request, (reserved) => adapter.execute(reserved)).finally(() => { settled = true; });
+  await waitForPendingStage(pendingPath(journalDirectory, request), "reserved");
   const boundary = await Promise.race([
     pending,
     new Promise<"still-pending">((resolve) => setTimeout(() => resolve("still-pending"), 50)),
