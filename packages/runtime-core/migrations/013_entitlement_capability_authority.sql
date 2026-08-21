@@ -993,6 +993,20 @@ as $$
 begin
   if tg_table_name = 'entitlement_assignments' then
     perform 1
+    from entitlements as entitlement
+    where (
+      tg_op <> 'INSERT'
+      and entitlement.tenant_id = old.tenant_id
+      and entitlement.entitlement_id = old.entitlement_id
+    ) or (
+      tg_op <> 'DELETE'
+      and entitlement.tenant_id = new.tenant_id
+      and entitlement.entitlement_id = new.entitlement_id
+    )
+    order by entitlement.tenant_id, entitlement.entitlement_id
+    for no key update;
+
+    perform 1
     from profiles as profile
     where (
       tg_op <> 'INSERT'

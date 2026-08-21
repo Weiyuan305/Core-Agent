@@ -116,7 +116,7 @@ const schemaManifestEntries = [
   [10, "identity_authority", "eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381"],
   [11, "password_reset_transactions", "fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393"],
   [12, "email_verification_transactions", "2e7a7d0b8f910ff5253ace5dff1f0cc242224ec432e75621f15f57d93d14af12"],
-  [13, "entitlement_capability_authority", "305b085de2d8185494198dfb1093bc5f029699c0bbfed42e84f65b1ac8416b0c"],
+  [13, "entitlement_capability_authority", "b2bf71c90115f32ee7c2f8ac270fcc598b6cdae9a27168c64beaa3f681ba181d"],
 ] as const;
 
 const schemaManifests = new Map<number, SchemaManifest>(schemaManifestEntries.map(([version, name, checksum]) => [
@@ -857,7 +857,7 @@ const schema13Routines = [
   ["f", "enforce_profile_snapshot_pointer_cas", "", "trigger", false, ["search_path=pg_catalog, public"], "64e7899ab83b4c3353b1c38ff4275649"],
   ["f", "enforce_tenant_pack_release_history_immutability", "", "trigger", false, ["search_path=pg_catalog, public"], "a016b5b5630e476cba8db8927a1fabf0"],
   ["f", "set_entitlement_snapshot_creation_metadata", "", "trigger", false, ["search_path=pg_catalog, public"], "768adafb7334f3d6d2b435c41452314c"],
-  ["f", "serialize_profile_entitlement_authority_mutation", "", "trigger", false, ["search_path=pg_catalog, public"], "7872ee19676e5bd4d91b6638f7b2da2a"],
+  ["f", "serialize_profile_entitlement_authority_mutation", "", "trigger", false, ["search_path=pg_catalog, public"], "c3532de0f1cbd8689d121d2ce753cf1d"],
   ["f", "validate_entitlement_snapshot_aggregate", "", "trigger", false, ["search_path=pg_catalog, public"], "4a633eea7d8e69e3f02baef8c5e1977e"],
 ] as const;
 

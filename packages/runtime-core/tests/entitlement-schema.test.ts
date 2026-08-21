@@ -1920,6 +1920,206 @@ test("review round 5 authority mutation cannot cross pointer validation and writ
   }
 });
 
+test("review round 6 every Assignment UPDATE locks its parent Entitlement before Profile", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await seedCatalogAndEntitlement("tenant_assignment_parent_lock");
+  await seedAvailableAssignment("tenant_assignment_parent_lock");
+
+  const entitlementClient = await pool.connect();
+  const assignmentClient = await pool.connect();
+  try {
+    await entitlementClient.query("begin");
+    await assignmentClient.query("begin");
+    await assignmentClient.query("select set_config('application_name', 'entitlement_assignment_parent_lock', false)");
+    await entitlementClient.query(
+      `select 1 from entitlements
+       where tenant_id = 'tenant_assignment_parent_lock' and entitlement_id = 'entitlement_read'
+       for update`,
+    );
+    const assignmentUpdate = assignmentClient.query(
+      `update entitlement_assignments
+       set updated_at = clock_timestamp(), resource_version = 2
+       where tenant_id = 'tenant_assignment_parent_lock' and assignment_id = 'assignment_read'`,
+    );
+    const waitedOnParent = await waitForDatabaseLock("entitlement_assignment_parent_lock");
+    await entitlementClient.query("commit");
+    const [assignmentResult] = await Promise.allSettled([assignmentUpdate]);
+    if (assignmentResult!.status === "fulfilled") await assignmentClient.query("commit");
+    else await assignmentClient.query("rollback");
+    assert.equal(waitedOnParent, true);
+    assert.equal(assignmentResult!.status, "fulfilled");
+  } finally {
+    await entitlementClient.query("rollback").catch(() => undefined);
+    await assignmentClient.query("rollback").catch(() => undefined);
+    entitlementClient.release();
+    assignmentClient.release();
+  }
+});
+
+test("review round 6 Entitlement-first and Assignment UPDATE complete without a lock-order deadlock", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await seedCatalogAndEntitlement("tenant_entitlement_first");
+  await seedAvailableAssignment("tenant_entitlement_first");
+
+  const entitlementClient = await pool.connect();
+  const assignmentClient = await pool.connect();
+  try {
+    await entitlementClient.query("begin");
+    await assignmentClient.query("begin");
+    await entitlementClient.query("set local deadlock_timeout = '100ms'");
+    await assignmentClient.query("set local deadlock_timeout = '100ms'");
+    await assignmentClient.query("select set_config('application_name', 'entitlement_assignment_deadlock_probe', false)");
+    await entitlementClient.query(
+      `select 1 from entitlements
+       where tenant_id = 'tenant_entitlement_first' and entitlement_id = 'entitlement_read'
+       for update`,
+    );
+    const assignmentUpdate = assignmentClient.query(
+      `update entitlement_assignments
+       set status = 'available', resource_version = 2
+       where tenant_id = 'tenant_entitlement_first' and assignment_id = 'assignment_read'`,
+    ).then(
+      (value) => ({ status: "fulfilled", value } as const),
+      (reason: unknown) => ({ status: "rejected", reason } as const),
+    );
+    assert.equal(await waitForDatabaseLock("entitlement_assignment_deadlock_probe"), true);
+    const [entitlementUpdateResult] = await Promise.allSettled([
+      entitlementClient.query(
+        `update entitlements
+         set updated_at = clock_timestamp(), resource_version = 2
+         where tenant_id = 'tenant_entitlement_first' and entitlement_id = 'entitlement_read'`,
+      ),
+    ]);
+    if (entitlementUpdateResult!.status === "fulfilled") await entitlementClient.query("commit");
+    else await entitlementClient.query("rollback");
+    const assignmentUpdateResult = await assignmentUpdate;
+    if (assignmentUpdateResult!.status === "fulfilled") await assignmentClient.query("commit");
+    else await assignmentClient.query("rollback");
+    assert.equal(entitlementUpdateResult!.status, "fulfilled");
+    assert.equal(assignmentUpdateResult!.status, "fulfilled");
+    assert.deepEqual(
+      (await pool.query(
+        `select entitlement.resource_version::text as entitlement_version,
+                assignment.resource_version::text as assignment_version
+         from entitlements as entitlement
+         join entitlement_assignments as assignment
+           on assignment.tenant_id = entitlement.tenant_id
+          and assignment.entitlement_id = entitlement.entitlement_id
+         where entitlement.tenant_id = 'tenant_entitlement_first'`,
+      )).rows,
+      [{ entitlement_version: "2", assignment_version: "2" }],
+    );
+  } finally {
+    await entitlementClient.query("rollback").catch(() => undefined);
+    await assignmentClient.query("rollback").catch(() => undefined);
+    entitlementClient.release();
+    assignmentClient.release();
+  }
+});
+
+test("review round 6 Assignment-first and Entitlement UPDATE serialize without deadlock", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await seedCatalogAndEntitlement("tenant_assignment_first");
+  await seedAvailableAssignment("tenant_assignment_first");
+
+  const assignmentClient = await pool.connect();
+  const entitlementClient = await pool.connect();
+  try {
+    await assignmentClient.query("begin");
+    await entitlementClient.query("begin");
+    await entitlementClient.query("select set_config('application_name', 'entitlement_update_after_assignment', false)");
+    await assignmentClient.query(
+      `update entitlement_assignments
+       set status = 'available', resource_version = 2
+       where tenant_id = 'tenant_assignment_first' and assignment_id = 'assignment_read'`,
+    );
+    const entitlementUpdate = entitlementClient.query(
+      `update entitlements
+       set updated_at = clock_timestamp(), resource_version = 2
+       where tenant_id = 'tenant_assignment_first' and entitlement_id = 'entitlement_read'`,
+    );
+    assert.equal(await waitForDatabaseLock("entitlement_update_after_assignment"), true);
+    await assignmentClient.query("commit");
+    const [entitlementResult] = await Promise.allSettled([entitlementUpdate]);
+    if (entitlementResult!.status === "fulfilled") await entitlementClient.query("commit");
+    else await entitlementClient.query("rollback");
+    assert.equal(entitlementResult!.status, "fulfilled");
+    assert.deepEqual(
+      (await pool.query(
+        `select entitlement.resource_version::text as entitlement_version,
+                assignment.resource_version::text as assignment_version
+         from entitlements as entitlement
+         join entitlement_assignments as assignment
+           on assignment.tenant_id = entitlement.tenant_id
+          and assignment.entitlement_id = entitlement.entitlement_id
+         where entitlement.tenant_id = 'tenant_assignment_first'`,
+      )).rows,
+      [{ entitlement_version: "2", assignment_version: "2" }],
+    );
+  } finally {
+    await assignmentClient.query("rollback").catch(() => undefined);
+    await entitlementClient.query("rollback").catch(() => undefined);
+    assignmentClient.release();
+    entitlementClient.release();
+  }
+});
+
+test("review round 6 CAS-first orders a later Entitlement mutation after the pointer write", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await seedCatalogAndEntitlement("tenant_pointer_cas_first");
+  await seedAvailableAssignment("tenant_pointer_cas_first");
+  await withTransaction((client) => insertSnapshotAggregate(client, {
+    snapshotId: "snapshot_pointer_cas_first",
+    tenantId: "tenant_pointer_cas_first",
+    profileId: "profile_tenant_pointer_cas_first",
+    sourceEntitlementIds: ["entitlement_read"],
+    sourceAssignmentIds: ["assignment_read"],
+    sourceReleaseIds: ["release_read"],
+    capabilities: [{
+      capability_id: "capability_read",
+      capability_version_id: "capability_version_read",
+      version: "1.0.0",
+    }],
+  }));
+
+  const pointerClient = await pool.connect();
+  const mutationClient = await pool.connect();
+  try {
+    await pointerClient.query("begin");
+    await mutationClient.query("begin");
+    await mutationClient.query("select set_config('application_name', 'entitlement_mutation_after_pointer', false)");
+    await pointerClient.query(
+      "select * from advance_profile_snapshot_pointer($1, $2, 0, $3)",
+      ["tenant_pointer_cas_first", "profile_tenant_pointer_cas_first", "snapshot_pointer_cas_first"],
+    );
+    const mutation = mutationClient.query(
+      `update entitlements
+       set status = 'revoked', reason_code = 'platform_revoked', resource_version = 2
+       where tenant_id = 'tenant_pointer_cas_first' and entitlement_id = 'entitlement_read'`,
+    );
+    assert.equal(await waitForDatabaseLock("entitlement_mutation_after_pointer"), true);
+    await pointerClient.query("commit");
+    const [mutationResult] = await Promise.allSettled([mutation]);
+    if (mutationResult!.status === "fulfilled") await mutationClient.query("commit");
+    else await mutationClient.query("rollback");
+    assert.equal(mutationResult!.status, "fulfilled");
+    assert.deepEqual(
+      (await pool.query(
+        `select pointer.resource_version::text as pointer_version, entitlement.status
+         from profile_snapshot_pointers as pointer
+         join entitlements as entitlement on entitlement.tenant_id = pointer.tenant_id
+         where pointer.tenant_id = 'tenant_pointer_cas_first'`,
+      )).rows,
+      [{ pointer_version: "1", status: "revoked" }],
+    );
+  } finally {
+    await pointerClient.query("rollback").catch(() => undefined);
+    await mutationClient.query("rollback").catch(() => undefined);
+    pointerClient.release();
+    mutationClient.release();
+  }
+});
+
 test("review round 4 historical current releases resolve retired authority but never blocked authority", async () => {
   await applyMigrations(pool, migrationsDirectory);
   await seedCatalogAndEntitlement("tenant_retired_current");
