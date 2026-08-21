@@ -378,9 +378,7 @@ test("registerB2c creates only the personal identity graph and replays byte-equi
   assert.equal(await tableCount("worker_jobs"), 0);
   assert.equal(await tableCount("core_sessions"), 0);
   assert.equal(await tableCount("platform_role_assignments"), 0);
-  assert.equal((await administratorPool.query<{ relation: string | null }>(
-    "select to_regclass('public.entitlements')::text as relation",
-  )).rows[0]?.relation, null);
+  assert.equal(await tableCount("entitlements"), 0, "B2C registration must not grant Entitlements");
   assert.equal(await tableCount("product_events"), 1);
   assert.equal(await tableCount("audit_events"), 1);
   assert.equal(await tableCount("outbox"), 1);

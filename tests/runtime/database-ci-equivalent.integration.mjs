@@ -161,6 +161,8 @@ async function runCiEquivalentScenario({ injectedFailure = false, injectedOutput
       expectedCounts.identityGatewayPostgres.testCount,
       expectedCounts.controlPlaneApiPostgres.testCount,
     ]);
+    assert.match(postgresOutput, /schema 13 migrates both empty and schema-12 databases without changing identity history/u);
+    assert.match(postgresOutput, /direct SQL assignment concurrency cannot oversubscribe a one-seat Entitlement/u);
     assert.match(postgresOutput, /schema 10 grants only the documented Identity Task 3-9 table-operation matrix/u);
     assert.match(postgresOutput, /real Identity login commits and atomically rolls back the Task 3 cross-table graph/u);
     assert.match(postgresOutput, /only a real platform_super_admin creates a B2B Tenant/u);
