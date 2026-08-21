@@ -138,3 +138,25 @@
   integration, count, marker, secret, and cleanup-equivalent gates were run
   directly without Docker.
 - Report: `.superpowers/sdd/task-2-report.md`.
+
+## Entitlement and Capability Registry v1 — Task 3 Catalog Review/Publication
+
+- Status: COMPLETE.
+- Branch: `feat/entitlement-capability-catalog-v1`.
+- Base: `ce3f002706d0d34f7039fea47ad70d9b3219848b`.
+- Implementation head before this progress record: `10055156373f`.
+- Result: immutable Capability/Pack draft, review, publish, retire, and block
+  services; stable idempotency/error mapping; platform audit; validated
+  ProductEvent/Transactional Outbox; affected-release recomputation; hostile
+  input budgets; and deterministic multi-Actor catalog lock ordering.
+- Approved amendments: immutable Contracts 0.8.0 adds nine closed catalog
+  lifecycle events; forward migration 014 aligns PostgreSQL immutable-artifact
+  admission with the released Contracts grammar. Historical Contracts 0.2.0–0.7.0
+  releases and migrations 001–013 remain unchanged.
+- Verification: Contracts 234/234 with 107 valid/11 invalid fixtures; Runtime Core
+  90/90; root unit 806/806; fresh native PostgreSQL 17 catalog/security 24/24;
+  protected SCRAM migration and entitlement schema 169/169; compatibility history,
+  historical immutability, secret, and diff checks PASS.
+- Reviews: task review and cumulative whole-branch review approved with zero
+  Critical, Important, or Minor findings; final assessment is Ready to merge.
+- Report: `.superpowers/sdd/task-3-report.md`.
