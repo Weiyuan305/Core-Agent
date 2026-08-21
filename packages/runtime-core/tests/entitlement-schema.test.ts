@@ -154,7 +154,8 @@ async function seedCatalogAndEntitlement(
      )`,
     [now],
   );
-  await pool.query("update pack_versions set status = 'published', resource_version = 2, updated_at = $1 where pack_version_id = 'pack_version_read'", [now]);
+  await pool.query("update pack_versions set status = 'reviewed', resource_version = 2, updated_at = $1 where pack_version_id = 'pack_version_read'", [now]);
+  await pool.query("update pack_versions set status = 'published', resource_version = 3, updated_at = $1 where pack_version_id = 'pack_version_read'", [now]);
   await pool.query(
     `insert into tenant_pack_releases (
        tenant_pack_release_id, tenant_id, pack_product_id, pack_version_id, pack_version,
@@ -298,6 +299,7 @@ test("every schema 13 foreign key has a valid source-column prefix index", async
 
 test("schema 13 authority ACLs are private and grant only reviewed service operations", async () => {
   await applyMigrations(pool, migrationsDirectory);
+  assert.equal((await pool.query<{ allowed: boolean }>("select has_schema_privilege('core_agent_app', 'public', 'usage') as allowed")).rows[0]?.allowed, true);
   const privileges = await pool.query<{ grantee: string; privilege_type: string; table_name: string }>(
     `select grantee, table_name, privilege_type
      from information_schema.role_table_grants
@@ -310,6 +312,8 @@ test("schema 13 authority ACLs are private and grant only reviewed service opera
   assert.equal(privileges.rows.some((row) => row.grantee === "core_agent_app" && row.table_name === "platform_authority_audit"), false);
   assert.equal(privileges.rows.some((row) => row.grantee === "core_agent_identity" && row.table_name === "platform_authority_audit" && row.privilege_type === "INSERT"), true);
   assert.equal(privileges.rows.some((row) => row.grantee === "core_agent_identity" && row.table_name === "profile_snapshot_pointers" && row.privilege_type === "UPDATE"), false);
+  assert.equal(privileges.rows.some((row) => row.grantee === "core_agent_app" && row.table_name === "tenant_pack_releases" && row.privilege_type === "UPDATE"), true);
+  assert.equal(privileges.rows.some((row) => row.grantee === "core_agent_app" && row.table_name === "entitlements" && row.privilege_type !== "SELECT"), false);
 
   const functionPrivileges = await pool.query<{ grantee: string; privilege_type: string }>(
     `select grantee, privilege_type from information_schema.routine_privileges
@@ -317,34 +321,39 @@ test("schema 13 authority ACLs are private and grant only reviewed service opera
        and grantee in ('PUBLIC', 'core_agent_app', 'core_agent_identity')
      order by grantee`,
   );
-  assert.deepEqual(functionPrivileges.rows, [{ grantee: "core_agent_identity", privilege_type: "EXECUTE" }]);
+  assert.deepEqual(functionPrivileges.rows, [
+    { grantee: "core_agent_app", privilege_type: "EXECUTE" },
+    { grantee: "core_agent_identity", privilege_type: "EXECUTE" },
+  ]);
 });
 
 test("catalog, release, and snapshot history is fail-closed immutable", async () => {
   await applyMigrations(pool, migrationsDirectory);
   await seedCatalogAndEntitlement("tenant_immutable");
   const now = new Date("2026-08-21T00:00:00.000Z");
-  await pool.query(
-    `insert into entitlement_snapshots (
-       snapshot_id, tenant_id, profile_id, snapshot_version, canonical_input_hash, resource_version
-     ) values ('snapshot_immutable', 'tenant_immutable', 'profile_tenant_immutable', 1, $1, 1)`,
-    [`sha256:${"b".repeat(64)}`],
-  );
-  await pool.query(
-    `insert into entitlement_snapshot_sources (
-       tenant_id, profile_id, snapshot_id, source_kind, source_id, source_order, created_at
-     ) values ('tenant_immutable', 'profile_tenant_immutable', 'snapshot_immutable', 'entitlement', 'entitlement_read', 1, $1)`,
-    [now],
-  );
-  await pool.query(
-    `insert into entitlement_snapshot_capabilities (
-       tenant_id, profile_id, snapshot_id, capability_id, capability_version_id, version, capability_order, created_at
-     ) values (
-       'tenant_immutable', 'profile_tenant_immutable', 'snapshot_immutable',
-       'capability_read', 'capability_version_read', '1.0.0', 1, $1
-     )`,
-    [now],
-  );
+  await withTransaction(async (client) => {
+    await client.query(
+      `insert into entitlement_snapshots (
+         snapshot_id, tenant_id, profile_id, snapshot_version, canonical_input_hash, resource_version
+       ) values ('snapshot_immutable', 'tenant_immutable', 'profile_tenant_immutable', 1, $1, 1)`,
+      [`sha256:${"b".repeat(64)}`],
+    );
+    await client.query(
+      `insert into entitlement_snapshot_sources (
+         tenant_id, profile_id, snapshot_id, source_kind, source_id, source_order, created_at
+       ) values ('tenant_immutable', 'profile_tenant_immutable', 'snapshot_immutable', 'entitlement', 'entitlement_read', 1, $1)`,
+      [now],
+    );
+    await client.query(
+      `insert into entitlement_snapshot_capabilities (
+         tenant_id, profile_id, snapshot_id, capability_id, capability_version_id, version, capability_order, created_at
+       ) values (
+         'tenant_immutable', 'profile_tenant_immutable', 'snapshot_immutable',
+         'capability_read', 'capability_version_read', '1.0.0', 1, $1
+       )`,
+      [now],
+    );
+  });
 
   const mutations: readonly [string, string][] = [
     ["update capability_versions set artifact_ref = 'manifest:sha256:" + "c".repeat(64) + "' where capability_version_id = 'capability_version_read'", "capability_versions_reviewed_immutable_check"],
@@ -362,6 +371,258 @@ test("catalog, release, and snapshot history is fail-closed immutable", async ()
   }
 });
 
+test("catalog admission enforces Contracts 0.7 exact refs and publishable canonical members", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await seedCatalogAndEntitlement("tenant_catalog_admission");
+  const invalidVersions = ["1.0", "01.0.0", "1.0.0-01", "1.0.0+build", "latest", "^1.0.0"];
+  for (const [index, version] of invalidVersions.entries()) {
+    await assert.rejects(
+      pool.query(
+        `insert into capability_versions (
+           capability_version_id, capability_id, version, kind, artifact_ref, contract_ref,
+           risk_class, approval_requirement, compatibility_json, status, resource_version, created_at, updated_at
+         ) values ($1, 'capability_read', $2, 'mcp', $3, 'synthetic/read@1.0.0', 'read', 'none', '{"core_contract_version":"0.7.0","domain_contract_version":"1.0.0","runtime_protocol_version":"1.0.0","tenant_modes":["b2b","b2c"]}'::jsonb, 'draft', 1, now(), now())`,
+        [`invalid_version_${index}`, version, `manifest:sha256:${"c".repeat(64)}`],
+      ),
+      (error) => constraintName(error) === "capability_versions_canonical_version_check",
+    );
+  }
+  for (const [index, artifactRef] of [
+    "oci:registry.example/synthetic/read:latest",
+    "npm:@synthetic/read@^1.0.0#sha512-not-exact",
+    `npm:mutable#sha512-${Buffer.alloc(64, 0x61).toString("base64")}`,
+    "https://registry.example/synthetic/read.tgz",
+    "manifest:sha256:ABCDEF",
+  ].entries()) {
+    await assert.rejects(
+      pool.query(
+        `insert into capability_versions (
+           capability_version_id, capability_id, version, kind, artifact_ref, contract_ref,
+           risk_class, approval_requirement, compatibility_json, status, resource_version, created_at, updated_at
+         ) values ($1, 'capability_read', $2, 'mcp', $3, 'synthetic/read@1.0.0', 'read', 'none', '{"core_contract_version":"0.7.0","domain_contract_version":"1.0.0","runtime_protocol_version":"1.0.0","tenant_modes":["b2b","b2c"]}'::jsonb, 'draft', 1, now(), now())`,
+        [`invalid_artifact_${index}`, `2.0.${index}`, artifactRef],
+      ),
+      (error) => constraintName(error) === "capability_versions_immutable_artifact_ref_check",
+    );
+  }
+  for (const [index, contractRef] of [
+    "synthetic/read@latest",
+    "synthetic/read@^1.0.0",
+    "synthetic/read@mutable@1.0.0",
+    "synthetic/read@\nmutable@1.0.0",
+    "HTTPS://contracts.example/read@1.0.0",
+  ].entries()) {
+    await assert.rejects(
+      pool.query(
+        `insert into capability_versions (
+           capability_version_id, capability_id, version, kind, artifact_ref, contract_ref,
+           risk_class, approval_requirement, compatibility_json, status, resource_version, created_at, updated_at
+         ) values ($1, 'capability_read', $2, 'mcp', $3, $4, 'read', 'none', '{"core_contract_version":"0.7.0","domain_contract_version":"1.0.0","runtime_protocol_version":"1.0.0","tenant_modes":["b2b","b2c"]}'::jsonb, 'draft', 1, now(), now())`,
+        [`invalid_contract_${index}`, `3.0.${index}`, `manifest:sha256:${"d".repeat(64)}`, contractRef],
+      ),
+      (error) => constraintName(error) === "capability_versions_exact_contract_ref_check",
+    );
+  }
+  await assert.rejects(
+    pool.query(
+      `insert into capability_versions (
+         capability_version_id, capability_id, version, kind, artifact_ref, contract_ref,
+         risk_class, approval_requirement, compatibility_json, status, resource_version, created_at, updated_at
+       ) values (
+         'invalid_compatibility_semver', 'capability_read', '3.1.0', 'mcp', $1,
+         'synthetic/read@3.1.0', 'read', 'none', $2::jsonb, 'draft', 1, now(), now()
+       )`,
+      [
+        `manifest:sha256:${"d".repeat(64)}`,
+        JSON.stringify({
+          core_contract_version: `1.0.0-${"a".repeat(123)}`,
+          domain_contract_version: "1.0.0",
+          runtime_protocol_version: "1.0.0",
+          tenant_modes: ["b2b", "b2c"],
+        }),
+      ],
+    ),
+    (error) => constraintName(error) === "capability_versions_compatibility_object_check",
+  );
+
+  await pool.query(
+    `insert into pack_versions (pack_version_id, pack_product_id, version, status, resource_version, created_at, updated_at)
+     values ('pack_empty', 'pack_product_read', '2.0.0', 'draft', 1, now(), now())`,
+  );
+  await pool.query("update pack_versions set status = 'reviewed' where pack_version_id = 'pack_empty'");
+  await assert.rejects(
+    pool.query("update pack_versions set status = 'published' where pack_version_id = 'pack_empty'"),
+    (error) => constraintName(error) === "pack_versions_publishable_members_check",
+  );
+
+  await pool.query(
+    `insert into capability_versions (
+       capability_version_id, capability_id, version, kind, artifact_ref, contract_ref,
+       risk_class, approval_requirement, compatibility_json, status, resource_version, created_at, updated_at
+     ) values
+       ('capability_version_draft', 'capability_read', '4.0.0', 'mcp', $1, 'synthetic/read@4.0.0', 'read', 'none', '{"core_contract_version":"0.7.0","domain_contract_version":"1.0.0","runtime_protocol_version":"1.0.0","tenant_modes":["b2b","b2c"]}'::jsonb, 'draft', 1, now(), now()),
+       ('capability_version_risky', 'capability_read', '5.0.0', 'mcp', $2, 'synthetic/read@5.0.0', 'external_write', 'human_approval', '{"core_contract_version":"0.7.0","domain_contract_version":"1.0.0","runtime_protocol_version":"1.0.0","tenant_modes":["b2b","b2c"]}'::jsonb, 'reviewed', 1, now(), now()),
+       ('capability_version_blocked', 'capability_read', '5.1.0', 'mcp', $3, 'synthetic/read@5.1.0', 'read', 'none', '{"core_contract_version":"0.7.0","domain_contract_version":"1.0.0","runtime_protocol_version":"1.0.0","tenant_modes":["b2b","b2c"]}'::jsonb, 'blocked', 1, now(), now())`,
+    [
+      `manifest:sha256:${"e".repeat(64)}`,
+      `manifest:sha256:${"f".repeat(64)}`,
+      `manifest:sha256:${"a".repeat(64)}`,
+    ],
+  );
+  for (const [packId, packVersion, memberId, capabilityVersionId] of [
+    ["pack_unsorted", "3.0.0", "member_unsorted", "capability_version_read"],
+    ["pack_draft_member", "4.0.0", "member_draft", "capability_version_draft"],
+    ["pack_risky_member", "5.0.0", "member_risky", "capability_version_risky"],
+    ["pack_blocked_member", "5.1.0", "member_blocked", "capability_version_blocked"],
+  ] as const) {
+    await pool.query(
+      `insert into pack_versions (pack_version_id, pack_product_id, version, status, resource_version, created_at, updated_at)
+       values ($1, 'pack_product_read', $2, 'draft', 1, now(), now())`,
+      [packId, packVersion],
+    );
+    await pool.query(
+      `insert into pack_members (
+         pack_member_id, pack_version_id, member_order, capability_id, capability_version_id, version,
+         resource_version, created_at, updated_at
+       ) select $1, $2, $3, capability_id, capability_version_id, version, 1, now(), now()
+         from capability_versions where capability_version_id = $4`,
+      [memberId, packId, packId === "pack_unsorted" ? 2 : 1, capabilityVersionId],
+    );
+    await pool.query("update pack_versions set status = 'reviewed' where pack_version_id = $1", [packId]);
+    await assert.rejects(
+      pool.query("update pack_versions set status = 'published' where pack_version_id = $1", [packId]),
+      (error) => constraintName(error) === "pack_versions_publishable_members_check",
+    );
+  }
+
+  await pool.query(
+    `insert into pack_versions (pack_version_id, pack_product_id, version, status, resource_version, created_at, updated_at)
+     values ('pack_not_published', 'pack_product_read', '6.0.0', 'reviewed', 1, now(), now())`,
+  );
+  await assert.rejects(
+    pool.query(
+      `insert into tenant_pack_releases (
+         tenant_pack_release_id, tenant_id, pack_product_id, pack_version_id, pack_version,
+         generation, status, resource_version
+       ) values ('release_not_published', 'tenant_catalog_admission', 'pack_product_read', 'pack_not_published', '6.0.0', 2, 'preparing', 1)`,
+    ),
+    (error) => constraintName(error) === "tenant_pack_releases_published_pack_check",
+  );
+});
+
+test("Capability and Pack status transitions cannot downgrade then mutate frozen content", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await seedCatalogAndEntitlement("tenant_status_transition");
+  await assert.rejects(
+    withTransaction(async (client) => {
+      await client.query("update capability_versions set status = 'draft' where capability_version_id = 'capability_version_read'");
+      await client.query("update capability_versions set artifact_ref = $1 where capability_version_id = 'capability_version_read'", [`manifest:sha256:${"7".repeat(64)}`]);
+    }),
+    (error) => constraintName(error) === "capability_versions_status_transition_check",
+  );
+  await assert.rejects(
+    withTransaction(async (client) => {
+      await client.query("update pack_versions set status = 'reviewed' where pack_version_id = 'pack_version_read'");
+      await client.query("delete from pack_members where pack_member_id = 'pack_member_read'");
+    }),
+    (error) => constraintName(error) === "pack_versions_status_transition_check",
+  );
+});
+
+test("Snapshot children are same-transaction sealed and validate typed same-Tenant release authority", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await seedCatalogAndEntitlement("tenant_snapshot_authority");
+  await seedIdentityGraph("tenant_snapshot_other");
+  await withTransaction(async (client) => {
+    await client.query(
+      `insert into entitlement_snapshots (
+         snapshot_id, tenant_id, profile_id, snapshot_version, canonical_input_hash, resource_version
+       ) values ('snapshot_valid', 'tenant_snapshot_authority', 'profile_tenant_snapshot_authority', 1, $1, 1)`,
+      [`sha256:${"1".repeat(64)}`],
+    );
+    await client.query(
+      `insert into entitlement_snapshot_sources (
+         tenant_id, profile_id, snapshot_id, source_kind, source_id, source_order
+       ) values ('tenant_snapshot_authority', 'profile_tenant_snapshot_authority', 'snapshot_valid', 'release', 'release_read', 1)`,
+    );
+    await client.query(
+      `insert into entitlement_snapshot_capabilities (
+         tenant_id, profile_id, snapshot_id, capability_id, capability_version_id, version, capability_order
+       ) values (
+         'tenant_snapshot_authority', 'profile_tenant_snapshot_authority', 'snapshot_valid',
+         'capability_read', 'capability_version_read', '1.0.0', 1
+       )`,
+    );
+  });
+  await assert.rejects(
+    pool.query(
+      `insert into entitlement_snapshot_sources (
+         tenant_id, profile_id, snapshot_id, source_kind, source_id, source_order
+       ) values ('tenant_snapshot_authority', 'profile_tenant_snapshot_authority', 'snapshot_valid', 'entitlement', 'entitlement_read', 1)`,
+    ),
+    (error) => constraintName(error) === "entitlement_snapshot_children_creation_transaction_check",
+  );
+  await assert.rejects(
+    withTransaction(async (client) => {
+      await client.query(
+        `insert into entitlement_snapshots (
+           snapshot_id, tenant_id, profile_id, snapshot_version, canonical_input_hash, resource_version
+         ) values ('snapshot_cross_tenant', 'tenant_snapshot_other', 'profile_tenant_snapshot_other', 1, $1, 1)`,
+        [`sha256:${"2".repeat(64)}`],
+      );
+      await client.query(
+        `insert into entitlement_snapshot_sources (
+           tenant_id, profile_id, snapshot_id, source_kind, source_id, source_order
+         ) values ('tenant_snapshot_other', 'profile_tenant_snapshot_other', 'snapshot_cross_tenant', 'release', 'release_read', 1)`,
+      );
+    }),
+    (error) => constraintName(error) === "entitlement_snapshots_source_authority_check",
+  );
+});
+
+test("Snapshot capabilities must be reviewed first-release-safe Pack members reachable from a source release", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await seedCatalogAndEntitlement("tenant_snapshot_capability");
+  await pool.query(
+    `insert into capabilities (capability_id, display_name, owning_domain, kind, resource_version, created_at, updated_at)
+     values ('capability_unreachable', 'Unreachable', 'synthetic', 'skill', 1, now(), now())`,
+  );
+  await pool.query(
+    `insert into capability_versions (
+       capability_version_id, capability_id, version, kind, artifact_ref, contract_ref,
+       risk_class, approval_requirement, compatibility_json, status, resource_version, created_at, updated_at
+     ) values (
+       'capability_version_unreachable', 'capability_unreachable', '1.0.0', 'skill', $1,
+       'synthetic/unreachable@1.0.0', 'read', 'none', '{"core_contract_version":"0.7.0","domain_contract_version":"1.0.0","runtime_protocol_version":"1.0.0","tenant_modes":["b2b","b2c"]}'::jsonb, 'reviewed', 1, now(), now()
+     )`,
+    [`manifest:sha256:${"8".repeat(64)}`],
+  );
+  await assert.rejects(
+    withTransaction(async (client) => {
+      await client.query(
+        `insert into entitlement_snapshots (
+           snapshot_id, tenant_id, profile_id, snapshot_version, canonical_input_hash, resource_version
+         ) values ('snapshot_unreachable', 'tenant_snapshot_capability', 'profile_tenant_snapshot_capability', 1, $1, 1)`,
+        [`sha256:${"3".repeat(64)}`],
+      );
+      await client.query(
+        `insert into entitlement_snapshot_sources (
+           tenant_id, profile_id, snapshot_id, source_kind, source_id, source_order
+         ) values ('tenant_snapshot_capability', 'profile_tenant_snapshot_capability', 'snapshot_unreachable', 'release', 'release_read', 1)`,
+      );
+      await client.query(
+        `insert into entitlement_snapshot_capabilities (
+           tenant_id, profile_id, snapshot_id, capability_id, capability_version_id, version, capability_order
+         ) values (
+           'tenant_snapshot_capability', 'profile_tenant_snapshot_capability', 'snapshot_unreachable',
+           'capability_unreachable', 'capability_version_unreachable', '1.0.0', 1
+         )`,
+      );
+    }),
+    (error) => constraintName(error) === "entitlement_snapshots_capability_authority_check",
+  );
+});
+
 test("tenant scoped foreign keys, order identity, assignment mode, and database-time validity fail closed", async () => {
   await applyMigrations(pool, migrationsDirectory);
   await seedCatalogAndEntitlement("tenant_authority", { seats: 2 });
@@ -374,8 +635,8 @@ test("tenant scoped foreign keys, order identity, assignment mode, and database-
          risk_class, approval_requirement, compatibility_json, status, resource_version, created_at, updated_at
        ) values (
          'capability_version_wrong_kind', 'capability_read', '2.0.0', 'skill',
-         'registry.example/capability-read@sha256:wrong-kind', 'contracts://capability-read/2.0.0',
-         'read', 'none', '{}'::jsonb, 'reviewed', 1, clock_timestamp(), clock_timestamp()
+         'manifest:sha256:${"9".repeat(64)}', 'synthetic/read@2.0.0',
+         'read', 'none', '{"core_contract_version":"0.7.0","domain_contract_version":"1.0.0","runtime_protocol_version":"1.0.0","tenant_modes":["b2b","b2c"]}'::jsonb, 'reviewed', 1, clock_timestamp(), clock_timestamp()
        )`,
     ),
     (error) => constraintName(error) === "capability_versions_kind_matches_capability_check",
@@ -471,6 +732,154 @@ test("direct SQL assignment concurrency cannot oversubscribe a one-seat Entitlem
   );
 });
 
+test("Entitlement seat reductions serialize with preparing and available Assignment consumption", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await seedCatalogAndEntitlement("tenant_seat_reduction", { seats: 2 });
+  const now = new Date("2026-08-21T00:00:00.000Z");
+  await pool.query(
+    `insert into profiles (
+       tenant_id, profile_id, schema_version, resource_version, owner_actor_id, profile_kind,
+       hermes_profile_ref, description, status, provider_config_id, model_id, created_at, updated_at
+     ) values
+       ('tenant_seat_reduction', 'profile_reduction_a', 1, 1, 'actor_tenant_seat_reduction', 'consultant', 'profile_reduction_a', 'A', 'active', 'provider', 'model', $1, $1),
+       ('tenant_seat_reduction', 'profile_reduction_b', 1, 1, 'actor_tenant_seat_reduction', 'consultant', 'profile_reduction_b', 'B', 'active', 'provider', 'model', $1, $1)`,
+    [now],
+  );
+  await pool.query(
+    `insert into entitlement_assignments (
+       assignment_id, tenant_id, entitlement_id, profile_id, status, reason_code, resource_version
+     ) values ('assignment_reduction_a', 'tenant_seat_reduction', 'entitlement_read', 'profile_reduction_a', 'available', 'seat_assigned', 1)`,
+  );
+  const results = await Promise.allSettled([
+    withTransaction(async (client) => client.query(
+      `insert into entitlement_assignments (
+         assignment_id, tenant_id, entitlement_id, profile_id, status, reason_code, resource_version
+       ) values ('assignment_reduction_b', 'tenant_seat_reduction', 'entitlement_read', 'profile_reduction_b', 'preparing', 'seat_assigned', 1)`,
+    )),
+    withTransaction(async (client) => client.query(
+      "update entitlements set seat_quantity = 1 where tenant_id = 'tenant_seat_reduction' and entitlement_id = 'entitlement_read'",
+    )),
+  ]);
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+  const rejected = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+  assert.ok([
+    "entitlement_assignments_seat_capacity_check",
+    "entitlements_consumed_seat_capacity_check",
+  ].includes(constraintName(rejected?.reason) ?? ""));
+  const authority = await pool.query<{ seats: number; assignments: number }>(
+    `select entitlement.seat_quantity as seats, count(assignment.assignment_id)::int as assignments
+     from entitlements entitlement
+     left join entitlement_assignments assignment
+       on assignment.tenant_id = entitlement.tenant_id
+      and assignment.entitlement_id = entitlement.entitlement_id
+      and assignment.status in ('preparing', 'available')
+     where entitlement.tenant_id = 'tenant_seat_reduction' and entitlement.entitlement_id = 'entitlement_read'
+     group by entitlement.seat_quantity`,
+  );
+  assert.ok(authority.rows[0]!.seats >= authority.rows[0]!.assignments);
+});
+
+test("Tenant releases enforce irreversible rollout generations", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await seedCatalogAndEntitlement("tenant_release_state");
+  await assert.rejects(
+    pool.query("update tenant_pack_releases set status = 'failed' where tenant_pack_release_id = 'release_read'"),
+    (error) => constraintName(error) === "tenant_pack_releases_status_transition_check",
+  );
+  for (const [releaseId, generation, status] of [
+    ["release_failed", 2, "failed"],
+    ["release_superseded", 3, "superseded"],
+  ] as const) {
+    await pool.query(
+      `insert into tenant_pack_releases (
+         tenant_pack_release_id, tenant_id, pack_product_id, pack_version_id, pack_version,
+         generation, status, resource_version
+       ) values ($1, 'tenant_release_state', 'pack_product_read', 'pack_version_read', '1.0.0', $2, $3, 1)`,
+      [releaseId, generation, status],
+    );
+    await assert.rejects(
+      pool.query("update tenant_pack_releases set status = 'current' where tenant_pack_release_id = $1", [releaseId]),
+      (error) => constraintName(error) === "tenant_pack_releases_status_transition_check",
+    );
+  }
+});
+
+test("core_agent_app can perform only Task 8 release transition and pointer CAS authority", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await seedCatalogAndEntitlement("tenant_app_worker");
+  await pool.query(
+    `insert into entitlement_snapshots (
+       snapshot_id, tenant_id, profile_id, snapshot_version, canonical_input_hash, resource_version
+     ) values ('snapshot_app_worker', 'tenant_app_worker', 'profile_tenant_app_worker', 1, $1, 1)`,
+    [`sha256:${"a".repeat(64)}`],
+  );
+  await withTransaction(async (client) => {
+    await client.query("set local role core_agent_app");
+    await client.query(
+      "update tenant_pack_releases set status = 'superseded' where tenant_pack_release_id = 'release_read'",
+    );
+    const result = await client.query<{ resource_version: string }>(
+      "select resource_version::text from advance_profile_snapshot_pointer($1, $2, 0, $3)",
+      ["tenant_app_worker", "profile_tenant_app_worker", "snapshot_app_worker"],
+    );
+    assert.equal(result.rows[0]?.resource_version, "1");
+  });
+  await assert.rejects(
+    withTransaction(async (client) => {
+      await client.query("set local role core_agent_app");
+      await client.query("update tenant_pack_releases set status = 'current' where tenant_pack_release_id = 'release_read'");
+    }),
+    (error) => constraintName(error) === "tenant_pack_releases_status_transition_check",
+  );
+  await assert.rejects(
+    withTransaction(async (client) => {
+      await client.query("set local role core_agent_app");
+      await client.query("update entitlements set seat_quantity = 2 where entitlement_id = 'entitlement_read'");
+    }),
+    /permission denied for table entitlements/,
+  );
+});
+
+test("audit actors and projection releases are exact same-Tenant composite authorities", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await seedCatalogAndEntitlement("tenant_composite_authority");
+  await seedIdentityGraph("tenant_composite_other");
+  await assert.rejects(
+    pool.query(
+      `insert into platform_authority_audit (
+         platform_authority_audit_id, authority_tenant_id, actor_id, membership_id, action,
+         decision, outcome, resource_type, resource_id, resource_version, request_id, trace_id, reason_summary
+       ) values (
+         'audit_mismatch', 'tenant_composite_authority', 'actor_tenant_composite_other',
+         'membership_tenant_composite_authority', 'catalog.review', 'allowed', 'succeeded',
+         'capability_version', 'capability_version_read', 1, 'request_audit', 'trace_audit', 'safe'
+       )`,
+    ),
+    (error) => constraintName(error) === "platform_authority_audit_membership_actor_fkey",
+  );
+
+  await withTransaction(async (client) => {
+    await client.query(
+      `insert into entitlement_snapshots (
+         snapshot_id, tenant_id, profile_id, snapshot_version, canonical_input_hash, resource_version
+       ) values ('snapshot_other_projection', 'tenant_composite_other', 'profile_tenant_composite_other', 1, $1, 1)`,
+      [`sha256:${"4".repeat(64)}`],
+    );
+  });
+  await assert.rejects(
+    pool.query(
+      `insert into capability_runtime_projections (
+         projection_id, tenant_id, profile_id, snapshot_id, snapshot_version, evaluated_at,
+         tenant_pack_release_id, runtime_generation, capability_manifest_digest, status, resource_version
+       ) select 'projection_cross_tenant', snapshot.tenant_id, snapshot.profile_id, snapshot.snapshot_id,
+                snapshot.snapshot_version, snapshot.evaluated_at, 'release_read', 1, $1, 'preparing', 1
+         from entitlement_snapshots snapshot where snapshot.snapshot_id = 'snapshot_other_projection'`,
+      [`sha256:${"5".repeat(64)}`],
+    ),
+    (error) => constraintName(error) === "capability_runtime_projections_release_fkey",
+  );
+});
+
 test("current Snapshot pointer advances only through expected-version CAS", async () => {
   await applyMigrations(pool, migrationsDirectory);
   await seedCatalogAndEntitlement("tenant_pointer");
@@ -501,6 +910,34 @@ test("current Snapshot pointer advances only through expected-version CAS", asyn
     ["tenant_pointer", "profile_tenant_pointer", 1, "snapshot_pointer_2"],
   );
   assert.equal(advanced.rows[0]?.resource_version, "2");
+  await assert.rejects(
+    pool.query("select * from advance_profile_snapshot_pointer($1, $2, $3, $4)", ["tenant_pointer", "profile_tenant_pointer", 2, "snapshot_pointer_2"]),
+    (error) => constraintName(error) === "profile_snapshot_pointers_monotonic_snapshot_check",
+  );
+  await assert.rejects(
+    pool.query("select * from advance_profile_snapshot_pointer($1, $2, $3, $4)", ["tenant_pointer", "profile_tenant_pointer", 2, "snapshot_pointer_1"]),
+    (error) => constraintName(error) === "profile_snapshot_pointers_monotonic_snapshot_check",
+  );
+});
+
+test("concurrent absent Snapshot pointer initialization serializes on the canonical Profile", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await seedCatalogAndEntitlement("tenant_pointer_init");
+  for (const [id, version, digest] of [["snapshot_init_1", 1, "6"], ["snapshot_init_2", 2, "7"]] as const) {
+    await pool.query(
+      `insert into entitlement_snapshots (
+         snapshot_id, tenant_id, profile_id, snapshot_version, canonical_input_hash, resource_version
+       ) values ($1, 'tenant_pointer_init', 'profile_tenant_pointer_init', $2, $3, 1)`,
+      [id, version, `sha256:${digest.repeat(64)}`],
+    );
+  }
+  const attempts = await Promise.allSettled([
+    pool.query("select * from advance_profile_snapshot_pointer($1, $2, 0, $3)", ["tenant_pointer_init", "profile_tenant_pointer_init", "snapshot_init_1"]),
+    pool.query("select * from advance_profile_snapshot_pointer($1, $2, 0, $3)", ["tenant_pointer_init", "profile_tenant_pointer_init", "snapshot_init_2"]),
+  ]);
+  assert.equal(attempts.filter((result) => result.status === "fulfilled").length, 1);
+  const rejected = attempts.find((result): result is PromiseRejectedResult => result.status === "rejected");
+  assert.equal(constraintName(rejected?.reason), "profile_snapshot_pointers_expected_version_check");
 });
 
 test("Worker kinds and Runtime manifest digest are exact", async () => {

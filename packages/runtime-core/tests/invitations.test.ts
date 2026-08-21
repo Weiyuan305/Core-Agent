@@ -19,7 +19,7 @@ if (databaseUrl === undefined || !new URL(databaseUrl).pathname.slice(1).startsW
 
 const administratorPool = new Pool({ connectionString: databaseUrl });
 const migrationsDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
-const now = new Date("2026-08-14T05:00:00.000Z");
+const now = new Date("2099-08-14T05:00:00.000Z");
 const emailHmacKey = createHash("sha256").update("task4-invitation-email-hmac-key", "utf8").digest();
 let identityDb: Kysely<RuntimeDatabase>;
 let entropyByte = 0x20;
@@ -195,7 +195,7 @@ test("active company admins invite only within their Tenant and persist digest p
   assert.equal(row.rows[0]?.secret_digest.length, 32);
   assert.deepEqual(row.rows[0]?.secret_digest, createHash("sha256").update(Buffer.alloc(32, 0x20)).digest());
   assert.deepEqual(row.rows[0]?.normalized_email_hmac, createHmac("sha256", emailHmacKey).update("consultant@example.test").digest());
-  assert.equal(row.rows[0]?.expires_at.toISOString(), "2026-08-21T05:00:00.000Z");
+  assert.equal(row.rows[0]?.expires_at.toISOString(), "2099-08-21T05:00:00.000Z");
   assert.equal(JSON.stringify(row.rows).includes("consultant@example.test"), false);
 
   const crossTenant = createPayload({

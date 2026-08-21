@@ -116,7 +116,7 @@ const schemaManifestEntries = [
   [10, "identity_authority", "eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381"],
   [11, "password_reset_transactions", "fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393"],
   [12, "email_verification_transactions", "2e7a7d0b8f910ff5253ace5dff1f0cc242224ec432e75621f15f57d93d14af12"],
-  [13, "entitlement_capability_authority", "d2c770eda7d38d3ee8ce97408a5edb56cfa3648608f8d1c4cd432cf6536579fd"],
+  [13, "entitlement_capability_authority", "e54d8b59ebaa7dfd7496a2314ea314fa78f3f0454a56a83284b1ffd803f25909"],
 ] as const;
 
 const schemaManifests = new Map<number, SchemaManifest>(schemaManifestEntries.map(([version, name, checksum]) => [
@@ -665,17 +665,20 @@ const schema13Constraints: readonly LegacyConstraintShape[] = [
   ["capability_runtime_projections", "capability_runtime_projections_generation_key", "u", true, "UNIQUE (tenant_id, runtime_generation)"],
   ["capability_runtime_projections", "capability_runtime_projections_pkey", "p", true, "PRIMARY KEY (projection_id)"],
   ["capability_runtime_projections", "capability_runtime_projections_reason_code_check", "c", true, "CHECK (reason_code IS NULL OR (reason_code = ANY (ARRAY['runtime_preparation_failed'::text, 'runtime_health_check_failed'::text, 'capability_manifest_mismatch'::text])))"],
-  ["capability_runtime_projections", "capability_runtime_projections_release_fkey", "f", true, "FOREIGN KEY (tenant_pack_release_id) REFERENCES tenant_pack_releases(tenant_pack_release_id)"],
+  ["capability_runtime_projections", "capability_runtime_projections_release_fkey", "f", true, "FOREIGN KEY (tenant_id, tenant_pack_release_id) REFERENCES tenant_pack_releases(tenant_id, tenant_pack_release_id)"],
   ["capability_runtime_projections", "capability_runtime_projections_resource_version_check", "c", true, "CHECK (resource_version > 0)"],
   ["capability_runtime_projections", "capability_runtime_projections_runtime_generation_check", "c", true, "CHECK (runtime_generation > 0)"],
   ["capability_runtime_projections", "capability_runtime_projections_snapshot_fkey", "f", true, "FOREIGN KEY (tenant_id, profile_id, snapshot_id, snapshot_version, evaluated_at) REFERENCES entitlement_snapshots(tenant_id, profile_id, snapshot_id, snapshot_version, evaluated_at)"],
   ["capability_runtime_projections", "capability_runtime_projections_status_check", "c", true, "CHECK (status = ANY (ARRAY['preparing'::text, 'available'::text, 'failed'::text]))"],
   ["capability_runtime_projections", "capability_runtime_projections_status_reason_check", "c", true, "CHECK ((status = ANY (ARRAY['preparing'::text, 'available'::text])) AND reason_code IS NULL OR status = 'failed'::text AND reason_code IS NOT NULL)"],
   ["capability_versions", "capability_versions_approval_requirement_check", "c", true, "CHECK (approval_requirement = ANY (ARRAY['none'::text, 'user_confirmation'::text, 'human_approval'::text]))"],
+  ["capability_versions", "capability_versions_canonical_version_check", "c", true, "CHECK (core_agent_is_canonical_semver(version))"],
   ["capability_versions", "capability_versions_capability_id_fkey", "f", true, "FOREIGN KEY (capability_id) REFERENCES capabilities(capability_id)"],
   ["capability_versions", "capability_versions_capability_id_version_key", "u", true, "UNIQUE (capability_id, version)"],
-  ["capability_versions", "capability_versions_compatibility_object_check", "c", true, "CHECK (jsonb_typeof(compatibility_json) = 'object'::text)"],
+  ["capability_versions", "capability_versions_compatibility_object_check", "c", true, "CHECK (core_agent_is_valid_capability_compatibility(compatibility_json))"],
+  ["capability_versions", "capability_versions_exact_contract_ref_check", "c", true, "CHECK (core_agent_is_exact_contract_ref(contract_ref))"],
   ["capability_versions", "capability_versions_exact_ref_key", "u", true, "UNIQUE (capability_version_id, capability_id, version)"],
+  ["capability_versions", "capability_versions_immutable_artifact_ref_check", "c", true, "CHECK (core_agent_is_immutable_artifact_ref(artifact_ref))"],
   ["capability_versions", "capability_versions_kind_check", "c", true, "CHECK (kind = ANY (ARRAY['mcp'::text, 'skill'::text, 'policy'::text]))"],
   ["capability_versions", "capability_versions_kind_matches_capability_check", "f", true, "FOREIGN KEY (capability_id, kind) REFERENCES capabilities(capability_id, kind)"],
   ["capability_versions", "capability_versions_pkey", "p", true, "PRIMARY KEY (capability_version_id)"],
@@ -692,16 +695,19 @@ const schema13Constraints: readonly LegacyConstraintShape[] = [
   ["entitlement_assignments", "entitlement_assignments_status_check", "c", true, "CHECK (status = ANY (ARRAY['preparing'::text, 'available'::text, 'suspended'::text, 'expired'::text, 'failed'::text, 'revoked'::text]))"],
   ["entitlement_assignments", "entitlement_assignments_status_reason_check", "c", true, "CHECK ((status = ANY (ARRAY['preparing'::text, 'available'::text])) AND reason_code = 'seat_assigned'::text OR status = 'suspended'::text AND (reason_code = ANY (ARRAY['administrator_suspended'::text, 'authority_suspended'::text])) OR status = 'expired'::text AND reason_code = 'validity_expired'::text OR status = 'failed'::text AND reason_code = 'runtime_preparation_failed'::text OR status = 'revoked'::text AND reason_code = 'administrator_revoked'::text)"],
   ["entitlement_snapshot_capabilities", "entitlement_snapshot_capabilities_capability_order_check", "c", true, "CHECK (capability_order > 0)"],
+  ["entitlement_snapshot_capabilities", "entitlement_snapshot_capabilities_aggregate_authority_check", "t", true, "TRIGGER DEFERRABLE INITIALLY DEFERRED"],
   ["entitlement_snapshot_capabilities", "entitlement_snapshot_capabilities_identity_key", "u", true, "UNIQUE (tenant_id, profile_id, snapshot_id, capability_id)"],
   ["entitlement_snapshot_capabilities", "entitlement_snapshot_capabilities_order_key", "u", true, "UNIQUE (tenant_id, profile_id, snapshot_id, capability_order)"],
   ["entitlement_snapshot_capabilities", "entitlement_snapshot_capabilities_snapshot_fkey", "f", true, "FOREIGN KEY (tenant_id, profile_id, snapshot_id) REFERENCES entitlement_snapshots(tenant_id, profile_id, snapshot_id)"],
   ["entitlement_snapshot_capabilities", "entitlement_snapshot_capabilities_version_fkey", "f", true, "FOREIGN KEY (capability_version_id, capability_id, version) REFERENCES capability_versions(capability_version_id, capability_id, version)"],
   ["entitlement_snapshot_sources", "entitlement_snapshot_sources_identity_key", "u", true, "UNIQUE (tenant_id, profile_id, snapshot_id, source_kind, source_id)"],
+  ["entitlement_snapshot_sources", "entitlement_snapshot_sources_aggregate_authority_check", "t", true, "TRIGGER DEFERRABLE INITIALLY DEFERRED"],
   ["entitlement_snapshot_sources", "entitlement_snapshot_sources_order_key", "u", true, "UNIQUE (tenant_id, profile_id, snapshot_id, source_kind, source_order)"],
   ["entitlement_snapshot_sources", "entitlement_snapshot_sources_snapshot_fkey", "f", true, "FOREIGN KEY (tenant_id, profile_id, snapshot_id) REFERENCES entitlement_snapshots(tenant_id, profile_id, snapshot_id)"],
   ["entitlement_snapshot_sources", "entitlement_snapshot_sources_source_kind_check", "c", true, "CHECK (source_kind = ANY (ARRAY['entitlement'::text, 'assignment'::text, 'release'::text]))"],
   ["entitlement_snapshot_sources", "entitlement_snapshot_sources_source_order_check", "c", true, "CHECK (source_order > 0)"],
   ["entitlement_snapshots", "entitlement_snapshots_canonical_input_hash_check", "c", true, "CHECK (canonical_input_hash ~ '^sha256:[a-f0-9]{64}$'::text)"],
+  ["entitlement_snapshots", "entitlement_snapshots_aggregate_authority_check", "t", true, "TRIGGER DEFERRABLE INITIALLY DEFERRED"],
   ["entitlement_snapshots", "entitlement_snapshots_exact_ref_key", "u", true, "UNIQUE (tenant_id, profile_id, snapshot_id, snapshot_version, evaluated_at)"],
   ["entitlement_snapshots", "entitlement_snapshots_input_key", "u", true, "UNIQUE (tenant_id, profile_id, canonical_input_hash)"],
   ["entitlement_snapshots", "entitlement_snapshots_pkey", "p", true, "PRIMARY KEY (snapshot_id)"],
@@ -735,6 +741,7 @@ const schema13Constraints: readonly LegacyConstraintShape[] = [
   ["pack_products", "pack_products_pkey", "p", true, "PRIMARY KEY (pack_product_id)"],
   ["pack_products", "pack_products_resource_version_check", "c", true, "CHECK (resource_version > 0)"],
   ["pack_products", "pack_products_tenant_modes_check", "c", true, "CHECK (tenant_modes = ARRAY['b2b'::text] OR tenant_modes = ARRAY['b2c'::text] OR tenant_modes = ARRAY['b2b'::text, 'b2c'::text])"],
+  ["pack_versions", "pack_versions_canonical_version_check", "c", true, "CHECK (core_agent_is_canonical_semver(version))"],
   ["pack_versions", "pack_versions_exact_ref_key", "u", true, "UNIQUE (pack_version_id, pack_product_id, version)"],
   ["pack_versions", "pack_versions_pack_product_id_fkey", "f", true, "FOREIGN KEY (pack_product_id) REFERENCES pack_products(pack_product_id)"],
   ["pack_versions", "pack_versions_pkey", "p", true, "PRIMARY KEY (pack_version_id)"],
@@ -746,7 +753,7 @@ const schema13Constraints: readonly LegacyConstraintShape[] = [
   ["platform_authority_audit", "platform_authority_audit_actor_id_fkey", "f", true, "FOREIGN KEY (actor_id) REFERENCES actors(actor_id)"],
   ["platform_authority_audit", "platform_authority_audit_change_summary_check", "c", true, "CHECK (change_summary IS NULL OR char_length(change_summary) <= 2000)"],
   ["platform_authority_audit", "platform_authority_audit_decision_check", "c", true, "CHECK (decision = ANY (ARRAY['allowed'::text, 'denied'::text, 'not_applicable'::text]))"],
-  ["platform_authority_audit", "platform_authority_audit_membership_fkey", "f", true, "FOREIGN KEY (authority_tenant_id, membership_id) REFERENCES memberships(tenant_id, membership_id)"],
+  ["platform_authority_audit", "platform_authority_audit_membership_actor_fkey", "f", true, "FOREIGN KEY (authority_tenant_id, membership_id, actor_id) REFERENCES memberships(tenant_id, membership_id, actor_id)"],
   ["platform_authority_audit", "platform_authority_audit_outcome_check", "c", true, "CHECK (outcome = ANY (ARRAY['succeeded'::text, 'failed'::text, 'cancelled'::text, 'pending'::text]))"],
   ["platform_authority_audit", "platform_authority_audit_pkey", "p", true, "PRIMARY KEY (platform_authority_audit_id)"],
   ["platform_authority_audit", "platform_authority_audit_reason_summary_check", "c", true, "CHECK (char_length(reason_summary) <= 2000)"],
@@ -770,6 +777,7 @@ const schema13Constraints: readonly LegacyConstraintShape[] = [
   ["tenant_pack_releases", "tenant_pack_releases_resource_version_check", "c", true, "CHECK (resource_version > 0)"],
   ["tenant_pack_releases", "tenant_pack_releases_status_check", "c", true, "CHECK (status = ANY (ARRAY['preparing'::text, 'current'::text, 'failed'::text, 'superseded'::text]))"],
   ["tenant_pack_releases", "tenant_pack_releases_tenant_id_fkey", "f", true, "FOREIGN KEY (tenant_id) REFERENCES tenants(tenant_id)"],
+  ["tenant_pack_releases", "tenant_pack_releases_tenant_ref_key", "u", true, "UNIQUE (tenant_id, tenant_pack_release_id)"],
 ];
 
 const schema13Indexes: readonly LegacyIndexShape[] = [
@@ -778,7 +786,7 @@ const schema13Indexes: readonly LegacyIndexShape[] = [
   ["capability_runtime_projections", "capability_runtime_projections_claim_idx", "CREATE INDEX capability_runtime_projections_claim_idx ON public.capability_runtime_projections USING btree (status, updated_at, tenant_id, runtime_generation) WHERE (status = ANY (ARRAY['preparing'::text, 'failed'::text]))"],
   ["capability_runtime_projections", "capability_runtime_projections_generation_key", "CREATE UNIQUE INDEX capability_runtime_projections_generation_key ON public.capability_runtime_projections USING btree (tenant_id, runtime_generation)"],
   ["capability_runtime_projections", "capability_runtime_projections_pkey", "CREATE UNIQUE INDEX capability_runtime_projections_pkey ON public.capability_runtime_projections USING btree (projection_id)"],
-  ["capability_runtime_projections", "capability_runtime_projections_release_fk_idx", "CREATE INDEX capability_runtime_projections_release_fk_idx ON public.capability_runtime_projections USING btree (tenant_pack_release_id)"],
+  ["capability_runtime_projections", "capability_runtime_projections_release_fk_idx", "CREATE INDEX capability_runtime_projections_release_fk_idx ON public.capability_runtime_projections USING btree (tenant_id, tenant_pack_release_id)"],
   ["capability_runtime_projections", "capability_runtime_projections_snapshot_fk_idx", "CREATE INDEX capability_runtime_projections_snapshot_fk_idx ON public.capability_runtime_projections USING btree (tenant_id, profile_id, snapshot_id, snapshot_version, evaluated_at)"],
   ["capability_versions", "capability_versions_capability_id_version_key", "CREATE UNIQUE INDEX capability_versions_capability_id_version_key ON public.capability_versions USING btree (capability_id, version)"],
   ["capability_versions", "capability_versions_exact_ref_key", "CREATE UNIQUE INDEX capability_versions_exact_ref_key ON public.capability_versions USING btree (capability_version_id, capability_id, version)"],
@@ -814,7 +822,7 @@ const schema13Indexes: readonly LegacyIndexShape[] = [
   ["pack_versions", "pack_versions_product_version_key", "CREATE UNIQUE INDEX pack_versions_product_version_key ON public.pack_versions USING btree (pack_product_id, version)"],
   ["platform_authority_audit", "platform_authority_audit_pkey", "CREATE UNIQUE INDEX platform_authority_audit_pkey ON public.platform_authority_audit USING btree (platform_authority_audit_id)"],
   ["platform_authority_audit", "platform_authority_audit_actor_fk_idx", "CREATE INDEX platform_authority_audit_actor_fk_idx ON public.platform_authority_audit USING btree (actor_id)"],
-  ["platform_authority_audit", "platform_authority_audit_membership_fk_idx", "CREATE INDEX platform_authority_audit_membership_fk_idx ON public.platform_authority_audit USING btree (authority_tenant_id, membership_id)"],
+  ["platform_authority_audit", "platform_authority_audit_membership_fk_idx", "CREATE INDEX platform_authority_audit_membership_fk_idx ON public.platform_authority_audit USING btree (authority_tenant_id, membership_id, actor_id)"],
   ["profile_snapshot_pointers", "profile_snapshot_pointers_pkey", "CREATE UNIQUE INDEX profile_snapshot_pointers_pkey ON public.profile_snapshot_pointers USING btree (tenant_id, profile_id)"],
   ["profile_snapshot_pointers", "profile_snapshot_pointers_snapshot_idx", "CREATE INDEX profile_snapshot_pointers_snapshot_idx ON public.profile_snapshot_pointers USING btree (tenant_id, snapshot_id, profile_id)"],
   ["profile_snapshot_pointers", "profile_snapshot_pointers_snapshot_fk_idx", "CREATE INDEX profile_snapshot_pointers_snapshot_fk_idx ON public.profile_snapshot_pointers USING btree (tenant_id, profile_id, snapshot_id, snapshot_version, evaluated_at)"],
@@ -826,29 +834,43 @@ const schema13Indexes: readonly LegacyIndexShape[] = [
   ["tenant_pack_releases", "tenant_pack_releases_generation_key", "CREATE UNIQUE INDEX tenant_pack_releases_generation_key ON public.tenant_pack_releases USING btree (tenant_id, pack_product_id, generation)"],
   ["tenant_pack_releases", "tenant_pack_releases_pack_version_fk_idx", "CREATE INDEX tenant_pack_releases_pack_version_fk_idx ON public.tenant_pack_releases USING btree (pack_version_id, pack_product_id, pack_version)"],
   ["tenant_pack_releases", "tenant_pack_releases_pkey", "CREATE UNIQUE INDEX tenant_pack_releases_pkey ON public.tenant_pack_releases USING btree (tenant_pack_release_id)"],
+  ["tenant_pack_releases", "tenant_pack_releases_tenant_ref_key", "CREATE UNIQUE INDEX tenant_pack_releases_tenant_ref_key ON public.tenant_pack_releases USING btree (tenant_id, tenant_pack_release_id)"],
 ];
 
 const schema13Routines = [
-  ["f", "advance_profile_snapshot_pointer", "p_tenant_id text, p_profile_id text, p_expected_resource_version bigint, p_snapshot_id text", "TABLE(resource_version bigint)", true, ["search_path=pg_catalog, public"], "c6e1c203e10d3862e133cd6c15512edf"],
-  ["f", "enforce_capability_version_immutability", "", "trigger", false, ["search_path=pg_catalog, public"], "4bd905a86465a54006561c3be8b49f38"],
+  ["f", "advance_profile_snapshot_pointer", "p_tenant_id text, p_profile_id text, p_expected_resource_version bigint, p_snapshot_id text", "TABLE(resource_version bigint)", true, ["search_path=pg_catalog, public"], "9084a82f86a44ce1260dd62d32c8c5d5"],
+  ["f", "core_agent_is_canonical_semver", "candidate text", "boolean", false, ["search_path=pg_catalog, public"], "c2bf31dbc8fdaef22c6ad3d0163348ee"],
+  ["f", "core_agent_is_exact_contract_ref", "candidate text", "boolean", false, ["search_path=pg_catalog, public"], "6a7062f99a26975f4dd850ce31a14011"],
+  ["f", "core_agent_is_immutable_artifact_ref", "candidate text", "boolean", false, ["search_path=pg_catalog, public"], "227da9054e47af213d660f6f7bb010da"],
+  ["f", "core_agent_is_valid_capability_compatibility", "candidate jsonb", "boolean", false, ["search_path=pg_catalog, public"], "8f8bff721458786255c96ec4da8e1ca7"],
+  ["f", "enforce_capability_version_immutability", "", "trigger", false, ["search_path=pg_catalog, public"], "8950aec1785a3266a22869c24f1e8f9e"],
   ["f", "enforce_entitlement_assignment_seat_capacity", "", "trigger", false, ["search_path=pg_catalog, public"], "fc54faa6572c9af7f4e2d498276f3b8e"],
+  ["f", "enforce_entitlement_consumed_seat_capacity", "", "trigger", false, ["search_path=pg_catalog, public"], "647fcca2dd031d0b4c70fd116f7c2e46"],
+  ["f", "enforce_entitlement_snapshot_child_creation_transaction", "", "trigger", false, ["search_path=pg_catalog, public"], "dc300af1764887d2b2ae15a65d050d72"],
   ["f", "enforce_entitlement_snapshot_immutability", "", "trigger", false, ["search_path=pg_catalog, public"], "7f04273175cf7af59f218abf4e2ff000"],
   ["f", "enforce_pack_member_immutability", "", "trigger", false, ["search_path=pg_catalog, public"], "b3240fa2b668d320c35080ac1e19db9a"],
-  ["f", "enforce_pack_version_immutability", "", "trigger", false, ["search_path=pg_catalog, public"], "a83ee065125c910f617998d57017e354"],
+  ["f", "enforce_pack_version_immutability", "", "trigger", false, ["search_path=pg_catalog, public"], "153becf8657b6f4f059b9e5f7ddc72aa"],
   ["f", "enforce_profile_snapshot_pointer_cas", "", "trigger", false, ["search_path=pg_catalog, public"], "64e7899ab83b4c3353b1c38ff4275649"],
-  ["f", "enforce_tenant_pack_release_history_immutability", "", "trigger", false, ["search_path=pg_catalog, public"], "2c642b6be45197edb41a4144c0c5a7eb"],
+  ["f", "enforce_tenant_pack_release_history_immutability", "", "trigger", false, ["search_path=pg_catalog, public"], "929b40399da8769a1b92b4277a9be080"],
+  ["f", "validate_entitlement_snapshot_aggregate", "", "trigger", false, ["search_path=pg_catalog, public"], "8856f74e54b4a64584b518543cf49205"],
 ] as const;
 
 const schema13Triggers = [
   ["capability_versions", "capability_versions_reviewed_immutable_check", "O", "CREATE TRIGGER capability_versions_reviewed_immutable_check BEFORE DELETE OR UPDATE ON capability_versions FOR EACH ROW EXECUTE FUNCTION enforce_capability_version_immutability()"],
   ["entitlement_assignments", "entitlement_assignments_seat_capacity_check", "O", "CREATE TRIGGER entitlement_assignments_seat_capacity_check BEFORE INSERT OR UPDATE OF tenant_id, entitlement_id, profile_id, status ON entitlement_assignments FOR EACH ROW EXECUTE FUNCTION enforce_entitlement_assignment_seat_capacity()"],
+  ["entitlement_snapshot_capabilities", "entitlement_snapshot_capabilities_creation_transaction_check", "O", "CREATE TRIGGER entitlement_snapshot_capabilities_creation_transaction_check BEFORE INSERT ON entitlement_snapshot_capabilities FOR EACH ROW EXECUTE FUNCTION enforce_entitlement_snapshot_child_creation_transaction()"],
+  ["entitlement_snapshot_capabilities", "entitlement_snapshot_capabilities_aggregate_authority_check", "O", "CREATE CONSTRAINT TRIGGER entitlement_snapshot_capabilities_aggregate_authority_check AFTER INSERT ON entitlement_snapshot_capabilities DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION validate_entitlement_snapshot_aggregate()"],
   ["entitlement_snapshot_capabilities", "entitlement_snapshot_capabilities_immutable_check", "O", "CREATE TRIGGER entitlement_snapshot_capabilities_immutable_check BEFORE DELETE OR UPDATE ON entitlement_snapshot_capabilities FOR EACH ROW EXECUTE FUNCTION enforce_entitlement_snapshot_immutability()"],
+  ["entitlement_snapshot_sources", "entitlement_snapshot_sources_creation_transaction_check", "O", "CREATE TRIGGER entitlement_snapshot_sources_creation_transaction_check BEFORE INSERT ON entitlement_snapshot_sources FOR EACH ROW EXECUTE FUNCTION enforce_entitlement_snapshot_child_creation_transaction()"],
+  ["entitlement_snapshot_sources", "entitlement_snapshot_sources_aggregate_authority_check", "O", "CREATE CONSTRAINT TRIGGER entitlement_snapshot_sources_aggregate_authority_check AFTER INSERT ON entitlement_snapshot_sources DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION validate_entitlement_snapshot_aggregate()"],
   ["entitlement_snapshot_sources", "entitlement_snapshot_sources_immutable_check", "O", "CREATE TRIGGER entitlement_snapshot_sources_immutable_check BEFORE DELETE OR UPDATE ON entitlement_snapshot_sources FOR EACH ROW EXECUTE FUNCTION enforce_entitlement_snapshot_immutability()"],
+  ["entitlement_snapshots", "entitlement_snapshots_aggregate_authority_check", "O", "CREATE CONSTRAINT TRIGGER entitlement_snapshots_aggregate_authority_check AFTER INSERT ON entitlement_snapshots DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION validate_entitlement_snapshot_aggregate()"],
   ["entitlement_snapshots", "entitlement_snapshots_immutable_check", "O", "CREATE TRIGGER entitlement_snapshots_immutable_check BEFORE DELETE OR UPDATE ON entitlement_snapshots FOR EACH ROW EXECUTE FUNCTION enforce_entitlement_snapshot_immutability()"],
+  ["entitlements", "entitlements_consumed_seat_capacity_check", "O", "CREATE TRIGGER entitlements_consumed_seat_capacity_check BEFORE UPDATE OF assignment_mode, seat_quantity ON entitlements FOR EACH ROW EXECUTE FUNCTION enforce_entitlement_consumed_seat_capacity()"],
   ["pack_members", "pack_members_published_immutable_check", "O", "CREATE TRIGGER pack_members_published_immutable_check BEFORE INSERT OR DELETE OR UPDATE ON pack_members FOR EACH ROW EXECUTE FUNCTION enforce_pack_member_immutability()"],
   ["pack_versions", "pack_versions_published_immutable_check", "O", "CREATE TRIGGER pack_versions_published_immutable_check BEFORE DELETE OR UPDATE ON pack_versions FOR EACH ROW EXECUTE FUNCTION enforce_pack_version_immutability()"],
   ["profile_snapshot_pointers", "profile_snapshot_pointers_cas_check", "O", "CREATE TRIGGER profile_snapshot_pointers_cas_check BEFORE INSERT OR DELETE OR UPDATE ON profile_snapshot_pointers FOR EACH ROW EXECUTE FUNCTION enforce_profile_snapshot_pointer_cas()"],
-  ["tenant_pack_releases", "tenant_pack_releases_history_immutable_check", "O", "CREATE TRIGGER tenant_pack_releases_history_immutable_check BEFORE DELETE OR UPDATE ON tenant_pack_releases FOR EACH ROW EXECUTE FUNCTION enforce_tenant_pack_release_history_immutability()"],
+  ["tenant_pack_releases", "tenant_pack_releases_history_immutable_check", "O", "CREATE TRIGGER tenant_pack_releases_history_immutable_check BEFORE INSERT OR DELETE OR UPDATE ON tenant_pack_releases FOR EACH ROW EXECUTE FUNCTION enforce_tenant_pack_release_history_immutability()"],
 ] as const;
 
 const schema13AppSelectTables = schema13Tables.filter((table) => table !== "platform_authority_audit");
@@ -865,6 +887,7 @@ const schema13RelationAcls: readonly RelationAclManifestEntry[] = [
   ...schema13AppSelectTables.map((table) => ["grant", "public", table, "r", "core_agent_app", "SELECT", false] as const),
   ...["capability_runtime_projections", "runtime_activity"].flatMap((table) => ["INSERT", "UPDATE"].map((privilege) =>
     ["grant", "public", table, "r", "core_agent_app", privilege, false] as const)),
+  ["grant", "public", "tenant_pack_releases", "r", "core_agent_app", "UPDATE", false],
   ...schema13IdentityMutableTables.flatMap((table) => ["SELECT", "INSERT", "UPDATE"].map((privilege) =>
     ["grant", "public", table, "r", "core_agent_identity", privilege, false] as const)),
   ...schema13IdentityImmutableTables.flatMap((table) => ["SELECT", "INSERT"].map((privilege) =>
@@ -885,6 +908,14 @@ schemaManifests.set(13, {
   routineAcls: [
     ...schema13Routines.map(([kind, name, arguments_]) =>
       ["revoke", "public", name, kind, arguments_, "PUBLIC", "EXECUTE", false] as const),
+    ...([
+      ["core_agent_is_canonical_semver", "candidate text"],
+      ["core_agent_is_exact_contract_ref", "candidate text"],
+      ["core_agent_is_immutable_artifact_ref", "candidate text"],
+      ["core_agent_is_valid_capability_compatibility", "candidate jsonb"],
+    ] as const).map(([name, arguments_]) =>
+      ["grant", "public", name, "f", arguments_, "core_agent_identity", "EXECUTE", false] as const),
+    ["grant", "public", "advance_profile_snapshot_pointer", "f", "p_tenant_id text, p_profile_id text, p_expected_resource_version bigint, p_snapshot_id text", "core_agent_app", "EXECUTE", false],
     ["grant", "public", "advance_profile_snapshot_pointer", "f", "p_tenant_id text, p_profile_id text, p_expected_resource_version bigint, p_snapshot_id text", "core_agent_identity", "EXECUTE", false],
   ],
   columnAmendments: [{
@@ -896,6 +927,13 @@ schemaManifests.set(13, {
     },
   }],
   constraintAmendments: [{
+    action: "add",
+    after: {
+      schema: "public", relation: "memberships", relkind: "r",
+      name: "memberships_tenant_membership_actor_key", type: "u", validated: true,
+      definition: "UNIQUE (tenant_id, membership_id, actor_id)",
+    },
+  }, {
     action: "add",
     after: {
       schema: "public", relation: "runtime_containers", relkind: "r",
@@ -911,6 +949,13 @@ schemaManifests.set(13, {
     },
   }],
   indexAmendments: [{
+    action: "add",
+    after: {
+      schema: "public", relation: "memberships", relkind: "r",
+      name: "memberships_tenant_membership_actor_key",
+      definition: "CREATE UNIQUE INDEX memberships_tenant_membership_actor_key ON public.memberships USING btree (tenant_id, membership_id, actor_id)",
+    },
+  }, {
     action: "add",
     after: {
       schema: "public", relation: "worker_jobs", relkind: "r",
