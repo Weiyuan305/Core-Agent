@@ -270,8 +270,21 @@ function boundedOption(value: number | undefined, fallback: number, minimum: num
   return resolved;
 }
 
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
+function delay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted === true) return Promise.reject(journalError());
+  return new Promise((resolvePromise, rejectPromise) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      rejectPromise(journalError());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolvePromise();
+    }, milliseconds);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted === true) onAbort();
+  });
 }
 
 function ownErrorValue(error: unknown, key: string): unknown {
@@ -509,7 +522,7 @@ export class OperationJournal {
         try { guard?.close(); } catch { /* close a failed connection */ }
         if (!isSqliteBusy(error)) throw journalError();
       }
-      await delay(this.#guardPollMs);
+      await delay(this.#guardPollMs, signal);
     }
   }
 
