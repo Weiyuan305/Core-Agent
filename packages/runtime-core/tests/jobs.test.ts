@@ -431,6 +431,71 @@ test("claimed jobs discriminate reconcile command intent and fail closed on inva
   );
 });
 
+test("tenant claimJobs returns both entitlement Worker kinds and rejects incompatible stored shapes", async () => {
+  for (const [index, jobKind] of ["reconcile_capability_projection", "stop_idle_b2c_runtime"].entries()) {
+    await db.insertInto("worker_jobs").values({
+      tenant_id: "tenant_jobs", job_id: `job_entitlement_tenant_${index}`, job_kind: jobKind,
+      status: "queued", attempt_count: 0, max_attempts: 3, lease_owner: null, lease_expires_at: null,
+      next_attempt_at: new Date(0), payload_ref: `entitlement:${index}`, effect_state: "pre_effect",
+      runtime_command: null, target_command_version: null, last_error_summary: null, run_id: null, container_id: null,
+      created_at: new Date(index), updated_at: new Date(index),
+    }).execute();
+  }
+  const claimed = await claimJobs(db, { tenantId: "tenant_jobs", workerId: "entitlement_tenant_worker", limit: 2, leaseMs: 30_000 });
+  assert.deepEqual(claimed.map((job) => [job.jobKind, job.runtimeCommand, job.effectState]), [
+    ["reconcile_capability_projection", null, "pre_effect"],
+    ["stop_idle_b2c_runtime", null, "pre_effect"],
+  ]);
+
+  await db.schema.alterTable("worker_jobs").dropConstraint("worker_jobs_runtime_command_intent_check").execute();
+  await pool.query(
+    `insert into worker_jobs (
+       tenant_id, job_id, job_kind, status, attempt_count, max_attempts, next_attempt_at,
+       payload_ref, effect_state, runtime_command, created_at, updated_at
+     ) values ('tenant_jobs', 'job_entitlement_bad_command', 'reconcile_capability_projection', 'queued', 0, 3, now(),
+               'bad-command', 'pre_effect', 'restart', now(), now())`,
+  );
+  await assert.rejects(
+    claimJobs(db, { tenantId: "tenant_jobs", workerId: "entitlement_bad_command", limit: 1, leaseMs: 30_000 }),
+    /Stored worker job command intent is invalid/,
+  );
+});
+
+test("claimPlatformWorkerJobs returns both entitlement Worker kinds and rejects incompatible effect state", async () => {
+  for (const [index, jobKind] of ["reconcile_capability_projection", "stop_idle_b2c_runtime"].entries()) {
+    await db.insertInto("worker_jobs").values({
+      tenant_id: "tenant_jobs", job_id: `job_entitlement_platform_${index}`, job_kind: jobKind,
+      status: "queued", attempt_count: 0, max_attempts: 3, lease_owner: null, lease_expires_at: null,
+      next_attempt_at: new Date(0), payload_ref: `platform-entitlement:${index}`, effect_state: "pre_effect",
+      runtime_command: null, target_command_version: null, last_error_summary: null, run_id: null, container_id: null,
+      created_at: new Date(index), updated_at: new Date(index),
+    }).execute();
+  }
+  const claimed = await claimPlatformWorkerJobs(db, {
+    workerId: "entitlement_platform_worker", limit: 2, leaseMs: 30_000,
+    jobKinds: ["reconcile_capability_projection", "stop_idle_b2c_runtime"],
+  });
+  assert.deepEqual(claimed.map((job) => [job.jobKind, job.runtimeCommand, job.effectState]), [
+    ["reconcile_capability_projection", null, "pre_effect"],
+    ["stop_idle_b2c_runtime", null, "pre_effect"],
+  ]);
+
+  await db.insertInto("worker_jobs").values({
+    tenant_id: "tenant_jobs", job_id: "job_entitlement_bad_effect", job_kind: "stop_idle_b2c_runtime",
+    status: "queued", attempt_count: 0, max_attempts: 3, lease_owner: null, lease_expires_at: null,
+    next_attempt_at: new Date(0), payload_ref: "bad-effect", effect_state: "unsafe_to_replay",
+    runtime_command: null, target_command_version: null, last_error_summary: null, run_id: null, container_id: null,
+    created_at: new Date(3), updated_at: new Date(3),
+  }).execute();
+  await assert.rejects(
+    claimPlatformWorkerJobs(db, {
+      workerId: "entitlement_bad_effect", limit: 1, leaseMs: 30_000,
+      jobKinds: ["stop_idle_b2c_runtime"],
+    }),
+    /Stored worker job effect state is invalid for job kind/,
+  );
+});
+
 test("stale workers cannot backdate or future-date database lease authority", async () => {
   await insertJob();
   const [claimed] = await claimJobs(db, { tenantId: "tenant_jobs", workerId: "worker_a", limit: 1, leaseMs: 30_000 });

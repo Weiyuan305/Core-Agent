@@ -110,3 +110,31 @@
   106-schema release exactness, secret, and diff gates pass.
 - Reviews: Task review and cumulative whole-branch review approved with zero
   Critical, Important, or Minor findings; final assessment is Ready to merge.
+
+## Entitlement and Capability Registry v1 — Task 2 Schema 13 Storage
+
+- Status: COMPLETE
+- Branch: `feat/entitlement-capability-schema-v1`
+- Base: `1f18ded803f84b34b7226900bf1e99b526f9062d`
+- Implementation head: `766de759fad2ad2683df7bb30bb959f2e9d89105`.
+- Result: schema 13 now owns the reviewed Capability/Pack catalog, Tenant releases,
+  Entitlements, B2B seats and Assignments, deterministic immutable effective
+  Snapshots, current Profile pointers, Runtime projections/activity, and the two
+  new Worker job kinds. Direct SQL is constrained by exact catalog admission,
+  tenant-safe authority, database-clock currentness, complete Snapshot union/hash
+  validation, monotonic pointer CAS, forward-only release state, least privilege,
+  and one Entitlement-to-Profile lock order.
+- Verification: root `check` PASS; root unit Runtime 200/200, Contracts 233/233,
+  Runtime Core 90/90, Gateway 129/129, Web 153/153; fresh native PostgreSQL 17
+  runtime 402/402, Gateway 2/2, API 15/15; integration 98/98. Contracts schema,
+  fixtures, compatibility, and history gates pass. Migration 013 SHA-256 and
+  manifest are `b2bf71c90115f32ee7c2f8ac270fcc598b6cdae9a27168c64beaa3f681ba181d`;
+  migrations 010-012 and accepted Contracts 0.7 artifacts are unchanged.
+- Reviews: six evidence-driven review/fix rounds closed Snapshot authority,
+  catalog, seat, currentness, ACL, state-machine, cross-language canonicalization,
+  and concurrency gaps. Final review found zero Critical, Important, or Minor
+  findings and assessed the branch Ready.
+- Constraint: the Docker/Colima-only wrapper was not run; its native PostgreSQL,
+  integration, count, marker, secret, and cleanup-equivalent gates were run
+  directly without Docker.
+- Report: `.superpowers/sdd/task-2-report.md`.

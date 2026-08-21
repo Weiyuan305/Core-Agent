@@ -17,6 +17,7 @@ interface ClaimedJobBase {
 export const workerJobKinds = [
   "provision_runtime", "reconcile_runtime", "execute_agent_run", "dispatch_outbox",
   "project_platform_memberships", "finalize_account_deletion",
+  "reconcile_capability_projection", "stop_idle_b2c_runtime",
 ] as const;
 export type WorkerJobKind = (typeof workerJobKinds)[number];
 export const runtimeCommandIntents = ["start", "stop", "restart", "delete"] as const;
@@ -31,7 +32,9 @@ export type ClaimedJob =
   | (ClaimedJobBase & { jobKind: "provision_runtime"; runtimeCommand: null; targetCommandVersion: null; effectState: "pre_effect" })
   | (ClaimedJobBase & { jobKind: "dispatch_outbox"; runtimeCommand: null; targetCommandVersion: null; effectState: "pre_effect" })
   | (ClaimedJobBase & { jobKind: "project_platform_memberships"; runtimeCommand: null; targetCommandVersion: null; effectState: "pre_effect" })
-  | (ClaimedJobBase & { jobKind: "finalize_account_deletion"; runtimeCommand: null; targetCommandVersion: null; effectState: WorkerEffectState });
+  | (ClaimedJobBase & { jobKind: "finalize_account_deletion"; runtimeCommand: null; targetCommandVersion: null; effectState: WorkerEffectState })
+  | (ClaimedJobBase & { jobKind: "reconcile_capability_projection"; runtimeCommand: null; targetCommandVersion: null; effectState: "pre_effect" })
+  | (ClaimedJobBase & { jobKind: "stop_idle_b2c_runtime"; runtimeCommand: null; targetCommandVersion: null; effectState: "pre_effect" });
 
 function workerEffectState(value: string): WorkerEffectState {
   if (!workerEffectStates.includes(value as WorkerEffectState)) throw new Error("Stored worker job effect state is invalid");
@@ -48,6 +51,7 @@ function nonReconcileJobKind(value: string): Exclude<WorkerJobKind, "reconcile_r
   if (
     value === "provision_runtime" || value === "execute_agent_run" || value === "dispatch_outbox"
     || value === "project_platform_memberships" || value === "finalize_account_deletion"
+    || value === "reconcile_capability_projection" || value === "stop_idle_b2c_runtime"
   ) return value;
   throw new Error("Stored worker job kind is invalid");
 }

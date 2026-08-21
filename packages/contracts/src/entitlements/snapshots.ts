@@ -97,11 +97,24 @@ function validateSortedIds(
     return [violation(duplicateCode, label, `${label} must not contain duplicates`)];
   }
   for (let index = 1; index < values.length; index += 1) {
-    if (values[index - 1]! >= values[index]!) {
+    if (compareUtf8(values[index - 1]!, values[index]!) >= 0) {
       return [violation(sortedCode, label, `${label} must use canonical order`)];
     }
   }
   return [];
+}
+
+const utf8Encoder = new TextEncoder();
+
+function compareUtf8(left: string, right: string): number {
+  const leftBytes = utf8Encoder.encode(left);
+  const rightBytes = utf8Encoder.encode(right);
+  const sharedLength = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < sharedLength; index += 1) {
+    if (leftBytes[index]! < rightBytes[index]!) return -1;
+    if (leftBytes[index]! > rightBytes[index]!) return 1;
+  }
+  return leftBytes.length - rightBytes.length;
 }
 
 function capabilityIdentity(capability: SnapshotCapability): string {
@@ -118,8 +131,8 @@ function compareCapability(left: SnapshotCapability, right: SnapshotCapability):
     [left.capability_version_id, right.capability_version_id],
     [left.version, right.version],
   ] as const) {
-    if (leftPart < rightPart) return -1;
-    if (leftPart > rightPart) return 1;
+    const comparison = compareUtf8(leftPart, rightPart);
+    if (comparison !== 0) return comparison;
   }
   return 0;
 }

@@ -148,6 +148,39 @@ test("Snapshot tuple identity and ordering remain injective when opaque ids cont
   }, collisionAuthority).map((item) => item.code), ["SNAPSHOT_CAPABILITIES_NOT_SORTED"]);
 });
 
+test("Snapshot canonical ordering follows UTF-8 bytes for Unicode opaque ids", () => {
+  const bmp = "authority_\uE000";
+  const astral = "authority_\u{1F600}";
+  assert.ok(Buffer.compare(Buffer.from(bmp, "utf8"), Buffer.from(astral, "utf8")) < 0);
+  assert.ok(bmp > astral, "the vector must distinguish UTF-8 byte order from UTF-16 code-unit order");
+
+  assert.deepEqual(validateEntitlementSnapshot({
+    ...snapshot,
+    source_entitlement_ids: [bmp, astral],
+  }, capabilityAuthority), []);
+
+  const unicodeCapabilities = [bmp, astral].map((capability_id, index) => ({
+    capability_id,
+    capability_version_id: `version_${index + 1}`,
+    version: "1.0.0",
+  }));
+  const unicodeAuthority = {
+    first_release: true,
+    capability_versions: unicodeCapabilities.map((reference) => ({
+      ...authoritativeCapabilityVersions[0]!,
+      ...reference,
+    })),
+  };
+  assert.deepEqual(validateEntitlementSnapshot({
+    ...snapshot,
+    capabilities: unicodeCapabilities,
+  }, unicodeAuthority), []);
+  assert.deepEqual(validateEntitlementSnapshot({
+    ...snapshot,
+    capabilities: [...unicodeCapabilities].reverse(),
+  }, unicodeAuthority).map((item) => item.code), ["SNAPSHOT_CAPABILITIES_NOT_SORTED"]);
+});
+
 test("snapshot capability triples require exact reviewed allowed authority", () => {
   const [firstAuthority, secondAuthority] = authoritativeCapabilityVersions;
   const nonExecuting = {
