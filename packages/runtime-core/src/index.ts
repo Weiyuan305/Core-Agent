@@ -167,6 +167,31 @@ export { createRedactor, redactSummary, type Redactor } from "./domain/redaction
 export { validateAuditEvent, validateProductEvent } from "./domain/events.js";
 export { strictUtcTimestampMilliseconds } from "./domain/utc-timestamp.js";
 export {
+  validateCatalogCommandInput,
+  validateCatalogTransition,
+  validateImmutableArtifactRef,
+  canonicalCompatibility,
+  type CatalogCompatibility,
+  type CatalogMemberInput,
+} from "./services/entitlements/catalog-validation.js";
+export {
+  createCapabilityVersion,
+  reviewCapabilityVersion,
+  retireCapabilityVersion,
+  blockCapabilityVersion,
+  type CapabilityWriteResult,
+  type CatalogCommandContext,
+  type CatalogCommandDependencies,
+} from "./services/entitlements/manage-capability.js";
+export {
+  createPackVersion,
+  reviewPackVersion,
+  publishPackVersion,
+  retirePackVersion,
+  blockPackVersion,
+  type PackWriteResult,
+} from "./services/entitlements/manage-pack.js";
+export {
   assertAgentRunTransition,
   assertRuntimeObservedTransition,
   redactedFailureSummary,
