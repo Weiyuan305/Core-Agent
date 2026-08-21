@@ -286,6 +286,14 @@ audit, and idempotency commit atomically; `readEventsAfter` must reconstruct eve
 emitted branch and exact replay must append none. Historical 0.2.0–0.7.0 releases and
 migrations 010–013 remain untouched.
 
+Final review hardening: inject one server-managed `catalogAuthorityTenantId` into
+catalog command dependencies and require the real Actor's active platform Membership
+there. Reuse Contracts artifact validation at the Runtime boundary; reject hostile
+cyclic/deep/oversized inputs before hashing; use exact UTF-8 Capability Version lock
+order; and queue Capability/Pack block recomputation only for exact `preparing` or
+`current` releases. First family/product creation must be race-safe and preserve all
+stable family metadata.
+
 **Files:**
 
 - Create: `packages/runtime-core/src/repositories/entitlements/catalog.ts`

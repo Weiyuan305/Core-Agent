@@ -1,4 +1,5 @@
 import type { Transaction } from "kysely";
+import { Buffer } from "node:buffer";
 
 import type { RuntimeDatabase } from "../../db/database.js";
 import { appendProductEvents, type ProductEventWithoutSequence } from "../events.js";
@@ -6,15 +7,24 @@ import { appendProductEvents, type ProductEventWithoutSequence } from "../events
 export async function lockCapabilityVersion(trx: Transaction<RuntimeDatabase>, capabilityVersionId: string) {
   return trx.selectFrom("capability_versions").selectAll().where("capability_version_id", "=", capabilityVersionId).forUpdate().executeTakeFirst();
 }
+function compareUtf8(left: string, right: string): number { return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8")); }
+/** Acquires Capability Version row locks one-by-one in exact UTF-8 byte order. */
+export async function lockCapabilityVersions(trx: Transaction<RuntimeDatabase>, capabilityVersionIds: readonly string[]) {
+  const locked = [];
+  for (const capabilityVersionId of [...new Set(capabilityVersionIds)].sort(compareUtf8)) {
+    const row = await lockCapabilityVersion(trx, capabilityVersionId);
+    if (row !== undefined) locked.push(row);
+  }
+  return locked;
+}
 export async function lockPackVersion(trx: Transaction<RuntimeDatabase>, packVersionId: string) {
   return trx.selectFrom("pack_versions").selectAll().where("pack_version_id", "=", packVersionId).forUpdate().executeTakeFirst();
 }
 export async function lockPackMembersAndCapabilities(trx: Transaction<RuntimeDatabase>, packVersionId: string) {
   const members = await trx.selectFrom("pack_members").selectAll().where("pack_version_id", "=", packVersionId)
     .orderBy("capability_version_id", "asc").orderBy("capability_id", "asc").orderBy("version", "asc").forUpdate().execute();
-  const identifiers = [...new Set(members.map((member) => member.capability_version_id))].sort();
-  const capabilities = identifiers.length === 0 ? [] : await trx.selectFrom("capability_versions").selectAll()
-    .where("capability_version_id", "in", identifiers).orderBy("capability_version_id", "asc").forUpdate().execute();
+  const identifiers = members.map((member) => member.capability_version_id);
+  const capabilities = await lockCapabilityVersions(trx, identifiers);
   return { members, capabilities };
 }
 

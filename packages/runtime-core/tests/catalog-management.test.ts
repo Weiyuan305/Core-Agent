@@ -34,6 +34,7 @@ const dependencies = Object.freeze({
   now: () => new Date(now),
   knownContractRefs: ["synthetic/catalog@1.0.0"],
   platformCompatibility: { core_contract_version: "0.7.0", runtime_protocol_version: "1.0.0" },
+  catalogAuthorityTenantId: "tenant_catalog",
 });
 function capabilityPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -70,6 +71,15 @@ async function reset(): Promise<void> {
   await pool.query(`insert into memberships (tenant_id, membership_id, actor_id, schema_version, resource_version, roles, membership_source, seat_ref, status, created_at, updated_at)
     values ('tenant_catalog', $1, 'actor_catalog_admin', 1, 1, array['admin'], 'platform', null, 'active', $2, $2)`, [membershipId, now]);
 }
+async function seedSecondPlatformActor(): Promise<typeof context> {
+  await pool.query(`insert into actors (actor_id, schema_version, resource_version, actor_kind, display_name, status, created_at, updated_at)
+    values ('actor_catalog_admin_two', 1, 1, 'human', 'Catalog admin two', 'active', $1, $1)`, [now]);
+  await pool.query(`insert into platform_role_assignments (platform_role_assignment_id, actor_id, role, status, resource_version, created_at, updated_at)
+    values ('platform_assignment_catalog_two', 'actor_catalog_admin_two', 'platform_super_admin', 'active', 1, $1, $1)`, [now]);
+  await pool.query(`insert into memberships (tenant_id, membership_id, actor_id, schema_version, resource_version, roles, membership_source, seat_ref, status, created_at, updated_at)
+    values ('tenant_catalog', 'membership_platform_catalog_two', 'actor_catalog_admin_two', 1, 1, array['admin'], 'platform', null, 'active', $1, $1)`, [now]);
+  return Object.freeze({ performingActorId: "actor_catalog_admin_two", requestId: "request_catalog_two", traceId: "trace_catalog_two" });
+}
 test.beforeEach(reset);
 test.after(async () => { await pool.end(); });
 
@@ -87,6 +97,24 @@ test("Capability draft creation replays exactly, conflicts on changed payload, a
   const row = await pool.query("select artifact_ref, status, resource_version::int from capability_versions where capability_version_id = 'capability_version_catalog'");
   assert.deepEqual(row.rows, [{ artifact_ref: `manifest:sha256:${"a".repeat(64)}`, status: "reviewed", resource_version: 2 }]);
   assert.deepEqual((await pool.query("select (select count(*)::int from platform_authority_audit) as audits, (select count(*)::int from product_events) as events, (select count(*)::int from outbox) as outbox")).rows, [{ audits: 2, events: 2, outbox: 2 }]);
+});
+
+test("catalog authority is the configured durable platform Tenant, never a sorted customer Membership", async () => {
+  const database = (await import("../src/db/database.js")).createRuntimeDatabase(pool);
+  const deps = { ...dependencies, db: database };
+  await pool.query(`insert into tenants (tenant_id, schema_version, resource_version, tenant_mode, status, display_name, created_at, updated_at)
+    values ('tenant_000_customer', 1, 1, 'b2b', 'active', 'Earlier customer', $1, $1)`, [now]);
+  await pool.query(`insert into memberships (tenant_id, membership_id, actor_id, schema_version, resource_version, roles, membership_source, seat_ref, status, created_at, updated_at)
+    values ('tenant_000_customer', 'membership_customer_platform', 'actor_catalog_admin', 1, 1, array['admin'], 'platform', null, 'active', $1, $1)`, [now]);
+  const create = required("createCapabilityVersion");
+  const created = await create(deps, context, command(capabilityPayload()));
+  assert.deepEqual((await pool.query("select authority_tenant_id from platform_authority_audit")).rows, [{ authority_tenant_id: "tenant_catalog" }]);
+  assert.deepEqual((await pool.query("select tenant_id from product_events")).rows, [{ tenant_id: "tenant_catalog" }]);
+  await pool.query("update memberships set status = 'revoked' where tenant_id = 'tenant_000_customer'");
+  assert.deepEqual(await create(deps, context, command(capabilityPayload())), created);
+  assert.deepEqual((await pool.query("select tenant_id from idempotency_records")).rows, [{ tenant_id: "tenant_catalog" }]);
+  await assert.rejects(() => create({ ...deps, catalogAuthorityTenantId: "tenant_missing" }, context, command(capabilityPayload({ idempotency_key: "missing-scope" }))), { code: "UNAUTHENTICATED" });
+  await assert.rejects(() => create({ db: database, now: dependencies.now, knownContractRefs: dependencies.knownContractRefs, platformCompatibility: dependencies.platformCompatibility }, context, command(capabilityPayload({ idempotency_key: "unset-scope" }))), { code: "INVALID_REQUEST" });
 });
 
 test("Pack publication persists a sorted immutable reviewed-member catalog, and retirement/blocking have no reverse transition", async () => {
@@ -128,6 +156,73 @@ test("real PostgreSQL locking admits only one concurrent Capability review at it
   assert.equal(attempts.filter((attempt) => attempt.status === "fulfilled").length, 1);
   assert.equal(attempts.filter((attempt) => attempt.status === "rejected").length, 1);
   assert.deepEqual((await pool.query("select status, resource_version::int from capability_versions where capability_version_id = 'capability_version_catalog'")).rows, [{ status: "reviewed", resource_version: 2 }]);
+});
+
+test("two platform Actors concurrently create first shared families/products and map submitted-ID races without provider errors", async () => {
+  const database = (await import("../src/db/database.js")).createRuntimeDatabase(pool);
+  const deps = { ...dependencies, db: database };
+  const contextTwo = await seedSecondPlatformActor();
+  const createCapability = required("createCapabilityVersion"); const createPack = required("createPackVersion");
+  const capabilityAttempts = await Promise.allSettled([
+    createCapability(deps, context, command(capabilityPayload({ idempotency_key: "family-one", capability_id: "capability_family_race", capability_version_id: "capability_version_family_one", version: "1.0.0" }))),
+    createCapability(deps, contextTwo, command(capabilityPayload({ idempotency_key: "family-two", capability_id: "capability_family_race", capability_version_id: "capability_version_family_two", version: "1.0.1" }))),
+  ]);
+  assert.equal(capabilityAttempts.filter((attempt) => attempt.status === "fulfilled").length, 2);
+  const packAttempts = await Promise.allSettled([
+    createPack(deps, context, command(packPayload({ idempotency_key: "product-one", pack_product_id: "pack_product_race", pack_version_id: "pack_version_product_one", version: "1.0.0", members: [{ capability_id: "capability_family_race", capability_version_id: "capability_version_family_one", version: "1.0.0" }] }))),
+    createPack(deps, contextTwo, command(packPayload({ idempotency_key: "product-two", pack_product_id: "pack_product_race", pack_version_id: "pack_version_product_two", version: "1.0.1", members: [{ capability_id: "capability_family_race", capability_version_id: "capability_version_family_two", version: "1.0.1" }] }))),
+  ]);
+  assert.equal(packAttempts.filter((attempt) => attempt.status === "fulfilled").length, 2);
+  const submittedIdRace = await Promise.allSettled([
+    createCapability(deps, context, command(capabilityPayload({ idempotency_key: "id-race-one", capability_id: "capability_id_race_one", capability_version_id: "capability_version_submitted_race", version: "2.0.0" }))),
+    createCapability(deps, contextTwo, command(capabilityPayload({ idempotency_key: "id-race-two", capability_id: "capability_id_race_two", capability_version_id: "capability_version_submitted_race", version: "2.0.0" }))),
+  ]);
+  assert.equal(submittedIdRace.filter((attempt) => attempt.status === "fulfilled").length, 1);
+  const rejected = submittedIdRace.find((attempt) => attempt.status === "rejected") as PromiseRejectedResult;
+  assert.equal((rejected.reason as { code?: string }).code, "IDEMPOTENCY_CONFLICT");
+  assert(!String(rejected.reason).includes("23505"));
+});
+
+test("Runtime, Contracts, and schema-13 immutable-artifact admission agree at exact boundary cases", async () => {
+  const validateImmutableArtifactRef = runtime.validateImmutableArtifactRef as (value: unknown) => string;
+  const digest = Buffer.alloc(64, 0x61).toString("base64");
+  const artifacts = [
+    `npm:${"a".repeat(214)}@1.0.0#sha512-${digest}`,
+    `oci:registry.example:5000/repository/path@sha256:${"a".repeat(64)}`,
+    `oci:registry.example.invalid/repository@sha256:${"a".repeat(64)}`,
+    `oci:registry.example/repository@sha256:${"A".repeat(64)}`,
+  ];
+  const Schema = (await import("typebox/schema")).default;
+  const { ImmutableArtifactRefSchema } = await import("@core-agent/contracts");
+  for (const artifact of artifacts) {
+    const contracts = Schema.Check(ImmutableArtifactRefSchema, artifact);
+    const runtimeAccepted = (() => { try { validateImmutableArtifactRef(artifact); return true; } catch { return false; } })();
+    const databaseAccepted = (await pool.query("select core_agent_is_immutable_artifact_ref($1) as accepted", [artifact])).rows[0]?.accepted;
+    assert.equal(runtimeAccepted, contracts, artifact); assert.equal(databaseAccepted, contracts, artifact);
+  }
+});
+
+test("two platform Actors create reversed multi-member Packs without deadlock and persist UTF-8 canonical member order", async () => {
+  const database = (await import("../src/db/database.js")).createRuntimeDatabase(pool);
+  const deps = { ...dependencies, db: database };
+  const createCapability = required("createCapabilityVersion");
+  const contextTwo = await seedSecondPlatformActor();
+  const first = { capability_id: "capability_sorted_\uE000", capability_version_id: "capability_version_sorted_\uE000", version: "1.0.0" };
+  const second = { capability_id: "capability_sorted_\u{10000}", capability_version_id: "capability_version_sorted_\u{10000}", version: "1.0.0" };
+  await createCapability(deps, context, command(capabilityPayload({ idempotency_key: "sorted-one", ...first })));
+  await createCapability(deps, context, command(capabilityPayload({ idempotency_key: "sorted-two", ...second })));
+  const createPack = required("createPackVersion");
+  const attempts = await Promise.allSettled([
+    createPack(deps, context, command(packPayload({ idempotency_key: "pack-sorted-one", pack_product_id: "pack_product_sorted_one", pack_version_id: "pack_version_sorted_one", members: [second, first] }))),
+    createPack(deps, contextTwo, command(packPayload({ idempotency_key: "pack-sorted-two", pack_product_id: "pack_product_sorted_two", pack_version_id: "pack_version_sorted_two", members: [first, second] }))),
+  ]);
+  assert.equal(attempts.filter((attempt) => attempt.status === "fulfilled").length, 2);
+  assert.deepEqual((await pool.query("select capability_version_id, member_order from pack_members order by pack_version_id, member_order")).rows, [
+    { capability_version_id: "capability_version_sorted_", member_order: 1 },
+    { capability_version_id: "capability_version_sorted_𐀀", member_order: 2 },
+    { capability_version_id: "capability_version_sorted_", member_order: 1 },
+    { capability_version_id: "capability_version_sorted_𐀀", member_order: 2 },
+  ]);
 });
 
 test("accepted catalog writes atomically append a safe lifecycle ProductEvent and Outbox entry without replay duplication", async () => {
@@ -264,9 +359,36 @@ test("Capability retirement and blocking are irreversible and blocking records t
   await pool.query(`insert into tenant_pack_releases (tenant_pack_release_id, tenant_id, pack_product_id, pack_version_id, pack_version, generation, status, resource_version, created_at, updated_at)
     values ('release_catalog_block', 'tenant_catalog', 'pack_product_catalog', 'pack_version_catalog', '1.0.0', 1, 'preparing', 1, $1, $1)`, [now]);
   await pool.query("update tenant_pack_releases set status = 'current', resource_version = 2 where tenant_pack_release_id = 'release_catalog_block'");
+  await pool.query(`insert into tenant_pack_releases (tenant_pack_release_id, tenant_id, pack_product_id, pack_version_id, pack_version, generation, status, resource_version, created_at, updated_at)
+    values ('release_catalog_failed', 'tenant_catalog', 'pack_product_catalog', 'pack_version_catalog', '1.0.0', 2, 'preparing', 1, $1, $1)`, [now]);
+  await pool.query("update tenant_pack_releases set status = 'failed', resource_version = 2 where tenant_pack_release_id = 'release_catalog_failed'");
+  await pool.query(`insert into tenants (tenant_id, schema_version, resource_version, tenant_mode, status, display_name, created_at, updated_at)
+    values ('tenant_catalog_history', 1, 1, 'b2b', 'active', 'Catalog history', $1, $1)`, [now]);
+  await pool.query(`insert into tenant_pack_releases (tenant_pack_release_id, tenant_id, pack_product_id, pack_version_id, pack_version, generation, status, resource_version, created_at, updated_at)
+    values ('release_catalog_superseded', 'tenant_catalog_history', 'pack_product_catalog', 'pack_version_catalog', '1.0.0', 1, 'preparing', 1, $1, $1)`, [now]);
+  await pool.query("update tenant_pack_releases set status = 'current', resource_version = 2 where tenant_pack_release_id = 'release_catalog_superseded'");
+  await pool.query("update tenant_pack_releases set status = 'superseded', resource_version = 3 where tenant_pack_release_id = 'release_catalog_superseded'");
   await required("blockCapabilityVersion")(deps, context, command({ schema_version: 1, idempotency_key: "block-capability", capability_version_id: "capability_version_catalog", expected_resource_version: 2 }));
   assert.deepEqual((await pool.query("select tenant_id, payload_ref, job_kind, max_attempts from worker_jobs order by job_id")).rows, [{ tenant_id: "tenant_catalog", payload_ref: "release_catalog_block", job_kind: "reconcile_capability_projection", max_attempts: 5 }]);
   await assert.rejects(() => required("retireCapabilityVersion")(deps, context, command({ schema_version: 1, idempotency_key: "retire-blocked", capability_version_id: "capability_version_catalog", expected_resource_version: 3 })), { code: "INVALID_STATE_TRANSITION" });
+});
+
+test("Pack blocking queues only effective or preparing releases of its exact immutable version", async () => {
+  const database = (await import("../src/db/database.js")).createRuntimeDatabase(pool);
+  const deps = { ...dependencies, db: database };
+  await required("createCapabilityVersion")(deps, context, command(capabilityPayload()));
+  await required("reviewCapabilityVersion")(deps, context, command({ schema_version: 1, idempotency_key: "pack-block-cap-review", capability_version_id: "capability_version_catalog", expected_resource_version: 1 }));
+  await required("createPackVersion")(deps, context, command(packPayload()));
+  await required("reviewPackVersion")(deps, context, command({ schema_version: 1, idempotency_key: "pack-block-review", pack_version_id: "pack_version_catalog", expected_resource_version: 1 }));
+  await required("publishPackVersion")(deps, context, command({ schema_version: 1, idempotency_key: "pack-block-publish", pack_version_id: "pack_version_catalog", expected_resource_version: 2 }));
+  await pool.query(`insert into tenant_pack_releases (tenant_pack_release_id, tenant_id, pack_product_id, pack_version_id, pack_version, generation, status, resource_version, created_at, updated_at)
+    values ('release_pack_preparing', 'tenant_catalog', 'pack_product_catalog', 'pack_version_catalog', '1.0.0', 1, 'preparing', 1, $1, $1),
+      ('release_pack_current', 'tenant_catalog', 'pack_product_catalog', 'pack_version_catalog', '1.0.0', 2, 'preparing', 1, $1, $1),
+      ('release_pack_failed', 'tenant_catalog', 'pack_product_catalog', 'pack_version_catalog', '1.0.0', 3, 'preparing', 1, $1, $1)`, [now]);
+  await pool.query("update tenant_pack_releases set status = 'current', resource_version = 2 where tenant_pack_release_id = 'release_pack_current'");
+  await pool.query("update tenant_pack_releases set status = 'failed', resource_version = 2 where tenant_pack_release_id = 'release_pack_failed'");
+  await required("blockPackVersion")(deps, context, command({ schema_version: 1, idempotency_key: "pack-block", pack_version_id: "pack_version_catalog", expected_resource_version: 3 }));
+  assert.deepEqual((await pool.query("select payload_ref from worker_jobs order by payload_ref")).rows, [{ payload_ref: "release_pack_current" }, { payload_ref: "release_pack_preparing" }]);
 });
 
 test("publication rejects blocked members, unsupported risks, and customer-mode mismatch", async () => {

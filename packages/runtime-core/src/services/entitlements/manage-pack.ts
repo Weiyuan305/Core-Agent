@@ -6,7 +6,7 @@ import type { Kysely, Transaction } from "kysely";
 import type { RuntimeDatabase } from "../../db/database.js";
 import { withDatabaseTransactionRetry } from "../../db/transaction-retry.js";
 import { beginIdempotentCommand, completeIdempotentCommand, DomainError } from "../../domain/idempotency.js";
-import { appendCatalogLifecycleEvent, lockPackMembersAndCapabilities, lockPackVersion } from "../../repositories/entitlements/catalog.js";
+import { appendCatalogLifecycleEvent, lockCapabilityVersions, lockPackMembersAndCapabilities, lockPackVersion } from "../../repositories/entitlements/catalog.js";
 import type { CatalogCommandContext, CatalogCommandDependencies } from "./manage-capability.js";
 import { validateCatalogCommandInput, validateCatalogTransition, type ValidatedPackCreate } from "./catalog-validation.js";
 
@@ -16,10 +16,11 @@ function safeVersion(value: string): number { const number = Number(value); if (
 function safeContext(context: CatalogCommandContext): void { if ([context.performingActorId, context.requestId, context.traceId].some((value) => typeof value !== "string" || value.length < 1 || value.length > 255)) throw new DomainError("INVALID_REQUEST", "Catalog command context is invalid"); }
 function auditId(key: string, action: string): string { return `audit_catalog_${createHash("sha256").update(`${key}:${action}`, "utf8").digest("hex").slice(0, 32)}`; }
 function eventId(key: string, action: string): string { return `event_catalog_${createHash("sha256").update(`${key}:${action}`, "utf8").digest("hex").slice(0, 32)}`; }
-async function platformScope(trx: Transaction<RuntimeDatabase>, context: CatalogCommandContext): Promise<{ tenantId: string; membershipId: string }> {
+async function platformScope(trx: Transaction<RuntimeDatabase>, context: CatalogCommandContext, catalogAuthorityTenantId: string): Promise<{ tenantId: string; membershipId: string }> {
+  if (typeof catalogAuthorityTenantId !== "string" || catalogAuthorityTenantId.length < 1 || catalogAuthorityTenantId.length > 255) throw new DomainError("INVALID_REQUEST", "Catalog authority scope is invalid");
   const actor = await trx.selectFrom("actors").select("status").where("actor_id", "=", context.performingActorId).forUpdate().executeTakeFirst();
   const role = await trx.selectFrom("platform_role_assignments").select("status").where("actor_id", "=", context.performingActorId).where("role", "=", "platform_super_admin").forUpdate().executeTakeFirst();
-  const membership = await trx.selectFrom("memberships").select(["tenant_id", "membership_id"]).where("actor_id", "=", context.performingActorId).where("membership_source", "=", "platform").where("status", "=", "active").orderBy("tenant_id", "asc").orderBy("membership_id", "asc").forUpdate().executeTakeFirst();
+  const membership = await trx.selectFrom("memberships").select(["tenant_id", "membership_id"]).where("tenant_id", "=", catalogAuthorityTenantId).where("actor_id", "=", context.performingActorId).where("membership_source", "=", "platform").where("status", "=", "active").forUpdate().executeTakeFirst();
   if (actor?.status !== "active" || role?.status !== "active" || membership === undefined) throw new DomainError("UNAUTHENTICATED", "Active platform authority is required");
   return { tenantId: membership.tenant_id, membershipId: membership.membership_id };
 }
@@ -39,7 +40,7 @@ function canonicalMembers(input: ValidatedPackCreate): readonly { capability_id:
 async function transition(dependencies: CatalogCommandDependencies, context: CatalogCommandContext, raw: unknown, desired: "reviewed" | "published" | "retired" | "blocked"): Promise<PackWriteResult> {
   const input = validateCatalogTransition(raw, "pack"); safeContext(context);
   return withDatabaseTransactionRetry(dependencies.db, async (trx) => {
-    const now = dependencies.now?.() ?? new Date(); const scope = await platformScope(trx, context); const operation = `entitlements.pack.${desired}`;
+    const now = dependencies.now?.() ?? new Date(); const scope = await platformScope(trx, context, dependencies.catalogAuthorityTenantId); const operation = `entitlements.pack.${desired}`;
     const admission = await beginIdempotentCommand<PackWriteResult>({ tenantId: scope.tenantId, trx }, { key: input.idempotency_key, payloadHash: input.payload_hash, operation, now, expiresAt: new Date(now.getTime() + dayMs) });
     if (admission.kind === "replay") { assertReplay(admission.response); return Object.freeze(admission.response); }
     if (admission.kind === "in_progress") throw new DomainError("IDEMPOTENCY_CONFLICT", "Catalog command is already in progress");
@@ -62,6 +63,15 @@ async function transition(dependencies: CatalogCommandDependencies, context: Cat
     }
     const resourceVersion = version + 1;
     await trx.updateTable("pack_versions").set({ status: desired, resource_version: resourceVersion, updated_at: now }).where("pack_version_id", "=", pack.pack_version_id).execute();
+    if (desired === "blocked") {
+      const affected = await trx.selectFrom("tenant_pack_releases").select(["tenant_id", "tenant_pack_release_id"])
+        .where("pack_version_id", "=", pack.pack_version_id).where("status", "in", ["preparing", "current"])
+        .orderBy("tenant_id", "asc").orderBy("tenant_pack_release_id", "asc").execute();
+      for (const release of affected) {
+        const jobId = `job_catalog_block_${createHash("sha256").update(`${pack.pack_version_id}:${release.tenant_id}:${release.tenant_pack_release_id}`, "utf8").digest("hex").slice(0, 32)}`;
+        await trx.insertInto("worker_jobs").values({ tenant_id: release.tenant_id, job_id: jobId, job_kind: "reconcile_capability_projection", status: "queued", attempt_count: 0, max_attempts: 5, lease_owner: null, lease_expires_at: null, next_attempt_at: now, payload_ref: release.tenant_pack_release_id, runtime_command: null, target_command_version: null, effect_state: "pre_effect", last_error_summary: null, run_id: null, container_id: null, created_at: now, updated_at: now }).onConflict((conflict) => conflict.columns(["tenant_id", "job_id"]).doNothing()).execute();
+      }
+    }
     const result: PackWriteResult = Object.freeze({ schema_version: 1, pack_version_id: pack.pack_version_id, pack_product_id: pack.pack_product_id, version: pack.version, status: desired, resource_version: resourceVersion });
     await audit(trx, scope, context, input.idempotency_key, operation, pack.pack_version_id, resourceVersion, now);
     await appendLifecycle(trx, scope, context, input.idempotency_key, operation, result, now);
@@ -72,18 +82,23 @@ async function transition(dependencies: CatalogCommandDependencies, context: Cat
 export async function createPackVersion(dependencies: CatalogCommandDependencies, context: CatalogCommandContext, raw: unknown): Promise<PackWriteResult> {
   const input = validateCatalogCommandInput(raw, "pack") as ValidatedPackCreate; safeContext(context); const members = canonicalMembers(input);
   try { return await withDatabaseTransactionRetry(dependencies.db, async (trx) => {
-    const now = dependencies.now?.() ?? new Date(); const scope = await platformScope(trx, context); const operation = "entitlements.pack.create";
+    const now = dependencies.now?.() ?? new Date(); const scope = await platformScope(trx, context, dependencies.catalogAuthorityTenantId); const operation = "entitlements.pack.create";
     const admission = await beginIdempotentCommand<PackWriteResult>({ tenantId: scope.tenantId, trx }, { key: input.idempotency_key, payloadHash: input.payload_hash, operation, now, expiresAt: new Date(now.getTime() + dayMs) });
     if (admission.kind === "replay") { assertReplay(admission.response); return Object.freeze(admission.response); }
     if (admission.kind === "in_progress") throw new DomainError("IDEMPOTENCY_CONFLICT", "Catalog command is already in progress");
     const existing = await lockPackVersion(trx, input.pack_version_id); if (existing !== undefined) throw new DomainError("IDEMPOTENCY_CONFLICT", "Pack Version identity conflicts");
     const sameVersion = await trx.selectFrom("pack_versions").select("pack_version_id").where("pack_product_id", "=", input.pack_product_id).where("version", "=", input.version).forUpdate().executeTakeFirst();
     if (sameVersion !== undefined) throw new DomainError("IDEMPOTENCY_CONFLICT", "Pack Version identity conflicts");
-    const product = await trx.selectFrom("pack_products").select("tenant_modes").where("pack_product_id", "=", input.pack_product_id).forUpdate().executeTakeFirst();
-    if (product !== undefined && JSON.stringify(product.tenant_modes) !== JSON.stringify(input.tenant_modes)) throw new DomainError("INVALID_STATE_TRANSITION", "Pack Product customer modes are immutable");
-    if (product === undefined) await trx.insertInto("pack_products").values({ pack_product_id: input.pack_product_id, display_name: input.display_name, tenant_modes: [...input.tenant_modes], resource_version: 1, created_at: now, updated_at: now }).execute();
+    let product = await trx.selectFrom("pack_products").select(["display_name", "tenant_modes"]).where("pack_product_id", "=", input.pack_product_id).forUpdate().executeTakeFirst();
+    if (product === undefined) {
+      await trx.insertInto("pack_products").values({ pack_product_id: input.pack_product_id, display_name: input.display_name, tenant_modes: [...input.tenant_modes], resource_version: 1, created_at: now, updated_at: now }).onConflict((conflict) => conflict.column("pack_product_id").doNothing()).execute();
+      product = await trx.selectFrom("pack_products").select(["display_name", "tenant_modes"]).where("pack_product_id", "=", input.pack_product_id).forUpdate().executeTakeFirst();
+    }
+    if (product === undefined) throw new DomainError("INTERNAL_ERROR", "Pack Product authority is unavailable");
+    if (product.display_name !== input.display_name || JSON.stringify(product.tenant_modes) !== JSON.stringify(input.tenant_modes)) throw new DomainError("INVALID_STATE_TRANSITION", "Pack Product metadata is immutable");
+    const capabilities = await lockCapabilityVersions(trx, members.map((member) => member.capability_version_id));
     for (const member of members) {
-      const capability = await trx.selectFrom("capability_versions").select(["capability_id", "version"]).where("capability_version_id", "=", member.capability_version_id).forUpdate().executeTakeFirst();
+      const capability = capabilities.find((candidate) => candidate.capability_version_id === member.capability_version_id);
       if (capability === undefined || capability.capability_id !== member.capability_id || capability.version !== member.version) throw new DomainError("INVALID_STATE_TRANSITION", "Pack members are not exact Capability Version authority");
     }
     await trx.insertInto("pack_versions").values({ pack_version_id: input.pack_version_id, pack_product_id: input.pack_product_id, version: input.version, status: "draft", resource_version: 1, created_at: now, updated_at: now }).execute();
@@ -92,9 +107,16 @@ export async function createPackVersion(dependencies: CatalogCommandDependencies
     await audit(trx, scope, context, input.idempotency_key, operation, input.pack_version_id, 1, now);
     await appendLifecycle(trx, scope, context, input.idempotency_key, operation, result, now);
     await completeIdempotentCommand({ tenantId: scope.tenantId, trx }, { key: input.idempotency_key, payloadHash: input.payload_hash, operation, resultRef: input.pack_version_id, response: result, updatedAt: now }); return result;
-  }, { isolationLevel: "serializable" }); } catch (error) { if (catalogUniqueConflict(error, "pack_versions_product_version_key")) throw new DomainError("IDEMPOTENCY_CONFLICT", "Pack Version identity conflicts"); throw error; }
+  }, { isolationLevel: "serializable" }); } catch (error) { throw mapCatalogDatabaseError(error); }
 }
-function catalogUniqueConflict(error: unknown, constraint: string): boolean { if (error === null || typeof error !== "object") return false; const code = Object.getOwnPropertyDescriptor(error, "code"); const name = Object.getOwnPropertyDescriptor(error, "constraint"); return code !== undefined && name !== undefined && "value" in code && "value" in name && code.value === "23505" && name.value === constraint; }
+function mapCatalogDatabaseError(error: unknown): never {
+  if (error === null || typeof error !== "object") throw error;
+  const code = Object.getOwnPropertyDescriptor(error, "code"); const constraint = Object.getOwnPropertyDescriptor(error, "constraint");
+  if (code === undefined || constraint === undefined || !("value" in code) || !("value" in constraint) || typeof code.value !== "string" || typeof constraint.value !== "string") throw error;
+  if (code.value === "23505" && ["pack_products_pkey", "pack_versions_pkey", "pack_versions_product_version_key", "pack_versions_exact_ref_key", "pack_members_pkey", "pack_members_order_key", "pack_members_capability_key"].includes(constraint.value)) throw new DomainError("IDEMPOTENCY_CONFLICT", "Pack Version identity conflicts");
+  if (code.value === "23514" && constraint.value.startsWith("pack_")) throw new DomainError("INVALID_REQUEST", "Catalog command does not satisfy its contract");
+  throw error;
+}
 export const reviewPackVersion = (dependencies: CatalogCommandDependencies, context: CatalogCommandContext, input: unknown) => transition(dependencies, context, input, "reviewed");
 export const publishPackVersion = (dependencies: CatalogCommandDependencies, context: CatalogCommandContext, input: unknown) => transition(dependencies, context, input, "published");
 export const retirePackVersion = (dependencies: CatalogCommandDependencies, context: CatalogCommandContext, input: unknown) => transition(dependencies, context, input, "retired");

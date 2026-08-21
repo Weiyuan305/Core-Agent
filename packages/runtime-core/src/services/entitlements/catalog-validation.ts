@@ -1,15 +1,18 @@
 import { createHash } from "node:crypto";
 import { types as utilTypes } from "node:util";
+import { ImmutableArtifactRefSchema } from "@core-agent/contracts";
+import Schema from "typebox/schema";
 
 import { DomainError } from "../../domain/idempotency.js";
 import { canonicalPayloadHash } from "../../domain/idempotency.js";
 
 const canonicalSemver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?$/u;
 const contractRef = /^[a-z0-9][a-z0-9._/-]{0,127}@(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?$/u;
-const npmIntegrity = /^[A-Za-z0-9+/]{85}[AQgw]==$/u;
-const ociComponent = /^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*$/u;
-const scopedPackage = /^@[a-z0-9][a-z0-9._~-]*\/[a-z0-9][a-z0-9._~-]*$/u;
-const plainPackage = /^[a-z0-9][a-z0-9._~-]*$/u;
+const maximumWireDepth = 32;
+const maximumWireNodes = 1_000;
+const maximumWireArrayItems = 256;
+const maximumWireRecordKeys = 64;
+const maximumWireUtf8Bytes = 64 * 1_024;
 
 export interface CatalogCompatibility {
   readonly core_contract_version: string;
@@ -97,19 +100,38 @@ function plainArray(value: unknown): readonly unknown[] {
 }
 
 /** Copies own data descriptors only, preserving array order for wire payload hashing. */
-function copyWireData(value: unknown): unknown {
-  if (value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number") return value;
-  if (typeof value !== "object" || utilTypes.isProxy(value)) invalid();
-  if (Array.isArray(value)) return plainArray(value).map(copyWireData);
+function copyWireData(value: unknown, budget = { nodes: 0, utf8Bytes: 0, ancestors: new Set<object>() }, depth = 0): unknown {
+  if (typeof value === "string") {
+    budget.utf8Bytes += Buffer.byteLength(value, "utf8");
+    if (budget.utf8Bytes > maximumWireUtf8Bytes) invalid();
+    return value;
+  }
+  if (value === null || typeof value === "boolean" || typeof value === "number") return value;
+  if (typeof value !== "object" || utilTypes.isProxy(value) || depth > maximumWireDepth) invalid();
+  if (budget.ancestors.has(value)) invalid();
+  budget.nodes += 1;
+  if (budget.nodes > maximumWireNodes) invalid();
+  budget.ancestors.add(value);
+  if (Array.isArray(value)) {
+    if (value.length > maximumWireArrayItems) invalid();
+    const copied = plainArray(value).map((entry) => copyWireData(entry, budget, depth + 1));
+    budget.ancestors.delete(value);
+    return copied;
+  }
   const prototype = Object.getPrototypeOf(value);
   if (prototype !== Object.prototype && prototype !== null) invalid();
   const output: Record<string, unknown> = Object.create(null);
-  for (const key of Reflect.ownKeys(value)) {
+  const keys = Reflect.ownKeys(value);
+  if (keys.length > maximumWireRecordKeys) invalid();
+  for (const key of keys) {
     if (typeof key !== "string") invalid();
+    budget.utf8Bytes += Buffer.byteLength(key, "utf8");
+    if (budget.utf8Bytes > maximumWireUtf8Bytes) invalid();
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) invalid();
-    output[key] = copyWireData(descriptor.value);
+    output[key] = copyWireData(descriptor.value, budget, depth + 1);
   }
+  budget.ancestors.delete(value);
   return output;
 }
 
@@ -135,18 +157,8 @@ function expected(value: unknown, optional: boolean): number | null {
 
 /** Exact 0.7 catalog admission, intentionally stricter than the plan's illustrative regex. */
 export function validateImmutableArtifactRef(value: unknown): string {
-  const artifact = text(value, 1, 512);
-  if (/^manifest:sha256:[a-f0-9]{64}$/u.test(artifact)) return artifact;
-  if (artifact.startsWith("npm:")) {
-    const body = artifact.slice(4); const integrityAt = body.lastIndexOf("#sha512-"); const packageAt = body.lastIndexOf("@", integrityAt);
-    if (integrityAt < 1 || packageAt < 1) invalid();
-    const packageName = body.slice(0, packageAt); const version = body.slice(packageAt + 1, integrityAt); const integrity = body.slice(integrityAt + 8);
-    if (body.length > 214 || (!plainPackage.test(packageName) && !scopedPackage.test(packageName)) || !canonicalSemver.test(version) || !npmIntegrity.test(integrity)) invalid();
-    return artifact;
-  }
-  if (!artifact.startsWith("oci:") || !artifact.endsWith(`@sha256:${artifact.slice(-64)}`) || !/^oci:.*@sha256:[a-f0-9]{64}$/u.test(artifact)) invalid();
-  const repository = artifact.slice(4, -72);
-  if (repository.length < 1 || repository.length > 255 || repository.split("/").some((component) => !ociComponent.test(component))) invalid();
+  const artifact = text(value, 1, 1_024);
+  if (!Schema.Check(ImmutableArtifactRefSchema, artifact)) invalid();
   return artifact;
 }
 

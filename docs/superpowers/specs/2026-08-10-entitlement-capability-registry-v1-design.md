@@ -15,6 +15,14 @@ customer/provider text, or secret material. Catalog writes append these validate
 events through the existing transactional ProductEvent/Outbox path; unknown future
 catalog branches remain fail-closed.
 
+**2026-08-21 final Task 3 review clarification:** Global catalog authority is anchored
+to one explicit server-managed catalog authority Tenant. Commands require and lock the
+performing platform Actor's active `platform` Membership in that exact configured
+Tenant; customer Tenant ordering, membership projection timing, and caller input may
+not choose the audit/idempotency/event scope. Runtime catalog admission reuses the
+released Contracts artifact semantics and bounds hostile descriptor-only input by
+depth, node, collection, and aggregate UTF-8 budgets before canonical hashing.
+
 ## 1. Decision record
 
 The approved product and architecture decisions are:
@@ -401,6 +409,11 @@ system-managed Tenant administrator Membership.
 Transactional Outbox remains the only path from an accepted database mutation to an
 event notification. Catalog, Entitlement, Assignment, snapshot, and Runtime intent
 must commit atomically or not at all.
+
+Catalog blocking queues bounded idempotent reconciliation only for the exact blocked
+resource's `preparing` or `current` Tenant Pack Releases. Failed and superseded
+history remains immutable evidence, not fresh work. Any multi-Capability lock acquires
+`capability_version_id` rows in exact UTF-8 byte order.
 
 ## 13. Failure behavior
 

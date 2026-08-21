@@ -16,6 +16,7 @@ test("every workspace consumer pins the released contracts package", async () =>
     "apps/control-plane-api",
     "apps/control-plane-web",
     "apps/control-plane-worker",
+    "apps/identity-gateway",
     "apps/runtime-supervisor",
     "packages/runtime-core",
   ] as const;

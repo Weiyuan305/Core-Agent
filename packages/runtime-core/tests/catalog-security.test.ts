@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { ImmutableArtifactRefSchema } from "@core-agent/contracts";
+import Schema from "typebox/schema";
 
 import { canonicalPayloadHash, DomainError } from "../src/domain/idempotency.js";
 
@@ -39,6 +41,41 @@ test("exact released Contracts validation remains stricter than the illustrative
   const bad = { ...valid, version: "01.0.0", artifact_ref: `oci:UPPERCASE/${"a".repeat(1)}@sha256:${"a".repeat(64)}` };
   assert.throws(() => validation()(bad, "capability"), { code: "INVALID_REQUEST" });
   assert.equal(canonicalPayloadHash(valid).startsWith("sha256:"), true);
+});
+
+test("Runtime artifact admission exactly matches Contracts 0.8 for npm and qualified OCI boundaries", () => {
+  const digest = Buffer.alloc(64, 0x61).toString("base64");
+  const artifacts = [
+    `npm:${"a".repeat(214)}@1.0.0#sha512-${digest}`,
+    `oci:registry.example:5000/repository/path@sha256:${"a".repeat(64)}`,
+    `oci:localhost:5000/repository@sha256:${"a".repeat(64)}`,
+    `oci:registry.example.invalid/repository@sha256:${"a".repeat(64)}`,
+    `oci:registry.example/repository@sha256:${"A".repeat(64)}`,
+  ];
+  for (const artifact_ref of artifacts) {
+    const payload = { ...valid, artifact_ref };
+    const acceptedByContracts = Schema.Check(ImmutableArtifactRefSchema, artifact_ref);
+    assert.equal(
+      (() => { try { validation()({ ...payload, payload_hash: canonicalPayloadHash(payload) }, "capability"); return true; } catch { return false; } })(),
+      acceptedByContracts,
+      artifact_ref,
+    );
+  }
+});
+
+test("catalog command copying bounds cycles depth nodes arrays and aggregate bytes without traps or reflection", () => {
+  const cyclic = { ...valid, compatibility: { ...valid.compatibility } } as Record<string, unknown>;
+  cyclic.irrelevant = cyclic;
+  let deep: Record<string, unknown> = { canary };
+  for (let index = 0; index < 80; index += 1) deep = { next: deep };
+  const deepPayload = { ...valid, irrelevant: deep };
+  const hugePayload = { ...valid, irrelevant: "x".repeat(70_000) };
+  const giantArray = { ...valid, irrelevant: new Array(300).fill("x") };
+  for (const payload of [cyclic, deepPayload, hugePayload, giantArray]) {
+    assert.throws(() => validation()({ ...payload, payload_hash: "sha256:" + "0".repeat(64) }, "capability"), (error: unknown) => {
+      assert(error instanceof DomainError); assert.equal(error.code, "INVALID_REQUEST"); assert(!error.message.includes(canary)); return true;
+    });
+  }
 });
 
 test("catalog command boundary rejects empty members, Pack nesting, duplicates, mutable artifacts, and oversized metadata", () => {
