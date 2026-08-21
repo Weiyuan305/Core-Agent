@@ -986,6 +986,165 @@ before insert or update or delete on profile_snapshot_pointers
 for each row
 execute function enforce_profile_snapshot_pointer_cas();
 
+create function serialize_profile_entitlement_authority_mutation()
+returns trigger
+language plpgsql
+as $$
+begin
+  if tg_table_name = 'entitlement_assignments' then
+    perform 1
+    from profiles as profile
+    where (
+      tg_op <> 'INSERT'
+      and profile.tenant_id = old.tenant_id
+      and profile.profile_id = old.profile_id
+    ) or (
+      tg_op <> 'DELETE'
+      and profile.tenant_id = new.tenant_id
+      and profile.profile_id = new.profile_id
+    )
+    order by profile.tenant_id, profile.profile_id
+    for update;
+  elsif tg_table_name = 'entitlements' then
+    perform 1
+    from profiles as profile
+    where (
+      tg_op <> 'INSERT'
+      and profile.tenant_id = old.tenant_id
+      and (
+        old.tenant_mode = 'b2c'
+        or exists (
+          select 1
+          from entitlement_assignments as assignment
+          where assignment.tenant_id = old.tenant_id
+            and assignment.entitlement_id = old.entitlement_id
+            and assignment.profile_id = profile.profile_id
+            and assignment.status in ('preparing', 'available')
+        )
+      )
+    ) or (
+      tg_op <> 'DELETE'
+      and profile.tenant_id = new.tenant_id
+      and (
+        new.tenant_mode = 'b2c'
+        or exists (
+          select 1
+          from entitlement_assignments as assignment
+          where assignment.tenant_id = new.tenant_id
+            and assignment.entitlement_id = new.entitlement_id
+            and assignment.profile_id = profile.profile_id
+            and assignment.status in ('preparing', 'available')
+        )
+      )
+    )
+    order by profile.tenant_id, profile.profile_id
+    for update;
+  elsif tg_table_name = 'tenant_pack_releases' then
+    perform 1
+    from profiles as profile
+    where exists (
+      select 1
+      from entitlements as entitlement
+      where (
+        (tg_op <> 'INSERT'
+          and entitlement.tenant_id = old.tenant_id
+          and entitlement.pack_product_id = old.pack_product_id)
+        or (tg_op <> 'DELETE'
+          and entitlement.tenant_id = new.tenant_id
+          and entitlement.pack_product_id = new.pack_product_id)
+      )
+        and profile.tenant_id = entitlement.tenant_id
+        and (
+          entitlement.tenant_mode = 'b2c'
+          or exists (
+            select 1
+            from entitlement_assignments as assignment
+            where assignment.tenant_id = entitlement.tenant_id
+              and assignment.entitlement_id = entitlement.entitlement_id
+              and assignment.profile_id = profile.profile_id
+              and assignment.status in ('preparing', 'available')
+          )
+        )
+    )
+    order by profile.tenant_id, profile.profile_id
+    for update;
+  elsif tg_table_name = 'pack_versions' then
+    perform 1
+    from profiles as profile
+    where exists (
+      select 1
+      from tenant_pack_releases as release
+      join entitlements as entitlement
+        on entitlement.tenant_id = release.tenant_id
+       and entitlement.pack_product_id = release.pack_product_id
+      where release.pack_version_id in (old.pack_version_id, new.pack_version_id)
+        and profile.tenant_id = entitlement.tenant_id
+        and (
+          entitlement.tenant_mode = 'b2c'
+          or exists (
+            select 1
+            from entitlement_assignments as assignment
+            where assignment.tenant_id = entitlement.tenant_id
+              and assignment.entitlement_id = entitlement.entitlement_id
+              and assignment.profile_id = profile.profile_id
+              and assignment.status in ('preparing', 'available')
+          )
+        )
+    )
+    order by profile.tenant_id, profile.profile_id
+    for update;
+  elsif tg_table_name = 'capability_versions' then
+    perform 1
+    from profiles as profile
+    where exists (
+      select 1
+      from pack_members as member
+      join tenant_pack_releases as release
+        on release.pack_version_id = member.pack_version_id
+      join entitlements as entitlement
+        on entitlement.tenant_id = release.tenant_id
+       and entitlement.pack_product_id = release.pack_product_id
+      where member.capability_version_id in (
+          old.capability_version_id, new.capability_version_id
+        )
+        and profile.tenant_id = entitlement.tenant_id
+        and (
+          entitlement.tenant_mode = 'b2c'
+          or exists (
+            select 1
+            from entitlement_assignments as assignment
+            where assignment.tenant_id = entitlement.tenant_id
+              and assignment.entitlement_id = entitlement.entitlement_id
+              and assignment.profile_id = profile.profile_id
+              and assignment.status in ('preparing', 'available')
+          )
+        )
+    )
+    order by profile.tenant_id, profile.profile_id
+    for update;
+  end if;
+
+  if tg_op = 'DELETE' then return old; end if;
+  return new;
+end
+$$;
+
+create trigger entitlement_assignments_authority_serialization_check
+before insert or update or delete on entitlement_assignments
+for each row execute function serialize_profile_entitlement_authority_mutation();
+create trigger entitlements_authority_serialization_check
+before insert or update or delete on entitlements
+for each row execute function serialize_profile_entitlement_authority_mutation();
+create trigger tenant_pack_releases_authority_serialization_check
+before insert or update or delete on tenant_pack_releases
+for each row execute function serialize_profile_entitlement_authority_mutation();
+create trigger pack_versions_authority_serialization_check
+before update of status on pack_versions
+for each row execute function serialize_profile_entitlement_authority_mutation();
+create trigger capability_versions_authority_serialization_check
+before update of status on capability_versions
+for each row execute function serialize_profile_entitlement_authority_mutation();
+
 create function advance_profile_snapshot_pointer(
   p_tenant_id text,
   p_profile_id text,
@@ -999,6 +1158,8 @@ as $$
 declare
   next_snapshot_version bigint;
   next_evaluated_at timestamptz;
+  authority_now timestamptz;
+  current_authority_matches boolean;
   current_resource_version bigint;
   current_snapshot_version bigint;
   changed_version bigint;
@@ -1013,6 +1174,147 @@ begin
       using errcode = '23503',
         constraint = 'profile_snapshot_pointers_profile_authority_check';
   end if;
+
+  authority_now := clock_timestamp();
+
+  select not exists (
+    with effective_entitlements as materialized (
+      select entitlement.entitlement_id, entitlement.pack_product_id
+      from entitlements as entitlement
+      where entitlement.tenant_id = p_tenant_id
+        and entitlement.status = 'active'
+        and entitlement.valid_from <= authority_now
+        and (entitlement.expires_at is null or authority_now < entitlement.expires_at)
+        and (
+          (entitlement.tenant_mode = 'b2c' and entitlement.assignment_mode = 'automatic')
+          or (entitlement.tenant_mode = 'b2b' and entitlement.assignment_mode = 'seat' and exists (
+            select 1
+            from entitlement_assignments as assignment
+            where assignment.tenant_id = entitlement.tenant_id
+              and assignment.entitlement_id = entitlement.entitlement_id
+              and assignment.profile_id = p_profile_id
+              and assignment.status in ('preparing', 'available')
+          ))
+        )
+    ), effective_assignments as materialized (
+      select assignment.assignment_id
+      from entitlement_assignments as assignment
+      join effective_entitlements as entitlement
+        on entitlement.entitlement_id = assignment.entitlement_id
+      where assignment.tenant_id = p_tenant_id
+        and assignment.profile_id = p_profile_id
+        and assignment.status in ('preparing', 'available')
+    ), effective_products as materialized (
+      select distinct entitlement.pack_product_id
+      from effective_entitlements as entitlement
+    ), snapshot_entitlements as materialized (
+      select source.source_id as entitlement_id
+      from entitlement_snapshot_sources as source
+      where source.tenant_id = p_tenant_id
+        and source.profile_id = p_profile_id
+        and source.snapshot_id = p_snapshot_id
+        and source.source_kind = 'entitlement'
+    ), snapshot_assignments as materialized (
+      select source.source_id as assignment_id
+      from entitlement_snapshot_sources as source
+      where source.tenant_id = p_tenant_id
+        and source.profile_id = p_profile_id
+        and source.snapshot_id = p_snapshot_id
+        and source.source_kind = 'assignment'
+    ), selected_releases as materialized (
+      select release.tenant_pack_release_id, release.pack_product_id,
+        release.pack_version_id, release.status as release_status, pack.status as pack_status
+      from entitlement_snapshot_sources as source
+      join tenant_pack_releases as release
+        on release.tenant_id = source.tenant_id
+       and release.tenant_pack_release_id = source.source_id
+      join pack_versions as pack
+        on pack.pack_version_id = release.pack_version_id
+       and pack.pack_product_id = release.pack_product_id
+       and pack.version = release.pack_version
+      where source.tenant_id = p_tenant_id
+        and source.profile_id = p_profile_id
+        and source.snapshot_id = p_snapshot_id
+        and source.source_kind = 'release'
+    ), effective_capabilities as materialized (
+      select member.capability_id, member.capability_version_id, member.version,
+        capability_version.status, capability_version.risk_class,
+        capability_version.artifact_ref
+      from selected_releases as release
+      join pack_members as member
+        on member.pack_version_id = release.pack_version_id
+      join capability_versions as capability_version
+        on capability_version.capability_id = member.capability_id
+       and capability_version.capability_version_id = member.capability_version_id
+       and capability_version.version = member.version
+    ), snapshot_capabilities as materialized (
+      select capability.capability_id, capability.capability_version_id, capability.version
+      from entitlement_snapshot_capabilities as capability
+      where capability.tenant_id = p_tenant_id
+        and capability.profile_id = p_profile_id
+        and capability.snapshot_id = p_snapshot_id
+    )
+    select 1 where
+      exists (
+        (select entitlement_id from effective_entitlements
+          except select entitlement_id from snapshot_entitlements)
+        union all
+        (select entitlement_id from snapshot_entitlements
+          except select entitlement_id from effective_entitlements)
+      )
+      or exists (
+        (select assignment_id from effective_assignments
+          except select assignment_id from snapshot_assignments)
+        union all
+        (select assignment_id from snapshot_assignments
+          except select assignment_id from effective_assignments)
+      )
+      or exists (
+        (select pack_product_id from effective_products
+          except select pack_product_id from selected_releases)
+        union all
+        (select pack_product_id from selected_releases
+          except select pack_product_id from effective_products)
+      )
+      or exists (
+        select release.pack_product_id
+        from selected_releases as release
+        group by release.pack_product_id
+        having count(*) <> 1
+      )
+      or exists (
+        select 1
+        from selected_releases as release
+        where release.release_status <> 'current'
+          or release.pack_status not in ('published', 'retired')
+      )
+      or exists (
+        select capability.capability_id
+        from effective_capabilities as capability
+        group by capability.capability_id
+        having count(distinct (capability.capability_version_id, capability.version)) > 1
+      )
+      or exists (
+        select 1
+        from effective_capabilities as capability
+        where capability.status not in ('reviewed', 'retired')
+          or capability.risk_class in ('external_write', 'privileged')
+          or (
+            capability.risk_class = 'draft_write'
+            and capability.artifact_ref not like 'manifest:sha256:%'
+          )
+      )
+      or exists (
+        (select capability_id, capability_version_id, version from effective_capabilities
+          except select capability_id, capability_version_id, version from snapshot_capabilities)
+        union all
+        (select capability_id, capability_version_id, version from snapshot_capabilities
+          except select capability_id, capability_version_id, version from effective_capabilities)
+      )
+  ) into current_authority_matches;
+
+  /* The canonical Profile lock prevents authority mutations from crossing this
+     database-clock derivation and the final pointer write below. */
 
   select snapshot.snapshot_version, snapshot.evaluated_at
   into next_snapshot_version, next_evaluated_at
@@ -1086,6 +1388,12 @@ begin
     raise exception 'Profile Snapshot pointer must advance monotonically'
       using errcode = '23514',
         constraint = 'profile_snapshot_pointers_monotonic_snapshot_check';
+  end if;
+
+  if not current_authority_matches then
+    raise exception 'Profile Snapshot no longer equals current effective authority'
+      using errcode = '23514',
+        constraint = 'profile_snapshot_pointers_current_authority_check';
   end if;
 
   perform set_config('core_agent.profile_snapshot_pointer_cas', 'authorized', true);
@@ -1476,6 +1784,7 @@ alter function enforce_entitlement_assignment_seat_capacity() set search_path = 
 alter function enforce_entitlement_consumed_seat_capacity() set search_path = pg_catalog, public;
 alter function enforce_entitlement_pack_product_mode() set search_path = pg_catalog, public;
 alter function enforce_profile_snapshot_pointer_cas() set search_path = pg_catalog, public;
+alter function serialize_profile_entitlement_authority_mutation() set search_path = pg_catalog, public;
 alter function advance_profile_snapshot_pointer(text, text, bigint, text) set search_path = pg_catalog, public;
 alter function core_agent_is_canonical_semver(text) set search_path = pg_catalog, public;
 alter function core_agent_is_exact_contract_ref(text) set search_path = pg_catalog, public;
@@ -1524,6 +1833,7 @@ revoke all on function enforce_entitlement_assignment_seat_capacity() from publi
 revoke all on function enforce_entitlement_consumed_seat_capacity() from public, core_agent_app, core_agent_identity;
 revoke all on function enforce_entitlement_pack_product_mode() from public, core_agent_app, core_agent_identity;
 revoke all on function enforce_profile_snapshot_pointer_cas() from public, core_agent_app, core_agent_identity;
+revoke all on function serialize_profile_entitlement_authority_mutation() from public, core_agent_app, core_agent_identity;
 revoke all on function advance_profile_snapshot_pointer(text, text, bigint, text) from public, core_agent_app, core_agent_identity;
 revoke all on function core_agent_is_canonical_semver(text) from public, core_agent_app, core_agent_identity;
 revoke all on function core_agent_is_exact_contract_ref(text) from public, core_agent_app, core_agent_identity;

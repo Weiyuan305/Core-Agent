@@ -116,7 +116,7 @@ const schemaManifestEntries = [
   [10, "identity_authority", "eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381"],
   [11, "password_reset_transactions", "fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393"],
   [12, "email_verification_transactions", "2e7a7d0b8f910ff5253ace5dff1f0cc242224ec432e75621f15f57d93d14af12"],
-  [13, "entitlement_capability_authority", "b811a39031c5e83a11868713718aca09c33827ad38c66ad228337284ce16dbe1"],
+  [13, "entitlement_capability_authority", "305b085de2d8185494198dfb1093bc5f029699c0bbfed42e84f65b1ac8416b0c"],
 ] as const;
 
 const schemaManifests = new Map<number, SchemaManifest>(schemaManifestEntries.map(([version, name, checksum]) => [
@@ -840,7 +840,7 @@ const schema13Indexes: readonly LegacyIndexShape[] = [
 ];
 
 const schema13Routines = [
-  ["f", "advance_profile_snapshot_pointer", "p_tenant_id text, p_profile_id text, p_expected_resource_version bigint, p_snapshot_id text", "TABLE(resource_version bigint)", true, ["search_path=pg_catalog, public"], "a4dc3f0665226510557bc41632f72616"],
+  ["f", "advance_profile_snapshot_pointer", "p_tenant_id text, p_profile_id text, p_expected_resource_version bigint, p_snapshot_id text", "TABLE(resource_version bigint)", true, ["search_path=pg_catalog, public"], "853c4f017083f2e2ba0f81c448f11880"],
   ["f", "core_agent_is_canonical_semver", "candidate text", "boolean", false, ["search_path=pg_catalog, public"], "1ed599030c907847f7eb71c6d56249f7"],
   ["f", "core_agent_is_exact_contract_ref", "candidate text", "boolean", false, ["search_path=pg_catalog, public"], "8fca5ebbc25091381747fc23a9e59858"],
   ["f", "core_agent_is_immutable_artifact_ref", "candidate text", "boolean", false, ["search_path=pg_catalog, public"], "06fece05a3affff873daf217fcbd3f42"],
@@ -857,11 +857,14 @@ const schema13Routines = [
   ["f", "enforce_profile_snapshot_pointer_cas", "", "trigger", false, ["search_path=pg_catalog, public"], "64e7899ab83b4c3353b1c38ff4275649"],
   ["f", "enforce_tenant_pack_release_history_immutability", "", "trigger", false, ["search_path=pg_catalog, public"], "a016b5b5630e476cba8db8927a1fabf0"],
   ["f", "set_entitlement_snapshot_creation_metadata", "", "trigger", false, ["search_path=pg_catalog, public"], "768adafb7334f3d6d2b435c41452314c"],
+  ["f", "serialize_profile_entitlement_authority_mutation", "", "trigger", false, ["search_path=pg_catalog, public"], "7872ee19676e5bd4d91b6638f7b2da2a"],
   ["f", "validate_entitlement_snapshot_aggregate", "", "trigger", false, ["search_path=pg_catalog, public"], "4a633eea7d8e69e3f02baef8c5e1977e"],
 ] as const;
 
 const schema13Triggers = [
+  ["capability_versions", "capability_versions_authority_serialization_check", "O", "CREATE TRIGGER capability_versions_authority_serialization_check BEFORE UPDATE OF status ON capability_versions FOR EACH ROW EXECUTE FUNCTION serialize_profile_entitlement_authority_mutation()"],
   ["capability_versions", "capability_versions_reviewed_immutable_check", "O", "CREATE TRIGGER capability_versions_reviewed_immutable_check BEFORE DELETE OR UPDATE ON capability_versions FOR EACH ROW EXECUTE FUNCTION enforce_capability_version_immutability()"],
+  ["entitlement_assignments", "entitlement_assignments_authority_serialization_check", "O", "CREATE TRIGGER entitlement_assignments_authority_serialization_check BEFORE INSERT OR DELETE OR UPDATE ON entitlement_assignments FOR EACH ROW EXECUTE FUNCTION serialize_profile_entitlement_authority_mutation()"],
   ["entitlement_assignments", "entitlement_assignments_seat_capacity_check", "O", "CREATE TRIGGER entitlement_assignments_seat_capacity_check BEFORE INSERT OR UPDATE OF tenant_id, entitlement_id, profile_id, status ON entitlement_assignments FOR EACH ROW EXECUTE FUNCTION enforce_entitlement_assignment_seat_capacity()"],
   ["entitlement_snapshot_capabilities", "entitlement_snapshot_capabilities_creation_transaction_check", "O", "CREATE TRIGGER entitlement_snapshot_capabilities_creation_transaction_check BEFORE INSERT ON entitlement_snapshot_capabilities FOR EACH ROW EXECUTE FUNCTION enforce_entitlement_snapshot_child_creation_transaction()"],
   ["entitlement_snapshot_capabilities", "entitlement_snapshot_capabilities_aggregate_authority_check", "O", "CREATE CONSTRAINT TRIGGER entitlement_snapshot_capabilities_aggregate_authority_check AFTER INSERT ON entitlement_snapshot_capabilities DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION validate_entitlement_snapshot_aggregate()"],
@@ -872,12 +875,15 @@ const schema13Triggers = [
   ["entitlement_snapshots", "entitlement_snapshots_aggregate_authority_check", "O", "CREATE CONSTRAINT TRIGGER entitlement_snapshots_aggregate_authority_check AFTER INSERT ON entitlement_snapshots DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION validate_entitlement_snapshot_aggregate()"],
   ["entitlement_snapshots", "entitlement_snapshots_creation_metadata_check", "O", "CREATE TRIGGER entitlement_snapshots_creation_metadata_check BEFORE INSERT ON entitlement_snapshots FOR EACH ROW EXECUTE FUNCTION set_entitlement_snapshot_creation_metadata()"],
   ["entitlement_snapshots", "entitlement_snapshots_immutable_check", "O", "CREATE TRIGGER entitlement_snapshots_immutable_check BEFORE DELETE OR UPDATE ON entitlement_snapshots FOR EACH ROW EXECUTE FUNCTION enforce_entitlement_snapshot_immutability()"],
+  ["entitlements", "entitlements_authority_serialization_check", "O", "CREATE TRIGGER entitlements_authority_serialization_check BEFORE INSERT OR DELETE OR UPDATE ON entitlements FOR EACH ROW EXECUTE FUNCTION serialize_profile_entitlement_authority_mutation()"],
   ["entitlements", "entitlements_consumed_seat_capacity_check", "O", "CREATE TRIGGER entitlements_consumed_seat_capacity_check BEFORE UPDATE OF assignment_mode, seat_quantity ON entitlements FOR EACH ROW EXECUTE FUNCTION enforce_entitlement_consumed_seat_capacity()"],
   ["entitlements", "entitlements_pack_product_mode_check", "O", "CREATE TRIGGER entitlements_pack_product_mode_check BEFORE INSERT OR UPDATE OF tenant_id, tenant_mode, tenant_pack_release_id, pack_product_id, pack_version_id, pack_version ON entitlements FOR EACH ROW EXECUTE FUNCTION enforce_entitlement_pack_product_mode()"],
   ["pack_members", "pack_members_published_immutable_check", "O", "CREATE TRIGGER pack_members_published_immutable_check BEFORE INSERT OR DELETE OR UPDATE ON pack_members FOR EACH ROW EXECUTE FUNCTION enforce_pack_member_immutability()"],
   ["pack_products", "pack_products_published_semantics_immutable_check", "O", "CREATE TRIGGER pack_products_published_semantics_immutable_check BEFORE UPDATE OF tenant_modes ON pack_products FOR EACH ROW EXECUTE FUNCTION enforce_pack_product_published_semantics()"],
+  ["pack_versions", "pack_versions_authority_serialization_check", "O", "CREATE TRIGGER pack_versions_authority_serialization_check BEFORE UPDATE OF status ON pack_versions FOR EACH ROW EXECUTE FUNCTION serialize_profile_entitlement_authority_mutation()"],
   ["pack_versions", "pack_versions_published_immutable_check", "O", "CREATE TRIGGER pack_versions_published_immutable_check BEFORE INSERT OR DELETE OR UPDATE ON pack_versions FOR EACH ROW EXECUTE FUNCTION enforce_pack_version_immutability()"],
   ["profile_snapshot_pointers", "profile_snapshot_pointers_cas_check", "O", "CREATE TRIGGER profile_snapshot_pointers_cas_check BEFORE INSERT OR DELETE OR UPDATE ON profile_snapshot_pointers FOR EACH ROW EXECUTE FUNCTION enforce_profile_snapshot_pointer_cas()"],
+  ["tenant_pack_releases", "tenant_pack_releases_authority_serialization_check", "O", "CREATE TRIGGER tenant_pack_releases_authority_serialization_check BEFORE INSERT OR DELETE OR UPDATE ON tenant_pack_releases FOR EACH ROW EXECUTE FUNCTION serialize_profile_entitlement_authority_mutation()"],
   ["tenant_pack_releases", "tenant_pack_releases_history_immutable_check", "O", "CREATE TRIGGER tenant_pack_releases_history_immutable_check BEFORE INSERT OR DELETE OR UPDATE ON tenant_pack_releases FOR EACH ROW EXECUTE FUNCTION enforce_tenant_pack_release_history_immutability()"],
 ] as const;
 

@@ -1,6 +1,6 @@
 {
   "runtimeCorePostgres": {
-    "testCount": 395,
+    "testCount": 398,
     "suitePaths": [
       "tests/migrations.test.ts",
       "tests/entitlement-schema.test.ts",

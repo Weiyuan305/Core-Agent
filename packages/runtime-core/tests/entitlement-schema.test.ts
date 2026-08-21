@@ -1473,6 +1473,11 @@ test("current Snapshot pointer advances only through expected-version CAS", asyn
       version: "1.0.0",
     }],
   }));
+  const inserted = await pool.query<{ resource_version: string }>(
+    "select resource_version::text from advance_profile_snapshot_pointer($1, $2, $3, $4)",
+    ["tenant_pointer", "profile_tenant_pointer", 0, "snapshot_pointer_1"],
+  );
+  assert.equal(inserted.rows[0]?.resource_version, "1");
   await seedAdditionalAssignedEntitlement("tenant_pointer", "pointer");
   await withTransaction((client) => insertSnapshotAggregate(client, {
     snapshotId: "snapshot_pointer_2",
@@ -1489,11 +1494,6 @@ test("current Snapshot pointer advances only through expected-version CAS", asyn
     }],
   }));
 
-  const inserted = await pool.query<{ resource_version: string }>(
-    "select resource_version::text from advance_profile_snapshot_pointer($1, $2, $3, $4)",
-    ["tenant_pointer", "profile_tenant_pointer", 0, "snapshot_pointer_1"],
-  );
-  assert.equal(inserted.rows[0]?.resource_version, "1");
   await assert.rejects(
     pool.query("update profile_snapshot_pointers set snapshot_id = 'snapshot_pointer_2' where tenant_id = 'tenant_pointer'"),
     (error) => constraintName(error) === "profile_snapshot_pointers_cas_check",
@@ -1534,24 +1534,9 @@ test("concurrent absent Snapshot pointer initialization serializes on the canoni
       version: "1.0.0",
     }],
   }));
-  await seedAdditionalAssignedEntitlement("tenant_pointer_init", "init");
-  await withTransaction((client) => insertSnapshotAggregate(client, {
-    snapshotId: "snapshot_init_2",
-    tenantId: "tenant_pointer_init",
-    profileId: "profile_tenant_pointer_init",
-    snapshotVersion: 2,
-    sourceEntitlementIds: ["entitlement_read", "entitlement_read_init"],
-    sourceAssignmentIds: ["assignment_read", "assignment_read_init"],
-    sourceReleaseIds: ["release_read"],
-    capabilities: [{
-      capability_id: "capability_read",
-      capability_version_id: "capability_version_read",
-      version: "1.0.0",
-    }],
-  }));
   const attempts = await Promise.allSettled([
     pool.query("select * from advance_profile_snapshot_pointer($1, $2, 0, $3)", ["tenant_pointer_init", "profile_tenant_pointer_init", "snapshot_init_1"]),
-    pool.query("select * from advance_profile_snapshot_pointer($1, $2, 0, $3)", ["tenant_pointer_init", "profile_tenant_pointer_init", "snapshot_init_2"]),
+    pool.query("select * from advance_profile_snapshot_pointer($1, $2, 0, $3)", ["tenant_pointer_init", "profile_tenant_pointer_init", "snapshot_init_1"]),
   ]);
   assert.equal(attempts.filter((result) => result.status === "fulfilled").length, 1);
   const rejected = attempts.find((result): result is PromiseRejectedResult => result.status === "rejected");
@@ -1728,20 +1713,52 @@ test("review round 4 Snapshot aggregate equals the complete deduplicated effecti
   );
 });
 
+test("review round 5 complete Snapshot sources reject missing Capability children", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await seedCatalogAndEntitlement("tenant_missing_capability");
+  await seedAvailableAssignment("tenant_missing_capability");
+
+  await assert.rejects(
+    withTransaction((client) => insertSnapshotAggregate(client, {
+      snapshotId: "snapshot_missing_capability",
+      tenantId: "tenant_missing_capability",
+      profileId: "profile_tenant_missing_capability",
+      sourceEntitlementIds: ["entitlement_read"],
+      sourceAssignmentIds: ["assignment_read"],
+      sourceReleaseIds: ["release_read"],
+      capabilities: [],
+    })),
+    (error) => constraintName(error) === "entitlement_snapshots_capability_completeness_check",
+  );
+});
+
 test("review round 4 preparing release Snapshot stays pending until release is current", async () => {
   await applyMigrations(pool, migrationsDirectory);
   await seedCatalogAndEntitlement("tenant_candidate_release");
   await seedAvailableAssignment("tenant_candidate_release");
   await pool.query(
-    `insert into pack_versions (
+    `insert into capabilities (
+       capability_id, display_name, owning_domain, kind, resource_version, created_at, updated_at
+     ) values ('capability_candidate', 'Candidate capability', 'synthetic', 'skill', 1, now(), now());
+     insert into capability_versions (
+       capability_version_id, capability_id, version, kind, artifact_ref, contract_ref,
+       risk_class, approval_requirement, compatibility_json, status, resource_version, created_at, updated_at
+     ) values (
+       'capability_version_candidate', 'capability_candidate', '2.0.0', 'skill',
+       'manifest:sha256:5555555555555555555555555555555555555555555555555555555555555555',
+       'synthetic/candidate@2.0.0', 'read', 'none',
+       '{"core_contract_version":"0.7.0","domain_contract_version":"1.0.0","runtime_protocol_version":"1.0.0","tenant_modes":["b2b","b2c"]}'::jsonb,
+       'reviewed', 1, now(), now()
+     );
+     insert into pack_versions (
        pack_version_id, pack_product_id, version, status, resource_version, created_at, updated_at
      ) values ('pack_version_candidate', 'pack_product_read', '2.0.0', 'draft', 1, now(), now());
      insert into pack_members (
        pack_member_id, pack_version_id, member_order, capability_id, capability_version_id, version,
        resource_version, created_at, updated_at
      ) values (
-       'pack_member_candidate', 'pack_version_candidate', 1, 'capability_read',
-       'capability_version_read', '1.0.0', 1, now(), now()
+       'pack_member_candidate', 'pack_version_candidate', 1, 'capability_candidate',
+       'capability_version_candidate', '2.0.0', 1, now(), now()
      );
      update pack_versions set status = 'reviewed', resource_version = 2 where pack_version_id = 'pack_version_candidate';
      update pack_versions set status = 'published', resource_version = 3 where pack_version_id = 'pack_version_candidate';
@@ -1761,9 +1778,9 @@ test("review round 4 preparing release Snapshot stays pending until release is c
     sourceAssignmentIds: ["assignment_read"],
     sourceReleaseIds: ["release_candidate"],
     capabilities: [{
-      capability_id: "capability_read",
-      capability_version_id: "capability_version_read",
-      version: "1.0.0",
+      capability_id: "capability_candidate",
+      capability_version_id: "capability_version_candidate",
+      version: "2.0.0",
     }],
   }));
   await assert.rejects(
@@ -1784,6 +1801,123 @@ test("review round 4 preparing release Snapshot stays pending until release is c
     ["tenant_candidate_release", "profile_tenant_candidate_release", "snapshot_candidate"],
   );
   assert.equal(advanced.rows[0]?.resource_version, "1");
+});
+
+test("review round 5 pointer CAS rejects authority changed after Snapshot preparation", async () => {
+  const cases = [
+    {
+      name: "revoked Entitlement",
+      mutate: () => pool.query(
+        `update entitlements
+         set status = 'revoked', reason_code = 'platform_revoked', resource_version = 2
+         where tenant_id = 'tenant_pointer_revalidate' and entitlement_id = 'entitlement_read'`,
+      ),
+    },
+    {
+      name: "expired Entitlement",
+      mutate: () => pool.query(
+        `update entitlements
+         set status = 'expired', reason_code = 'validity_expired', expires_at = clock_timestamp(), resource_version = 2
+         where tenant_id = 'tenant_pointer_revalidate' and entitlement_id = 'entitlement_read'`,
+      ),
+    },
+    {
+      name: "removed Assignment",
+      mutate: () => pool.query(
+        `update entitlement_assignments
+         set status = 'revoked', reason_code = 'administrator_revoked', resource_version = 2
+         where tenant_id = 'tenant_pointer_revalidate' and assignment_id = 'assignment_read'`,
+      ),
+    },
+    {
+      name: "added Entitlement and Assignment",
+      mutate: () => seedAdditionalAssignedEntitlement("tenant_pointer_revalidate", "after_prepare"),
+    },
+  ] as const;
+
+  for (const [index, mutation] of cases.entries()) {
+    if (index > 0) await resetDatabase();
+    await applyMigrations(pool, migrationsDirectory);
+    await seedCatalogAndEntitlement("tenant_pointer_revalidate");
+    await seedAvailableAssignment("tenant_pointer_revalidate");
+    await withTransaction((client) => insertSnapshotAggregate(client, {
+      snapshotId: `snapshot_pointer_revalidate_${index}`,
+      tenantId: "tenant_pointer_revalidate",
+      profileId: "profile_tenant_pointer_revalidate",
+      sourceEntitlementIds: ["entitlement_read"],
+      sourceAssignmentIds: ["assignment_read"],
+      sourceReleaseIds: ["release_read"],
+      capabilities: [{
+        capability_id: "capability_read",
+        capability_version_id: "capability_version_read",
+        version: "1.0.0",
+      }],
+    }));
+    await mutation.mutate();
+    await assert.rejects(
+      pool.query(
+        "select * from advance_profile_snapshot_pointer($1, $2, 0, $3)",
+        ["tenant_pointer_revalidate", "profile_tenant_pointer_revalidate", `snapshot_pointer_revalidate_${index}`],
+      ),
+      (error) => {
+        assert.equal(constraintName(error), "profile_snapshot_pointers_current_authority_check", mutation.name);
+        return true;
+      },
+    );
+  }
+});
+
+test("review round 5 authority mutation cannot cross pointer validation and write", async () => {
+  await applyMigrations(pool, migrationsDirectory);
+  await seedCatalogAndEntitlement("tenant_pointer_barrier");
+  await seedAvailableAssignment("tenant_pointer_barrier");
+  await withTransaction((client) => insertSnapshotAggregate(client, {
+    snapshotId: "snapshot_pointer_barrier",
+    tenantId: "tenant_pointer_barrier",
+    profileId: "profile_tenant_pointer_barrier",
+    sourceEntitlementIds: ["entitlement_read"],
+    sourceAssignmentIds: ["assignment_read"],
+    sourceReleaseIds: ["release_read"],
+    capabilities: [{
+      capability_id: "capability_read",
+      capability_version_id: "capability_version_read",
+      version: "1.0.0",
+    }],
+  }));
+
+  const mutationClient = await pool.connect();
+  const pointerClient = await pool.connect();
+  try {
+    await mutationClient.query("begin");
+    await pointerClient.query("select set_config('application_name', 'entitlement_pointer_authority_barrier', false)");
+    await mutationClient.query(
+      `update entitlements
+       set status = 'revoked', reason_code = 'platform_revoked', resource_version = 2
+       where tenant_id = 'tenant_pointer_barrier' and entitlement_id = 'entitlement_read'`,
+    );
+    const pointerAdvance = pointerClient.query(
+      "select * from advance_profile_snapshot_pointer($1, $2, 0, $3)",
+      ["tenant_pointer_barrier", "profile_tenant_pointer_barrier", "snapshot_pointer_barrier"],
+    );
+    const waitedOnAuthorityLock = await waitForDatabaseLock("entitlement_pointer_authority_barrier");
+    await mutationClient.query("commit");
+    const [pointerResult] = await Promise.allSettled([pointerAdvance]);
+    assert.equal(waitedOnAuthorityLock, true);
+    assert.equal(pointerResult!.status, "rejected");
+    if (pointerResult!.status === "rejected") {
+      assert.equal(constraintName(pointerResult!.reason), "profile_snapshot_pointers_current_authority_check");
+    }
+    assert.equal(
+      Number((await pool.query(
+        "select count(*)::int as count from profile_snapshot_pointers where tenant_id = 'tenant_pointer_barrier'",
+      )).rows[0]?.count),
+      0,
+    );
+  } finally {
+    await mutationClient.query("rollback").catch(() => undefined);
+    mutationClient.release();
+    pointerClient.release();
+  }
 });
 
 test("review round 4 historical current releases resolve retired authority but never blocked authority", async () => {
