@@ -49,7 +49,7 @@
 
 ---
 
-### Task 1: Release Entitlement and Capability contracts as `@core-agent/contracts` 0.6.0
+### Task 1: Release Entitlement and Capability contracts as `@core-agent/contracts` 0.7.0
 
 **Files:**
 
@@ -72,13 +72,13 @@
 - Modify: `packages/contracts/package.json`
 - Modify: `packages/contracts/CHANGELOG.md`
 - Modify: `packages/contracts/compatibility-change.json`
-- Create: `packages/contracts/compat/v1/releases/0.6.0/`
+- Create: `packages/contracts/compat/v1/releases/0.7.0/`
 - Regenerate: `packages/contracts/schemas/v1/*.schema.json`
 - Regenerate: `packages/contracts/compat/v1/*.schema.json`
 
 **Interfaces:**
 
-- Consumes: Contracts 0.5.0, `EntitlementSnapshotRef`, `TrustedRequestContext`, `AuditEvent`, and ProductEvent helpers.
+- Consumes: Contracts 0.6.0, `EntitlementSnapshotRef`, `TrustedRequestContext`, `AuditEvent`, and ProductEvent helpers.
 - Produces: all catalog/entitlement resources, commands, public summaries, projection states, and event/error vocabularies used by Tasks 2-12.
 
 - [ ] **Step 1: Write failing catalog-contract tests**
@@ -141,11 +141,11 @@ Expected: FAIL because the new resources and events do not exist.
 
 - [ ] **Step 5: Implement and export the schemas**
 
-Use top-level registered schemas now supported by the 0.5.0 release-manifest policy. Every resource is `additionalProperties: false`, includes resource metadata, uses opaque IDs, and separates private/internal fields from public summaries. New producers must sort arrays before validation; schemas must not silently coerce or sort client input.
+Use the top-level registered-schema and immutable release-manifest policy already established by Contracts 0.6.0. Every resource is `additionalProperties: false`, includes resource metadata, uses opaque IDs, and separates private/internal fields from public summaries. New producers must sort arrays before validation; schemas must not silently coerce or sort client input.
 
-- [ ] **Step 6: Publish the additive 0.6.0 contract release**
+- [ ] **Step 6: Publish the additive 0.7.0 contract release**
 
-Set package/version authority to `0.6.0`, generate live schemas, copy the exact current manifest to `compat/v1/releases/0.6.0`, and record an additive minor change. Historical 0.2-0.5 releases remain byte-immutable.
+Set package/version authority to `0.7.0`, generate live schemas, copy the exact current manifest to `compat/v1/releases/0.7.0`, and record an additive minor change. Historical 0.2-0.6 releases remain byte-immutable.
 
 - [ ] **Step 7: Verify and commit**
 
@@ -888,7 +888,7 @@ The script outputs redacted JSON with IDs hashed, states, generations, digests, 
 
 - [ ] **Step 4: Document operations, rollout, and rollback**
 
-Give exact commands and gates for contracts 0.6.0, schema 13, feature flags, catalog review, initial non-executing data, grant/revoke, release canary, projection health, conflict diagnosis, Worker retry, B2C idle, release rollback through a new generation, application rollback with mutations disabled, and confirmation that no real MCP is exposed.
+Give exact commands and gates for contracts 0.7.0, schema 13, feature flags, catalog review, initial non-executing data, grant/revoke, release canary, projection health, conflict diagnosis, Worker retry, B2C idle, release rollback through a new generation, application rollback with mutations disabled, and confirmation that no real MCP is exposed.
 
 - [ ] **Step 5: Run final acceptance**
 

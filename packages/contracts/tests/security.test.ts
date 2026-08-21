@@ -22,6 +22,11 @@ const forbiddenAuthResponseFields = [
   "password", "email", "provider_subject", "access_token", "refresh_token",
   "authorization", "raw_claims", "key_id", "provider_error_body",
 ];
+const forbiddenServiceSummaryFields = [
+  "artifact_ref", "contract_ref", "capability_id", "capability_ids",
+  "external_order_ref", "price", "receipt", "tool_schema", "secret",
+  "failure_summary", "container_id", "image_id",
+];
 
 function matchingCredentialOrPersonalDataPattern(content: string): RegExp | undefined {
   return credentialOrPersonalDataPatterns.find((pattern) => pattern.test(content));
@@ -196,5 +201,19 @@ test("public auth response schemas expose no authentication PII, tokens, claims,
       return undefined;
     };
     assert.equal(visit(document), undefined, key);
+  }
+});
+
+test("public entitlement summaries expose no catalog, commercial, tool, secret, or runtime internals", () => {
+  for (const key of [
+    "company-service-summary",
+    "student-service-summary",
+    "company-assignment-summary",
+  ] as const) {
+    const document = ContractSchemas[key] as unknown as Record<string, unknown>;
+    const serialized = JSON.stringify(document);
+    for (const field of forbiddenServiceSummaryFields) {
+      assert.equal(serialized.includes(`\"${field}\"`), false, `${key} exposes ${field}`);
+    }
   }
 });

@@ -1,0 +1,16 @@
+{
+  "schema_key": "entitlement-assignment",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": {
+    "schema_version": 1,
+    "resource_version": 1,
+    "created_at": "2026-08-20T01:00:00Z",
+    "updated_at": "2026-08-20T01:00:00Z",
+    "assignment_id": "assignment_demo",
+    "tenant_id": "tenant_demo",
+    "entitlement_id": "entitlement_demo",
+    "profile_id": "profile_demo",
+    "status": "preparing",
+    "reason_code": "seat_assigned"
+  }
+}

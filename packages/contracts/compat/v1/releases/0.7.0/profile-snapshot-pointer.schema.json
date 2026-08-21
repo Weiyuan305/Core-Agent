@@ -1,0 +1,72 @@
+{
+  "$id": "core-agent://v1/profile-snapshot-pointer",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "created_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "entitlement_snapshot_ref": {
+      "$id": "core-agent://v1/entitlement-snapshot-ref",
+      "additionalProperties": false,
+      "properties": {
+        "evaluated_at": {
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+          "type": "string"
+        },
+        "snapshot_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "version": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "snapshot_id",
+        "version",
+        "evaluated_at"
+      ],
+      "type": "object"
+    },
+    "profile_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "tenant_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "resource_version",
+    "created_at",
+    "updated_at",
+    "tenant_id",
+    "profile_id",
+    "entitlement_snapshot_ref"
+  ],
+  "type": "object"
+}

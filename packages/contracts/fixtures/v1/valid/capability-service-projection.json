@@ -1,0 +1,20 @@
+{
+  "schema_key": "capability-service-projection",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": {
+    "schema_version": 1,
+    "resource_version": 1,
+    "created_at": "2026-08-20T01:00:00Z",
+    "updated_at": "2026-08-20T01:00:00Z",
+    "projection_id": "projection_demo",
+    "tenant_id": "tenant_demo",
+    "profile_id": "profile_demo",
+    "entitlement_snapshot_ref": {
+      "snapshot_id": "snapshot_demo",
+      "version": 1,
+      "evaluated_at": "2026-08-20T01:00:00Z"
+    },
+    "generation": 1,
+    "status": "preparing"
+  }
+}

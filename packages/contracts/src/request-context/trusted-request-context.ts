@@ -1,4 +1,5 @@
 import Type, { type Static } from "typebox";
+import Schema from "typebox/schema";
 
 import {
   OpaqueIdSchema,
@@ -12,6 +13,7 @@ import {
   CaseRefSchema,
   ConsentSnapshotRefSchema,
   EntitlementSnapshotRefSchema,
+  type EntitlementSnapshotRef,
   StudentRefSchema,
   validateCaseScope,
 } from "../runtime/refs.js";
@@ -98,7 +100,63 @@ export interface TrustedContextAuthority {
   };
 }
 
+const EntitlementSnapshotAuthoritySchema = Type.Object(
+  {
+    tenant_id: OpaqueIdSchema,
+    profile_id: OpaqueIdSchema,
+    snapshot_ref: EntitlementSnapshotRefSchema,
+    capability_ids: Type.Array(OpaqueIdSchema, { uniqueItems: true }),
+  },
+  { additionalProperties: false },
+);
+
+export interface EntitlementAwareTrustedContextAuthority extends TrustedContextAuthority {
+  entitlement_snapshot: {
+    tenant_id: string;
+    profile_id: string;
+    snapshot_ref: EntitlementSnapshotRef;
+    capability_ids: readonly string[];
+  };
+}
+
 const MAX_CONTEXT_TTL_NANOSECONDS = 300_000_000_000n;
+
+function isAccessorSafePlainData(value: unknown, seen: Set<object>): boolean {
+  if (value === null || typeof value !== "object") return true;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  const prototype = Object.getPrototypeOf(value);
+  if (Array.isArray(value)) {
+    if (prototype !== Array.prototype) return false;
+  } else if (prototype !== Object.prototype && prototype !== null) {
+    return false;
+  }
+  for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
+    if (descriptor.get !== undefined || descriptor.set !== undefined || !("value" in descriptor)) {
+      return false;
+    }
+    if (!isAccessorSafePlainData(descriptor.value, seen)) return false;
+  }
+  seen.delete(value);
+  return true;
+}
+
+function readEntitlementSnapshotAuthority(
+  authority: EntitlementAwareTrustedContextAuthority,
+): Static<typeof EntitlementSnapshotAuthoritySchema> | undefined {
+  const descriptor = Object.getOwnPropertyDescriptor(authority, "entitlement_snapshot");
+  if (
+    descriptor === undefined
+    || descriptor.get !== undefined
+    || descriptor.set !== undefined
+    || !("value" in descriptor)
+    || !isAccessorSafePlainData(descriptor.value, new Set())
+    || !Schema.Check(EntitlementSnapshotAuthoritySchema, descriptor.value)
+  ) {
+    return undefined;
+  }
+  return descriptor.value as Static<typeof EntitlementSnapshotAuthoritySchema>;
+}
 
 export function validateTrustedRequestContext(
   context: TrustedRequestContext,
@@ -289,6 +347,95 @@ export function validateTrustedRequestContext(
         "Original actor must equal the effective actor without delegation",
       ),
     );
+  }
+
+  return violations;
+}
+
+/**
+ * Mandatory validation gate for every consumer authorizing entitlement-backed capabilities.
+ */
+export function validateEntitlementAwareTrustedRequestContext(
+  context: TrustedRequestContext,
+  authority: EntitlementAwareTrustedContextAuthority,
+): ContractViolation[] {
+  const violations = validateTrustedRequestContext(context, authority);
+  const entitlementAuthority = readEntitlementSnapshotAuthority(authority);
+  if (entitlementAuthority === undefined) {
+    violations.push(violation(
+      "ENTITLEMENT_AUTHORITY_REQUIRED",
+      "authority.entitlement_snapshot",
+      "Entitlement-aware validation requires closed authoritative tenant, profile, snapshot, and Capability facts",
+    ));
+    return violations;
+  }
+
+  if (
+    entitlementAuthority.tenant_id !== context.tenant_id
+    || entitlementAuthority.tenant_id !== authority.profile.tenant_id
+  ) {
+    violations.push(violation(
+      "ENTITLEMENT_AUTHORITY_TENANT_MISMATCH",
+      "authority.entitlement_snapshot.tenant_id",
+      "Entitlement snapshot tenant must match the trusted context and authoritative profile",
+    ));
+  }
+  if (
+    entitlementAuthority.profile_id !== context.profile_id
+    || entitlementAuthority.profile_id !== authority.profile.profile_id
+  ) {
+    violations.push(violation(
+      "ENTITLEMENT_AUTHORITY_PROFILE_MISMATCH",
+      "authority.entitlement_snapshot.profile_id",
+      "Entitlement snapshot profile must match the trusted context and authoritative profile",
+    ));
+  }
+
+  for (let index = 1; index < context.capability_ids.length; index += 1) {
+    if (context.capability_ids[index - 1]! >= context.capability_ids[index]!) {
+      violations.push(violation(
+        "CAPABILITY_IDS_NOT_SORTED",
+        "capability_ids",
+        "Trusted context Capability ids must use canonical order",
+      ));
+      break;
+    }
+  }
+  for (let index = 1; index < entitlementAuthority.capability_ids.length; index += 1) {
+    if (entitlementAuthority.capability_ids[index - 1]! >= entitlementAuthority.capability_ids[index]!) {
+      violations.push(violation(
+        "ENTITLEMENT_AUTHORITY_CAPABILITIES_NOT_CANONICAL",
+        "authority.entitlement_snapshot.capability_ids",
+        "Authoritative Capability ids must be unique and canonically sorted",
+      ));
+      break;
+    }
+  }
+
+  const effectiveRef = entitlementAuthority.snapshot_ref;
+  const contextRef = context.entitlement_snapshot_ref;
+  if (
+    contextRef.snapshot_id !== effectiveRef.snapshot_id
+    || contextRef.version !== effectiveRef.version
+    || contextRef.evaluated_at !== effectiveRef.evaluated_at
+  ) {
+    violations.push(violation(
+      "ENTITLEMENT_SNAPSHOT_MISMATCH",
+      "entitlement_snapshot_ref",
+      "Trusted context must reference the effective entitlement snapshot",
+    ));
+  }
+  if (
+    context.capability_ids.length !== entitlementAuthority.capability_ids.length
+    || context.capability_ids.some((capabilityId, index) => (
+      capabilityId !== entitlementAuthority.capability_ids[index]
+    ))
+  ) {
+    violations.push(violation(
+      "ENTITLEMENT_CAPABILITIES_MISMATCH",
+      "capability_ids",
+      "Trusted context Capability ids must match the effective entitlement snapshot",
+    ));
   }
 
   return violations;

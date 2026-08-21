@@ -1,0 +1,12 @@
+{
+  "schema_key": "revoke-pack-seat-request",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": {
+    "schema_version": 1,
+    "idempotency_key": "idem_revoke_assignment_demo",
+    "payload_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "assignment_id": "assignment_demo",
+    "expected_resource_version": 1,
+    "reason_code": "administrator_revoked"
+  }
+}

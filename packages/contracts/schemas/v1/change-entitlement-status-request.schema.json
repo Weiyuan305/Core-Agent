@@ -1,0 +1,144 @@
+{
+  "$id": "core-agent://v1/change-entitlement-status-request",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "entitlement_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "expected_resource_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "idempotency_key": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "payload_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "reason_code": {
+          "const": "administrator_suspended",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "title": "SchemaVersion",
+          "type": "number"
+        },
+        "status": {
+          "const": "suspended",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "idempotency_key",
+        "payload_hash",
+        "entitlement_id",
+        "expected_resource_version",
+        "status",
+        "reason_code"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "entitlement_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "expected_resource_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "idempotency_key": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "payload_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "reason_code": {
+          "const": "administrator_reactivated",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "title": "SchemaVersion",
+          "type": "number"
+        },
+        "status": {
+          "const": "active",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "idempotency_key",
+        "payload_hash",
+        "entitlement_id",
+        "expected_resource_version",
+        "status",
+        "reason_code"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "entitlement_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "expected_resource_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "idempotency_key": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "payload_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "reason_code": {
+          "const": "platform_revoked",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "title": "SchemaVersion",
+          "type": "number"
+        },
+        "status": {
+          "const": "revoked",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "idempotency_key",
+        "payload_hash",
+        "entitlement_id",
+        "expected_resource_version",
+        "status",
+        "reason_code"
+      ],
+      "type": "object"
+    }
+  ]
+}

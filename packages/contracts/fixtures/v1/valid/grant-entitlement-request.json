@@ -1,0 +1,18 @@
+{
+  "schema_key": "grant-entitlement-request",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": {
+    "schema_version": 1,
+    "idempotency_key": "idem_grant_demo",
+    "payload_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "tenant_id": "tenant_demo",
+    "pack_product_id": "pack.eduapply",
+    "source": "platform_manual",
+    "external_order_ref": "order_demo_001",
+    "expected_resource_version": 1,
+    "expires_at": "2027-08-20T01:00:00Z",
+    "tenant_mode": "b2b",
+    "assignment_mode": "seat",
+    "seat_quantity": 3
+  }
+}

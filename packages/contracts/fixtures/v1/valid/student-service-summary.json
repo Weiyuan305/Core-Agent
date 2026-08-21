@@ -1,0 +1,11 @@
+{
+  "schema_key": "student-service-summary",
+  "expected": { "structurally_valid": true, "violation_codes": [] },
+  "value": {
+    "schema_version": 1,
+    "service_id": "service_demo",
+    "display_name": "Student all-in-one",
+    "valid_from": "2026-08-20T01:00:00Z",
+    "service_state": "preparing"
+  }
+}

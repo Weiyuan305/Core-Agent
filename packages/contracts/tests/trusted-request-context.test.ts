@@ -6,10 +6,12 @@ import {
   SignedTrustedRequestContextSchema,
   TrustedRequestContextSchema,
   validateSignedContextEnvelope,
+  validateEntitlementAwareTrustedRequestContext,
   validateTrustedRequestContext,
   type SignedTrustedRequestContext,
   type TrustedRequestContext,
   type TrustedContextAuthority,
+  type EntitlementAwareTrustedContextAuthority,
 } from "../src/index.js";
 
 const context: TrustedRequestContext = {
@@ -372,6 +374,265 @@ test("context schema rejects duplicate capabilities, duplicate audience, and unk
     false,
   );
   assert.equal(validator.Check({ ...context, untrusted: true }), false);
+});
+
+test("trusted context capability ids must be in canonical sorted order", () => {
+  const entitlementAuthority: EntitlementAwareTrustedContextAuthority = {
+    ...authority,
+    entitlement_snapshot: {
+      tenant_id: context.tenant_id,
+      profile_id: context.profile_id,
+      snapshot_ref: context.entitlement_snapshot_ref,
+      capability_ids: ["eduapply.application", "housing.read"],
+    },
+  };
+  assert.deepEqual(
+    validateEntitlementAwareTrustedRequestContext({
+      ...context,
+      capability_ids: ["housing.read", "eduapply.application"],
+    }, entitlementAuthority).map((item) => item.code),
+    ["CAPABILITY_IDS_NOT_SORTED", "ENTITLEMENT_CAPABILITIES_MISMATCH"],
+  );
+  assert.deepEqual(validateTrustedRequestContext({
+    ...context,
+    capability_ids: ["housing.read", "eduapply.application"],
+  }, authority), []);
+});
+
+test("trusted context must exactly match the effective entitlement snapshot", () => {
+  const effectiveAuthority: EntitlementAwareTrustedContextAuthority = {
+    ...authority,
+    entitlement_snapshot: {
+      tenant_id: context.tenant_id,
+      profile_id: context.profile_id,
+      snapshot_ref: context.entitlement_snapshot_ref,
+      capability_ids: context.capability_ids,
+    },
+  };
+  assert.deepEqual(validateEntitlementAwareTrustedRequestContext(context, effectiveAuthority), []);
+  assert.deepEqual(
+    validateEntitlementAwareTrustedRequestContext(context, {
+      ...effectiveAuthority,
+      entitlement_snapshot: {
+        ...effectiveAuthority.entitlement_snapshot,
+        snapshot_ref: { ...context.entitlement_snapshot_ref, version: 8 },
+      },
+    }).map((item) => item.code),
+    ["ENTITLEMENT_SNAPSHOT_MISMATCH"],
+  );
+  assert.deepEqual(
+    validateEntitlementAwareTrustedRequestContext(context, {
+      ...effectiveAuthority,
+      entitlement_snapshot: {
+        ...effectiveAuthority.entitlement_snapshot,
+        capability_ids: ["housing.read"],
+      },
+    }).map((item) => item.code),
+    ["ENTITLEMENT_CAPABILITIES_MISMATCH"],
+  );
+  assert.deepEqual(
+    validateEntitlementAwareTrustedRequestContext(
+      context,
+      authority as EntitlementAwareTrustedContextAuthority,
+    ).map((item) => item.code),
+    ["ENTITLEMENT_AUTHORITY_REQUIRED"],
+  );
+  assert.deepEqual(
+    validateEntitlementAwareTrustedRequestContext(context, {
+      ...effectiveAuthority,
+      entitlement_snapshot: {
+        ...effectiveAuthority.entitlement_snapshot,
+        capability_ids: ["housing.read", "eduapply.application"],
+      },
+    }).map((item) => item.code),
+    ["ENTITLEMENT_AUTHORITY_CAPABILITIES_NOT_CANONICAL", "ENTITLEMENT_CAPABILITIES_MISMATCH"],
+  );
+});
+
+test("entitlement snapshot authority binds tenant and profile scope", () => {
+  const effectiveAuthority: EntitlementAwareTrustedContextAuthority = {
+    ...authority,
+    entitlement_snapshot: {
+      tenant_id: context.tenant_id,
+      profile_id: context.profile_id,
+      snapshot_ref: context.entitlement_snapshot_ref,
+      capability_ids: context.capability_ids,
+    },
+  };
+  assert.deepEqual(
+    validateEntitlementAwareTrustedRequestContext(context, {
+      ...effectiveAuthority,
+      entitlement_snapshot: {
+        ...effectiveAuthority.entitlement_snapshot,
+        tenant_id: "tenant_other",
+      },
+    }).map((item) => ({ code: item.code, path: item.path })),
+    [{
+      code: "ENTITLEMENT_AUTHORITY_TENANT_MISMATCH",
+      path: "authority.entitlement_snapshot.tenant_id",
+    }],
+  );
+  assert.deepEqual(
+    validateEntitlementAwareTrustedRequestContext(context, {
+      ...effectiveAuthority,
+      entitlement_snapshot: {
+        ...effectiveAuthority.entitlement_snapshot,
+        profile_id: "profile_other",
+      },
+    }).map((item) => ({ code: item.code, path: item.path })),
+    [{
+      code: "ENTITLEMENT_AUTHORITY_PROFILE_MISMATCH",
+      path: "authority.entitlement_snapshot.profile_id",
+    }],
+  );
+});
+
+test("entitlement snapshot authority is closed and requires tenant/profile scope", () => {
+  const complete = {
+    tenant_id: context.tenant_id,
+    profile_id: context.profile_id,
+    snapshot_ref: context.entitlement_snapshot_ref,
+    capability_ids: context.capability_ids,
+  };
+  const { tenant_id: _tenantId, ...withoutTenant } = complete;
+  const { profile_id: _profileId, ...withoutProfile } = complete;
+  for (const entitlement_snapshot of [
+    withoutTenant,
+    withoutProfile,
+    { ...complete, unexpected: true },
+  ]) {
+    assert.deepEqual(
+      validateEntitlementAwareTrustedRequestContext(context, {
+        ...authority,
+        entitlement_snapshot,
+      } as unknown as EntitlementAwareTrustedContextAuthority).map((item) => ({
+        code: item.code,
+        path: item.path,
+      })),
+      [{
+        code: "ENTITLEMENT_AUTHORITY_REQUIRED",
+        path: "authority.entitlement_snapshot",
+      }],
+    );
+  }
+});
+
+test("entitlement snapshot authority rejects accessors without invoking them", () => {
+  let getterCalls = 0;
+  const hostileAuthority = { ...authority } as unknown as EntitlementAwareTrustedContextAuthority;
+  Object.defineProperty(hostileAuthority, "entitlement_snapshot", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return {
+        tenant_id: context.tenant_id,
+        profile_id: context.profile_id,
+        snapshot_ref: context.entitlement_snapshot_ref,
+        capability_ids: context.capability_ids,
+      };
+    },
+  });
+
+  const violations = validateEntitlementAwareTrustedRequestContext(context, hostileAuthority);
+  assert.equal(getterCalls, 0);
+  assert.deepEqual(
+    violations.map((item) => ({ code: item.code, path: item.path })),
+    [{
+      code: "ENTITLEMENT_AUTHORITY_REQUIRED",
+      path: "authority.entitlement_snapshot",
+    }],
+  );
+});
+
+test("entitlement snapshot authority rejects nested accessors without invoking them", () => {
+  const completeAuthority: EntitlementAwareTrustedContextAuthority = {
+    ...authority,
+    entitlement_snapshot: {
+      tenant_id: context.tenant_id,
+      profile_id: context.profile_id,
+      snapshot_ref: context.entitlement_snapshot_ref,
+      capability_ids: context.capability_ids,
+    },
+  };
+  assert.deepEqual(
+    validateEntitlementAwareTrustedRequestContext(context, completeAuthority),
+    [],
+  );
+
+  let getterCalls = 0;
+  const snapshotRef = { ...completeAuthority.entitlement_snapshot.snapshot_ref };
+  Object.defineProperty(snapshotRef, "evaluated_at", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return context.entitlement_snapshot_ref.evaluated_at;
+    },
+  });
+  const hostileAuthority = {
+    ...completeAuthority,
+    entitlement_snapshot: {
+      ...completeAuthority.entitlement_snapshot,
+      snapshot_ref: snapshotRef,
+    },
+  } as EntitlementAwareTrustedContextAuthority;
+
+  const violations = validateEntitlementAwareTrustedRequestContext(context, hostileAuthority);
+  assert.equal(getterCalls, 0);
+  assert.deepEqual(
+    violations.map((item) => ({ code: item.code, path: item.path })),
+    [{
+      code: "ENTITLEMENT_AUTHORITY_REQUIRED",
+      path: "authority.entitlement_snapshot",
+    }],
+  );
+});
+
+test("entitlement snapshot authority rejects cyclic nested authority data", () => {
+  const completeAuthority: EntitlementAwareTrustedContextAuthority = {
+    ...authority,
+    entitlement_snapshot: {
+      tenant_id: context.tenant_id,
+      profile_id: context.profile_id,
+      snapshot_ref: context.entitlement_snapshot_ref,
+      capability_ids: context.capability_ids,
+    },
+  };
+  assert.deepEqual(
+    validateEntitlementAwareTrustedRequestContext(context, completeAuthority),
+    [],
+  );
+
+  const capabilityIds = [...completeAuthority.entitlement_snapshot.capability_ids];
+  Object.defineProperty(capabilityIds, "nestedData", {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value: {},
+  });
+  const nestedAuthority: EntitlementAwareTrustedContextAuthority = {
+    ...completeAuthority,
+    entitlement_snapshot: {
+      ...completeAuthority.entitlement_snapshot,
+      capability_ids: capabilityIds,
+    },
+  };
+  assert.deepEqual(
+    validateEntitlementAwareTrustedRequestContext(context, nestedAuthority),
+    [],
+  );
+
+  Object.defineProperty(capabilityIds, "nestedData", { value: capabilityIds });
+
+  assert.deepEqual(
+    validateEntitlementAwareTrustedRequestContext(context, nestedAuthority).map((item) => ({
+      code: item.code,
+      path: item.path,
+    })),
+    [{
+      code: "ENTITLEMENT_AUTHORITY_REQUIRED",
+      path: "authority.entitlement_snapshot",
+    }],
+  );
 });
 
 test("signed envelope rejects schema and algorithm conflicts without claiming signature validity", () => {

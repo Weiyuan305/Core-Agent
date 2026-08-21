@@ -14,13 +14,18 @@ import {
   ErrorCategorySchema,
   StableErrorCodeSchema,
 } from "../errors/error-envelope.js";
-import { CaseRefSchema, StudentRefSchema } from "../runtime/refs.js";
+import {
+  CaseRefSchema,
+  EntitlementSnapshotRefSchema,
+  StudentRefSchema,
+} from "../runtime/refs.js";
 import {
   ContainerObservedStateSchema,
   TaskStatusSchema,
 } from "../runtime/resources.js";
 import { MembershipStatusSchema } from "../tenant/identity.js";
 import { CoreSessionRevocationReasonCodeSchema } from "../identity/authority.js";
+import { ServiceFailureReasonCodeSchema } from "../entitlements/snapshots.js";
 
 const EmbeddedStudentRefSchema = Type.Omit(
   StudentRefSchema,
@@ -29,6 +34,11 @@ const EmbeddedStudentRefSchema = Type.Omit(
 );
 const EmbeddedCaseRefSchema = Type.Omit(
   CaseRefSchema,
+  [],
+  { additionalProperties: false },
+);
+const EmbeddedEntitlementSnapshotRefSchema = Type.Omit(
+  EntitlementSnapshotRefSchema,
   [],
   { additionalProperties: false },
 );
@@ -430,6 +440,116 @@ export const IdentityEventSchema = Type.Union(
   { $id: "core-agent://v1/identity-event", "x-extensible-union": true },
 );
 
+const PackReleaseSelectedEventSchema = createEventBranch("pack.release_selected", {
+  tenant_pack_release_id: OpaqueIdSchema,
+  pack_product_id: OpaqueIdSchema,
+  pack_version_id: OpaqueIdSchema,
+  generation: Type.Integer({ minimum: 1 }),
+  status: Type.Literal("current"),
+  resource_version: ResourceVersionSchema,
+});
+const EntitlementActivatedEventSchema = createEventBranch("entitlement.activated", {
+  entitlement_id: OpaqueIdSchema,
+  pack_product_id: OpaqueIdSchema,
+  status: Type.Literal("active"),
+  reason_code: Type.Union([
+    Type.Literal("platform_grant"),
+    Type.Literal("administrator_reactivated"),
+  ]),
+  resource_version: ResourceVersionSchema,
+});
+const EntitlementSuspendedEventSchema = createEventBranch("entitlement.suspended", {
+  entitlement_id: OpaqueIdSchema,
+  pack_product_id: OpaqueIdSchema,
+  status: Type.Literal("suspended"),
+  reason_code: Type.Literal("administrator_suspended"),
+  resource_version: ResourceVersionSchema,
+});
+const EntitlementRevokedEventSchema = createEventBranch("entitlement.revoked", {
+  entitlement_id: OpaqueIdSchema,
+  pack_product_id: OpaqueIdSchema,
+  status: Type.Literal("revoked"),
+  reason_code: Type.Literal("platform_revoked"),
+  resource_version: ResourceVersionSchema,
+});
+const EntitlementExpiredEventSchema = createEventBranch("entitlement.expired", {
+  entitlement_id: OpaqueIdSchema,
+  pack_product_id: OpaqueIdSchema,
+  status: Type.Literal("expired"),
+  reason_code: Type.Literal("validity_expired"),
+  resource_version: ResourceVersionSchema,
+});
+const AssignmentCreatedEventSchema = createEventBranch("assignment.created", {
+  assignment_id: OpaqueIdSchema,
+  entitlement_id: OpaqueIdSchema,
+  profile_id: OpaqueIdSchema,
+  status: Type.Literal("preparing"),
+  reason_code: Type.Literal("seat_assigned"),
+  resource_version: ResourceVersionSchema,
+});
+const AssignmentRevokedEventSchema = createEventBranch("assignment.revoked", {
+  assignment_id: OpaqueIdSchema,
+  entitlement_id: OpaqueIdSchema,
+  profile_id: OpaqueIdSchema,
+  status: Type.Literal("revoked"),
+  reason_code: Type.Literal("administrator_revoked"),
+  resource_version: ResourceVersionSchema,
+});
+const EntitlementSnapshotChangedEventSchema = createEventBranch("entitlement_snapshot.changed", {
+  profile_id: OpaqueIdSchema,
+  entitlement_snapshot_ref: EmbeddedEntitlementSnapshotRefSchema,
+  resource_version: ResourceVersionSchema,
+});
+
+const EntitlementEventBranchSchemas = [
+  PackReleaseSelectedEventSchema,
+  EntitlementActivatedEventSchema,
+  EntitlementSuspendedEventSchema,
+  EntitlementRevokedEventSchema,
+  EntitlementExpiredEventSchema,
+  AssignmentCreatedEventSchema,
+  AssignmentRevokedEventSchema,
+  EntitlementSnapshotChangedEventSchema,
+] as const;
+
+export const EntitlementEventSchema = Type.Union(
+  [...EntitlementEventBranchSchemas],
+  { $id: "core-agent://v1/entitlement-event", "x-extensible-union": true },
+);
+
+function createServiceEventBranch<
+  const EventType extends "service.preparing" | "service.available",
+  const State extends "preparing" | "available",
+>(eventType: EventType, state: State) {
+  return createEventBranch(eventType, {
+    profile_id: OpaqueIdSchema,
+    generation: Type.Integer({ minimum: 1 }),
+    entitlement_snapshot_ref: EmbeddedEntitlementSnapshotRefSchema,
+    state: Type.Literal(state),
+  });
+}
+
+const ServicePreparingEventSchema = createServiceEventBranch("service.preparing", "preparing");
+const ServiceAvailableEventSchema = createServiceEventBranch("service.available", "available");
+const ServiceFailedEventSchema = createEventBranch("service.failed", {
+  profile_id: OpaqueIdSchema,
+  generation: Type.Integer({ minimum: 1 }),
+  entitlement_snapshot_ref: EmbeddedEntitlementSnapshotRefSchema,
+  state: Type.Literal("failed"),
+  reason_code: ServiceFailureReasonCodeSchema,
+});
+
+const ServiceEventBranchSchemas = [
+  ServicePreparingEventSchema,
+  ServiceAvailableEventSchema,
+  ServiceFailedEventSchema,
+] as const;
+
+export const ServiceEventSchema = Type.Union(
+  [...ServiceEventBranchSchemas],
+  { $id: "core-agent://v1/service-event", "x-extensible-union": true },
+);
+
 const ProductEventBranchSchemas = [
   ConversationCreatedEventSchema,
   ConversationArchivedEventSchema,
@@ -454,6 +574,8 @@ const ProductEventBranchSchemas = [
   ErrorReportedEventBranchSchema,
   MessageCreatedEventBranchSchema,
   ...IdentityEventBranchSchemas,
+  ...EntitlementEventBranchSchemas,
+  ...ServiceEventBranchSchemas,
 ] as const;
 
 const ProductEventFamilySchemas = [
@@ -468,6 +590,8 @@ const ProductEventFamilySchemas = [
   ErrorReportedEventSchema,
   MessageCreatedEventSchema,
   IdentityEventSchema,
+  EntitlementEventSchema,
+  ServiceEventSchema,
 ] as const;
 
 export const ProductEventSchema = Type.Union(
@@ -492,6 +616,7 @@ export function classifyProductEvent(value: unknown): "known" | "unknown" | "inv
 
 const associationIdChecks = [
   ["tenant_id", "EVENT_TENANT_ID_MISMATCH"],
+  ["profile_id", "EVENT_PROFILE_ID_MISMATCH"],
   ["conversation_id", "EVENT_CONVERSATION_ID_MISMATCH"],
   ["run_id", "EVENT_RUN_ID_MISMATCH"],
   ["task_id", "EVENT_TASK_ID_MISMATCH"],

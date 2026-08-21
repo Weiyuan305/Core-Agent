@@ -94,3 +94,19 @@
   and exact provider cleanup proof.
 - Report: `.superpowers/sdd/task-12-report.md`.
 - Implementation commit: `b1454ea63a55adc83b330eb50fc012b16b129a75`.
+
+## Entitlement and Capability Registry v1 — Task 1 Contracts
+
+- Status: COMPLETE
+- Branch: `feat/entitlement-capability-contracts-v1`
+- Base: `9f7c5c0516bea648770a4e73be28c736acf4a0bb`
+- Plan-version amendment: `6288395858` (`@core-agent/contracts` 0.7.0; 0.6.0 is already released).
+- Implementation head: `fd2ffe8f3e24d05a41cc39b1e0b197f1a44c838a`.
+- Result: Capability, Pack, Entitlement, Assignment, Snapshot, public summary,
+  event/error, and tenant/profile-bound entitlement-aware Trusted Context
+  contracts are published as the exact 0.7.0 release.
+- Verification: Contracts 232/232; fixtures 106 valid/11 invalid; schema,
+  compatibility, compatibility-history, historical 0.2-0.6 immutability,
+  106-schema release exactness, secret, and diff gates pass.
+- Reviews: Task review and cumulative whole-branch review approved with zero
+  Critical, Important, or Minor findings; final assessment is Ready to merge.

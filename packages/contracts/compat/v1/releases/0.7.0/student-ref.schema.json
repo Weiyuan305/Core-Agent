@@ -1,0 +1,27 @@
+{
+  "$id": "core-agent://v1/student-ref",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "source_system": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "source_version": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "student_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "student_id",
+    "source_system"
+  ],
+  "type": "object"
+}
