@@ -350,12 +350,12 @@ test.before(async () => ensureRoles());
 test.beforeEach(async () => resetDatabase());
 test.after(async () => pool.end());
 
-test("schema 13 migrates both empty and schema-12 databases without changing identity history", async () => {
-  assert.equal(EXPECTED_SCHEMA_VERSION, 13);
+test("schema 14 migrates both empty and schema-12 databases without changing identity history", async () => {
+  assert.equal(EXPECTED_SCHEMA_VERSION, 14);
   await applyMigrations(pool, migrationsDirectory);
   assert.deepEqual(
     (await pool.query("select version, name from core_agent_schema_migrations order by version")).rows.at(-1),
-    { version: 13, name: "entitlement_capability_authority" },
+    { version: 14, name: "catalog_artifact_contract_parity" },
   );
 
   await resetDatabase();
@@ -366,6 +366,7 @@ test("schema 13 migrates both empty and schema-12 databases without changing ide
     const historyAfter = await pool.query("select version, name, checksum, applied_at from core_agent_schema_migrations order by version");
     assert.deepEqual(historyAfter.rows.slice(0, 12), historyBefore.rows);
     assert.equal(historyAfter.rows[12]?.version, 13);
+    assert.equal(historyAfter.rows[13]?.version, 14);
   } finally {
     await rm(prefixDirectory, { recursive: true, force: true });
   }

@@ -157,7 +157,10 @@ function expected(value: unknown, optional: boolean): number | null {
 
 /** Exact 0.7 catalog admission, intentionally stricter than the plan's illustrative regex. */
 export function validateImmutableArtifactRef(value: unknown): string {
-  const artifact = text(value, 1, 1_024);
+  // The command-wide descriptor budget limits aggregate request size.  Do not
+  // add a narrower artifact cap than the released Contracts grammar or schema.
+  if (typeof value !== "string" || value.length < 1 || value.includes("\0")) invalid();
+  const artifact = value;
   if (!Schema.Check(ImmutableArtifactRefSchema, artifact)) invalid();
   return artifact;
 }

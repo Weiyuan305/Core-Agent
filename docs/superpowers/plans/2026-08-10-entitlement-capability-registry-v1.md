@@ -294,6 +294,12 @@ order; and queue Capability/Pack block recomputation only for exact `preparing` 
 `current` releases. First family/product creation must be race-safe and preserve all
 stable family metadata.
 
+Final compatibility hardening: add forward migration 014, not a Contracts 0.8.0 or
+migration-013 rewrite, to replace the artifact predicate used by the existing named
+CHECK. Its manifest records the routine replacement and schema version 14; Runtime
+relies on the released schema without a separate 1,024-character cap. Native PG tests
+cover dotted no-slash OCI, long qualified OCI, and two-Actor inverse lock barriers.
+
 **Files:**
 
 - Create: `packages/runtime-core/src/repositories/entitlements/catalog.ts`

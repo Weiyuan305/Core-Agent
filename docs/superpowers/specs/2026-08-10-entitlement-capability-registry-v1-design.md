@@ -23,6 +23,13 @@ not choose the audit/idempotency/event scope. Runtime catalog admission reuses t
 released Contracts artifact semantics and bounds hostile descriptor-only input by
 depth, node, collection, and aggregate UTF-8 budgets before canonical hashing.
 
+**2026-08-21 compatibility migration clarification:** Contracts 0.8.0 is immutable.
+Schema 14 forward-replaces only the immutable-artifact predicate behind the existing
+Capability Version CHECK so PostgreSQL accepts the same released grammar, including
+dotted no-slash OCI repository identities. Runtime has no separate 1,024-character
+artifact cap; the command aggregate UTF-8 budget remains the denial-of-service bound.
+Migrations 010–013 remain byte-for-byte historical artifacts.
+
 ## 1. Decision record
 
 The approved product and architecture decisions are:

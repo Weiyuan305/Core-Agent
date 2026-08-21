@@ -147,11 +147,12 @@ test("publication fails closed for unavailable member authority and preserves th
 test("real PostgreSQL locking admits only one concurrent Capability review at its expected version", async () => {
   const database = (await import("../src/db/database.js")).createRuntimeDatabase(pool);
   const deps = { ...dependencies, db: database };
+  const contextTwo = await seedSecondPlatformActor();
   await required("createCapabilityVersion")(deps, context, command(capabilityPayload()));
   const review = required("reviewCapabilityVersion");
   const attempts = await Promise.allSettled([
     review(deps, context, command({ schema_version: 1, idempotency_key: "capability-review-race-a", capability_version_id: "capability_version_catalog", expected_resource_version: 1 })),
-    review(deps, context, command({ schema_version: 1, idempotency_key: "capability-review-race-b", capability_version_id: "capability_version_catalog", expected_resource_version: 1 })),
+    review(deps, contextTwo, command({ schema_version: 1, idempotency_key: "capability-review-race-b", capability_version_id: "capability_version_catalog", expected_resource_version: 1 })),
   ]);
   assert.equal(attempts.filter((attempt) => attempt.status === "fulfilled").length, 1);
   assert.equal(attempts.filter((attempt) => attempt.status === "rejected").length, 1);
@@ -199,6 +200,95 @@ test("Runtime, Contracts, and schema-13 immutable-artifact admission agree at ex
     const runtimeAccepted = (() => { try { validateImmutableArtifactRef(artifact); return true; } catch { return false; } })();
     const databaseAccepted = (await pool.query("select core_agent_is_immutable_artifact_ref($1) as accepted", [artifact])).rows[0]?.accepted;
     assert.equal(runtimeAccepted, contracts, artifact); assert.equal(databaseAccepted, contracts, artifact);
+  }
+});
+
+test("released Contracts artifact grammar is accepted by Runtime and PostgreSQL at the same long and dotted OCI boundaries", async () => {
+  const validateImmutableArtifactRef = runtime.validateImmutableArtifactRef as (value: unknown) => string;
+  const digest = "a".repeat(64);
+  const longQualifiedRegistry = Array.from({ length: 17 }, () => "a".repeat(63)).join(".");
+  const artifacts = [
+    `oci:registry.example@sha256:${digest}`,
+    `oci:${longQualifiedRegistry}/repository@sha256:${digest}`,
+  ];
+  const Schema = (await import("typebox/schema")).default;
+  const { ImmutableArtifactRefSchema } = await import("@core-agent/contracts");
+  const results = await Promise.all(artifacts.map(async (artifact) => ({
+    contracts: Schema.Check(ImmutableArtifactRefSchema, artifact),
+    runtime: (() => { try { validateImmutableArtifactRef(artifact); return true; } catch { return false; } })(),
+    database: (await pool.query("select core_agent_is_immutable_artifact_ref($1) as accepted", [artifact])).rows[0]?.accepted,
+  })));
+  assert.deepEqual(results, [
+    { contracts: true, runtime: true, database: true },
+    { contracts: true, runtime: true, database: true },
+  ]);
+});
+
+test("two Actor create and publish wait on the same UTF-8-first Capability Version lock", async () => {
+  const database = (await import("../src/db/database.js")).createRuntimeDatabase(pool);
+  const deps = { ...dependencies, db: database };
+  const contextTwo = await seedSecondPlatformActor();
+  const createCapability = required("createCapabilityVersion");
+  const reviewCapability = required("reviewCapabilityVersion");
+  // Capability identity order is a,z while Version identity order is a,z in
+  // the opposite pairing.  The old create path followed member order and
+  // therefore waited on the z Version while publish waited on the a Version.
+  const memberA = { capability_id: "capability_lock_a", capability_version_id: "capability_version_lock_z", version: "1.0.0" };
+  const memberZ = { capability_id: "capability_lock_z", capability_version_id: "capability_version_lock_a", version: "1.0.0" };
+  for (const [index, member] of [memberA, memberZ].entries()) {
+    await createCapability(deps, context, command(capabilityPayload({ ...member, idempotency_key: `lock-capability-create-${index}` })));
+    await reviewCapability(deps, context, command({ schema_version: 1, idempotency_key: `lock-capability-review-${index}`, capability_version_id: member.capability_version_id, expected_resource_version: 1 }));
+  }
+  const createPack = required("createPackVersion");
+  const reviewPack = required("reviewPackVersion");
+  const publishPack = required("publishPackVersion");
+  await createPack(deps, context, command(packPayload({ idempotency_key: "lock-existing-create", pack_product_id: "pack_product_lock_existing", pack_version_id: "pack_version_lock_existing", members: [memberZ, memberA] })));
+  await reviewPack(deps, context, command({ schema_version: 1, idempotency_key: "lock-existing-review", pack_version_id: "pack_version_lock_existing", expected_resource_version: 1 }));
+
+  const firstBlocker = await pool.connect();
+  const inverseBlocker = await pool.connect();
+  let firstOpen = false;
+  let inverseOpen = false;
+  try {
+    await firstBlocker.query("begin"); firstOpen = true;
+    await inverseBlocker.query("begin"); inverseOpen = true;
+    await firstBlocker.query("select capability_version_id from capability_versions where capability_version_id = $1 for update", [memberZ.capability_version_id]);
+    await inverseBlocker.query("select capability_version_id from capability_versions where capability_version_id = $1 for update", [memberA.capability_version_id]);
+
+    const publish = publishPack(deps, contextTwo, command({ schema_version: 1, idempotency_key: "lock-publish", pack_version_id: "pack_version_lock_existing", expected_resource_version: 2 }));
+    const create = createPack(deps, context, command(packPayload({ idempotency_key: "lock-create", pack_product_id: "pack_product_lock_new", pack_version_id: "pack_version_lock_new", members: [memberA, memberZ] })));
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const waiting = await pool.query(`select count(*)::int as count from pg_stat_activity
+        where datname = current_database() and wait_event_type = 'Lock' and query like '%capability_versions%'`);
+      if (waiting.rows[0]?.count === 2) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const waiting = await pool.query(`select count(*)::int as count from pg_stat_activity
+      where datname = current_database() and wait_event_type = 'Lock' and query like '%capability_versions%'`);
+    assert.equal(waiting.rows[0]?.count, 2, "both production transactions must wait at a Capability Version row");
+
+    // Releasing the old create-path candidate must leave it lockable: both
+    // production transactions are still waiting on memberZ's byte-first ID.
+    await inverseBlocker.query("commit"); inverseOpen = false;
+    const probe = await pool.connect();
+    try {
+      await probe.query("begin");
+      await assert.doesNotReject(() => probe.query("select capability_version_id from capability_versions where capability_version_id = $1 for update nowait", [memberA.capability_version_id]));
+      await probe.query("rollback");
+    } finally { probe.release(); }
+
+    await firstBlocker.query("commit"); firstOpen = false;
+    const [published, created] = await Promise.all([publish, create]);
+    assert.equal(published.status, "published");
+    assert.equal(created.status, "draft");
+    assert.deepEqual((await pool.query("select capability_version_id from pack_members where pack_version_id = 'pack_version_lock_new' order by member_order")).rows, [
+      { capability_version_id: memberA.capability_version_id },
+      { capability_version_id: memberZ.capability_version_id },
+    ]);
+  } finally {
+    if (inverseOpen) await inverseBlocker.query("rollback").catch(() => undefined);
+    if (firstOpen) await firstBlocker.query("rollback").catch(() => undefined);
+    inverseBlocker.release(); firstBlocker.release();
   }
 });
 
