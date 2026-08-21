@@ -116,7 +116,7 @@ const schemaManifestEntries = [
   [10, "identity_authority", "eb0b2e42ffacef5b16bee6aa1930824ee39317adf01f2f627ccf9c7ce589d381"],
   [11, "password_reset_transactions", "fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393"],
   [12, "email_verification_transactions", "2e7a7d0b8f910ff5253ace5dff1f0cc242224ec432e75621f15f57d93d14af12"],
-  [13, "entitlement_capability_authority", "9f686c0ddca1bf7154ef00bf300157985420251fd3261aa4bcea97cc995b0832"],
+  [13, "entitlement_capability_authority", "b811a39031c5e83a11868713718aca09c33827ad38c66ad228337284ce16dbe1"],
 ] as const;
 
 const schemaManifests = new Map<number, SchemaManifest>(schemaManifestEntries.map(([version, name, checksum]) => [
@@ -840,7 +840,7 @@ const schema13Indexes: readonly LegacyIndexShape[] = [
 ];
 
 const schema13Routines = [
-  ["f", "advance_profile_snapshot_pointer", "p_tenant_id text, p_profile_id text, p_expected_resource_version bigint, p_snapshot_id text", "TABLE(resource_version bigint)", true, ["search_path=pg_catalog, public"], "9084a82f86a44ce1260dd62d32c8c5d5"],
+  ["f", "advance_profile_snapshot_pointer", "p_tenant_id text, p_profile_id text, p_expected_resource_version bigint, p_snapshot_id text", "TABLE(resource_version bigint)", true, ["search_path=pg_catalog, public"], "a4dc3f0665226510557bc41632f72616"],
   ["f", "core_agent_is_canonical_semver", "candidate text", "boolean", false, ["search_path=pg_catalog, public"], "1ed599030c907847f7eb71c6d56249f7"],
   ["f", "core_agent_is_exact_contract_ref", "candidate text", "boolean", false, ["search_path=pg_catalog, public"], "8fca5ebbc25091381747fc23a9e59858"],
   ["f", "core_agent_is_immutable_artifact_ref", "candidate text", "boolean", false, ["search_path=pg_catalog, public"], "06fece05a3affff873daf217fcbd3f42"],
@@ -852,12 +852,12 @@ const schema13Routines = [
   ["f", "enforce_entitlement_snapshot_child_creation_transaction", "", "trigger", false, ["search_path=pg_catalog, public"], "d2d3224941ce10877e487fa8512c5e6a"],
   ["f", "enforce_entitlement_snapshot_immutability", "", "trigger", false, ["search_path=pg_catalog, public"], "7f04273175cf7af59f218abf4e2ff000"],
   ["f", "enforce_pack_member_immutability", "", "trigger", false, ["search_path=pg_catalog, public"], "b3240fa2b668d320c35080ac1e19db9a"],
-  ["f", "enforce_pack_product_published_semantics", "", "trigger", false, ["search_path=pg_catalog, public"], "55e7c0c88b26092d8c569b4701eb7665"],
-  ["f", "enforce_pack_version_immutability", "", "trigger", false, ["search_path=pg_catalog, public"], "b5aa838985c3b5562b816da088431c2e"],
+  ["f", "enforce_pack_product_published_semantics", "", "trigger", false, ["search_path=pg_catalog, public"], "747ee128281c53476d3200929aa99f7d"],
+  ["f", "enforce_pack_version_immutability", "", "trigger", false, ["search_path=pg_catalog, public"], "960836e0ebfbb5b9bc7765636621aa2c"],
   ["f", "enforce_profile_snapshot_pointer_cas", "", "trigger", false, ["search_path=pg_catalog, public"], "64e7899ab83b4c3353b1c38ff4275649"],
   ["f", "enforce_tenant_pack_release_history_immutability", "", "trigger", false, ["search_path=pg_catalog, public"], "a016b5b5630e476cba8db8927a1fabf0"],
   ["f", "set_entitlement_snapshot_creation_metadata", "", "trigger", false, ["search_path=pg_catalog, public"], "768adafb7334f3d6d2b435c41452314c"],
-  ["f", "validate_entitlement_snapshot_aggregate", "", "trigger", false, ["search_path=pg_catalog, public"], "f173a9574b3dfab70438cfb82ccdb4b0"],
+  ["f", "validate_entitlement_snapshot_aggregate", "", "trigger", false, ["search_path=pg_catalog, public"], "4a633eea7d8e69e3f02baef8c5e1977e"],
 ] as const;
 
 const schema13Triggers = [

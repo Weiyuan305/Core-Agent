@@ -606,88 +606,144 @@ begin
   end if;
 
   if exists (
+    with effective_entitlements as (
+      select entitlement.entitlement_id
+      from entitlements as entitlement
+      where entitlement.tenant_id = new.tenant_id
+        and entitlement.status = 'active'
+        and entitlement.valid_from <= snapshot_evaluated_at
+        and (entitlement.expires_at is null or snapshot_evaluated_at < entitlement.expires_at)
+        and (
+          (entitlement.tenant_mode = 'b2c' and entitlement.assignment_mode = 'automatic')
+          or (entitlement.tenant_mode = 'b2b' and entitlement.assignment_mode = 'seat' and exists (
+            select 1
+            from entitlement_assignments as assignment
+            where assignment.tenant_id = entitlement.tenant_id
+              and assignment.entitlement_id = entitlement.entitlement_id
+              and assignment.profile_id = new.profile_id
+              and assignment.status in ('preparing', 'available')
+          ))
+        )
+    ), snapshot_entitlements as (
+      select source.source_id as entitlement_id
+      from entitlement_snapshot_sources as source
+      where source.tenant_id = new.tenant_id
+        and source.profile_id = new.profile_id
+        and source.snapshot_id = new.snapshot_id
+        and source.source_kind = 'entitlement'
+    )
+    (select entitlement_id from effective_entitlements
+      except select entitlement_id from snapshot_entitlements)
+    union all
+    (select entitlement_id from snapshot_entitlements
+      except select entitlement_id from effective_entitlements)
+  ) then
+    raise exception 'Snapshot Entitlement sources must equal complete effective authority'
+      using errcode = '23514',
+        constraint = 'entitlement_snapshots_source_completeness_check';
+  end if;
+
+  if exists (
+    with effective_entitlements as (
+      select entitlement.entitlement_id
+      from entitlements as entitlement
+      where entitlement.tenant_id = new.tenant_id
+        and entitlement.status = 'active'
+        and entitlement.valid_from <= snapshot_evaluated_at
+        and (entitlement.expires_at is null or snapshot_evaluated_at < entitlement.expires_at)
+        and entitlement.tenant_mode = 'b2b'
+        and entitlement.assignment_mode = 'seat'
+        and exists (
+          select 1
+          from entitlement_assignments as assignment
+          where assignment.tenant_id = entitlement.tenant_id
+            and assignment.entitlement_id = entitlement.entitlement_id
+            and assignment.profile_id = new.profile_id
+            and assignment.status in ('preparing', 'available')
+        )
+    ), effective_assignments as (
+      select assignment.assignment_id
+      from entitlement_assignments as assignment
+      join effective_entitlements as entitlement
+        on entitlement.entitlement_id = assignment.entitlement_id
+      where assignment.tenant_id = new.tenant_id
+        and assignment.profile_id = new.profile_id
+        and assignment.status in ('preparing', 'available')
+    ), snapshot_assignments as (
+      select source.source_id as assignment_id
+      from entitlement_snapshot_sources as source
+      where source.tenant_id = new.tenant_id
+        and source.profile_id = new.profile_id
+        and source.snapshot_id = new.snapshot_id
+        and source.source_kind = 'assignment'
+    )
+    (select assignment_id from effective_assignments
+      except select assignment_id from snapshot_assignments)
+    union all
+    (select assignment_id from snapshot_assignments
+      except select assignment_id from effective_assignments)
+  ) then
+    raise exception 'Snapshot Assignment sources must equal complete effective authority'
+      using errcode = '23514',
+        constraint = 'entitlement_snapshots_source_completeness_check';
+  end if;
+
+  if exists (
+    with effective_products as (
+      select distinct entitlement.pack_product_id
+      from entitlements as entitlement
+      join entitlement_snapshot_sources as source
+        on source.tenant_id = entitlement.tenant_id
+       and source.source_id = entitlement.entitlement_id
+       and source.profile_id = new.profile_id
+       and source.snapshot_id = new.snapshot_id
+       and source.source_kind = 'entitlement'
+      where entitlement.tenant_id = new.tenant_id
+    ), selected_releases as (
+      select release.tenant_pack_release_id, release.pack_product_id
+      from entitlement_snapshot_sources as source
+      join tenant_pack_releases as release
+        on release.tenant_id = source.tenant_id
+       and release.tenant_pack_release_id = source.source_id
+      where source.tenant_id = new.tenant_id
+        and source.profile_id = new.profile_id
+        and source.snapshot_id = new.snapshot_id
+        and source.source_kind = 'release'
+    )
+    (select pack_product_id from effective_products
+      except select pack_product_id from selected_releases)
+    union all
+    (select pack_product_id from selected_releases
+      except select pack_product_id from effective_products)
+    union all
+    select pack_product_id from selected_releases
+    group by pack_product_id having count(*) <> 1
+  ) then
+    raise exception 'Snapshot Release sources must select one release per effective Product'
+      using errcode = '23514',
+        constraint = 'entitlement_snapshots_source_completeness_check';
+  end if;
+
+  if exists (
     select 1
     from entitlement_snapshot_sources as source
+    join tenant_pack_releases as release
+      on release.tenant_id = source.tenant_id
+     and release.tenant_pack_release_id = source.source_id
+    join pack_versions as pack
+      on pack.pack_version_id = release.pack_version_id
+     and pack.pack_product_id = release.pack_product_id
+     and pack.version = release.pack_version
     where source.tenant_id = new.tenant_id
       and source.profile_id = new.profile_id
       and source.snapshot_id = new.snapshot_id
-      and (
-        (source.source_kind = 'release' and not exists (
-          select 1
-          from entitlement_snapshot_sources as entitlement_source
-          join entitlements as entitlement
-            on entitlement.tenant_id = entitlement_source.tenant_id
-           and entitlement.entitlement_id = entitlement_source.source_id
-          where entitlement_source.tenant_id = source.tenant_id
-            and entitlement_source.profile_id = source.profile_id
-            and entitlement_source.snapshot_id = source.snapshot_id
-            and entitlement_source.source_kind = 'entitlement'
-            and entitlement.tenant_pack_release_id = source.source_id
-        ))
-        or (source.source_kind = 'assignment' and not exists (
-          select 1
-          from entitlement_assignments as assignment
-          join entitlement_snapshot_sources as entitlement_source
-            on entitlement_source.tenant_id = assignment.tenant_id
-           and entitlement_source.profile_id = assignment.profile_id
-           and entitlement_source.snapshot_id = source.snapshot_id
-           and entitlement_source.source_kind = 'entitlement'
-           and entitlement_source.source_id = assignment.entitlement_id
-          where assignment.tenant_id = source.tenant_id
-            and assignment.profile_id = source.profile_id
-            and assignment.assignment_id = source.source_id
-            and assignment.status in ('preparing', 'available')
-        ))
-        or (source.source_kind = 'entitlement' and not exists (
-          select 1
-          from entitlements as entitlement
-          join tenant_pack_releases as release
-            on release.tenant_id = entitlement.tenant_id
-           and release.tenant_pack_release_id = entitlement.tenant_pack_release_id
-           and release.pack_product_id = entitlement.pack_product_id
-           and release.pack_version_id = entitlement.pack_version_id
-           and release.pack_version = entitlement.pack_version
-           and release.status = 'current'
-          join pack_versions as pack
-            on pack.pack_version_id = release.pack_version_id
-           and pack.pack_product_id = release.pack_product_id
-           and pack.version = release.pack_version
-           and pack.status = 'published'
-          join entitlement_snapshot_sources as release_source
-            on release_source.tenant_id = source.tenant_id
-           and release_source.profile_id = source.profile_id
-           and release_source.snapshot_id = source.snapshot_id
-           and release_source.source_kind = 'release'
-           and release_source.source_id = release.tenant_pack_release_id
-          where entitlement.tenant_id = source.tenant_id
-            and entitlement.entitlement_id = source.source_id
-            and entitlement.status = 'active'
-            and entitlement.valid_from <= snapshot_evaluated_at
-            and (entitlement.expires_at is null or snapshot_evaluated_at < entitlement.expires_at)
-            and (
-              (entitlement.tenant_mode = 'b2c'
-                and entitlement.assignment_mode = 'automatic')
-              or (entitlement.tenant_mode = 'b2b'
-                and entitlement.assignment_mode = 'seat'
-                and exists (
-                  select 1
-                  from entitlement_snapshot_sources as assignment_source
-                  join entitlement_assignments as assignment
-                    on assignment.tenant_id = assignment_source.tenant_id
-                   and assignment.profile_id = assignment_source.profile_id
-                   and assignment.assignment_id = assignment_source.source_id
-                   and assignment.entitlement_id = entitlement.entitlement_id
-                   and assignment.status in ('preparing', 'available')
-                  where assignment_source.tenant_id = source.tenant_id
-                    and assignment_source.profile_id = source.profile_id
-                    and assignment_source.snapshot_id = source.snapshot_id
-                    and assignment_source.source_kind = 'assignment'
-                ))
-            )
-        ))
+      and source.source_kind = 'release'
+      and not (
+        (release.status = 'preparing' and pack.status = 'published')
+        or (release.status = 'current' and pack.status in ('published', 'retired'))
       )
   ) then
-    raise exception 'Snapshot sources do not establish active commercial authority'
+    raise exception 'Snapshot Release sources are not admissible rollout authority'
       using errcode = '23514',
         constraint = 'entitlement_snapshots_source_commercial_authority_check';
   end if;
@@ -713,62 +769,88 @@ begin
 
   if exists (
     select 1
-    from entitlement_snapshot_capabilities as snapshot_capability
-    where snapshot_capability.tenant_id = new.tenant_id
-      and snapshot_capability.profile_id = new.profile_id
-      and snapshot_capability.snapshot_id = new.snapshot_id
-      and not exists (
-        with source_releases as (
-          select release.tenant_pack_release_id
-          from entitlement_snapshot_sources as source
-          join entitlements as entitlement
-            on entitlement.tenant_id = source.tenant_id
-           and entitlement.entitlement_id = source.source_id
-          join tenant_pack_releases as release
-            on release.tenant_id = entitlement.tenant_id
-           and release.tenant_pack_release_id = entitlement.tenant_pack_release_id
-           and release.status = 'current'
-          join entitlement_snapshot_sources as release_source
-            on release_source.tenant_id = source.tenant_id
-           and release_source.profile_id = source.profile_id
-           and release_source.snapshot_id = source.snapshot_id
-           and release_source.source_kind = 'release'
-           and release_source.source_id = release.tenant_pack_release_id
-          where source.tenant_id = new.tenant_id
-            and source.profile_id = new.profile_id
-            and source.snapshot_id = new.snapshot_id
-            and source.source_kind = 'entitlement'
+    from entitlement_snapshot_sources as source
+    join tenant_pack_releases as release
+      on release.tenant_id = source.tenant_id
+     and release.tenant_pack_release_id = source.source_id
+    join pack_members as member
+      on member.pack_version_id = release.pack_version_id
+    join capability_versions as capability_version
+      on capability_version.capability_id = member.capability_id
+     and capability_version.capability_version_id = member.capability_version_id
+     and capability_version.version = member.version
+    where source.tenant_id = new.tenant_id
+      and source.profile_id = new.profile_id
+      and source.snapshot_id = new.snapshot_id
+      and source.source_kind = 'release'
+      and not (
+        (
+          (release.status = 'preparing' and capability_version.status = 'reviewed')
+          or (release.status = 'current' and capability_version.status in ('reviewed', 'retired'))
         )
-        select 1
-        from capability_versions as capability_version
-        join pack_members as member
-          on member.capability_id = capability_version.capability_id
-         and member.capability_version_id = capability_version.capability_version_id
-         and member.version = capability_version.version
-        join pack_versions as pack
-          on pack.pack_version_id = member.pack_version_id
-         and pack.status = 'published'
-        join tenant_pack_releases as release
-          on release.tenant_id = new.tenant_id
-         and release.pack_version_id = pack.pack_version_id
-        join source_releases
-          on source_releases.tenant_pack_release_id = release.tenant_pack_release_id
-        where capability_version.capability_id = snapshot_capability.capability_id
-          and capability_version.capability_version_id = snapshot_capability.capability_version_id
-          and capability_version.version = snapshot_capability.version
-          and capability_version.status = 'reviewed'
-          and (
-            capability_version.risk_class = 'read'
-            or (
-              capability_version.risk_class = 'draft_write'
-              and capability_version.artifact_ref like 'manifest:sha256:%'
-            )
+        and (
+          capability_version.risk_class = 'read'
+          or (
+            capability_version.risk_class = 'draft_write'
+            and capability_version.artifact_ref like 'manifest:sha256:%'
           )
+        )
       )
   ) then
-    raise exception 'Snapshot Capability is not effective reviewed Pack authority'
+    raise exception 'Snapshot Capability is not admissible selected Pack authority'
       using errcode = '23514',
         constraint = 'entitlement_snapshots_capability_authority_check';
+  end if;
+
+  if exists (
+    select member.capability_id
+    from entitlement_snapshot_sources as source
+    join tenant_pack_releases as release
+      on release.tenant_id = source.tenant_id
+     and release.tenant_pack_release_id = source.source_id
+    join pack_members as member
+      on member.pack_version_id = release.pack_version_id
+    where source.tenant_id = new.tenant_id
+      and source.profile_id = new.profile_id
+      and source.snapshot_id = new.snapshot_id
+      and source.source_kind = 'release'
+    group by member.capability_id
+    having count(distinct (member.capability_version_id, member.version)) > 1
+  ) then
+    raise exception 'Selected Packs require conflicting Capability versions'
+      using errcode = '23514',
+        constraint = 'entitlement_snapshots_capability_conflict_check';
+  end if;
+
+  if exists (
+    with effective_capabilities as (
+      select distinct member.capability_id, member.capability_version_id, member.version
+      from entitlement_snapshot_sources as source
+      join tenant_pack_releases as release
+        on release.tenant_id = source.tenant_id
+       and release.tenant_pack_release_id = source.source_id
+      join pack_members as member
+        on member.pack_version_id = release.pack_version_id
+      where source.tenant_id = new.tenant_id
+        and source.profile_id = new.profile_id
+        and source.snapshot_id = new.snapshot_id
+        and source.source_kind = 'release'
+    ), snapshot_capabilities as (
+      select capability.capability_id, capability.capability_version_id, capability.version
+      from entitlement_snapshot_capabilities as capability
+      where capability.tenant_id = new.tenant_id
+        and capability.profile_id = new.profile_id
+        and capability.snapshot_id = new.snapshot_id
+    )
+    (select capability_id, capability_version_id, version from effective_capabilities
+      except select capability_id, capability_version_id, version from snapshot_capabilities)
+    union all
+    (select capability_id, capability_version_id, version from snapshot_capabilities
+      except select capability_id, capability_version_id, version from effective_capabilities)
+  ) then
+    raise exception 'Snapshot Capabilities must equal complete effective Pack union'
+      using errcode = '23514',
+        constraint = 'entitlement_snapshots_capability_completeness_check';
   end if;
 
   if exists (
@@ -944,6 +1026,38 @@ begin
     raise exception 'Snapshot does not belong to the requested Tenant and Profile'
       using errcode = '23503',
         constraint = 'profile_snapshot_pointers_snapshot_authority_check';
+  end if;
+
+  if exists (
+    select 1
+    from entitlement_snapshot_sources as source
+    join tenant_pack_releases as release
+      on release.tenant_id = source.tenant_id
+     and release.tenant_pack_release_id = source.source_id
+    join pack_versions as pack
+      on pack.pack_version_id = release.pack_version_id
+     and pack.pack_product_id = release.pack_product_id
+     and pack.version = release.pack_version
+    where source.tenant_id = p_tenant_id
+      and source.profile_id = p_profile_id
+      and source.snapshot_id = p_snapshot_id
+      and source.source_kind = 'release'
+      and (release.status <> 'current' or pack.status = 'blocked')
+  ) or exists (
+    select 1
+    from entitlement_snapshot_capabilities as snapshot_capability
+    join capability_versions as capability_version
+      on capability_version.capability_id = snapshot_capability.capability_id
+     and capability_version.capability_version_id = snapshot_capability.capability_version_id
+     and capability_version.version = snapshot_capability.version
+    where snapshot_capability.tenant_id = p_tenant_id
+      and snapshot_capability.profile_id = p_profile_id
+      and snapshot_capability.snapshot_id = p_snapshot_id
+      and capability_version.status = 'blocked'
+  ) then
+    raise exception 'Profile Snapshot pointer requires current non-blocked release authority'
+      using errcode = '23514',
+        constraint = 'profile_snapshot_pointers_release_current_check';
   end if;
 
   if p_expected_resource_version is null or p_expected_resource_version < 0 then
@@ -1157,6 +1271,12 @@ begin
     raise exception 'Pack Version status transition is irreversible'
       using errcode = '23514', constraint = 'pack_versions_status_transition_check';
   end if;
+  if tg_op = 'UPDATE' and new.status = 'published' and old.status <> 'published' then
+    perform 1
+    from pack_products as product
+    where product.pack_product_id = new.pack_product_id
+    for update;
+  end if;
   if tg_op = 'UPDATE' and new.status = 'published' and old.status <> 'published' and (
     not exists (
       select 1 from pack_members as member
@@ -1231,6 +1351,10 @@ returns trigger
 language plpgsql
 as $$
 begin
+  perform 1
+  from pack_products as product
+  where product.pack_product_id = old.pack_product_id
+  for update;
   if old.tenant_modes is distinct from new.tenant_modes
     and exists (
       select 1

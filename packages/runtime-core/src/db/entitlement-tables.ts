@@ -140,7 +140,7 @@ export interface EntitlementSnapshotTable {
   tenant_id: string;
   profile_id: string;
   snapshot_version: EntitlementBigInt;
-  evaluated_at: DefaultTimestamp;
+  evaluated_at: ColumnType<Date, undefined, never>;
   creation_xid: ColumnType<string, undefined, never>;
   canonical_input_hash: string;
   resource_version: EntitlementBigInt;
