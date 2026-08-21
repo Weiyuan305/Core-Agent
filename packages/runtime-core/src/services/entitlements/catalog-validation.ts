@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { types as utilTypes } from "node:util";
 
 import { DomainError } from "../../domain/idempotency.js";
+import { canonicalPayloadHash } from "../../domain/idempotency.js";
 
 const canonicalSemver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?$/u;
 const contractRef = /^[a-z0-9][a-z0-9._/-]{0,127}@(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?$/u;
@@ -95,6 +96,30 @@ function plainArray(value: unknown): readonly unknown[] {
   return values;
 }
 
+/** Copies own data descriptors only, preserving array order for wire payload hashing. */
+function copyWireData(value: unknown): unknown {
+  if (value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number") return value;
+  if (typeof value !== "object" || utilTypes.isProxy(value)) invalid();
+  if (Array.isArray(value)) return plainArray(value).map(copyWireData);
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) invalid();
+  const output: Record<string, unknown> = Object.create(null);
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string") invalid();
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) invalid();
+    output[key] = copyWireData(descriptor.value);
+  }
+  return output;
+}
+
+function validateWirePayloadHash(input: Record<string, unknown>): string {
+  const received = hash(ownValue(input, "payload_hash"));
+  const { payload_hash: _payloadHash, ...payload } = input;
+  if (received !== canonicalPayloadHash(payload)) invalid();
+  return received;
+}
+
 function text(value: unknown, minimum = 1, maximum = 255): string {
   if (typeof value !== "string" || value.length < minimum || value.length > maximum || value.includes("\0")) invalid();
   return value;
@@ -147,9 +172,9 @@ export function canonicalCompatibility(value: unknown): { readonly compatibility
 export function validateCatalogCommandInput(value: unknown, kind: "capability" | "pack"): ValidatedCapabilityCreate | ValidatedPackCreate {
   const capabilityKeys = ["schema_version", "idempotency_key", "payload_hash", "capability_id", "capability_version_id", "display_name", "owning_domain", "kind", "version", "artifact_ref", "contract_ref", "risk_class", "approval_requirement", "compatibility", "expected_resource_version"] as const;
   const packKeys = ["schema_version", "idempotency_key", "payload_hash", "pack_product_id", "pack_version_id", "display_name", "tenant_modes", "version", "expected_resource_version", "members"] as const;
-  const input = plainRecord(value, kind === "capability" ? capabilityKeys : packKeys);
+  const input = plainRecord(copyWireData(value), kind === "capability" ? capabilityKeys : packKeys);
   if (ownValue(input, "schema_version") !== 1) invalid();
-  const common = { schema_version: 1 as const, idempotency_key: id(ownValue(input, "idempotency_key")), payload_hash: hash(ownValue(input, "payload_hash")) };
+  const common = { schema_version: 1 as const, idempotency_key: id(ownValue(input, "idempotency_key")), payload_hash: validateWirePayloadHash(input) };
   if (kind === "capability") {
     const compatibility = canonicalCompatibility(ownValue(input, "compatibility")).compatibility;
     const expectedResourceVersion = expected(ownValue(input, "expected_resource_version"), true);
@@ -169,7 +194,7 @@ export function validateCatalogCommandInput(value: unknown, kind: "capability" |
 
 export function validateCatalogTransition(value: unknown, resource: "capability" | "pack"): ValidatedVersionTransition {
   const identifier = resource === "capability" ? "capability_version_id" : "pack_version_id";
-  const input = plainRecord(value, ["schema_version", "idempotency_key", "payload_hash", identifier, "expected_resource_version"]);
+  const input = plainRecord(copyWireData(value), ["schema_version", "idempotency_key", "payload_hash", identifier, "expected_resource_version"]);
   if (ownValue(input, "schema_version") !== 1) invalid();
-  return Object.freeze({ schema_version: 1, idempotency_key: id(ownValue(input, "idempotency_key")), payload_hash: hash(ownValue(input, "payload_hash")), [identifier]: id(ownValue(input, identifier)), expected_resource_version: expected(ownValue(input, "expected_resource_version"), false) as number });
+  return Object.freeze({ schema_version: 1, idempotency_key: id(ownValue(input, "idempotency_key")), payload_hash: validateWirePayloadHash(input), [identifier]: id(ownValue(input, identifier)), expected_resource_version: expected(ownValue(input, "expected_resource_version"), false) as number });
 }

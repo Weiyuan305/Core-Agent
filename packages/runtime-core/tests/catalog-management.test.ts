@@ -85,6 +85,7 @@ test("Capability draft creation replays exactly, conflicts on changed payload, a
   await assert.rejects(() => review(deps, context, command({ schema_version: 1, idempotency_key: "capability-review-again", capability_version_id: "capability_version_catalog", expected_resource_version: 2 })), { code: "INVALID_STATE_TRANSITION" });
   const row = await pool.query("select artifact_ref, status, resource_version::int from capability_versions where capability_version_id = 'capability_version_catalog'");
   assert.deepEqual(row.rows, [{ artifact_ref: `manifest:sha256:${"a".repeat(64)}`, status: "reviewed", resource_version: 2 }]);
+  assert.deepEqual((await pool.query("select (select count(*)::int from platform_authority_audit) as audits, (select count(*)::int from product_events) as events, (select count(*)::int from outbox) as outbox")).rows, [{ audits: 2, events: 2, outbox: 2 }]);
 });
 
 test("Pack publication persists a sorted immutable reviewed-member catalog, and retirement/blocking have no reverse transition", async () => {
@@ -126,4 +127,88 @@ test("real PostgreSQL locking admits only one concurrent Capability review at it
   assert.equal(attempts.filter((attempt) => attempt.status === "fulfilled").length, 1);
   assert.equal(attempts.filter((attempt) => attempt.status === "rejected").length, 1);
   assert.deepEqual((await pool.query("select status, resource_version::int from capability_versions where capability_version_id = 'capability_version_catalog'")).rows, [{ status: "reviewed", resource_version: 2 }]);
+});
+
+test("accepted catalog writes atomically append a safe lifecycle ProductEvent and Outbox entry without replay duplication", async () => {
+  const database = (await import("../src/db/database.js")).createRuntimeDatabase(pool);
+  const deps = { ...dependencies, db: database };
+  const create = required("createCapabilityVersion");
+  const created = await create(deps, context, command(capabilityPayload()));
+  assert.deepEqual(await create(deps, context, command(capabilityPayload())), created);
+  const counts = await pool.query(`select
+    (select count(*)::int from capability_versions) as capabilities,
+    (select count(*)::int from platform_authority_audit) as audits,
+    (select count(*)::int from product_events) as events,
+    (select count(*)::int from outbox) as outbox,
+    (select count(*)::int from idempotency_records where status = 'completed') as idempotency`);
+  assert.deepEqual(counts.rows, [{ capabilities: 1, audits: 1, events: 1, outbox: 1, idempotency: 1 }]);
+  const event = await pool.query("select event_type, payload from product_events");
+  assert.deepEqual(event.rows, [{ event_type: "catalog.capability.created", payload: { resource_id: "capability_version_catalog", resource_type: "capability_version", resource_version: 1, status: "draft" } }]);
+});
+
+test("wire-order customer modes hash before persistence normalization and duplicate catalog versions fail safely", async () => {
+  const database = (await import("../src/db/database.js")).createRuntimeDatabase(pool);
+  const deps = { ...dependencies, db: database };
+  const createCapability = required("createCapabilityVersion");
+  await createCapability(deps, context, command(capabilityPayload()));
+  const duplicateCapability = command(capabilityPayload({ idempotency_key: "capability-duplicate-version", capability_version_id: "capability_version_catalog_other" }));
+  await assert.rejects(() => createCapability(deps, context, duplicateCapability), (error: unknown) => error instanceof Error && (error as { code?: string }).code === "IDEMPOTENCY_CONFLICT" && !error.message.includes("capability_versions_capability_id_version_key"));
+  const createPack = required("createPackVersion");
+  const wireOrdered = packPayload({ idempotency_key: "pack-wire-order", tenant_modes: ["b2c", "b2b"] });
+  await createPack(deps, context, command(wireOrdered));
+  assert.deepEqual((await pool.query("select tenant_modes from pack_products where pack_product_id = 'pack_product_catalog'")).rows, [{ tenant_modes: ["b2b", "b2c"] }]);
+  await assert.rejects(() => createPack(deps, context, command(packPayload({ idempotency_key: "pack-wire-order", tenant_modes: ["b2b", "b2c"] }))), { code: "IDEMPOTENCY_CONFLICT" });
+  const duplicatePack = command(packPayload({ idempotency_key: "pack-duplicate-version", pack_version_id: "pack_version_catalog_other" }));
+  await assert.rejects(() => createPack(deps, context, duplicatePack), (error: unknown) => error instanceof Error && (error as { code?: string }).code === "IDEMPOTENCY_CONFLICT" && !error.message.includes("pack_versions_product_version_key"));
+});
+
+test("catalog production commands reject unknown members, unknown contracts, incompatible metadata, and kind mismatch without provider disclosure", async () => {
+  const database = (await import("../src/db/database.js")).createRuntimeDatabase(pool);
+  const deps = { ...dependencies, db: database };
+  const createCapability = required("createCapabilityVersion"); const createPack = required("createPackVersion");
+  await assert.rejects(() => createPack(deps, context, command(packPayload({ members: [{ capability_id: "missing", capability_version_id: "missing_version", version: "1.0.0" }], idempotency_key: "unknown-member" }))), { code: "INVALID_STATE_TRANSITION" });
+  await assert.rejects(() => createCapability(deps, context, command(capabilityPayload({ contract_ref: "synthetic/unknown@1.0.0", idempotency_key: "unknown-contract" }))), { code: "INVALID_STATE_TRANSITION" });
+  await assert.rejects(() => createCapability(deps, context, command(capabilityPayload({ compatibility: { ...capabilityPayload().compatibility as object, runtime_protocol_version: "9.0.0" }, idempotency_key: "bad-protocol" }))), { code: "INVALID_STATE_TRANSITION" });
+  await createCapability(deps, context, command(capabilityPayload()));
+  const duplicateMember = packPayload({ idempotency_key: "duplicate-member", members: [packPayload().members[0], packPayload().members[0]] });
+  await assert.rejects(() => createPack(deps, context, command(duplicateMember)), { code: "INVALID_REQUEST" });
+  await assert.rejects(() => createCapability(deps, context, command(capabilityPayload({ capability_version_id: "capability_version_kind_mismatch", version: "2.0.0", kind: "skill", idempotency_key: "kind-mismatch" }))), { code: "INVALID_STATE_TRANSITION" });
+});
+
+test("Capability retirement and blocking are irreversible and blocking records the affected release as one bounded recomputation job", async () => {
+  const database = (await import("../src/db/database.js")).createRuntimeDatabase(pool);
+  const deps = { ...dependencies, db: database };
+  await required("createCapabilityVersion")(deps, context, command(capabilityPayload()));
+  await required("reviewCapabilityVersion")(deps, context, command({ schema_version: 1, idempotency_key: "review-for-block", capability_version_id: "capability_version_catalog", expected_resource_version: 1 }));
+  await required("createPackVersion")(deps, context, command(packPayload()));
+  await required("reviewPackVersion")(deps, context, command({ schema_version: 1, idempotency_key: "review-pack-for-block", pack_version_id: "pack_version_catalog", expected_resource_version: 1 }));
+  await required("publishPackVersion")(deps, context, command({ schema_version: 1, idempotency_key: "publish-pack-for-block", pack_version_id: "pack_version_catalog", expected_resource_version: 2 }));
+  await pool.query(`insert into tenant_pack_releases (tenant_pack_release_id, tenant_id, pack_product_id, pack_version_id, pack_version, generation, status, resource_version, created_at, updated_at)
+    values ('release_catalog_block', 'tenant_catalog', 'pack_product_catalog', 'pack_version_catalog', '1.0.0', 1, 'preparing', 1, $1, $1)`, [now]);
+  await pool.query("update tenant_pack_releases set status = 'current', resource_version = 2 where tenant_pack_release_id = 'release_catalog_block'");
+  await required("blockCapabilityVersion")(deps, context, command({ schema_version: 1, idempotency_key: "block-capability", capability_version_id: "capability_version_catalog", expected_resource_version: 2 }));
+  assert.deepEqual((await pool.query("select tenant_id, payload_ref, job_kind, max_attempts from worker_jobs order by job_id")).rows, [{ tenant_id: "tenant_catalog", payload_ref: "release_catalog_block", job_kind: "reconcile_capability_projection", max_attempts: 5 }]);
+  await assert.rejects(() => required("retireCapabilityVersion")(deps, context, command({ schema_version: 1, idempotency_key: "retire-blocked", capability_version_id: "capability_version_catalog", expected_resource_version: 3 })), { code: "INVALID_STATE_TRANSITION" });
+});
+
+test("publication rejects blocked members, unsupported risks, and customer-mode mismatch", async () => {
+  const database = (await import("../src/db/database.js")).createRuntimeDatabase(pool);
+  const deps = { ...dependencies, db: database };
+  const createCapability = required("createCapabilityVersion"); const reviewCapability = required("reviewCapabilityVersion"); const blockCapability = required("blockCapabilityVersion");
+  const createPack = required("createPackVersion"); const reviewPack = required("reviewPackVersion"); const publish = required("publishPackVersion");
+  const makePack = async (suffix: string, capabilityId: string, capabilityVersionId: string, modes: string[]) => {
+    await createPack(deps, context, command(packPayload({ idempotency_key: `pack-${suffix}`, pack_product_id: `pack_product_${suffix}`, pack_version_id: `pack_version_${suffix}`, tenant_modes: modes, members: [{ capability_id: capabilityId, capability_version_id: capabilityVersionId, version: "1.0.0" }] })));
+    await reviewPack(deps, context, command({ schema_version: 1, idempotency_key: `review-pack-${suffix}`, pack_version_id: `pack_version_${suffix}`, expected_resource_version: 1 }));
+    await assert.rejects(() => publish(deps, context, command({ schema_version: 1, idempotency_key: `publish-pack-${suffix}`, pack_version_id: `pack_version_${suffix}`, expected_resource_version: 2 })), { code: "INVALID_STATE_TRANSITION" });
+  };
+  await createCapability(deps, context, command(capabilityPayload({ idempotency_key: "risk-create", capability_id: "capability_risk", capability_version_id: "capability_version_risk", risk_class: "external_write" })));
+  await reviewCapability(deps, context, command({ schema_version: 1, idempotency_key: "risk-review", capability_version_id: "capability_version_risk", expected_resource_version: 1 }));
+  await makePack("risk", "capability_risk", "capability_version_risk", ["b2b"]);
+  await createCapability(deps, context, command(capabilityPayload({ idempotency_key: "mode-create", capability_id: "capability_mode", capability_version_id: "capability_version_mode", compatibility: { core_contract_version: "0.7.0", domain_contract_version: "1.0.0", runtime_protocol_version: "1.0.0", tenant_modes: ["b2b"] } })));
+  await reviewCapability(deps, context, command({ schema_version: 1, idempotency_key: "mode-review", capability_version_id: "capability_version_mode", expected_resource_version: 1 }));
+  await makePack("mode", "capability_mode", "capability_version_mode", ["b2c"]);
+  await createCapability(deps, context, command(capabilityPayload({ idempotency_key: "blocked-create", capability_id: "capability_blocked", capability_version_id: "capability_version_blocked" })));
+  await reviewCapability(deps, context, command({ schema_version: 1, idempotency_key: "blocked-review", capability_version_id: "capability_version_blocked", expected_resource_version: 1 }));
+  await blockCapability(deps, context, command({ schema_version: 1, idempotency_key: "blocked-block", capability_version_id: "capability_version_blocked", expected_resource_version: 2 }));
+  await makePack("blocked", "capability_blocked", "capability_version_blocked", ["b2b"]);
 });
