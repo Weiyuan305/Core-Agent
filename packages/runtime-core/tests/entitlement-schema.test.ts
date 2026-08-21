@@ -2207,16 +2207,19 @@ test("review round 4 Pack publication and Product mode updates serialize on one 
     );
     const publish = publishClient.query(
       "update pack_versions set status = 'published', resource_version = 3 where pack_version_id = 'pack_version_lock'",
+    ).then(
+      (value) => ({ status: "fulfilled" as const, value }),
+      (reason: unknown) => ({ status: "rejected" as const, reason }),
     );
     const waitedOnProductLock = await waitForDatabaseLock("entitlement_product_publish_barrier");
     await productClient.query("commit");
-    const [publishResult] = await Promise.allSettled([publish]);
-    if (publishResult!.status === "fulfilled") await publishClient.query("commit");
+    const publishResult = await publish;
+    if (publishResult.status === "fulfilled") await publishClient.query("commit");
     else await publishClient.query("rollback");
     assert.equal(waitedOnProductLock, true);
-    assert.equal(publishResult!.status, "rejected");
-    if (publishResult!.status === "rejected") {
-      assert.equal(constraintName(publishResult!.reason), "pack_versions_publishable_members_check");
+    assert.equal(publishResult.status, "rejected");
+    if (publishResult.status === "rejected") {
+      assert.equal(constraintName(publishResult.reason), "pack_versions_publishable_members_check");
     }
     assert.deepEqual(
       (await pool.query(
