@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { chmod, lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -17,6 +17,12 @@ const lock = JSON.parse(await import("node:fs/promises").then(({ readFile }) => 
 )));
 const platform = process.arch === "arm64" ? "linux/arm64" : "linux/amd64";
 const protectedRunner = join(repositoryRoot, "scripts/run-protected-ci-command.mjs");
+const migrationVersions = (await readdir(join(repositoryRoot, "packages/runtime-core/migrations")))
+  .map((name) => /^(\d{3})_[a-z0-9_-]+\.sql$/u.exec(name))
+  .filter((match) => match !== null)
+  .map((match) => Number(match[1]));
+const expectedSchemaVersion = Math.max(...migrationVersions);
+assert(Number.isSafeInteger(expectedSchemaVersion) && expectedSchemaVersion > 0);
 
 function safeOutput(result, credential) {
   const output = Buffer.concat([result.stdout ?? Buffer.alloc(0), result.stderr ?? Buffer.alloc(0)]);
@@ -161,7 +167,10 @@ async function runCiEquivalentScenario({ injectedFailure = false, injectedOutput
       expectedCounts.identityGatewayPostgres.testCount,
       expectedCounts.controlPlaneApiPostgres.testCount,
     ]);
-    assert.match(postgresOutput, /schema 13 migrates both empty and schema-12 databases without changing identity history/u);
+    assert.match(
+      postgresOutput,
+      new RegExp(`schema ${expectedSchemaVersion} migrates both empty and schema-12 databases without changing identity history`, "u"),
+    );
     assert.match(postgresOutput, /direct SQL assignment concurrency cannot oversubscribe a one-seat Entitlement/u);
     assert.match(postgresOutput, /schema 10 grants only the documented Identity Task 3-9 table-operation matrix/u);
     assert.match(postgresOutput, /real Identity login commits and atomically rolls back the Task 3 cross-table graph/u);

@@ -1043,6 +1043,10 @@ test("fresh CI-equivalent protects command output and proves cleanup after succe
   assert.match(text, /protectedRun\("npm", \["run", "test:postgres"\]/u);
   assert.match(text, /protectedRun\("npm", \["run", "test:integration"\]/u);
   assert.match(text, /database-ci-expected-counts\.json/u);
+  assert.match(text, /const migrationVersions = \(await readdir/u);
+  assert.match(text, /const expectedSchemaVersion = Math\.max\(\.\.\.migrationVersions\);/u);
+  assert.match(text, /new RegExp\(`schema \$\{expectedSchemaVersion\} migrates both empty and schema-12 databases/u);
+  assert.doesNotMatch(text, /schema \d+ migrates both empty and schema-12 databases/u);
   assert.match(text, /expectedCounts\.runtimeCorePostgres\.testCount,[\s\S]*expectedCounts\.identityGatewayPostgres\.testCount,[\s\S]*expectedCounts\.controlPlaneApiPostgres\.testCount/u);
   assert.match(text, /assertNodeTestSummaries\(integrationOutput, \[expectedCounts\.integration\.testCount\]\)/u);
   assert.match(text, /protectedRun\("docker", \["logs", container\]/u);
