@@ -350,12 +350,12 @@ test.before(async () => ensureRoles());
 test.beforeEach(async () => resetDatabase());
 test.after(async () => pool.end());
 
-test("schema 13 migrates both empty and schema-12 databases without changing identity history", async () => {
-  assert.equal(EXPECTED_SCHEMA_VERSION, 13);
+test("schema 14 migrates both empty and schema-12 databases without changing identity history", async () => {
+  assert.equal(EXPECTED_SCHEMA_VERSION, 14);
   await applyMigrations(pool, migrationsDirectory);
   assert.deepEqual(
     (await pool.query("select version, name from core_agent_schema_migrations order by version")).rows.at(-1),
-    { version: 13, name: "entitlement_capability_authority" },
+    { version: 14, name: "catalog_artifact_contract_parity" },
   );
 
   await resetDatabase();
@@ -366,6 +366,7 @@ test("schema 13 migrates both empty and schema-12 databases without changing ide
     const historyAfter = await pool.query("select version, name, checksum, applied_at from core_agent_schema_migrations order by version");
     assert.deepEqual(historyAfter.rows.slice(0, 12), historyBefore.rows);
     assert.equal(historyAfter.rows[12]?.version, 13);
+    assert.equal(historyAfter.rows[13]?.version, 14);
   } finally {
     await rm(prefixDirectory, { recursive: true, force: true });
   }
@@ -2206,16 +2207,19 @@ test("review round 4 Pack publication and Product mode updates serialize on one 
     );
     const publish = publishClient.query(
       "update pack_versions set status = 'published', resource_version = 3 where pack_version_id = 'pack_version_lock'",
+    ).then(
+      (value) => ({ status: "fulfilled" as const, value }),
+      (reason: unknown) => ({ status: "rejected" as const, reason }),
     );
     const waitedOnProductLock = await waitForDatabaseLock("entitlement_product_publish_barrier");
     await productClient.query("commit");
-    const [publishResult] = await Promise.allSettled([publish]);
-    if (publishResult!.status === "fulfilled") await publishClient.query("commit");
+    const publishResult = await publish;
+    if (publishResult.status === "fulfilled") await publishClient.query("commit");
     else await publishClient.query("rollback");
     assert.equal(waitedOnProductLock, true);
-    assert.equal(publishResult!.status, "rejected");
-    if (publishResult!.status === "rejected") {
-      assert.equal(constraintName(publishResult!.reason), "pack_versions_publishable_members_check");
+    assert.equal(publishResult.status, "rejected");
+    if (publishResult.status === "rejected") {
+      assert.equal(constraintName(publishResult.reason), "pack_versions_publishable_members_check");
     }
     assert.deepEqual(
       (await pool.query(

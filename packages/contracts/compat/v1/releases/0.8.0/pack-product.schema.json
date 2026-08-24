@@ -1,0 +1,64 @@
+{
+  "$id": "core-agent://v1/pack-product",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "created_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "display_name": {
+      "maxLength": 200,
+      "minLength": 1,
+      "type": "string"
+    },
+    "pack_product_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "tenant_modes": {
+      "items": {
+        "anyOf": [
+          {
+            "const": "b2b",
+            "type": "string"
+          },
+          {
+            "const": "b2c",
+            "type": "string"
+          }
+        ]
+      },
+      "maxItems": 2,
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "updated_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "resource_version",
+    "created_at",
+    "updated_at",
+    "pack_product_id",
+    "display_name",
+    "tenant_modes"
+  ],
+  "type": "object"
+}

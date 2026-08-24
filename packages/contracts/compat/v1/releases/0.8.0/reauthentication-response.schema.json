@@ -1,0 +1,33 @@
+{
+  "$id": "core-agent://v1/reauthentication-response",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "reauthenticated_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "session_resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "valid_until": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "reauthenticated_at",
+    "valid_until",
+    "session_resource_version"
+  ],
+  "type": "object"
+}

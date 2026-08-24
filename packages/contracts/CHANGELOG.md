@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.0 - 2026-08-21
+
+- Add closed Capability-Version and Pack-Version catalog lifecycle ProductEvent
+  branches for draft creation, review, publication, retirement, and blocking.
+  Payloads carry only stable resource identifiers, closed status facts, and
+  resource versions; executable metadata, customer/provider content, and secrets
+  remain excluded.
+- Append the immutable 0.8.0 schema release without changing 0.2.0–0.7.0.
+
 ## 0.7.0 - 2026-08-20
 
 - Add closed Capability, immutable Capability Version, Pack Product, exact Pack

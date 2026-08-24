@@ -5,6 +5,31 @@
 **Depends on:** [Identity Runtime and Public Auth v1](2026-08-10-identity-runtime-public-auth-v1-design.md)
 **Next phase:** Core-Agent Policy Plugin and Capability/MCP Gateway
 
+**2026-08-21 approved amendment:** Contracts 0.7.0 remains immutable. Catalog
+Lifecycle facts are released compatibly as Contracts 0.8.0: the only new branches
+are closed `capability_version.{created,reviewed,retired,blocked}` and
+`pack_version.{created,reviewed,published,retired,blocked}` ProductEvents. Each
+contains only its version ID, stable family/product ID, closed status, and resource
+version. It must not contain artifact or contract references, compatibility details,
+customer/provider text, or secret material. Catalog writes append these validated
+events through the existing transactional ProductEvent/Outbox path; unknown future
+catalog branches remain fail-closed.
+
+**2026-08-21 final Task 3 review clarification:** Global catalog authority is anchored
+to one explicit server-managed catalog authority Tenant. Commands require and lock the
+performing platform Actor's active `platform` Membership in that exact configured
+Tenant; customer Tenant ordering, membership projection timing, and caller input may
+not choose the audit/idempotency/event scope. Runtime catalog admission reuses the
+released Contracts artifact semantics and bounds hostile descriptor-only input by
+depth, node, collection, and aggregate UTF-8 budgets before canonical hashing.
+
+**2026-08-21 compatibility migration clarification:** Contracts 0.8.0 is immutable.
+Schema 14 forward-replaces only the immutable-artifact predicate behind the existing
+Capability Version CHECK so PostgreSQL accepts the same released grammar, including
+dotted no-slash OCI repository identities. Runtime has no separate 1,024-character
+artifact cap; the command aggregate UTF-8 budget remains the denial-of-service bound.
+Migrations 010–013 remain byte-for-byte historical artifacts.
+
 ## 1. Decision record
 
 The approved product and architecture decisions are:
@@ -375,11 +400,12 @@ platform-created grants. The UI must not display a fake working checkout button.
 
 ## 12. Events and audit
 
-New ProductEvent families describe bounded lifecycle facts such as Pack release
-selected, Entitlement activated/suspended/revoked/expired, Assignment created/revoked,
-effective snapshot changed, and service preparing/available/failed. Events contain IDs,
-states, versions, and safe reason codes, not prices, receipts, payment payloads,
-Capability secrets, provider configuration, or customer content.
+New ProductEvent families describe bounded lifecycle facts such as Capability/Pack
+catalog lifecycle, Pack release selected, Entitlement activated/suspended/revoked/
+expired, Assignment created/revoked, effective snapshot changed, and service
+preparing/available/failed. Events contain IDs, states, versions, and safe reason
+codes, not prices, receipts, payment payloads, artifact or contract references,
+compatibility details, Capability secrets, provider configuration, or customer content.
 
 Every authorization and mutation emits an AuditEvent with the real Actor,
 Membership, effective role, Tenant, action, decision, outcome, request/trace IDs,
@@ -390,6 +416,11 @@ system-managed Tenant administrator Membership.
 Transactional Outbox remains the only path from an accepted database mutation to an
 event notification. Catalog, Entitlement, Assignment, snapshot, and Runtime intent
 must commit atomically or not at all.
+
+Catalog blocking queues bounded idempotent reconciliation only for the exact blocked
+resource's `preparing` or `current` Tenant Pack Releases. Failed and superseded
+history remains immutable evidence, not fresh work. Any multi-Capability lock acquires
+`capability_version_id` rows in exact UTF-8 byte order.
 
 ## 13. Failure behavior
 

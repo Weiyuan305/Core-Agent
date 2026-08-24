@@ -1,0 +1,83 @@
+{
+  "$id": "core-agent://v1/tenant",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "created_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "display_name": {
+      "maxLength": 200,
+      "minLength": 1,
+      "type": "string"
+    },
+    "resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "status": {
+      "anyOf": [
+        {
+          "const": "provisioning",
+          "type": "string"
+        },
+        {
+          "const": "active",
+          "type": "string"
+        },
+        {
+          "const": "suspended",
+          "type": "string"
+        },
+        {
+          "const": "closing",
+          "type": "string"
+        },
+        {
+          "const": "closed",
+          "type": "string"
+        }
+      ]
+    },
+    "tenant_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "tenant_mode": {
+      "anyOf": [
+        {
+          "const": "b2b",
+          "type": "string"
+        },
+        {
+          "const": "b2c",
+          "type": "string"
+        }
+      ]
+    },
+    "updated_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "resource_version",
+    "created_at",
+    "updated_at",
+    "tenant_id",
+    "tenant_mode",
+    "display_name",
+    "status"
+  ],
+  "type": "object"
+}

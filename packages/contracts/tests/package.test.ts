@@ -6,7 +6,7 @@ import test from "node:test";
 import { CONTRACT_PACKAGE_VERSION, WIRE_SCHEMA_VERSION } from "../src/index.js";
 
 test("exports the package and wire versions", () => {
-  assert.equal(CONTRACT_PACKAGE_VERSION, "0.7.0");
+  assert.equal(CONTRACT_PACKAGE_VERSION, "0.8.0");
   assert.equal(WIRE_SCHEMA_VERSION, 1);
 });
 
@@ -16,6 +16,7 @@ test("every workspace consumer pins the released contracts package", async () =>
     "apps/control-plane-api",
     "apps/control-plane-web",
     "apps/control-plane-worker",
+    "apps/identity-gateway",
     "apps/runtime-supervisor",
     "packages/runtime-core",
   ] as const;

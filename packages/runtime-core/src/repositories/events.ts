@@ -101,6 +101,10 @@ export async function appendProductEvents(
   const appended: ProductEvent[] = [];
   for (const partial of input.events) {
     if (partial.tenant_id !== context.tenantId) throw new DomainError("INVALID_REQUEST", "ProductEvent tenant does not match transaction scope");
+    // Structural validation must happen before allocating a durable cursor. A
+    // caller may handle a rejected event inside its transaction; in that case a
+    // malformed/unknown event must not leave an unreadable sequence gap behind.
+    validateProductEvent({ ...partial, sequence: 1 } as ProductEvent, context.tenantId);
     const allocation = await context.trx.insertInto("stream_sequences").values({
       tenant_id: context.tenantId,
       stream_id: input.streamId,

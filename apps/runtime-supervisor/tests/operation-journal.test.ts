@@ -233,7 +233,7 @@ test("two journal instances reserve one digest before either dispatches", async 
 });
 
 test("a busy per-operation guard observes an abort signal within its bounded wait", async () => {
-  const firstJournal = new OperationJournal({ directory: journalRoot, guardPollMs: 1, guardWaitMs: 100 });
+  const firstJournal = new OperationJournal({ directory: journalRoot, guardPollMs: 500, guardWaitMs: 2_000 });
   let entered!: () => void;
   const firstEntered = new Promise<void>((resolve) => { entered = resolve; });
   let release!: () => void;
@@ -246,15 +246,27 @@ test("a busy per-operation guard observes an abort signal within its bounded wai
   await firstEntered;
   const controller = new AbortController();
   let secondCallbacks = 0;
-  const second = new OperationJournal({ directory: journalRoot, guardPollMs: 1, guardWaitMs: 100 }).run(
+  const second = new OperationJournal({ directory: journalRoot, guardPollMs: 500, guardWaitMs: 2_000 }).run(
     request(),
     async () => { secondCallbacks += 1; return response(); },
     { signal: controller.signal },
   );
+  await new Promise((resolve) => setTimeout(resolve, 50));
   controller.abort();
-  await assert.rejects(second, /SUPERVISOR_REJECTED: Operation journal record is unsafe/u);
-  assert.equal(secondCallbacks, 0);
-  release();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const abortObservation = await Promise.race([
+      second.then(() => "resolved" as const, () => "rejected" as const),
+      new Promise<"timeout">((resolve) => { timeout = setTimeout(() => resolve("timeout"), 150); }),
+    ]);
+    assert.equal(abortObservation, "rejected");
+    await assert.rejects(second, /SUPERVISOR_REJECTED: Operation journal record is unsafe/u);
+    assert.equal(secondCallbacks, 0);
+  } finally {
+    clearTimeout(timeout);
+    release();
+    await Promise.allSettled([first, second]);
+  }
   assert.equal((await first).outcome, "accepted");
 });
 

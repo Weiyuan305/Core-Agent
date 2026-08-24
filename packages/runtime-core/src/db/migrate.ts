@@ -77,6 +77,7 @@ type ShapeAmendment<T> = Readonly<{
 type LegacyColumnShape = readonly [relation: string, name: string, type: string, notNull: boolean, defaultExpression: string];
 type LegacyConstraintShape = readonly [relation: string, name: string, type: string, validated: boolean, definition: string];
 type LegacyIndexShape = readonly [relation: string, name: string, definition: string];
+type RoutineShape = readonly [kind: "f" | "p", name: string, arguments: string, result: string, securityDefiner: boolean, config: readonly string[], definitionHash: string];
 
 function compareCatalogText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
@@ -108,7 +109,8 @@ interface SchemaManifest {
   readonly name: string;
   readonly objects?: readonly RelationManifestEntry[];
   readonly relationAcls?: readonly RelationAclManifestEntry[];
-  readonly routines?: readonly (readonly [kind: string, name: string, arguments: string, result: string, securityDefiner: boolean, config: readonly string[], definitionHash: string])[];
+  readonly routines?: readonly RoutineShape[];
+  readonly routineAmendments?: readonly ShapeAmendment<RoutineShape>[];
   readonly routineAcls?: readonly RoutineAclManifestEntry[];
   readonly triggers?: readonly (readonly [relation: string, name: string, enabled: string, definition: string])[];
   readonly validateAndConverge?: (
@@ -134,6 +136,7 @@ const schemaManifestEntries = [
   [11, "password_reset_transactions", "fc9b7b131ba5c5faf8a4e04867776fa069b0db7d3cfb3049d8df1078a4433393"],
   [12, "email_verification_transactions", "2e7a7d0b8f910ff5253ace5dff1f0cc242224ec432e75621f15f57d93d14af12"],
   [13, "entitlement_capability_authority", "b2bf71c90115f32ee7c2f8ac270fcc598b6cdae9a27168c64beaa3f681ba181d"],
+  [14, "catalog_artifact_contract_parity", "f95542be7709937690c0f944bf71d2fa9b322fdcc3496fc7e5b63ca43ddb1fa6"],
 ] as const;
 
 const schemaManifests = new Map<number, SchemaManifest>(schemaManifestEntries.map(([version, name, checksum]) => [
@@ -856,11 +859,14 @@ const schema13Indexes: readonly LegacyIndexShape[] = [
   ["tenant_pack_releases", "tenant_pack_releases_tenant_ref_key", "CREATE UNIQUE INDEX tenant_pack_releases_tenant_ref_key ON public.tenant_pack_releases USING btree (tenant_id, tenant_pack_release_id)"],
 ];
 
-const schema13Routines = [
+const schema13ImmutableArtifactRoutine: RoutineShape = ["f", "core_agent_is_immutable_artifact_ref", "candidate text", "boolean", false, ["search_path=pg_catalog, public"], "06fece05a3affff873daf217fcbd3f42"];
+const schema14ImmutableArtifactRoutine: RoutineShape = ["f", "core_agent_is_immutable_artifact_ref", "candidate text", "boolean", false, ["search_path=pg_catalog, public"], "828c21925efe83d2fce99b4635e39af1"];
+
+const schema13Routines: readonly RoutineShape[] = [
   ["f", "advance_profile_snapshot_pointer", "p_tenant_id text, p_profile_id text, p_expected_resource_version bigint, p_snapshot_id text", "TABLE(resource_version bigint)", true, ["search_path=pg_catalog, public"], "853c4f017083f2e2ba0f81c448f11880"],
   ["f", "core_agent_is_canonical_semver", "candidate text", "boolean", false, ["search_path=pg_catalog, public"], "1ed599030c907847f7eb71c6d56249f7"],
   ["f", "core_agent_is_exact_contract_ref", "candidate text", "boolean", false, ["search_path=pg_catalog, public"], "8fca5ebbc25091381747fc23a9e59858"],
-  ["f", "core_agent_is_immutable_artifact_ref", "candidate text", "boolean", false, ["search_path=pg_catalog, public"], "06fece05a3affff873daf217fcbd3f42"],
+  schema13ImmutableArtifactRoutine,
   ["f", "core_agent_is_valid_capability_compatibility", "candidate jsonb", "boolean", false, ["search_path=pg_catalog, public"], "f59dfba1340e4748c5244dac2d65ba27"],
   ["f", "enforce_capability_version_immutability", "", "trigger", false, ["search_path=pg_catalog, public"], "8950aec1785a3266a22869c24f1e8f9e"],
   ["f", "enforce_entitlement_assignment_seat_capacity", "", "trigger", false, ["search_path=pg_catalog, public"], "fc54faa6572c9af7f4e2d498276f3b8e"],
@@ -1007,6 +1013,15 @@ schemaManifests.set(13, {
       name: "worker_jobs_capability_projection_claim_idx",
       definition: "CREATE INDEX worker_jobs_capability_projection_claim_idx ON public.worker_jobs USING btree (job_kind, status, next_attempt_at, created_at, tenant_id, job_id) WHERE ((job_kind = ANY (ARRAY['reconcile_capability_projection'::text, 'stop_idle_b2c_runtime'::text])) AND (status = ANY (ARRAY['queued'::text, 'retrying'::text])))",
     },
+  }],
+});
+
+schemaManifests.set(14, {
+  ...schemaManifests.get(14)!,
+  routineAmendments: [{
+    action: "replace",
+    before: schema13ImmutableArtifactRoutine,
+    after: schema14ImmutableArtifactRoutine,
   }],
 });
 
@@ -1268,6 +1283,51 @@ function foldRelationSemantics(
   return folded;
 }
 
+function routineKey(routine: RoutineShape): string {
+  return `${routine[0]}|${routine[1]}|${routine[2]}`;
+}
+
+function sameRoutine(left: RoutineShape | undefined, right: RoutineShape | undefined): boolean {
+  return left !== undefined && right !== undefined && JSON.stringify(left) === JSON.stringify(right);
+}
+
+function foldRoutines(
+  manifests: ReadonlyMap<number, SchemaManifest>, throughVersion: number,
+): Map<string, RoutineShape> {
+  const folded = new Map<string, RoutineShape>();
+  for (const manifest of orderedManifests(manifests, throughVersion)) {
+    for (const routine of manifest.routines ?? []) {
+      const key = routineKey(routine);
+      if (folded.has(key)) throw new Error(`schema ${manifest.version} manifest validation failed: duplicate routines`);
+      folded.set(key, routine);
+    }
+    for (const amendment of manifest.routineAmendments ?? []) {
+      const shape = amendment.after ?? amendment.before;
+      if (shape === undefined) throw new Error(`schema ${manifest.version} manifest validation failed: empty routine amendment`);
+      const key = routineKey(shape);
+      const current = folded.get(key);
+      if (amendment.action === "replace") {
+        if (amendment.before === undefined || amendment.after === undefined
+          || routineKey(amendment.before) !== routineKey(amendment.after)
+          || !sameRoutine(current, amendment.before)) {
+          throw new Error(`schema ${manifest.version} manifest validation failed: invalid routine replace`);
+        }
+        folded.set(key, amendment.after);
+      } else if (amendment.action === "revoke") {
+        if (amendment.before === undefined || amendment.after !== undefined || !sameRoutine(current, amendment.before)) {
+          throw new Error(`schema ${manifest.version} manifest validation failed: invalid routine revoke`);
+        }
+        folded.delete(key);
+      } else if (amendment.before !== undefined || amendment.after === undefined || current !== undefined) {
+        throw new Error(`schema ${manifest.version} manifest validation failed: invalid routine add`);
+      } else {
+        folded.set(key, amendment.after);
+      }
+    }
+  }
+  return folded;
+}
+
 type FoldedRelationAcl = readonly [schema: "public", name: string, kind: RelationKind, grantee: string, privilege: string, grantable: boolean];
 type FoldedRoutineAcl = readonly [schema: "public", name: string, kind: "f" | "p", arguments: string, grantee: string, privilege: "EXECUTE", grantable: boolean];
 
@@ -1310,6 +1370,7 @@ function validateManifestDeclarations(manifests: ReadonlyMap<number, SchemaManif
   foldShapes(manifests, throughVersion, "constraints", "constraintAmendments", normalizeConstraint as never);
   foldShapes(manifests, throughVersion, "indexes", "indexAmendments", normalizeIndex as never);
   foldRelationSemantics(manifests, throughVersion);
+  foldRoutines(manifests, throughVersion);
   foldManifestAcls(manifests, throughVersion, "relationAcls");
   foldManifestAcls(manifests, throughVersion, "routineAcls");
   for (const manifest of orderedManifests(manifests, throughVersion)) {
@@ -1672,9 +1733,7 @@ async function validateRegisteredCatalog(
     );
   }
 
-  const expectedRoutines = [...manifests.values()]
-    .filter((manifest) => manifest.version <= throughVersion)
-    .flatMap((manifest) => manifest.routines ?? [])
+  const expectedRoutines = [...foldRoutines(manifests, throughVersion).values()]
     .sort((left, right) => `${left[1]}|${left[2]}`.localeCompare(`${right[1]}|${right[2]}`));
   const actualRoutines = (await client.query<{
     arguments: string; config: string[] | null; definition_hash: string; kind: string; name: string;

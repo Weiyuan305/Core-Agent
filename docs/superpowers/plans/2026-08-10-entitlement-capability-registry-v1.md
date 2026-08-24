@@ -275,6 +275,31 @@ git commit -m "feat(entitlements): add capability authority schema"
 
 ### Task 3: Implement immutable Capability and Pack catalog review/publication
 
+**2026-08-21 approved implementation amendment:** Preserve the immutable Contracts
+0.7.0 release byte-for-byte and publish compatible Contracts 0.8.0 catalog lifecycle
+ProductEvent branches. Capability versions emit only
+`created/reviewed/retired/blocked`; Pack versions emit only
+`created/reviewed/published/retired/blocked`. Their closed payloads carry only the
+version ID, stable Capability/Pack-product ID, closed status, and resource version.
+The service must call validated `appendProductEvents` so event, Outbox, resource,
+audit, and idempotency commit atomically; `readEventsAfter` must reconstruct every
+emitted branch and exact replay must append none. Historical 0.2.0–0.7.0 releases and
+migrations 010–013 remain untouched.
+
+Final review hardening: inject one server-managed `catalogAuthorityTenantId` into
+catalog command dependencies and require the real Actor's active platform Membership
+there. Reuse Contracts artifact validation at the Runtime boundary; reject hostile
+cyclic/deep/oversized inputs before hashing; use exact UTF-8 Capability Version lock
+order; and queue Capability/Pack block recomputation only for exact `preparing` or
+`current` releases. First family/product creation must be race-safe and preserve all
+stable family metadata.
+
+Final compatibility hardening: add forward migration 014, not a Contracts 0.8.0 or
+migration-013 rewrite, to replace the artifact predicate used by the existing named
+CHECK. Its manifest records the routine replacement and schema version 14; Runtime
+relies on the released schema without a separate 1,024-character cap. Native PG tests
+cover dotted no-slash OCI, long qualified OCI, and two-Actor inverse lock barriers.
+
 **Files:**
 
 - Create: `packages/runtime-core/src/repositories/entitlements/catalog.ts`

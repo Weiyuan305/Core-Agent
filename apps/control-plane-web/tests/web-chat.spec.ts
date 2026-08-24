@@ -150,8 +150,13 @@ test("keeps the selected Conversation visible in a constrained scrolling list", 
     await page.getByRole("button", { name: "返回学生与对话" }).click();
     await expect(page.getByRole("navigation", { name: "学生与对话" })).toBeVisible();
   }
+  const conversationRows = page.locator(".conversation-row");
+  await expect(page.locator('.conversation-row[aria-current="page"]')).toHaveCount(1);
+  let expectedConversationCount = await conversationRows.count();
   for (let index = 0; index < 11; index += 1) {
     await page.getByRole("button", { name: "新建对话" }).click();
+    expectedConversationCount += 1;
+    await expect(conversationRows).toHaveCount(expectedConversationCount);
     if (testInfo.project.name === "iphone") {
       await page.getByRole("button", { name: "返回学生与对话" }).click();
       await expect(page.getByRole("navigation", { name: "学生与对话" })).toBeVisible();
@@ -160,7 +165,7 @@ test("keeps the selected Conversation visible in a constrained scrolling list", 
 
   const list = page.locator(".conversation-list__items");
   const selected = page.locator('.conversation-row[aria-current="page"]');
-  const metrics = await page.evaluate(() => {
+  const readMetrics = async () => page.evaluate(() => {
     const items = document.querySelector<HTMLElement>(".conversation-list__items");
     const current = document.querySelector<HTMLElement>('.conversation-row[aria-current="page"]');
     if (items === null || current === null) throw new Error("Conversation list missing");
@@ -179,6 +184,14 @@ test("keeps the selected Conversation visible in a constrained scrolling list", 
 
   await expect(list).toBeVisible();
   await expect(selected).toHaveCount(1);
+  await expect.poll(async () => {
+    const current = await readMetrics();
+    return current.scrollHeight > current.clientHeight
+      && current.scrollTop > 0
+      && current.currentTop >= current.listTop
+      && current.currentBottom <= current.listBottom + 1;
+  }).toBe(true);
+  const metrics = await readMetrics();
   expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight);
   expect(metrics.scrollTop).toBeGreaterThan(0);
   expect(metrics.currentTop).toBeGreaterThanOrEqual(metrics.listTop);
