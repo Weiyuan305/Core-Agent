@@ -89,7 +89,6 @@ test("first Pack release becomes current and an authority-bearing upgrade remain
     { generation: 2, status: "preparing" },
   ]);
 });
-
 test("release selection requires current platform authority and recent Core Session reauthentication", async () => {
   const context = await seedPlatformAuthority("stale");
   await seedTenant("tenant_release_stale", "b2b");
@@ -112,4 +111,3 @@ test("release selection requires current platform authority and recent Core Sess
   })), { code: "UNAUTHENTICATED" });
   assert.equal((await entitlementTestPool.query("select count(*)::int as count from tenant_pack_releases")).rows[0]?.count, 0);
 });
-

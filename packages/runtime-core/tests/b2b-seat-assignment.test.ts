@@ -25,7 +25,6 @@ test.beforeEach(async () => {
   await resetEntitlementTestDatabase();
   await seedTenant("tenant_platform_authority", "b2b", 0);
 });
-
 async function arrange(seats = 1, profileCount = 3) {
   const platform = await seedPlatformAuthority("seat_setup");
   const tenantId = "tenant_seat_assignment";
@@ -157,4 +156,3 @@ test("assignment rejects stale reauthentication, cross-Tenant Profiles, and non-
     profile_id: `profile_${arranged.tenantId}_2`,
   })), { code: "UNAUTHENTICATED" });
 });
-
