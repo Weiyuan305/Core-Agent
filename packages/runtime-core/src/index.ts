@@ -192,6 +192,22 @@ export {
   type PackWriteResult,
 } from "./services/entitlements/manage-pack.js";
 export {
+  selectTenantPackRelease,
+  type SelectTenantPackReleaseDependencies,
+  type TenantPackReleaseSelectionResult,
+} from "./services/entitlements/select-pack-release.js";
+export {
+  grantEntitlement,
+  changeEntitlementStatus,
+  type EntitlementWriteResult,
+  type ManageEntitlementDependencies,
+} from "./services/entitlements/manage-entitlement.js";
+export {
+  expireEntitlements,
+  type ExpireEntitlementsDependencies,
+} from "./services/entitlements/expire-entitlements.js";
+export type { EntitlementCommandContext } from "./services/entitlements/authority.js";
+export {
   assertAgentRunTransition,
   assertRuntimeObservedTransition,
   redactedFailureSummary,
