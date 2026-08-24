@@ -66,3 +66,18 @@ test("database transaction retry is abort-aware before opening another transacti
   );
   assert.deepEqual(setup.counts(), { builders: 0, executions: 0 });
 });
+
+test("database transaction retry backs off and aborts before opening another transaction", async () => {
+  const controller = new AbortController();
+  const setup = database(async () => { throw Object.freeze({ code: "40001" }); });
+  const abortTimer = setTimeout(() => controller.abort(new Error("private abort reason")), 5);
+  try {
+    await assert.rejects(
+      withDatabaseTransactionRetry(setup.db as never, async () => undefined, { signal: controller.signal }),
+      (error: unknown) => error instanceof DatabaseTransactionRetryAbortedError && !error.message.includes("private"),
+    );
+  } finally {
+    clearTimeout(abortTimer);
+  }
+  assert.deepEqual(setup.counts(), { builders: 1, executions: 1 });
+});
