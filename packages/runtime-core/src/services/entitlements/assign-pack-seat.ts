@@ -123,6 +123,12 @@ export async function assignPackSeat(
         now,
         tenantId: entitlement.tenant_id,
         profileId: input.profile_id,
+        evidence: {
+          actorId: context.performingActorId,
+          membershipId: actingMembershipId,
+          requestId: context.requestId,
+          traceId: context.traceId,
+        },
       });
       const nextUsed = usedSeats + 1;
       const result: PackSeatAssignmentResult = Object.freeze({

@@ -25,6 +25,7 @@ import {
   type EntitlementTransactionDependencies,
 } from "./authority.js";
 import { validateEntitlementCommand } from "./command-validation.js";
+import { resolveProfileSnapshotInTransaction } from "./resolve-profile-snapshot.js";
 import { appendEntitlementLifecycleEffects } from "./transaction-effects.js";
 
 export interface ManageEntitlementDependencies extends EntitlementTransactionDependencies {
@@ -122,6 +123,31 @@ function transitionEvent(status: EntitlementWriteResult["status"]): string {
   return "entitlement.expired";
 }
 
+async function resolveAffectedProfiles(
+  trx: Transaction<RuntimeDatabase>,
+  now: Date,
+  authority: { authorityTenantId: string; membershipId: string },
+  context: EntitlementCommandContext,
+  tenantId: string,
+  profileIds: readonly string[],
+): Promise<void> {
+  for (const profileId of profileIds) {
+    await resolveProfileSnapshotInTransaction({
+      trx,
+      now,
+      tenantId,
+      profileId,
+      evidence: {
+        actorId: context.performingActorId,
+        membershipId: authority.membershipId,
+        auditTenantId: authority.authorityTenantId,
+        requestId: context.requestId,
+        traceId: context.traceId,
+      },
+    });
+  }
+}
+
 export async function grantEntitlement(
   dependencies: ManageEntitlementDependencies,
   context: EntitlementCommandContext,
@@ -209,6 +235,7 @@ export async function grantEntitlement(
       reconcilePayloadRef: profileIds[0] ?? entitlementId,
       now,
     });
+    await resolveAffectedProfiles(trx, now, authority, context, input.tenant_id, profileIds);
     await completeIdempotentCommand({ tenantId: input.tenant_id, trx }, {
       key: input.idempotency_key,
       payloadHash: input.payload_hash,
@@ -290,6 +317,7 @@ export async function changeEntitlementStatus(
       reconcilePayloadRef: profileIds[0] ?? row.entitlement_id,
       now,
     });
+    await resolveAffectedProfiles(trx, now, authority, context, row.tenant_id, profileIds);
     await completeIdempotentCommand({ tenantId: row.tenant_id, trx }, {
       key: input.idempotency_key,
       payloadHash: input.payload_hash,

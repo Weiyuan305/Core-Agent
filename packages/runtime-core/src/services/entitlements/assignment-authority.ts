@@ -15,6 +15,12 @@ export interface AssignmentResolverInput {
   readonly now: Date;
   readonly tenantId: string;
   readonly profileId: string;
+  readonly evidence: {
+    readonly actorId: string;
+    readonly membershipId: string;
+    readonly requestId: string;
+    readonly traceId: string;
+  };
 }
 
 export interface AssignmentCommandDependencies extends EntitlementTransactionDependencies {

@@ -76,6 +76,12 @@ export async function revokePackSeat(
       now,
       tenantId: discovered.tenant_id,
       profileId: discovered.profile_id,
+      evidence: {
+        actorId: context.performingActorId,
+        membershipId: actingMembershipId,
+        requestId: context.requestId,
+        traceId: context.traceId,
+      },
     });
     const result: PackSeatAssignmentResult = Object.freeze({
       schema_version: 1,

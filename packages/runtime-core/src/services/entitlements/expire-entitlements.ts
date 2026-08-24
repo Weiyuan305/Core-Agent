@@ -11,6 +11,7 @@ import {
   type PlatformEntitlementAuthority,
 } from "./authority.js";
 import { assertCommandContext } from "./command-validation.js";
+import { resolveProfileSnapshotInTransaction } from "./resolve-profile-snapshot.js";
 import { appendEntitlementLifecycleEffects } from "./transaction-effects.js";
 
 export interface ExpireEntitlementsDependencies extends EntitlementTransactionDependencies {
@@ -98,6 +99,21 @@ export async function expireEntitlements(
         reconcilePayloadRef: profiles[0] ?? row.entitlement_id,
         now,
       });
+      for (const profileId of profiles) {
+        await resolveProfileSnapshotInTransaction({
+          trx,
+          now,
+          tenantId: row.tenant_id,
+          profileId,
+          evidence: {
+            actorId: dependencies.expiryContext.performingActorId,
+            membershipId: authority.membershipId,
+            auditTenantId: authority.authorityTenantId,
+            requestId: dependencies.expiryContext.requestId,
+            traceId: dependencies.expiryContext.traceId,
+          },
+        });
+      }
       expired.push(row.entitlement_id);
     }
     return Object.freeze(expired);

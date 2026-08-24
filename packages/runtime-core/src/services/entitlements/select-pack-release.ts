@@ -4,7 +4,7 @@ import {
   SelectTenantPackReleaseRequestSchema,
   type SelectTenantPackReleaseRequest,
 } from "@core-agent/contracts";
-import type { Kysely } from "kysely";
+import type { Kysely, Transaction } from "kysely";
 
 import type { RuntimeDatabase } from "../../db/database.js";
 import { withDatabaseTransactionRetry } from "../../db/transaction-retry.js";
@@ -25,6 +25,7 @@ import {
   type EntitlementTransactionDependencies,
 } from "./authority.js";
 import { validateEntitlementCommand } from "./command-validation.js";
+import { resolveProfileSnapshotInTransaction } from "./resolve-profile-snapshot.js";
 import { appendEntitlementLifecycleEffects } from "./transaction-effects.js";
 
 export interface SelectTenantPackReleaseDependencies extends EntitlementTransactionDependencies {
@@ -57,6 +58,33 @@ function storedReplay(value: unknown): TenantPackReleaseSelectionResult {
     releaseId: (value as { releaseId: string }).releaseId,
     generation: (value as { generation: number }).generation,
   });
+}
+
+async function affectedReleaseProfiles(
+  trx: Transaction<RuntimeDatabase>,
+  tenantId: string,
+  tenantMode: "b2b" | "b2c",
+  packProductId: string,
+): Promise<readonly string[]> {
+  const profiles = tenantMode === "b2c"
+    ? await trx.selectFrom("profiles").select("profile_id")
+      .where("tenant_id", "=", tenantId).where("status", "=", "active")
+      .orderBy("profile_id", "asc").forUpdate().execute()
+    : await trx.selectFrom("profiles")
+      .innerJoin("entitlement_assignments", (join) => join
+        .onRef("entitlement_assignments.tenant_id", "=", "profiles.tenant_id")
+        .onRef("entitlement_assignments.profile_id", "=", "profiles.profile_id"))
+      .innerJoin("entitlements", (join) => join
+        .onRef("entitlements.tenant_id", "=", "entitlement_assignments.tenant_id")
+        .onRef("entitlements.entitlement_id", "=", "entitlement_assignments.entitlement_id"))
+      .select("profiles.profile_id")
+      .where("profiles.tenant_id", "=", tenantId)
+      .where("profiles.status", "=", "active")
+      .where("entitlements.pack_product_id", "=", packProductId)
+      .where("entitlements.status", "=", "active")
+      .where("entitlement_assignments.status", "in", ["preparing", "available"])
+      .orderBy("profiles.profile_id", "asc").forUpdate("profiles").execute();
+  return Object.freeze([...new Set(profiles.map((profile) => profile.profile_id))]);
 }
 
 export async function selectTenantPackRelease(
@@ -166,6 +194,30 @@ export async function selectTenantPackRelease(
       ...(desiredStatus === "preparing" ? { reconcilePayloadRef: identifier } : {}),
       now,
     });
+    if (desiredStatus === "preparing") {
+      const profileIds = await affectedReleaseProfiles(
+        trx,
+        input.tenant_id,
+        tenant.tenant_mode,
+        input.pack_product_id,
+      );
+      for (const profileId of profileIds) {
+        await resolveProfileSnapshotInTransaction({
+          trx,
+          now,
+          tenantId: input.tenant_id,
+          profileId,
+          candidateReleaseId: identifier,
+          evidence: {
+            actorId: context.performingActorId,
+            membershipId: authority.membershipId,
+            auditTenantId: authority.authorityTenantId,
+            requestId: context.requestId,
+            traceId: context.traceId,
+          },
+        });
+      }
+    }
     await completeIdempotentCommand({ tenantId: input.tenant_id, trx }, {
       key: input.idempotency_key,
       payloadHash: input.payload_hash,

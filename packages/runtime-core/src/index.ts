@@ -221,6 +221,22 @@ export type {
   AssignmentResolverInput,
 } from "./services/entitlements/assignment-authority.js";
 export {
+  resolveEffectiveCapabilities,
+  type EffectiveCapabilitySet,
+  type EffectiveCapabilitySource,
+  type EffectiveCapabilityTriple,
+} from "./services/entitlements/effective-capabilities.js";
+export {
+  resolveProfileSnapshot,
+  resolveProfileSnapshotInTransaction,
+  type ResolveProfileSnapshotDependencies,
+  type ResolveProfileSnapshotInput,
+  type ResolveProfileSnapshotTransactionInput,
+  type ResolvedProfileSnapshot,
+  type SnapshotResolutionEvidence,
+} from "./services/entitlements/resolve-profile-snapshot.js";
+export { assertAutomaticB2cProfile } from "./services/entitlements/automatic-b2c-assignment.js";
+export {
   assertAgentRunTransition,
   assertRuntimeObservedTransition,
   redactedFailureSummary,
