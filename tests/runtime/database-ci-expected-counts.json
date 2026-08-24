@@ -1,6 +1,6 @@
 {
   "runtimeCorePostgres": {
-    "testCount": 434,
+    "testCount": 445,
     "suitePaths": [
       "tests/migrations.test.ts",
       "tests/entitlement-schema.test.ts",
@@ -40,7 +40,7 @@
     ]
   },
   "identityGatewayPostgres": {
-    "testCount": 2
+    "testCount": 3
   },
   "controlPlaneApiPostgres": {
     "testCount": 15

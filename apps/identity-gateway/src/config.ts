@@ -20,6 +20,7 @@ export interface IdentityGatewayConfig {
   readonly port: number;
   readonly publicAuthEnabled: boolean;
   readonly trustedProxyAddresses: ReadonlySet<string>;
+  readonly catalogAuthorityTenantId: string;
 }
 
 const allowedIdentityKeys = new Set([
@@ -42,6 +43,7 @@ const allowedIdentityKeys = new Set([
   "IDENTITY_GATEWAY_CONTAINER_BIND",
   "IDENTITY_PUBLIC_AUTH_ENABLED",
   "IDENTITY_TRUSTED_PROXY_ADDRESSES",
+  "IDENTITY_CATALOG_AUTHORITY_TENANT_ID",
 ]);
 
 function invalidConfiguration(): never {
@@ -93,6 +95,11 @@ function exactUrlList(value: string, protocols: ReadonlySet<string>, production:
 
 function reference(value: string): string {
   if (!/^(?:\/[A-Za-z0-9]|[A-Za-z0-9])[A-Za-z0-9._:/-]{0,1023}$/u.test(value) || value === "." || value === "..") invalidConfiguration();
+  return value;
+}
+
+function boundedIdentifier(value: string): string {
+  if (value.length > 255 || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/u.test(value)) invalidConfiguration();
   return value;
 }
 
@@ -186,6 +193,7 @@ export function loadIdentityGatewayConfig(environment: NodeJS.ProcessEnv): Ident
     port: port(required(environment, "IDENTITY_GATEWAY_PORT")),
     publicAuthEnabled: exactBoolean(required(environment, "IDENTITY_PUBLIC_AUTH_ENABLED")),
     trustedProxyAddresses: trustedProxyAddresses(environment.IDENTITY_TRUSTED_PROXY_ADDRESSES),
+    catalogAuthorityTenantId: boundedIdentifier(required(environment, "IDENTITY_CATALOG_AUTHORITY_TENANT_ID")),
   });
 }
 

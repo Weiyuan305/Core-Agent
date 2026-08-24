@@ -158,7 +158,9 @@ test("production composition atomically verifies email, registers Task 3, issues
   const key = Buffer.alloc(32, 0x5a);
   const protector = identityGatewayServerTestInternals.aesProtector(key, "composition-private-pii");
   const oauthProtector = identityGatewayServerTestInternals.aesProtector(key, "composition-oauth-transaction");
-  const operations = identityGatewayServerTestInternals.productionOperations(db, key, protector, oauthProtector);
+  const operations = identityGatewayServerTestInternals.productionOperations(
+    db, key, protector, oauthProtector, "tenant_platform_authority",
+  );
   try {
     for (let attempt = 0; attempt < 21; attempt += 1) {
       assert.equal(await operations.consumeRateLimit({
@@ -2633,6 +2635,7 @@ test("production composition atomically verifies email, registers Task 3, issues
         IDENTITY_SESSION_HMAC_KEY_REF: await writeSecret("session", "s".repeat(32)),
         IDENTITY_PII_HMAC_KEY_REF: await writeSecret("pii", "p".repeat(32)),
         IDENTITY_SIGNING_KEY_REF: await writeSecret("signing", "k".repeat(32)),
+        IDENTITY_CATALOG_AUTHORITY_TENANT_ID: "tenant_platform_authority",
         IDENTITY_GATEWAY_PORT: "18080",
         IDENTITY_PUBLIC_AUTH_ENABLED: "1",
       } satisfies NodeJS.ProcessEnv;
@@ -2657,7 +2660,9 @@ test("production Fastify and Supabase adapter fail closed on ambiguous reset rec
   const piiProtector = identityGatewayServerTestInternals.aesProtector(key, "round-nine-private-pii");
   const providerStore = identityGatewayServerTestInternals.oauthStore(db);
   const providerProtector = identityGatewayServerTestInternals.aesProtector(Buffer.alloc(32, 0x7b), "oauth-transaction");
-  const operations = identityGatewayServerTestInternals.productionOperations(db, key, piiProtector, providerProtector);
+  const operations = identityGatewayServerTestInternals.productionOperations(
+    db, key, piiProtector, providerProtector, "tenant_platform_authority",
+  );
   const flowCookieKey = Buffer.alloc(32, 0x7c);
   const normalizedEmail = "round-nine-reset@example.test";
   const providerSubject = "provider_round_nine_reset";

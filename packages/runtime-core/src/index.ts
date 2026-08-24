@@ -143,6 +143,7 @@ export {
   type CapabilityProjectionFailureResult,
   type CapabilityProjectionPreparationResult,
   type CapabilityProjectionWorkerJobRef,
+  type EntitlementRuntimeProvisioningTemplate,
   type StoredCapabilityProjectionFacts,
 } from "./repositories/entitlements/projections.js";
 export {

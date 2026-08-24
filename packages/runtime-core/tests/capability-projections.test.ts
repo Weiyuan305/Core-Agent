@@ -7,10 +7,13 @@ import { deriveRuntimeContainerId } from "../src/services/provision-tenant.js";
 import { resolveProfileSnapshotInTransaction } from "../src/services/entitlements/resolve-profile-snapshot.js";
 import {
   assignPackSeat,
+  createRedactor,
   grantEntitlement,
+  loadProviderCatalog,
   loadCurrentSnapshotAuthority,
   markJobEffectDispatched,
   selectTenantPackRelease,
+  WorkerRuntimeRepository,
 } from "../src/index.js";
 import {
   entitlementTestDatabase,
@@ -28,6 +31,23 @@ function command(payload: Record<string, unknown>) {
 }
 
 const imageRef = `managed/runtime:v1@sha256:${"a".repeat(64)}`;
+const projectionProviderCatalog = loadProviderCatalog([{
+  provider_config_id: "provider",
+  base_url: "https://provider.example/v1",
+  model_ids: ["model"],
+  credential_secret_ref: "provider_secret_entitlement",
+  timeout_ms: 10_000,
+  max_safe_retries: 2,
+}]);
+
+function provisioningTemplate() {
+  return {
+    imageRef,
+    platform: "linux/amd64" as const,
+    ingressSecretReferenceId: "ingress_entitlement_runtime",
+    providerCatalog: projectionProviderCatalog,
+  };
+}
 
 test.beforeEach(async () => {
   await resetEntitlementTestDatabase();
@@ -262,6 +282,106 @@ test("projection preparation preserves current runtime until exact inspection at
     profileId: arranged.profileId,
     now: new Date(entitlementTestNow),
   })).current, true);
+});
+
+test("the first effective service creates one managed Runtime provision intent", async () => {
+  const arranged = await arrange();
+  await entitlementTestDatabase.deleteFrom("runtime_containers")
+    .where("tenant_id", "=", arranged.tenantId).execute();
+  const repository = new CapabilityProjectionRepository(
+    entitlementTestDatabase,
+    () => new Date(entitlementTestNow),
+    provisioningTemplate(),
+  );
+
+  const prepared = await repository.prepare(arranged.job);
+  assert.equal(prepared.kind, "ready");
+  const runtime = await entitlementTestDatabase.selectFrom("runtime_containers")
+    .select(["container_id", "desired_state", "observed_state", "generation", "image_ref", "runtime_platform"])
+    .where("tenant_id", "=", arranged.tenantId).executeTakeFirstOrThrow();
+  assert.deepEqual(runtime, {
+    container_id: arranged.runtimeId,
+    desired_state: "running",
+    observed_state: "requested",
+    generation: 1,
+    image_ref: imageRef,
+    runtime_platform: "linux/amd64",
+  });
+  assert.deepEqual(await entitlementTestDatabase.selectFrom("runtime_activity")
+    .select(["runtime_generation", "active_conversation_count", "active_run_count"])
+    .where("tenant_id", "=", arranged.tenantId).executeTakeFirstOrThrow(), {
+    runtime_generation: "1",
+    active_conversation_count: 0,
+    active_run_count: 0,
+  });
+  assert.deepEqual(await entitlementTestDatabase.selectFrom("secret_references")
+    .select(["reference_id", "purpose", "version", "status"])
+    .where("tenant_id", "=", arranged.tenantId).orderBy("reference_id").execute(), [{
+    reference_id: "ingress_entitlement_runtime", purpose: "integration", version: "1", status: "active",
+  }, {
+    reference_id: "provider_secret_entitlement", purpose: "provider_credential", version: "1", status: "active",
+  }]);
+  const facts = await new WorkerRuntimeRepository(entitlementTestDatabase, createRedactor([]))
+    .loadProvisionFacts(arranged.tenantId, arranged.runtimeId, projectionProviderCatalog);
+  assert.equal(facts.imageRef, imageRef);
+  assert.equal(facts.profiles.length, 1);
+  assert.equal(facts.ingressSecretRef.reference_id, "ingress_entitlement_runtime");
+});
+
+test("the first B2C Entitlement creates the same one managed Runtime provision intent", async () => {
+  const tenantId = "tenant_projection_b2c_first";
+  const [profileId] = await seedTenant(tenantId, "b2c", 1);
+  const platform = await seedPlatformAuthority("projection_b2c_first");
+  const pack = await seedPublishedPack("projection_b2c_first", ["b2c"]);
+  const dependencies = {
+    db: entitlementTestDatabase,
+    platformAuthorityTenantId: "tenant_platform_authority",
+    databaseNow: async () => new Date(entitlementTestNow),
+  };
+  await selectTenantPackRelease(dependencies, platform, command({
+    schema_version: 1,
+    idempotency_key: "projection-b2c-release",
+    tenant_id: tenantId,
+    pack_product_id: pack.packProductId,
+    pack_version_id: pack.packVersionId,
+    expected_resource_version: 1,
+  }) as never);
+  assert.equal(await entitlementTestDatabase.selectFrom("runtime_containers")
+    .select("container_id").where("tenant_id", "=", tenantId).execute().then((rows) => rows.length), 0,
+  "selecting a purchasable B2C release must not provision before the first active Entitlement");
+  await grantEntitlement(dependencies, platform, command({
+    schema_version: 1,
+    idempotency_key: "projection-b2c-grant",
+    tenant_id: tenantId,
+    pack_product_id: pack.packProductId,
+    source: "platform_manual",
+    external_order_ref: "projection-b2c-order",
+    expected_resource_version: 1,
+    tenant_mode: "b2c",
+    assignment_mode: "automatic",
+  }) as never);
+  const job = await entitlementTestDatabase.selectFrom("worker_jobs")
+    .innerJoin("capability_runtime_projections", "capability_runtime_projections.projection_id", "worker_jobs.payload_ref")
+    .select(["worker_jobs.job_id", "capability_runtime_projections.projection_id"])
+    .where("worker_jobs.tenant_id", "=", tenantId)
+    .where("worker_jobs.job_kind", "=", "reconcile_capability_projection")
+    .executeTakeFirstOrThrow();
+  await entitlementTestDatabase.updateTable("worker_jobs").set({
+    status: "running", attempt_count: 1, lease_owner: "worker_projection_b2c",
+    lease_expires_at: new Date("2100-01-01T00:00:00.000Z"),
+  }).where("tenant_id", "=", tenantId).where("job_id", "=", job.job_id).execute();
+  const repository = new CapabilityProjectionRepository(
+    entitlementTestDatabase, () => new Date(entitlementTestNow), provisioningTemplate(),
+  );
+  const prepared = await repository.prepare({
+    tenantId, jobId: job.job_id, workerId: "worker_projection_b2c",
+    attemptCount: 1, projectionId: job.projection_id,
+  });
+  assert.equal(prepared.kind, "ready");
+  const runtimes = await entitlementTestDatabase.selectFrom("runtime_containers")
+    .select(["container_id", "observed_state"]).where("tenant_id", "=", tenantId).execute();
+  assert.deepEqual(runtimes, [{ container_id: deriveRuntimeContainerId(tenantId), observed_state: "requested" }]);
+  assert.equal(profileId, prepared.kind === "ready" ? prepared.facts.profileId : undefined);
 });
 
 test("projection completion after authority changes is fenced and preserves the previous runtime", async () => {

@@ -10,7 +10,9 @@ import type { AppleLinkProviderObservation, AuthProviderAdapter, PasswordResetPr
 import { registerAccountRoutes } from "./routes/account.js";
 import { registerAppleRoutes } from "./routes/apple.js";
 import { registerCompanyRoutes } from "./routes/companies.js";
+import { registerCatalogRoutes } from "./routes/catalog.js";
 import { registerEmailRoutes } from "./routes/email.js";
+import { registerEntitlementRoutes } from "./routes/entitlements.js";
 import { registerInvitationRoutes } from "./routes/invitations.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
 import {
@@ -223,7 +225,8 @@ export async function buildIdentityGatewayApp(dependencies: BuildIdentityGateway
       traceId: `trace_${randomUUID()}`,
       clientIdentifier: clientIdentifier(request),
     });
-    if (request.url === "/auth/v1" || request.url.startsWith("/auth/v1/")) {
+    if (request.url === "/auth/v1" || request.url.startsWith("/auth/v1/")
+      || request.url === "/app/v1" || request.url.startsWith("/app/v1/")) {
       validatePublicTransport(request, dependencies.config);
     }
   });
@@ -257,6 +260,8 @@ export async function buildIdentityGatewayApp(dependencies: BuildIdentityGateway
   await registerInvitationRoutes(app, shared);
   await registerCompanyRoutes(app, shared);
   await registerAccountRoutes(app, shared);
+  await registerCatalogRoutes(app, shared);
+  await registerEntitlementRoutes(app, shared);
   return app;
 }
 

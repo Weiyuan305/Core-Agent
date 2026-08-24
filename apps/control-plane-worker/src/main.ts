@@ -7,7 +7,7 @@ import {
   enqueueIdleB2cRuntimeStopJobs, RuntimeActivityRepository,
   withAgentRunConversationLock, withRuntimeAdvisoryLock, WorkerAgentRunRepository, WorkerRuntimeRepository,
   CapabilityProjectionRepository,
-  type ClaimedJob, type HermesChatInput, type ProviderCatalog, type Redactor, type RuntimeDatabase,
+  type ClaimedJob, type EntitlementRuntimeProvisioningTemplate, type HermesChatInput, type ProviderCatalog, type Redactor, type RuntimeDatabase,
   type SecretStore, type SupervisorRequest, type SupervisorResponse,
 } from "@core-agent/runtime-core";
 import { sql, type Kysely } from "kysely";
@@ -349,10 +349,11 @@ export function createWorkerRuntimeRepositories(
   db: Kysely<RuntimeDatabase>,
   providerCatalog: ProviderCatalog,
   redactor: Redactor = createRedactor([]),
+  provisioningTemplate?: EntitlementRuntimeProvisioningTemplate,
 ): WorkerRepositories {
   return {
     runtimes: new WorkerRuntimeRepository(db, redactor),
-    capabilityProjections: new CapabilityProjectionRepository(db),
+    capabilityProjections: new CapabilityProjectionRepository(db, () => new Date(), provisioningTemplate),
     agentRuns: new WorkerAgentRunRepository(db, providerCatalog, redactor),
     redactor,
   };

@@ -277,6 +277,7 @@ export async function createAgentRun(
       });
       if (wake === "not_found") notFound();
       if (wake === "preparing") {
+        await touchRuntimeActivity(trx, tenantId);
         return { kind: "preparing" as const };
       }
       const admission = await beginIdempotentCommand<AgentRun>(tenantTransaction, {

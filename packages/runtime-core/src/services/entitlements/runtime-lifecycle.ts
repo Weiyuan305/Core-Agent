@@ -9,18 +9,19 @@ export async function ensureRuntimeWakeIntent(
   trx: Transaction<RuntimeDatabase>,
   input: { tenantId: string; runtimeId: string },
 ): Promise<"ready" | "preparing" | "not_found"> {
-  const observed = await trx.selectFrom("runtime_containers")
-    .select(["generation", "command_version", "desired_state", "observed_state", "health_status"])
+  const ready = await trx.selectFrom("runtime_containers")
+    .select("container_id")
     .where("tenant_id", "=", input.tenantId)
     .where("container_id", "=", input.runtimeId)
+    .where("desired_state", "=", "running")
+    .where("observed_state", "=", "ready")
+    .where("health_status", "=", "healthy")
+    .forShare()
     .executeTakeFirst();
-  if (observed === undefined) return "not_found";
-  if (observed.desired_state === "running" && observed.observed_state === "ready" && observed.health_status === "healthy") {
-    return "ready";
-  }
+  if (ready !== undefined) return "ready";
   await acquireRuntimeTransactionAdvisoryLock(trx, input.tenantId, input.runtimeId);
   const runtime = await trx.selectFrom("runtime_containers")
-    .select(["generation", "desired_state", "observed_state", "health_status"])
+    .select(["generation", "command_version", "desired_state", "observed_state", "health_status"])
     .where("tenant_id", "=", input.tenantId)
     .where("container_id", "=", input.runtimeId)
     .forUpdate()
@@ -29,7 +30,7 @@ export async function ensureRuntimeWakeIntent(
   if (runtime.desired_state === "running" && runtime.observed_state === "ready" && runtime.health_status === "healthy") {
     return "ready";
   }
-  if (runtime.desired_state === "stopped" || runtime.observed_state === "stopped") {
+  if (runtime.desired_state === "stopped") {
     const updated = await trx.updateTable("runtime_containers").set({
       desired_state: "running",
       command_version: sql`command_version + 1`,
@@ -45,6 +46,14 @@ export async function ensureRuntimeWakeIntent(
       generation: runtime.generation,
       command: "start",
       targetCommandVersion: safeContractInteger(updated.command_version),
+    });
+  } else if (runtime.observed_state === "stopped") {
+    await queueRuntimeLifecycleCommand(trx, {
+      tenantId: input.tenantId,
+      runtimeId: input.runtimeId,
+      generation: runtime.generation,
+      command: "start",
+      targetCommandVersion: safeContractInteger(runtime.command_version),
     });
   }
   return "preparing";

@@ -340,11 +340,18 @@ services:
       CONTROL_PLANE_BOOTSTRAP_KEY_FILE: /run/unavailable/bootstrap-key
       CONTROL_PLANE_DATABASE_URL: postgresql://core_agent_app@postgres:5432/core_agent_runtime
       CONTROL_PLANE_DATABASE_PASSWORD_FILE: /run/core-agent/database-credentials/database-password
+      CONTROL_PLANE_IMAGE_LOCK_FILE: /run/core-agent/config/hermes-images.lock.json
+      CONTROL_PLANE_RUNTIME_PLATFORM: ${CORE_AGENT_PLATFORM:?set CORE_AGENT_PLATFORM}
+      CONTROL_PLANE_INGRESS_SECRET_REFERENCE_ID: hermes_ingress
       CONTROL_PLANE_PROVIDER_CATALOG_FILE: /app/infra/runtime/providers.json
       CONTROL_PLANE_SECRET_ROOT: /run/core-agent/ingress
       CONTROL_PLANE_SUPERVISOR_SOCKET: /run/core-agent/supervisor/runtime.sock
       CONTROL_PLANE_WORKER_ID: runtime-worker-1
     volumes:
+      - type: bind
+        source: ${CORE_AGENT_HERMES_IMAGE_LOCK_FILE:?set CORE_AGENT_HERMES_IMAGE_LOCK_FILE}
+        target: /run/core-agent/config/hermes-images.lock.json
+        read_only: true
       - type: bind
         source: ./providers.dev.json
         target: /app/infra/runtime/providers.json

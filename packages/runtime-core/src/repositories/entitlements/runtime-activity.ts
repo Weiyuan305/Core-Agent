@@ -123,6 +123,27 @@ export async function enqueueIdleB2cRuntimeStopJobs(
 ): Promise<number> {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new RangeError("limit must be 1 through 100");
   return withDatabaseTransactionRetry(db, async (trx) => {
+    await sql`
+      insert into runtime_activity (
+        tenant_id, runtime_generation, last_work_at, active_conversation_count,
+        active_run_count, resource_version, created_at, updated_at
+      )
+      select runtime.tenant_id, runtime.generation, runtime.updated_at, 0, 0, 1,
+        clock_timestamp(), clock_timestamp()
+      from runtime_containers as runtime
+      join tenants as tenant on tenant.tenant_id = runtime.tenant_id
+      where tenant.tenant_mode = 'b2c'
+        and tenant.status = 'active'
+        and runtime.desired_state = 'running'
+        and not exists (
+          select 1 from runtime_activity as existing
+          where existing.tenant_id = runtime.tenant_id
+            and existing.runtime_generation = runtime.generation
+        )
+      order by runtime.updated_at, runtime.tenant_id, runtime.generation
+      limit ${limit}
+      on conflict (tenant_id, runtime_generation) do nothing
+    `.execute(trx);
     const candidates = await sql<{
       tenant_id: string;
       runtime_generation: number;
@@ -137,6 +158,15 @@ export async function enqueueIdleB2cRuntimeStopJobs(
       where tenant.tenant_mode = 'b2c'
         and tenant.status = 'active'
         and runtime.desired_state = 'running'
+        and not exists (
+          select 1 from worker_jobs as start_job
+          where start_job.tenant_id = runtime.tenant_id
+            and start_job.container_id = runtime.container_id
+            and start_job.job_kind = 'reconcile_runtime'
+            and start_job.runtime_command = 'start'
+            and start_job.target_command_version = runtime.command_version
+            and start_job.status in ('queued', 'running', 'retrying')
+        )
         and activity.last_work_at <= clock_timestamp() - ${idleInterval}
         and not exists (
           select 1 from agent_runs as run
@@ -191,7 +221,7 @@ export class RuntimeActivityRepository {
         return { kind: "lease_lost" } as const;
       }
       const runtime = await trx.selectFrom("runtime_containers")
-        .select(["container_id", "generation", "desired_state"])
+        .select(["container_id", "generation", "command_version", "desired_state"])
         .where("tenant_id", "=", input.tenantId)
         .where("container_id", "=", input.runtimeId)
         .forUpdate()
@@ -212,6 +242,16 @@ export class RuntimeActivityRepository {
         .where("status", "in", ["queued", "running", "waiting_approval"])
         .limit(1)
         .executeTakeFirst();
+      const activeStart = runtime === undefined ? undefined : await trx.selectFrom("worker_jobs")
+        .select("job_id")
+        .where("tenant_id", "=", input.tenantId)
+        .where("container_id", "=", runtime.container_id)
+        .where("job_kind", "=", "reconcile_runtime")
+        .where("runtime_command", "=", "start")
+        .where("target_command_version", "=", String(runtime.command_version))
+        .where("status", "in", ["queued", "running", "retrying"])
+        .limit(1)
+        .executeTakeFirst();
       const due = activity === undefined ? false : await sql<{ due: boolean }>`
         select ${activity.last_work_at} <= clock_timestamp() - ${idleInterval} as due
       `.execute(trx).then((result) => result.rows[0]?.due === true);
@@ -220,6 +260,7 @@ export class RuntimeActivityRepository {
         && tenant.status === "active"
         && runtime.desired_state === "running"
         && activeRun === undefined
+        && activeStart === undefined
         && due;
       if (!eligible) {
         await this.completeOwnedJob(trx, input);

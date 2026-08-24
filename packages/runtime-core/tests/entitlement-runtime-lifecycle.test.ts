@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { sql } from "kysely";
+import { sql, type KyselyPlugin } from "kysely";
 import { Pool } from "pg";
 
 import {
@@ -29,6 +29,45 @@ if (databaseUrl === undefined || !new URL(databaseUrl).pathname.slice(1).startsW
 }
 const pool = new Pool({ connectionString: databaseUrl });
 const db = createRuntimeDatabase(pool);
+
+interface Deferred<T> {
+  readonly promise: Promise<T>;
+  resolve(value: T): void;
+  reject(error: unknown): void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+async function assertPending<T>(promise: Promise<T>): Promise<void> {
+  const pending = Symbol("pending");
+  const outcome = await Promise.race([
+    promise.then(() => "fulfilled" as const, () => "rejected" as const),
+    new Promise<typeof pending>((resolve) => setTimeout(resolve, 50, pending)),
+  ]);
+  assert.equal(outcome, pending);
+}
+
+async function waitForBarrier(promise: Promise<void>, message: string): Promise<void> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error(message)), 2_000);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
 
 function conversationRequest(tenantId: string, profileId: string) {
   return withPayloadHash({
@@ -127,6 +166,10 @@ test("a stopped B2C Runtime creates one idempotent wake before one Run is admitt
     .where("tenant_id", "=", tenantId).where("job_kind", "=", "reconcile_runtime")
     .where("runtime_command", "=", "start").execute();
   assert.equal(starts.length, 1);
+  const wakeVersion = await db.selectFrom("runtime_containers").select("command_version")
+    .where("tenant_id", "=", tenantId).executeTakeFirstOrThrow();
+  assert.equal(Number(starts[0]?.target_command_version), Number(wakeVersion.command_version),
+    "the one active start job must target the current durable command version");
   assert.equal(await db.selectFrom("agent_runs").select("run_id").where("tenant_id", "=", tenantId).execute().then((rows) => rows.length), 0);
   const waking = await db.selectFrom("runtime_containers")
     .select(["desired_state", "volume_ref", "capability_manifest_digest", "generation"])
@@ -144,6 +187,100 @@ test("a stopped B2C Runtime creates one idempotent wake before one Run is admitt
   const replay = await attempt();
   assert.deepEqual(replay, admitted);
   assert.equal(await db.selectFrom("agent_runs").select("run_id").where("tenant_id", "=", tenantId).execute().then((rows) => rows.length), 1);
+});
+
+test("an active wake intent fences the idle scheduler until the exact Runtime start settles", async () => {
+  const tenantId = "tenant_lifecycle_wake_idle_fence";
+  const seeded = await seedConversation(tenantId);
+  await db.updateTable("runtime_containers").set({
+    desired_state: "stopped", observed_state: "stopped", health_status: "unknown",
+  }).where("tenant_id", "=", tenantId).execute();
+  await db.updateTable("runtime_activity").set({
+    last_work_at: sql<Date>`clock_timestamp() - interval '31 minutes'`,
+  }).where("tenant_id", "=", tenantId).execute();
+
+  const attempt = () => createAgentRun(
+    { db, providerCatalog, now: () => admissionNow }, serviceContext(tenantId),
+    seeded.conversation.conversation_id, runRequest(tenantId),
+  );
+  await assert.rejects(attempt(), (error: unknown) => error instanceof DomainError && error.code === "SERVICE_PREPARING");
+  const afterWake = await db.selectFrom("runtime_containers").select("command_version")
+    .where("tenant_id", "=", tenantId).executeTakeFirstOrThrow();
+  assert.equal(await enqueueIdleB2cRuntimeStopJobs(db, 10), 0,
+    "a just-requested wake must refresh activity before returning SERVICE_PREPARING");
+
+  await db.updateTable("runtime_activity").set({
+    last_work_at: sql<Date>`clock_timestamp() - interval '31 minutes'`,
+  }).where("tenant_id", "=", tenantId).execute();
+  assert.equal(await enqueueIdleB2cRuntimeStopJobs(db, 10), 0,
+    "an active exact-version start job must fence stale idle scheduling");
+  await assert.rejects(attempt(), (error: unknown) => error instanceof DomainError && error.code === "SERVICE_PREPARING");
+  const afterRetry = await db.selectFrom("runtime_containers").select("command_version")
+    .where("tenant_id", "=", tenantId).executeTakeFirstOrThrow();
+  assert.equal(Number(afterRetry.command_version), Number(afterWake.command_version));
+  assert.equal(await db.selectFrom("worker_jobs").select("job_id")
+    .where("tenant_id", "=", tenantId).where("runtime_command", "=", "stop").execute().then((rows) => rows.length), 0);
+});
+
+test("a ready Run holds the Runtime lock until activity commits and supersedes a claimed idle stop", async () => {
+  const tenantId = "tenant_lifecycle_ready_run_stop_race";
+  const seeded = await seedConversation(tenantId);
+  const runtime = await db.selectFrom("runtime_containers")
+    .select(["container_id", "generation"])
+    .where("tenant_id", "=", tenantId).executeTakeFirstOrThrow();
+  await db.updateTable("runtime_activity").set({
+    last_work_at: sql<Date>`clock_timestamp() - interval '31 minutes'`,
+  }).where("tenant_id", "=", tenantId).execute();
+  assert.equal(await enqueueIdleB2cRuntimeStopJobs(db, 1), 1);
+  const [claimed] = await claimPlatformWorkerJobs(db, {
+    workerId: "worker_ready_run_stop_race", limit: 1, leaseMs: 30_000,
+    jobKinds: ["stop_idle_b2c_runtime"],
+  });
+  assert.ok(claimed !== undefined && claimed.jobKind === "stop_idle_b2c_runtime");
+  if (claimed === undefined || claimed.jobKind !== "stop_idle_b2c_runtime") return;
+
+  const readyLockHeld = deferred<void>();
+  const releaseReadyRun = deferred<void>();
+  let held = false;
+  const plugin: KyselyPlugin = {
+    transformQuery(args) {
+      return args.node;
+    },
+    async transformResult(args) {
+      const row = args.result.rows[0] as Record<string, unknown> | undefined;
+      if (!held && args.result.rows.length === 1 && row?.container_id === runtime.container_id
+        && Object.keys(row).length === 1) {
+        held = true;
+        readyLockHeld.resolve();
+        await releaseReadyRun.promise;
+      }
+      return args.result;
+    },
+  };
+  const runPromise = createAgentRun(
+    { db: db.withPlugin(plugin), providerCatalog, now: () => admissionNow }, serviceContext(tenantId),
+    seeded.conversation.conversation_id, runRequest(tenantId),
+  );
+  await waitForBarrier(readyLockHeld.promise, "ready Run did not reach the Runtime row-lock barrier");
+  const stopPromise = new RuntimeActivityRepository(db).stopIdle({
+    tenantId, jobId: claimed.jobId, workerId: "worker_ready_run_stop_race",
+    attemptCount: claimed.attemptCount, runtimeId: claimed.payloadRef,
+  });
+  try {
+    await assertPending(stopPromise);
+  } finally {
+    releaseReadyRun.resolve();
+  }
+  const admitted = await runPromise;
+  assert.equal(admitted.status, "queued");
+  assert.deepEqual(await stopPromise, { kind: "superseded" });
+  assert.equal((await db.selectFrom("runtime_containers").select("desired_state")
+    .where("tenant_id", "=", tenantId).executeTakeFirstOrThrow()).desired_state, "running");
+  assert.equal(await db.selectFrom("worker_jobs").select("job_id")
+    .where("tenant_id", "=", tenantId).where("job_kind", "=", "reconcile_runtime")
+    .where("runtime_command", "=", "stop").execute().then((rows) => rows.length), 0);
+  assert.equal(runtime.generation, Number((await db.selectFrom("runtime_activity").select("runtime_generation")
+    .where("tenant_id", "=", tenantId).executeTakeFirstOrThrow()).runtime_generation));
 });
 
 test("idle scheduling is B2C-only, uses the exact 30-minute boundary, and respects active Runs", async () => {
@@ -202,6 +339,40 @@ test("idle scheduling is B2C-only, uses the exact 30-minute boundary, and respec
   assert.equal(await enqueueIdleB2cRuntimeStopJobs(db, 10), 0);
 });
 
+test("a never-used running B2C Runtime receives authoritative activity and becomes idle", async () => {
+  const tenantId = "tenant_lifecycle_never_used";
+  await seedReadyTenant(db, tenantId);
+  await db.deleteFrom("runtime_activity").where("tenant_id", "=", tenantId).execute();
+  await db.updateTable("runtime_containers").set({
+    created_at: sql<Date>`clock_timestamp() - interval '30 minutes'`,
+    updated_at: sql<Date>`clock_timestamp() - interval '30 minutes'`,
+  }).where("tenant_id", "=", tenantId).execute();
+
+  assert.equal(await enqueueIdleB2cRuntimeStopJobs(db, 10), 1);
+  const activity = await db.selectFrom("runtime_activity")
+    .select(["runtime_generation", "last_work_at"])
+    .where("tenant_id", "=", tenantId).executeTakeFirstOrThrow();
+  const runtime = await db.selectFrom("runtime_containers").select("generation")
+    .where("tenant_id", "=", tenantId).executeTakeFirstOrThrow();
+  assert.equal(Number(activity.runtime_generation), runtime.generation);
+});
+
+test("idle scheduling bounds missing-activity backfill to the requested batch", async () => {
+  const tenantIds = ["tenant_lifecycle_batch_a", "tenant_lifecycle_batch_b", "tenant_lifecycle_batch_c"];
+  for (const tenantId of tenantIds) {
+    await seedReadyTenant(db, tenantId);
+    await db.deleteFrom("runtime_activity").where("tenant_id", "=", tenantId).execute();
+    await db.updateTable("runtime_containers").set({
+      updated_at: sql<Date>`clock_timestamp() - interval '31 minutes'`,
+    }).where("tenant_id", "=", tenantId).execute();
+  }
+
+  assert.equal(await enqueueIdleB2cRuntimeStopJobs(db, 1), 1);
+  const activities = await db.selectFrom("runtime_activity").select("tenant_id")
+    .where("tenant_id", "in", tenantIds).execute();
+  assert.equal(activities.length, 1, "one scheduler batch must not backfill an unbounded number of rows");
+});
+
 test("the idle-stop worker rechecks authority, preserves Volume and manifest history, and emits one stop intent", async () => {
   const tenantId = "tenant_lifecycle_stop";
   await seedReadyTenant(db, tenantId);
@@ -236,7 +407,7 @@ test("the idle-stop worker rechecks authority, preserves Volume and manifest his
   assert.deepEqual(stopJobs, [{ runtime_command: "stop", container_id: runtime.container_id }]);
 });
 
-test("activity after scheduling supersedes the claimed idle stop under the Runtime lock", async () => {
+test("activity or an active exact-version start supersedes a claimed idle stop under the Runtime lock", async () => {
   const tenantId = "tenant_lifecycle_recheck";
   await seedReadyTenant(db, tenantId);
   const runtime = await db.selectFrom("runtime_containers")
@@ -263,4 +434,45 @@ test("activity after scheduling supersedes the claimed idle stop under the Runti
   assert.equal(await db.selectFrom("worker_jobs").select("job_id")
     .where("tenant_id", "=", tenantId).where("job_kind", "=", "reconcile_runtime")
     .where("runtime_command", "=", "stop").execute().then((rows) => rows.length), 0);
+
+  const wakingTenantId = "tenant_lifecycle_recheck_active_start";
+  const waking = await seedConversation(wakingTenantId);
+  const wakingRuntime = await db.selectFrom("runtime_containers")
+    .select(["container_id", "generation"])
+    .where("tenant_id", "=", wakingTenantId).executeTakeFirstOrThrow();
+  await db.updateTable("runtime_activity").set({ last_work_at: new Date(0) })
+    .where("tenant_id", "=", wakingTenantId).execute();
+  assert.equal(await enqueueIdleB2cRuntimeStopJobs(db, 1), 1);
+  const [claimedBeforeWake] = await claimPlatformWorkerJobs(db, {
+    workerId: "worker_recheck_active_start", limit: 1, leaseMs: 30_000,
+    jobKinds: ["stop_idle_b2c_runtime"],
+  });
+  assert.ok(claimedBeforeWake !== undefined && claimedBeforeWake.jobKind === "stop_idle_b2c_runtime");
+  if (claimedBeforeWake === undefined || claimedBeforeWake.jobKind !== "stop_idle_b2c_runtime") return;
+  await db.updateTable("runtime_containers").set({
+    desired_state: "stopped", observed_state: "stopped", health_status: "unknown",
+  }).where("tenant_id", "=", wakingTenantId).execute();
+  await assert.rejects(createAgentRun(
+    { db, providerCatalog, now: () => admissionNow }, serviceContext(wakingTenantId),
+    waking.conversation.conversation_id, runRequest(wakingTenantId),
+  ), (error: unknown) => error instanceof DomainError && error.code === "SERVICE_PREPARING");
+  await db.updateTable("runtime_activity").set({ last_work_at: new Date(0) })
+    .where("tenant_id", "=", wakingTenantId).execute();
+  assert.deepEqual(await new RuntimeActivityRepository(db).stopIdle({
+    tenantId: wakingTenantId, jobId: claimedBeforeWake.jobId, workerId: "worker_recheck_active_start",
+    attemptCount: claimedBeforeWake.attemptCount, runtimeId: claimedBeforeWake.payloadRef,
+  }), { kind: "superseded" });
+  const durableWake = await db.selectFrom("runtime_containers").select(["desired_state", "command_version"])
+    .where("tenant_id", "=", wakingTenantId).executeTakeFirstOrThrow();
+  assert.equal(durableWake.desired_state, "running");
+  assert.equal(await db.selectFrom("worker_jobs").select("job_id")
+    .where("tenant_id", "=", wakingTenantId).where("job_kind", "=", "reconcile_runtime")
+    .where("runtime_command", "=", "start")
+    .where("target_command_version", "=", String(durableWake.command_version))
+    .where("status", "in", ["queued", "running", "retrying"]).execute().then((rows) => rows.length), 1);
+  assert.equal(await db.selectFrom("worker_jobs").select("job_id")
+    .where("tenant_id", "=", wakingTenantId).where("job_kind", "=", "reconcile_runtime")
+    .where("runtime_command", "=", "stop").execute().then((rows) => rows.length), 0);
+  assert.equal(wakingRuntime.generation, Number((await db.selectFrom("runtime_activity").select("runtime_generation")
+    .where("tenant_id", "=", wakingTenantId).executeTakeFirstOrThrow()).runtime_generation));
 });

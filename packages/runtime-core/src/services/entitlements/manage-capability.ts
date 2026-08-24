@@ -10,6 +10,8 @@ import { canonicalCompatibility, validateCatalogCommandInput, validateCatalogTra
 
 export interface CatalogCommandDependencies {
   readonly db: Kysely<RuntimeDatabase>;
+  /** Caller-owned serializable transaction used by protected HTTP composition. */
+  readonly transaction?: Transaction<RuntimeDatabase>;
   readonly now?: () => Date;
   readonly knownContractRefs: readonly string[];
   readonly platformCompatibility: { readonly core_contract_version: string; readonly runtime_protocol_version: string };
@@ -42,13 +44,18 @@ function assertCapabilityCompatibility(input: ValidatedCapabilityCreate, depende
   return canonicalCompatibility(input.compatibility).hash;
 }
 function assertReplay(value: unknown): asserts value is CapabilityWriteResult { if (value === null || typeof value !== "object" || Array.isArray(value)) throw new DomainError("INTERNAL_ERROR", "Stored catalog response is invalid"); }
+function catalogTransaction<T>(dependencies: CatalogCommandDependencies, work: (trx: Transaction<RuntimeDatabase>) => Promise<T>): Promise<T> {
+  return dependencies.transaction === undefined
+    ? withDatabaseTransactionRetry(dependencies.db, work, { isolationLevel: "serializable" })
+    : work(dependencies.transaction);
+}
 async function appendLifecycle(trx: Transaction<RuntimeDatabase>, scope: { tenantId: string }, context: CatalogCommandContext, key: string, action: string, result: CapabilityWriteResult, now: Date): Promise<void> {
   await appendCatalogLifecycleEvent(trx, { tenantId: scope.tenantId, eventId: eventId(key, action), streamId: result.capability_version_id, eventType: `capability_version.${result.status === "draft" ? "created" : result.status}`, resourceType: "capability_version", resourceId: result.capability_version_id, resourceVersion: result.resource_version, requestId: context.requestId, traceId: context.traceId, occurredAt: now, capabilityId: result.capability_id });
 }
 
 async function transition(dependencies: CatalogCommandDependencies, context: CatalogCommandContext, raw: unknown, desired: "reviewed" | "retired" | "blocked"): Promise<CapabilityWriteResult> {
   const input = validateCatalogTransition(raw, "capability"); safeContext(context);
-  return withDatabaseTransactionRetry(dependencies.db, async (trx) => {
+  return catalogTransaction(dependencies, async (trx) => {
     const now = dependencies.now?.() ?? new Date(); const scope = await platformScope(trx, context, dependencies.catalogAuthorityTenantId);
     const operation = `entitlements.capability.${desired}`;
     const admission = await beginIdempotentCommand<CapabilityWriteResult>({ tenantId: scope.tenantId, trx }, { key: input.idempotency_key, payloadHash: input.payload_hash, operation, now, expiresAt: new Date(now.getTime() + dayMs) });
@@ -74,12 +81,12 @@ async function transition(dependencies: CatalogCommandDependencies, context: Cat
     await appendLifecycle(trx, scope, context, input.idempotency_key, operation, result, now);
     await completeIdempotentCommand({ tenantId: scope.tenantId, trx }, { key: input.idempotency_key, payloadHash: input.payload_hash, operation, resultRef: row.capability_version_id, response: result, updatedAt: now });
     return result;
-  }, { isolationLevel: "serializable" });
+  });
 }
 
 export async function createCapabilityVersion(dependencies: CatalogCommandDependencies, context: CatalogCommandContext, raw: unknown): Promise<CapabilityWriteResult> {
   const input = validateCatalogCommandInput(raw, "capability") as ValidatedCapabilityCreate; safeContext(context); const compatibilityHash = assertCapabilityCompatibility(input, dependencies);
-  try { return await withDatabaseTransactionRetry(dependencies.db, async (trx) => {
+  try { return await catalogTransaction(dependencies, async (trx) => {
     const now = dependencies.now?.() ?? new Date(); const scope = await platformScope(trx, context, dependencies.catalogAuthorityTenantId); const operation = "entitlements.capability.create";
     const admission = await beginIdempotentCommand<CapabilityWriteResult>({ tenantId: scope.tenantId, trx }, { key: input.idempotency_key, payloadHash: input.payload_hash, operation, now, expiresAt: new Date(now.getTime() + dayMs) });
     if (admission.kind === "replay") { assertReplay(admission.response); return Object.freeze(admission.response); }
@@ -99,7 +106,7 @@ export async function createCapabilityVersion(dependencies: CatalogCommandDepend
     await appendPlatformAudit(trx, scope, context, input.idempotency_key, operation, input.capability_version_id, 1, now);
     await appendLifecycle(trx, scope, context, input.idempotency_key, operation, result, now);
     await completeIdempotentCommand({ tenantId: scope.tenantId, trx }, { key: input.idempotency_key, payloadHash: input.payload_hash, operation, resultRef: input.capability_version_id, response: result, updatedAt: now }); return result;
-  }, { isolationLevel: "serializable" }); } catch (error) { throw mapCatalogDatabaseError(error); }
+  }); } catch (error) { throw mapCatalogDatabaseError(error); }
 }
 function mapCatalogDatabaseError(error: unknown): never {
   if (error === null || typeof error !== "object") throw error;

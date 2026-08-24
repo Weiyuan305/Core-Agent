@@ -19,12 +19,15 @@ import {
   cancelAccountDeletion,
   completeIdempotentCommand,
   createB2bCompany,
+  createCapabilityVersion,
   createInvitation,
+  createPackVersion,
   createRuntimeDatabase,
   DomainError,
   establishRecentReauthenticationInTransaction,
   establishAccountDeletionRecoveryReauthentication,
   finalizeEmailVerificationTransactionStart,
+  grantEntitlement,
   grantConsultantRole,
   inspectInvitation,
   invitationEmailHmac,
@@ -33,6 +36,14 @@ import {
   lockInvitationBySecret,
   prepareEmailVerificationTransaction,
   readInvitationBySecret,
+  resolveProfileSnapshotInTransaction,
+  reviewCapabilityVersion,
+  reviewPackVersion,
+  publishPackVersion,
+  retireCapabilityVersion,
+  retirePackVersion,
+  blockCapabilityVersion,
+  blockPackVersion,
   releaseEmailVerificationProviderAttempt,
   terminalizeEmailVerificationProviderAttempt,
   registerB2c,
@@ -44,6 +55,11 @@ import {
   revokeCoreSessionInTransaction,
   revokeCoreSessionsInTransaction,
   revokeInvitation,
+  revokePackSeat,
+  assignPackSeat,
+  selectTenantPackRelease,
+  safeContractInteger,
+  changeEntitlementStatus,
   suspendMembership,
   strictUtcTimestampMilliseconds,
   withDatabaseTransactionRetry,
@@ -71,6 +87,11 @@ import {
   APPLE_LINK_SETTLEMENT_SECONDS,
   PASSWORD_RESET_SETTLEMENT_SECONDS,
 } from "./security.js";
+import {
+  toCompanyAssignmentSummary,
+  toCompanyServiceSummary,
+  toStudentServiceSummary,
+} from "./public-entitlement-views.js";
 
 export interface ProductionIdentityGatewayOptions {
   readonly environment?: NodeJS.ProcessEnv;
@@ -413,6 +434,16 @@ function commandContext(actorId: string, tenantId?: string) {
   };
 }
 
+function entitlementCommandContext(authority: GatewayAuthenticatedSession) {
+  return {
+    performingActorId: authority.actorId,
+    performingAuthSubjectId: authority.authSubjectId,
+    performingSessionId: String(authority.session.session_id),
+    requestId: `request_${randomUUID()}`,
+    traceId: `trace_${randomUUID()}`,
+  };
+}
+
 async function resolveCompanyTenant(
   trx: Transaction<RuntimeDatabase>, actorId: string, membershipId: string,
 ): Promise<string> {
@@ -452,6 +483,143 @@ async function requireCompanyAdminForTenant(
   if (authority === undefined) throw new DomainError("UNAUTHENTICATED", "Active company administrator authority is required");
 }
 
+async function requirePlatformAuthority(
+  trx: Transaction<RuntimeDatabase>, actorId: string, authorityTenantId: string,
+): Promise<string> {
+  const actor = await trx.selectFrom("actors").select("status")
+    .where("actor_id", "=", actorId).executeTakeFirst();
+  const role = await trx.selectFrom("platform_role_assignments").select("status")
+    .where("actor_id", "=", actorId).where("role", "=", "platform_super_admin").executeTakeFirst();
+  const membership = await trx.selectFrom("memberships")
+    .innerJoin("tenants", "tenants.tenant_id", "memberships.tenant_id")
+    .select("memberships.tenant_id")
+    .where("memberships.tenant_id", "=", authorityTenantId)
+    .where("memberships.actor_id", "=", actorId).where("memberships.membership_source", "=", "platform")
+    .where("memberships.status", "=", "active")
+    .where("tenants.status", "=", "active")
+    .executeTakeFirst();
+  if (actor?.status !== "active" || role?.status !== "active" || membership === undefined) {
+    throw new DomainError("UNAUTHENTICATED", "Active platform authority is required");
+  }
+  return membership.tenant_id;
+}
+
+async function companyServices(
+  trx: Transaction<RuntimeDatabase>, actorId: string, tenantId: string,
+) {
+  await requireCompanyAdminForTenant(trx, actorId, tenantId);
+  const rows = await trx.selectFrom("entitlements")
+    .innerJoin("pack_products", "pack_products.pack_product_id", "entitlements.pack_product_id")
+    .select([
+      "entitlements.entitlement_id", "entitlements.valid_from", "entitlements.expires_at",
+      "entitlements.status as entitlement_status", "entitlements.seat_quantity",
+      "pack_products.display_name",
+    ])
+    .where("entitlements.tenant_id", "=", tenantId)
+    .where("entitlements.tenant_mode", "=", "b2b")
+    .orderBy("entitlements.entitlement_id").limit(201).execute();
+  if (rows.length > 200) throw new DomainError("DEPENDENCY_UNAVAILABLE", "Company service result is too large", true);
+  const services = [];
+  for (const row of rows) {
+    const assignments = await trx.selectFrom("entitlement_assignments")
+      .select(["profile_id", "status"])
+      .where("tenant_id", "=", tenantId).where("entitlement_id", "=", row.entitlement_id).execute();
+    const used = assignments.filter((candidate) => candidate.status === "preparing" || candidate.status === "available").length;
+    let assignmentStatus: "preparing" | "available" | "failed" | undefined;
+    if (assignments.some((candidate) => candidate.status === "failed")) assignmentStatus = "failed";
+    else if (assignments.some((candidate) => candidate.status === "preparing")) assignmentStatus = "preparing";
+    else if (assignments.some((candidate) => candidate.status === "available")) assignmentStatus = "available";
+    const profiles = assignments.map((candidate) => candidate.profile_id);
+    const projections = profiles.length === 0 ? [] : await trx.selectFrom("profile_snapshot_pointers")
+      .innerJoin("capability_runtime_projections", (join) => join
+        .onRef("capability_runtime_projections.tenant_id", "=", "profile_snapshot_pointers.tenant_id")
+        .onRef("capability_runtime_projections.profile_id", "=", "profile_snapshot_pointers.profile_id")
+        .onRef("capability_runtime_projections.snapshot_id", "=", "profile_snapshot_pointers.snapshot_id"))
+      .select("capability_runtime_projections.status")
+      .where("profile_snapshot_pointers.tenant_id", "=", tenantId)
+      .where("profile_snapshot_pointers.profile_id", "in", profiles).execute();
+    const projectionStatus = projections.some((candidate) => candidate.status === "failed")
+      ? "failed" as const
+      : projections.some((candidate) => candidate.status === "preparing")
+        ? "preparing" as const
+        : projections.length > 0 ? "available" as const : "preparing" as const;
+    services.push(toCompanyServiceSummary({
+      ...row,
+      used_seats: used,
+      assignment_status: assignmentStatus,
+      projection_status: projectionStatus,
+    }));
+  }
+  return Object.freeze({ schema_version: 1 as const, services: Object.freeze(services) });
+}
+
+async function companyAssignments(
+  trx: Transaction<RuntimeDatabase>, actorId: string, tenantId: string,
+) {
+  await requireCompanyAdminForTenant(trx, actorId, tenantId);
+  const rows = await trx.selectFrom("entitlement_assignments")
+    .innerJoin("entitlements", (join) => join
+      .onRef("entitlements.tenant_id", "=", "entitlement_assignments.tenant_id")
+      .onRef("entitlements.entitlement_id", "=", "entitlement_assignments.entitlement_id"))
+    .innerJoin("pack_products", "pack_products.pack_product_id", "entitlements.pack_product_id")
+    .innerJoin("profiles", (join) => join
+      .onRef("profiles.tenant_id", "=", "entitlement_assignments.tenant_id")
+      .onRef("profiles.profile_id", "=", "entitlement_assignments.profile_id"))
+    .select([
+      "entitlement_assignments.assignment_id", "entitlement_assignments.profile_id",
+      "entitlement_assignments.status as assignment_status", "profiles.description as profile_display_name",
+      "pack_products.display_name as service_display_name",
+    ])
+    .where("entitlement_assignments.tenant_id", "=", tenantId)
+    .orderBy("entitlement_assignments.assignment_id").limit(201).execute();
+  if (rows.length > 200) throw new DomainError("DEPENDENCY_UNAVAILABLE", "Company assignment result is too large", true);
+  return Object.freeze({ schema_version: 1 as const, assignments: Object.freeze(rows.map(toCompanyAssignmentSummary)) });
+}
+
+async function studentServices(
+  trx: Transaction<RuntimeDatabase>, actorId: string,
+) {
+  const authority = await trx.selectFrom("memberships")
+    .innerJoin("tenants", "tenants.tenant_id", "memberships.tenant_id")
+    .innerJoin("profiles", (join) => join
+      .onRef("profiles.tenant_id", "=", "memberships.tenant_id")
+      .onRef("profiles.owner_actor_id", "=", "memberships.actor_id"))
+    .select(["memberships.tenant_id", "profiles.profile_id"])
+    .where("memberships.actor_id", "=", actorId)
+    .where("memberships.membership_source", "=", "self")
+    .where("memberships.status", "=", "active")
+    .where("tenants.tenant_mode", "=", "b2c").where("tenants.status", "=", "active")
+    .where("profiles.status", "=", "active").orderBy("memberships.tenant_id").limit(2).execute();
+  if (authority.length !== 1) throw new DomainError("UNAUTHENTICATED", "Student service authority is unavailable");
+  const { tenant_id: tenantId, profile_id: profileId } = authority[0]!;
+  const pointer = await trx.selectFrom("profile_snapshot_pointers")
+    .leftJoin("capability_runtime_projections", (join) => join
+      .onRef("capability_runtime_projections.tenant_id", "=", "profile_snapshot_pointers.tenant_id")
+      .onRef("capability_runtime_projections.profile_id", "=", "profile_snapshot_pointers.profile_id")
+      .onRef("capability_runtime_projections.snapshot_id", "=", "profile_snapshot_pointers.snapshot_id"))
+    .select("capability_runtime_projections.status")
+    .where("profile_snapshot_pointers.tenant_id", "=", tenantId)
+    .where("profile_snapshot_pointers.profile_id", "=", profileId).executeTakeFirst();
+  const rows = await trx.selectFrom("entitlements")
+    .innerJoin("pack_products", "pack_products.pack_product_id", "entitlements.pack_product_id")
+    .select([
+      "entitlements.entitlement_id", "entitlements.valid_from", "entitlements.expires_at",
+      "entitlements.status as entitlement_status", "pack_products.display_name",
+    ])
+    .where("entitlements.tenant_id", "=", tenantId)
+    .where("entitlements.tenant_mode", "=", "b2c")
+    .where("entitlements.assignment_mode", "=", "automatic")
+    .orderBy("entitlements.entitlement_id").limit(201).execute();
+  if (rows.length > 200) throw new DomainError("DEPENDENCY_UNAVAILABLE", "Student service result is too large", true);
+  return Object.freeze({
+    schema_version: 1 as const,
+    services: Object.freeze(rows.map((row) => toStudentServiceSummary({
+      ...row,
+      projection_status: pointer?.status ?? "preparing",
+    }))),
+  });
+}
+
 function providerIdentityKindAccepts(
   verifiedKind: VerifiedProviderSubject["identityKind"],
   storedKind: "email_password" | "apple" | "email_password_apple",
@@ -466,6 +634,7 @@ function productionOperations(
   piiKey: Uint8Array,
   piiProtector: TransactionProtector,
   oauthProtector: TransactionProtector,
+  catalogAuthorityTenantId: string,
 ): IdentityGatewayOperations {
   const verificationDependencies = { db, hmacKey: piiKey, protector: aesProtector(piiKey, "email-verification") };
   const unavailable = (): never => { throw new DomainError("DEPENDENCY_UNAVAILABLE", "Identity operation is unavailable", true); };
@@ -897,6 +1066,84 @@ function productionOperations(
       return row.provider_settlement_expires_at.toISOString();
     },
     async executeAuthorityCommand(input) {
+      if (input.authority !== undefined && input.kind === "platform_catalog_list") {
+        return withDatabaseTransactionRetry(db, async (trx) => {
+          await requirePlatformAuthority(trx, input.authority!.actorId, catalogAuthorityTenantId);
+          const capabilities = await trx.selectFrom("capability_versions")
+            .innerJoin("capabilities", "capabilities.capability_id", "capability_versions.capability_id")
+            .select([
+              "capability_versions.capability_version_id", "capability_versions.capability_id",
+              "capabilities.display_name", "capabilities.kind", "capability_versions.status",
+              "capability_versions.resource_version",
+            ]).orderBy("capability_versions.capability_version_id").limit(201).execute();
+          const packs = await trx.selectFrom("pack_versions")
+            .innerJoin("pack_products", "pack_products.pack_product_id", "pack_versions.pack_product_id")
+            .select([
+              "pack_versions.pack_version_id", "pack_versions.pack_product_id", "pack_products.display_name",
+              "pack_products.tenant_modes", "pack_versions.status", "pack_versions.resource_version",
+            ]).orderBy("pack_versions.pack_version_id").limit(201).execute();
+          if (capabilities.length > 200 || packs.length > 200) {
+            throw new DomainError("DEPENDENCY_UNAVAILABLE", "Platform catalog result is too large", true);
+          }
+          return {
+            schema_version: 1,
+            capabilities: capabilities.map((row) => ({
+              schema_version: 1, capability_id: row.capability_id,
+              capability_version_id: row.capability_version_id,
+              display_name: row.display_name, kind: row.kind, status: row.status,
+              resource_version: safeContractInteger(row.resource_version),
+            })),
+            packs: packs.map((row) => ({
+              schema_version: 1, pack_product_id: row.pack_product_id,
+              pack_version_id: row.pack_version_id,
+              display_name: row.display_name, tenant_modes: row.tenant_modes, status: row.status,
+              resource_version: safeContractInteger(row.resource_version),
+            })),
+          };
+        }, { isolationLevel: "serializable" });
+      }
+      if (input.authority !== undefined && input.kind === "platform_entitlement_list") {
+        return withDatabaseTransactionRetry(db, async (trx) => {
+          await requirePlatformAuthority(trx, input.authority!.actorId, catalogAuthorityTenantId);
+          const rows = await trx.selectFrom("entitlements")
+            .innerJoin("pack_products", "pack_products.pack_product_id", "entitlements.pack_product_id")
+            .select([
+              "entitlements.entitlement_id", "entitlements.tenant_id", "entitlements.tenant_mode",
+              "entitlements.status", "entitlements.valid_from", "entitlements.expires_at",
+              "entitlements.resource_version", "pack_products.display_name",
+            ]).orderBy("entitlements.entitlement_id").limit(201).execute();
+          if (rows.length > 200) throw new DomainError("DEPENDENCY_UNAVAILABLE", "Platform entitlement result is too large", true);
+          return {
+            schema_version: 1,
+            entitlements: rows.map((row) => ({
+              schema_version: 1, entitlement_id: row.entitlement_id, tenant_id: row.tenant_id,
+              display_name: row.display_name, tenant_mode: row.tenant_mode, status: row.status,
+              valid_from: row.valid_from.toISOString(),
+              ...(row.expires_at === null ? {} : { expires_at: row.expires_at.toISOString() }),
+              resource_version: safeContractInteger(row.resource_version),
+            })),
+          };
+        }, { isolationLevel: "serializable" });
+      }
+      if (input.authority !== undefined && input.kind === "company_service_list") {
+        return withDatabaseTransactionRetry(db, async (trx) => {
+          await requireRecentReauthentication({ trx }, authorityInput(input.authority!));
+          return companyServices(
+            trx, input.authority!.actorId, String((input.payload as { tenant_id?: unknown }).tenant_id ?? ""),
+          );
+        }, { isolationLevel: "serializable" });
+      }
+      if (input.authority !== undefined && input.kind === "company_assignment_list") {
+        return withDatabaseTransactionRetry(db, async (trx) => {
+          await requireRecentReauthentication({ trx }, authorityInput(input.authority!));
+          return companyAssignments(
+            trx, input.authority!.actorId, String((input.payload as { tenant_id?: unknown }).tenant_id ?? ""),
+          );
+        }, { isolationLevel: "serializable" });
+      }
+      if (input.authority !== undefined && input.kind === "student_service_list") {
+        return withDatabaseTransactionRetry(db, (trx) => studentServices(trx, input.authority!.actorId), { isolationLevel: "serializable" });
+      }
       if (input.kind === "session_inspect") {
         if (input.authority === undefined) throw new DomainError("UNAUTHENTICATED", "Session authority is required");
         const payload = input.payload as { session_id: string };
@@ -1326,6 +1573,37 @@ function productionOperations(
       return unavailable();
     },
     async executeProtectedAuthorityCommand(input) {
+      if (input.kind === "entitlement_select_release" || input.kind === "entitlement_grant"
+        || input.kind === "entitlement_change_status") {
+        const dependencies = { db, platformAuthorityTenantId: catalogAuthorityTenantId };
+        const context = entitlementCommandContext(input.authority);
+        if (input.kind === "entitlement_select_release") {
+          const selected = await selectTenantPackRelease(dependencies, context, input.payload);
+          return Object.freeze({
+            schema_version: 1 as const,
+            release_id: selected.releaseId,
+            generation: selected.generation,
+            state: selected.kind,
+          });
+        }
+        if (input.kind === "entitlement_grant") return grantEntitlement(dependencies, context, input.payload);
+        return changeEntitlementStatus(dependencies, context, input.payload);
+      }
+      if (input.kind === "entitlement_seat_assign" || input.kind === "entitlement_seat_revoke") {
+        const payload = input.payload as Record<string, unknown>;
+        const tenantId = String(payload.tenant_id ?? "");
+        const { tenant_id: _tenantId, ...command } = payload;
+        const dependencies = {
+          db,
+          platformAuthorityTenantId: "unused-company-seat-authority",
+          authorityTenantId: tenantId,
+          resolveProfileSnapshotInTransaction,
+        };
+        const context = entitlementCommandContext(input.authority);
+        return input.kind === "entitlement_seat_assign"
+          ? assignPackSeat(dependencies, context, command)
+          : revokePackSeat(dependencies, context, command);
+      }
       const result = await withDatabaseTransactionRetry(db, async (trx) => {
         if (input.kind === "account_deletion_request") {
           return requestAccountDeletion({
@@ -1346,6 +1624,31 @@ function productionOperations(
           }, input.payload);
         }
         await requireRecentReauthentication({ trx }, authorityInput(input.authority));
+        if (input.kind.startsWith("catalog_")) {
+          await requirePlatformAuthority(trx, input.authority.actorId, catalogAuthorityTenantId);
+          const dependencies = {
+            db,
+            transaction: trx,
+            catalogAuthorityTenantId,
+            knownContractRefs: ["core-agent.contracts@0.8.0"],
+            platformCompatibility: { core_contract_version: "0.8.0", runtime_protocol_version: "1.0.0" },
+          };
+          const context = {
+            performingActorId: input.authority.actorId,
+            requestId: `request_${randomUUID()}`,
+            traceId: `trace_${randomUUID()}`,
+          };
+          if (input.kind === "catalog_capability_create") return createCapabilityVersion(dependencies, context, input.payload);
+          if (input.kind === "catalog_capability_review") return reviewCapabilityVersion(dependencies, context, input.payload);
+          if (input.kind === "catalog_capability_retire") return retireCapabilityVersion(dependencies, context, input.payload);
+          if (input.kind === "catalog_capability_block") return blockCapabilityVersion(dependencies, context, input.payload);
+          if (input.kind === "catalog_pack_create") return createPackVersion(dependencies, context, input.payload);
+          if (input.kind === "catalog_pack_review") return reviewPackVersion(dependencies, context, input.payload);
+          if (input.kind === "catalog_pack_publish") return publishPackVersion(dependencies, context, input.payload);
+          if (input.kind === "catalog_pack_retire") return retirePackVersion(dependencies, context, input.payload);
+          if (input.kind === "catalog_pack_block") return blockPackVersion(dependencies, context, input.payload);
+          throw new DomainError("INVALID_REQUEST", "Catalog command is invalid");
+        }
         if (input.kind === "apple_link_provider_observation") {
           const payload = input.payload as {
             schema_version: 1; payload_hash: string; transaction_id: string;
@@ -1727,7 +2030,9 @@ export async function buildProductionIdentityGateway(options: ProductionIdentity
         transactionStore: oauthStore(db), transactionProtector: oauthProtector,
       });
       const app = await buildIdentityGatewayApp({
-        config, provider, operations: productionOperations(db, piiKey, piiProtector, oauthProtector),
+        config, provider, operations: productionOperations(
+          db, piiKey, piiProtector, oauthProtector, config.catalogAuthorityTenantId,
+        ),
         flowCookieKey: deriveKey(sessionMaterial, "flow-cookie"),
       });
       app.addHook("onClose", async () => { await db.destroy(); });

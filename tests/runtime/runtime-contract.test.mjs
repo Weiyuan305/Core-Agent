@@ -737,7 +737,7 @@ test("REAL_HERMES smoke accepts only a reviewed Core-Agent product image lock", 
   );
 });
 
-test("control-plane API and Supervisor load one caller-supplied product image lock", async () => {
+test("control-plane API, Worker, and Supervisor load one caller-supplied product image lock", async () => {
   const controlPlaneCompose = await readFile(
     new URL("../../infra/runtime/compose.dev.yaml", import.meta.url),
     "utf8",
@@ -749,14 +749,20 @@ test("control-plane API and Supervisor load one caller-supplied product image lo
   assert.match(runtimeEnvironmentExample, /^CORE_AGENT_HERMES_IMAGE_LOCK_FILE=\/absolute\/path\/to\/Core-Agent\/infra\/hermes\/product-images\.lock\.json$/m);
   assert.equal(
     controlPlaneCompose.match(/source: \$\{CORE_AGENT_HERMES_IMAGE_LOCK_FILE:\?set CORE_AGENT_HERMES_IMAGE_LOCK_FILE\}/g)?.length,
-    2,
+    3,
   );
   assert.equal(
     controlPlaneCompose.match(/target: \/run\/core-agent\/config\/hermes-images\.lock\.json/g)?.length,
+    3,
+  );
+  assert.equal(
+    controlPlaneCompose.match(/CONTROL_PLANE_IMAGE_LOCK_FILE: \/run\/core-agent\/config\/hermes-images\.lock\.json/g)?.length,
     2,
   );
-  assert.match(controlPlaneCompose, /CONTROL_PLANE_IMAGE_LOCK_FILE: \/run\/core-agent\/config\/hermes-images\.lock\.json/);
-  assert.match(controlPlaneCompose, /CORE_AGENT_IMAGE_LOCK_PATH: \/run\/core-agent\/config\/hermes-images\.lock\.json/);
+  assert.equal(
+    controlPlaneCompose.match(/CORE_AGENT_IMAGE_LOCK_PATH: \/run\/core-agent\/config\/hermes-images\.lock\.json/g)?.length,
+    1,
+  );
 });
 
 const dockerfile = await readFile(
