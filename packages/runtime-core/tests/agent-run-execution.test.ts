@@ -152,6 +152,32 @@ test("Agent Run execution atomically begins, persists ordered unsafe deltas, and
   assert.equal(await db.selectFrom("outbox").selectAll().where("tenant_id", "=", setup.tenantId).execute().then((rows) => rows.length), 8);
 });
 
+test("an already-streaming model-only Run finishes with its historical Snapshot after authority revocation", async () => {
+  const setup = await setupExecution("tenant_execute_historical_snapshot");
+  const ref = {
+    tenantId: setup.tenantId, jobId: setup.job.jobId, workerId: "worker_execute",
+    attemptCount: setup.job.attemptCount, runId: setup.run.run_id,
+  };
+  const admissionAudit = await db.selectFrom("audit_events").select("entitlement_snapshot_ref")
+    .where("tenant_id", "=", setup.tenantId).where("action", "=", "agent_run.create").executeTakeFirstOrThrow();
+  assert.equal(typeof (admissionAudit.entitlement_snapshot_ref as { snapshot_id?: unknown })?.snapshot_id, "string");
+  const begun = await setup.repository.begin(ref);
+  assert.equal(begun.kind, "admitted");
+  if (begun.kind !== "admitted") return;
+  assert.deepEqual(await setup.repository.markDispatched(ref), { kind: "updated" });
+  await db.updateTable("entitlements").set({
+    status: "revoked", reason_code: "platform_revoked", resource_version: 2, updated_at: executionNow,
+  }).where("tenant_id", "=", setup.tenantId).execute();
+  assert.deepEqual(await setup.repository.persistDelta(ref, begun.facts.assistantMessageId, "Historical answer"), { kind: "updated" });
+  assert.deepEqual(await setup.repository.complete(ref, begun.facts, "Historical answer"), { kind: "updated" });
+  assert.equal((await db.selectFrom("agent_runs").select("status")
+    .where("tenant_id", "=", setup.tenantId).where("run_id", "=", setup.run.run_id)
+    .executeTakeFirstOrThrow()).status, "succeeded");
+  assert.deepEqual((await db.selectFrom("audit_events").select("entitlement_snapshot_ref")
+    .where("tenant_id", "=", setup.tenantId).where("action", "=", "agent_run.create")
+    .executeTakeFirstOrThrow()).entitlement_snapshot_ref, admissionAudit.entitlement_snapshot_ref);
+});
+
 test("Agent Run completion and failure share conversation-run order with parent retry admission", { timeout: 15_000 }, async () => {
   for (const operation of ["complete", "fail"] as const) {
     const setup = await setupExecution(`tenant_agent_run_lock_${operation}`);

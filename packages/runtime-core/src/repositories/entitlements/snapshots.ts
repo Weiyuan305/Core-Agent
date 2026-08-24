@@ -26,20 +26,25 @@ export async function loadEffectiveCapabilitySources(
   profileId: string,
   now: Date,
   candidateReleaseId?: string,
+  lockAuthority = true,
 ): Promise<readonly EffectiveCapabilitySource[]> {
-  const tenant = await trx.selectFrom("tenants").select(["tenant_mode", "status"])
-    .where("tenant_id", "=", tenantId).forUpdate().executeTakeFirst();
+  let tenantQuery = trx.selectFrom("tenants").select(["tenant_mode", "status"])
+    .where("tenant_id", "=", tenantId);
+  if (lockAuthority) tenantQuery = tenantQuery.forUpdate();
+  const tenant = await tenantQuery.executeTakeFirst();
   if (tenant?.status !== "active") throw new DomainError("ENTITLEMENT_DENIED", "Active Tenant authority is required");
-  const profile = await trx.selectFrom("profiles").select(["owner_actor_id", "profile_kind", "status"])
-    .where("tenant_id", "=", tenantId).where("profile_id", "=", profileId)
-    .forUpdate().executeTakeFirst();
+  let profileQuery = trx.selectFrom("profiles").select(["owner_actor_id", "profile_kind", "status"])
+    .where("tenant_id", "=", tenantId).where("profile_id", "=", profileId);
+  if (lockAuthority) profileQuery = profileQuery.forUpdate();
+  const profile = await profileQuery.executeTakeFirst();
   if (profile?.status !== "active") throw new DomainError("ENTITLEMENT_DENIED", "Active Profile authority is required");
   if (tenant.tenant_mode === "b2c") {
-    await assertAutomaticB2cProfile(trx, tenantId, profileId);
+    await assertAutomaticB2cProfile(trx, tenantId, profileId, lockAuthority);
   } else if (tenant.tenant_mode === "b2b") {
-    const membership = await trx.selectFrom("memberships").select(["status", "roles", "membership_source"])
-      .where("tenant_id", "=", tenantId).where("actor_id", "=", profile.owner_actor_id)
-      .forUpdate().executeTakeFirst();
+    let membershipQuery = trx.selectFrom("memberships").select(["status", "roles", "membership_source"])
+      .where("tenant_id", "=", tenantId).where("actor_id", "=", profile.owner_actor_id);
+    if (lockAuthority) membershipQuery = membershipQuery.forUpdate();
+    const membership = await membershipQuery.executeTakeFirst();
     if (
       profile.profile_kind !== "consultant"
       || membership?.status !== "active"
@@ -61,7 +66,7 @@ export async function loadEffectiveCapabilitySources(
   const selectedCandidateId = candidateRelease?.tenant_pack_release_id ?? null;
   const selectedCandidateProductId = candidateRelease?.pack_product_id ?? null;
 
-  const rows = (await sql<EffectiveAuthorityRow>`
+  const effectiveQuery = sql<EffectiveAuthorityRow>`
     select entitlement.entitlement_id,
       assignment.assignment_id,
       release.tenant_pack_release_id,
@@ -113,8 +118,9 @@ export async function loadEffectiveCapabilitySources(
       )
     order by entitlement.entitlement_id collate "C", member.capability_id collate "C",
       member.capability_version_id collate "C", member.version collate "C"
-    for share of entitlement, release, pack, member, capability_version
-  `.execute(trx)).rows;
+    ${lockAuthority ? sql`for share of entitlement, release, pack, member, capability_version` : sql``}
+  `;
+  const rows = (await effectiveQuery.execute(trx)).rows;
   const sourceMap = new Map<string, { entitlementId: string; assignmentId?: string; releaseId: string; capabilities: Array<{ capabilityId: string; capabilityVersionId: string; version: string }> }>();
   for (const row of rows) {
     if (

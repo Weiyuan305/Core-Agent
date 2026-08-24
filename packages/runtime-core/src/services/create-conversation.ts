@@ -27,6 +27,7 @@ import {
 import { appendAuditEvent, appendProductEvents } from "../repositories/events.js";
 import { ResourceRepositories } from "../repositories/index.js";
 import { deriveRuntimeContainerId } from "./provision-tenant.js";
+import { loadCurrentSnapshotAuthority } from "./entitlements/current-authority.js";
 
 const CreateConversationServiceRequestSchema = Type.Object({
   schema_version: Type.Literal(1),
@@ -188,6 +189,18 @@ export async function createConversation(
     if (runtime.desired_state !== "running" || runtime.observed_state !== "ready" || runtime.health_status !== "healthy") {
       runtimeNotReady();
     }
+    const entitlementAuthority = await loadCurrentSnapshotAuthority({
+      trx,
+      tenantId,
+      profileId: request.profile_id,
+      now,
+    });
+    if (!entitlementAuthority.current) {
+      if (entitlementAuthority.state === "preparing") {
+        throw new DomainError("SERVICE_PREPARING", "Capability service is preparing", true);
+      }
+      throw new DomainError("ENTITLEMENT_DENIED", "Current entitlement authority is unavailable");
+    }
 
     const conversation: Conversation = {
       schema_version: 1,
@@ -257,6 +270,7 @@ export async function createConversation(
       trace_id: context.traceId,
       reason_summary: "Created a managed Conversation and Hermes Session",
       resource_version: 1,
+      entitlement_snapshot_ref: entitlementAuthority.snapshotRef,
     });
     await completeIdempotentCommand(tenantTransaction, {
       key: request.idempotency_key,

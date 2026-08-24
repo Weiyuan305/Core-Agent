@@ -36,6 +36,9 @@ export interface AccountDeletionEntitlementRevocationPort {
     readonly trx: Transaction<RuntimeDatabase>;
     readonly actorId: string;
     readonly accountDeletionId: string;
+    readonly now: Date;
+    readonly requestId: string;
+    readonly traceId: string;
   }): Promise<void>;
 }
 
@@ -431,6 +434,14 @@ export async function requestAccountDeletion(
       .where("status", "=", "revoked")
       .where("revocation_reason", "=", "account_deletion_requested")
       .execute();
+    await dependencies.entitlementRevocation.revokeInTransaction({
+      trx,
+      actorId: context.actorId,
+      accountDeletionId: deletionId,
+      now,
+      requestId: context.requestId,
+      traceId: context.traceId,
+    });
     for (const membership of activeMemberships) {
       await trx.updateTable("memberships").set({
         status: "revoked",
@@ -441,11 +452,6 @@ export async function requestAccountDeletion(
         .where("resource_version", "=", membership.resource_version)
         .executeTakeFirstOrThrow();
     }
-    await dependencies.entitlementRevocation.revokeInTransaction({
-      trx,
-      actorId: context.actorId,
-      accountDeletionId: deletionId,
-    });
     for (const membership of activeMemberships) {
       if (membership.tenant_mode === "b2c") {
         await dependencies.runtimeStopIntent.stopInTransaction({

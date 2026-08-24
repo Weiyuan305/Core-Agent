@@ -201,6 +201,9 @@ async function runCiEquivalentScenario({ injectedFailure = false, injectedOutput
     assert.match(postgresOutput, /trusted context is signed only from current Session identity graph runtime Run and snapshot authority/u);
     assert.match(postgresOutput, /trusted context issuance fails closed on stale Session Membership Profile Tenant runtime Run or snapshot authority/u);
     assert.match(postgresOutput, /identity bootstrap snapshot is explicit and cannot admit an Agent Run/u);
+    assert.match(postgresOutput, /current authority immediately denies every underlying Tenant Profile Membership Pack Capability and release transition/u);
+    assert.match(postgresOutput, /an already-streaming model-only Run finishes with its historical Snapshot after authority revocation/u);
+    assert.match(postgresOutput, /account-deletion revocation removes only the Actor's entitlement authority and advances empty snapshots/u);
     assert.match(postgresOutput, /trusted context admits a Conversation and rejects bootstrap authority/u);
     assert.match(postgresOutput, /trusted context binds and admits one AgentRun/u);
     assert.match(postgresOutput, /deletion request is one serializable Actor-first transition/u);

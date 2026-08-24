@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -13,6 +14,7 @@ import { canonicalPayloadHash, DomainError } from "../src/domain/idempotency.js"
 import { provisionTenant } from "../src/services/provision-tenant.js";
 import { commandRuntime, getTenantRuntime } from "../src/services/command-runtime.js";
 import { createConversation } from "../src/services/create-conversation.js";
+import { resolveProfileSnapshotInTransaction } from "../src/services/entitlements/resolve-profile-snapshot.js";
 import { createRedactor } from "../src/domain/redaction.js";
 import { WorkerRuntimeRepository } from "../src/repositories/worker-runtime.js";
 import { acquireRuntimeTransactionAdvisoryLock, withRuntimeAdvisoryLock } from "../src/repositories/runtime-lock.js";
@@ -132,6 +134,77 @@ async function waitForLockWaiters(minimum: number): Promise<void> {
   }
   assert.fail(`expected at least ${minimum} PostgreSQL lock waiters`);
 }
+
+async function seedProvisionedEntitlementAuthority(tenantId: string, profileId: string): Promise<void> {
+  const suffix = createHash("sha256").update(tenantId, "utf8").digest("hex").slice(0, 20);
+  const capabilityId = `capability_provision_${suffix}`;
+  const capabilityVersionId = `capability_version_provision_${suffix}`;
+  const productId = `pack_product_provision_${suffix}`;
+  const packVersionId = `pack_version_provision_${suffix}`;
+  const releaseId = `release_provision_${suffix}`;
+  const entitlementId = `entitlement_provision_${suffix}`;
+  await db.insertInto("capabilities").values({
+    capability_id: capabilityId, display_name: "Provision lock capability", owning_domain: "runtime",
+    kind: "mcp", resource_version: 1, created_at: admissionAuthorityNow, updated_at: admissionAuthorityNow,
+  }).execute();
+  await db.insertInto("capability_versions").values({
+    capability_version_id: capabilityVersionId, capability_id: capabilityId, version: "1.0.0", kind: "mcp",
+    artifact_ref: `manifest:sha256:${createHash("sha256").update(capabilityVersionId).digest("hex")}`,
+    contract_ref: "runtime/provision-lock@1.0.0", risk_class: "read", approval_requirement: "none",
+    compatibility_json: { core_contract_version: "0.8.0", domain_contract_version: "1.0.0", runtime_protocol_version: "1.0.0", tenant_modes: ["b2b"] },
+    status: "reviewed", resource_version: 1, created_at: admissionAuthorityNow, updated_at: admissionAuthorityNow,
+  }).execute();
+  await db.insertInto("pack_products").values({
+    pack_product_id: productId, display_name: "Provision lock Pack", tenant_modes: ["b2b"], resource_version: 1,
+    created_at: admissionAuthorityNow, updated_at: admissionAuthorityNow,
+  }).execute();
+  await db.insertInto("pack_versions").values({
+    pack_version_id: packVersionId, pack_product_id: productId, version: "1.0.0", status: "draft", resource_version: 1,
+    created_at: admissionAuthorityNow, updated_at: admissionAuthorityNow,
+  }).execute();
+  await db.insertInto("pack_members").values({
+    pack_member_id: `pack_member_provision_${suffix}`, pack_version_id: packVersionId, member_order: 1,
+    capability_id: capabilityId, capability_version_id: capabilityVersionId, version: "1.0.0", resource_version: 1,
+    created_at: admissionAuthorityNow, updated_at: admissionAuthorityNow,
+  }).execute();
+  await db.updateTable("pack_versions").set({ status: "reviewed", resource_version: 2, updated_at: admissionAuthorityNow }).where("pack_version_id", "=", packVersionId).execute();
+  await db.updateTable("pack_versions").set({ status: "published", resource_version: 3, updated_at: admissionAuthorityNow }).where("pack_version_id", "=", packVersionId).execute();
+  await db.insertInto("tenant_pack_releases").values({
+    tenant_pack_release_id: releaseId, tenant_id: tenantId, pack_product_id: productId,
+    pack_version_id: packVersionId, pack_version: "1.0.0", generation: 1, status: "preparing", resource_version: 1,
+    created_at: admissionAuthorityNow, updated_at: admissionAuthorityNow,
+  }).execute();
+  await db.updateTable("tenant_pack_releases").set({ status: "current", resource_version: 2, updated_at: admissionAuthorityNow }).where("tenant_pack_release_id", "=", releaseId).execute();
+  await db.insertInto("entitlements").values({
+    entitlement_id: entitlementId, tenant_id: tenantId, pack_product_id: productId, tenant_pack_release_id: releaseId,
+    pack_version_id: packVersionId, pack_version: "1.0.0", source: "platform_manual",
+    external_order_ref: `provision_order_${suffix}`, tenant_mode: "b2b", assignment_mode: "seat", seat_quantity: 1,
+    valid_from: admissionAuthorityNow, expires_at: null, status: "active", reason_code: "platform_grant", resource_version: 1,
+    created_at: admissionAuthorityNow, updated_at: admissionAuthorityNow,
+  }).execute();
+  await db.insertInto("entitlement_assignments").values({
+    assignment_id: `assignment_provision_${suffix}`, tenant_id: tenantId, entitlement_id: entitlementId, profile_id: profileId,
+    status: "preparing", reason_code: "seat_assigned", resource_version: 1,
+    created_at: admissionAuthorityNow, updated_at: admissionAuthorityNow,
+  }).execute();
+  await db.updateTable("entitlement_assignments").set({ status: "available", resource_version: 2, updated_at: admissionAuthorityNow })
+    .where("assignment_id", "=", `assignment_provision_${suffix}`).execute();
+  const snapshot = await db.transaction().execute((trx) => resolveProfileSnapshotInTransaction({
+    trx, tenantId, profileId, now: admissionAuthorityNow,
+    evidence: {
+      actorId: "core_agent_provisioner", membershipId: "core_agent_provisioner_admin",
+      requestId: `request_provision_authority_${suffix}`, traceId: `trace_provision_authority_${suffix}`,
+    },
+  }));
+  await db.updateTable("capability_runtime_projections").set({ status: "available", updated_at: admissionAuthorityNow })
+    .where("projection_id", "=", snapshot.projection.projectionId).execute();
+  await db.updateTable("runtime_containers").set({
+    generation: snapshot.projection.generation,
+    capability_manifest_digest: snapshot.canonicalInputHash,
+  }).where("tenant_id", "=", tenantId).execute();
+}
+
+const admissionAuthorityNow = new Date("2026-08-06T01:00:00.000Z");
 
 async function holdRuntimeRowUntilLeaseExpires(
   tenantId: string,
@@ -589,6 +662,7 @@ test("finishProvision and Conversation admission share one lock order without a 
   const job = await db.selectFrom("worker_jobs").select(["job_id", "attempt_count"]).where("tenant_id", "=", tenantId).where("job_kind", "=", "provision_runtime").executeTakeFirstOrThrow();
   await db.updateTable("tenants").set({ status: "active" }).where("tenant_id", "=", tenantId).execute();
   await db.updateTable("profiles").set({ status: "active" }).where("tenant_id", "=", tenantId).execute();
+  await seedProvisionedEntitlementAuthority(tenantId, provisioning.identity_graph.profiles[0]!.profile_id);
   await db.updateTable("runtime_containers").set({ observed_state: "provisioning" }).where("tenant_id", "=", tenantId).execute();
   await db.updateTable("worker_jobs").set({ status: "running", lease_owner: "worker_finish", lease_expires_at: new Date("2100-01-01T00:00:00.000Z") }).where("tenant_id", "=", tenantId).where("job_id", "=", job.job_id).execute();
   const repository = new WorkerRuntimeRepository(db, createRedactor([]));

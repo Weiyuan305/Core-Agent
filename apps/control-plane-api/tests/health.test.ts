@@ -332,6 +332,10 @@ test("every DomainError maps to its exact non-leaking ErrorEnvelope status", () 
     RESOURCE_NOT_FOUND: [404, "authorization"],
     IDEMPOTENCY_CONFLICT: [409, "conflict"],
     RESOURCE_VERSION_CONFLICT: [409, "conflict"],
+    CAPABILITY_CONFLICT: [409, "conflict"],
+    ENTITLEMENT_DENIED: [403, "authorization"],
+    SEAT_EXHAUSTED: [409, "conflict"],
+    SERVICE_PREPARING: [503, "unavailable"],
     INVALID_STATE_TRANSITION: [409, "conflict"],
     RUNTIME_NOT_READY: [409, "conflict"],
     SUPERVISOR_REJECTED: [409, "conflict"],
@@ -354,7 +358,7 @@ test("every DomainError maps to its exact non-leaking ErrorEnvelope status", () 
     assert.equal(mapped.envelope.message.includes("sentinel"), false);
     assert.equal(
       mapped.envelope.retryable,
-      code === "DEPENDENCY_UNAVAILABLE" || code === "DEPENDENCY_TIMEOUT",
+      code === "DEPENDENCY_UNAVAILABLE" || code === "DEPENDENCY_TIMEOUT" || code === "SERVICE_PREPARING",
     );
     assert.equal(Schema.Compile(ErrorEnvelopeSchema).Check(mapped.envelope), true);
     assert.equal(mapped.internalError === undefined, code !== "INTERNAL_ERROR");

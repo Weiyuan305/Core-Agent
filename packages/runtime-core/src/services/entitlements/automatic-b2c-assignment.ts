@@ -8,22 +8,25 @@ export async function assertAutomaticB2cProfile(
   trx: Transaction<RuntimeDatabase>,
   tenantId: string,
   profileId: string,
+  lockAuthority = true,
 ): Promise<void> {
-  const memberships = await trx.selectFrom("memberships")
+  let membershipQuery = trx.selectFrom("memberships")
     .select(["membership_id", "actor_id", "roles", "membership_source", "status"])
     .where("tenant_id", "=", tenantId)
     .where("status", "=", "active")
-    .orderBy("membership_id", "asc")
-    .forUpdate().execute();
+    .orderBy("membership_id", "asc");
+  if (lockAuthority) membershipQuery = membershipQuery.forUpdate();
+  const memberships = await membershipQuery.execute();
   const students = memberships.filter((membership) => (
     membership.membership_source === "self" && membership.roles.includes("student")
   ));
-  const profiles = await trx.selectFrom("profiles")
+  let profileQuery = trx.selectFrom("profiles")
     .select(["profile_id", "owner_actor_id", "profile_kind", "status"])
     .where("tenant_id", "=", tenantId)
     .where("status", "=", "active")
-    .orderBy("profile_id", "asc")
-    .forUpdate().execute();
+    .orderBy("profile_id", "asc");
+  if (lockAuthority) profileQuery = profileQuery.forUpdate();
+  const profiles = await profileQuery.execute();
   const defaults = profiles.filter((profile) => profile.profile_kind === "default");
   if (
     students.length !== 1

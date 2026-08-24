@@ -5,6 +5,8 @@ import test from "node:test";
 import type { SignedTrustedRequestContext } from "@core-agent/contracts";
 import {
   canonicalJson,
+  createEntitlementSnapshotAuthorityPort,
+  deriveRuntimeContainerId,
   encodeSignedTrustedContext,
   issueCoreSession,
   issueTrustedContext,
@@ -21,12 +23,13 @@ const authSubjectId = "auth_subject_task11_trusted";
 const tenantId = "tenant_task11_trusted";
 const membershipId = "membership_task11_trusted";
 const profileId = "profile_task11_trusted";
-const containerId = "container_task11_trusted";
+const containerId = deriveRuntimeContainerId(tenantId);
 const conversationId = "conversation_task11_trusted";
 const runId = "run_task11_trusted";
 
 let harness: IntegrationHarness;
 let sessionId: string;
+let capabilityIds: readonly string[];
 
 test.before(async () => {
   harness = await createIntegrationHarness("trusted-context");
@@ -62,6 +65,7 @@ test.before(async () => {
     generation: 1, volume_ref: "volume_task11_trusted", health_status: "healthy",
     last_probed_at: now, failure_summary: null, created_at: now, updated_at: now,
   }).execute();
+  capabilityIds = (await harness.seedEntitlementAuthority({ tenantId, profileIds: [profileId], now })).capabilityIds;
   await harness.db.insertInto("conversations").values({
     tenant_id: tenantId, conversation_id: conversationId, profile_id: profileId,
     created_by_actor_id: actorId, status: "active", schema_version: 1, resource_version: 1,
@@ -92,22 +96,7 @@ async function signedContext(): Promise<SignedTrustedRequestContext> {
     issuer: "identity-gateway",
     audience: ["control-plane-api"],
     databaseNow: async () => new Date(now),
-    entitlementSnapshotAuthority: {
-      async loadCurrentSnapshot(input) {
-        assert.equal(input.actorId, actorId);
-        assert.equal(input.membershipId, membershipId);
-        assert.equal(input.profileId, profileId);
-        return {
-          snapshotRef: {
-            snapshot_id: "snapshot_task11_trusted", version: 7,
-            evaluated_at: "2026-08-20T05:59:00.000Z",
-          },
-          capabilityIds: ["capability_task11_b", "capability_task11_a"],
-          current: true,
-          bootstrapOnly: false,
-        };
-      },
-    },
+    entitlementSnapshotAuthority: createEntitlementSnapshotAuthorityPort(),
   }, {
     sessionId, tenantId, membershipId, effectiveRole: "consultant", profileId, containerId,
     conversationId, runId, requestId: "request_task11_trusted", traceId: "trace_task11_trusted",
@@ -143,7 +132,7 @@ function resign(envelope: SignedTrustedRequestContext, fields: Partial<SignedTru
 
 test("trusted context derives Control Plane Actor Membership Profile and role from current PostgreSQL authority", async () => {
   const envelope = await signedContext();
-  assert.deepEqual(envelope.payload.capability_ids, ["capability_task11_a", "capability_task11_b"]);
+  assert.deepEqual(envelope.payload.capability_ids, capabilityIds);
   const authority = await authenticate(envelope);
   assert.deepEqual({
     actorId: authority.actorId,

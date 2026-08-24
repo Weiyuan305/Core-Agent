@@ -27,6 +27,7 @@ import {
 import { appendAuditEvent, appendProductEvents } from "../repositories/events.js";
 import { ResourceRepositories } from "../repositories/index.js";
 import { deriveRuntimeContainerId } from "./provision-tenant.js";
+import { loadCurrentSnapshotAuthority } from "./entitlements/current-authority.js";
 
 export interface CreateAgentRunDependencies {
   readonly db: Kysely<RuntimeDatabase>;
@@ -239,6 +240,18 @@ export async function createAgentRun(
       if (runtime.desired_state !== "running" || runtime.observed_state !== "ready" || runtime.health_status !== "healthy") {
         runtimeNotReady();
       }
+      const entitlementAuthority = await loadCurrentSnapshotAuthority({
+        trx,
+        tenantId,
+        profileId: conversation.profile_id,
+        now,
+      });
+      if (!entitlementAuthority.current) {
+        if (entitlementAuthority.state === "preparing") {
+          throw new DomainError("SERVICE_PREPARING", "Capability service is preparing", true);
+        }
+        throw new DomainError("ENTITLEMENT_DENIED", "Current entitlement authority is unavailable");
+      }
       if (request.parent_run_id !== undefined) {
         const parent = await trx.selectFrom("agent_runs").select(["run_id", "conversation_id", "status"])
           .where("tenant_id", "=", tenantId).where("run_id", "=", request.parent_run_id)
@@ -378,6 +391,7 @@ export async function createAgentRun(
         reason_summary: "Queued a managed Agent Run",
         run_id: runId,
         resource_version: 1,
+        entitlement_snapshot_ref: entitlementAuthority.snapshotRef,
       });
       await completeIdempotentCommand(tenantTransaction, {
         key: request.idempotency_key,

@@ -1,9 +1,18 @@
 {
   "runtimeCorePostgres": {
-    "testCount": 402,
+    "testCount": 428,
     "suitePaths": [
       "tests/migrations.test.ts",
       "tests/entitlement-schema.test.ts",
+      "tests/tenant-pack-release.test.ts",
+      "tests/manage-entitlement.test.ts",
+      "tests/b2c-automatic-assignment.test.ts",
+      "tests/b2b-seat-assignment.test.ts",
+      "tests/b2b-seat-concurrency.test.ts",
+      "tests/effective-capabilities.test.ts",
+      "tests/snapshot-immutability.test.ts",
+      "tests/entitlement-admission.test.ts",
+      "tests/revocation-semantics.test.ts",
       "tests/tenant-isolation.test.ts",
       "tests/optimistic-concurrency.test.ts",
       "tests/idempotency.test.ts",

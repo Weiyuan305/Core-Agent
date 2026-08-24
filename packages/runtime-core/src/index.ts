@@ -356,6 +356,16 @@ export {
   type VerifyTrustedContextSignatureInput,
 } from "./services/identity/trusted-context.js";
 export {
+  createEntitlementSnapshotAuthorityPort,
+  loadCurrentSnapshotAuthority,
+  requireCurrentSnapshot,
+  recheckCapabilityBeforeEffect,
+  requireCurrentSnapshotAuthority,
+  type CurrentSnapshotAuthority,
+  type LoadCurrentSnapshotAuthorityInput,
+  type RequireCurrentSnapshotAuthorityInput,
+} from "./services/entitlements/current-authority.js";
+export {
   beginEmailVerificationTransaction,
   admitEmailVerificationProviderAttempt,
   canonicalEmailVerificationStartPayloadHash,
@@ -491,6 +501,10 @@ export {
   type AuthenticatedAccountDeletionRecovery,
   type EstablishAccountDeletionRecoveryReauthenticationInput,
 } from "./services/identity/manage-account-deletion.js";
+export {
+  createAccountDeletionEntitlementRevocationPort,
+  type CreateAccountDeletionEntitlementRevocationPortDependencies,
+} from "./services/entitlements/revoke-actor-entitlements.js";
 export {
   readAccountDeletionFinalizationFacts,
   type StoredAccountDeletionFinalizationFacts,
