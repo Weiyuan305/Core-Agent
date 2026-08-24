@@ -15,8 +15,8 @@ import { dirname, join, resolve } from "node:path";
 import {
   validateSupervisorRequest,
   validateSupervisorResponse,
-  type SupervisorRequestV1,
-  type SupervisorResponseV1,
+  type SupervisorRequest,
+  type SupervisorResponse,
 } from "@core-agent/runtime-core";
 
 const maximumRecordBytes = 64 * 1024;
@@ -25,16 +25,16 @@ const defaultGuardWaitMs = 330_000;
 const completedAtPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const hashPattern = /^sha256:[a-f0-9]{64}$/;
 
-interface JournalRecordV1 {
-  readonly protocol_version: 1;
+interface JournalRecord {
+  readonly protocol_version: 1 | 2;
   readonly operation_id: string;
   readonly request_hash: string;
   readonly completed_at: string;
-  readonly response: SupervisorResponseV1;
+  readonly response: SupervisorResponse;
 }
 
-interface PendingJournalRecordV1 {
-  readonly protocol_version: 1;
+interface PendingJournalRecord {
+  readonly protocol_version: 1 | 2;
   readonly operation_id: string;
   readonly request_hash: string;
   readonly stage: OperationJournalStage;
@@ -43,7 +43,7 @@ interface PendingJournalRecordV1 {
 
 interface InFlightEntry {
   readonly requestHash: string;
-  readonly response: Promise<SupervisorResponseV1>;
+  readonly response: Promise<SupervisorResponse>;
 }
 
 export type OperationJournalStage = "reserved" | "start_pending" | "stop_pending" | "delete_pending";
@@ -58,23 +58,23 @@ const transientResponseBrand = Symbol("transient-operation-journal-response");
 
 export interface TransientOperationJournalResponse {
   readonly [transientResponseBrand]: true;
-  readonly response: SupervisorResponseV1;
+  readonly response: SupervisorResponse;
 }
 
 export interface OperationJournalRunOptions {
   readonly admissionDeadlineMs?: number;
-  readonly admissionExpiredResponse?: SupervisorResponseV1;
+  readonly admissionExpiredResponse?: SupervisorResponse;
   readonly signal?: AbortSignal;
 }
 
 export function transientOperationJournalResponse(
-  response: SupervisorResponseV1,
+  response: SupervisorResponse,
 ): TransientOperationJournalResponse {
   return Object.freeze({ [transientResponseBrand]: true as const, response });
 }
 
 function isTransientOperationJournalResponse(
-  value: SupervisorResponseV1 | TransientOperationJournalResponse,
+  value: SupervisorResponse | TransientOperationJournalResponse,
 ): value is TransientOperationJournalResponse {
   return typeof value === "object" && value !== null && transientResponseBrand in value;
 }
@@ -93,9 +93,9 @@ function journalError(): Error {
   return new Error("SUPERVISOR_REJECTED: Operation journal record is unsafe");
 }
 
-function conflict(operationId: string): SupervisorResponseV1 {
+function conflict(operationId: string, protocolVersion: 1 | 2): SupervisorResponse {
   return {
-    protocol_version: 1,
+    protocol_version: protocolVersion,
     operation_id: operationId,
     outcome: "rejected",
     code: "SUPERVISOR_REJECTED",
@@ -141,13 +141,13 @@ function canonicalJson(value: unknown): string {
   return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
 }
 
-function parseRecord(value: unknown): JournalRecordV1 | PendingJournalRecordV1 {
+function parseRecord(value: unknown): JournalRecord | PendingJournalRecord {
   if (typeof value === "object" && value !== null && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype) {
     const keys = Reflect.ownKeys(value);
     if (keys.length === 5 && keys.every((key) => typeof key === "string" && ["protocol_version", "operation_id", "request_hash", "stage", "state"].includes(key))) {
       exactDataRecord(value, ["protocol_version", "operation_id", "request_hash", "stage", "state"]);
       if (
-        value.protocol_version !== 1
+        (value.protocol_version !== 1 && value.protocol_version !== 2)
         || typeof value.operation_id !== "string"
         || typeof value.request_hash !== "string" || !hashPattern.test(value.request_hash)
         || value.state !== "pending"
@@ -155,7 +155,7 @@ function parseRecord(value: unknown): JournalRecordV1 | PendingJournalRecordV1 {
           && value.stage !== "stop_pending" && value.stage !== "delete_pending")
       ) throw journalError();
       return {
-        protocol_version: 1,
+        protocol_version: value.protocol_version,
         operation_id: value.operation_id,
         request_hash: value.request_hash,
         stage: value.stage,
@@ -165,7 +165,7 @@ function parseRecord(value: unknown): JournalRecordV1 | PendingJournalRecordV1 {
   }
   exactDataRecord(value, ["protocol_version", "operation_id", "request_hash", "completed_at", "response"]);
   if (
-    value.protocol_version !== 1
+    (value.protocol_version !== 1 && value.protocol_version !== 2)
     || typeof value.operation_id !== "string"
     || typeof value.request_hash !== "string"
     || !hashPattern.test(value.request_hash)
@@ -173,15 +173,15 @@ function parseRecord(value: unknown): JournalRecordV1 | PendingJournalRecordV1 {
     || !completedAtPattern.test(value.completed_at)
     || !Number.isFinite(Date.parse(value.completed_at))
   ) throw journalError();
-  let response: SupervisorResponseV1;
+  let response: SupervisorResponse;
   try {
     response = validateSupervisorResponse(value.response);
   } catch {
     throw journalError();
   }
-  if (response.operation_id !== value.operation_id) throw journalError();
+  if (response.operation_id !== value.operation_id || response.protocol_version !== value.protocol_version) throw journalError();
   return {
-    protocol_version: 1,
+    protocol_version: value.protocol_version,
     operation_id: value.operation_id,
     request_hash: value.request_hash,
     completed_at: value.completed_at,
@@ -189,8 +189,9 @@ function parseRecord(value: unknown): JournalRecordV1 | PendingJournalRecordV1 {
   };
 }
 
-function stageIsCompatible(request: SupervisorRequestV1, stage: OperationJournalStage): boolean {
+function stageIsCompatible(request: SupervisorRequest, stage: OperationJournalStage): boolean {
   if (stage === "reserved") return true;
+  if (request.protocol_version === 2) return false;
   if (request.kind === "start") return stage === "start_pending";
   if (request.kind === "stop") return stage === "stop_pending";
   if (request.kind === "delete") return stage === "delete_pending";
@@ -199,10 +200,11 @@ function stageIsCompatible(request: SupervisorRequestV1, stage: OperationJournal
 }
 
 function canAdvanceStage(
-  request: SupervisorRequestV1,
+  request: SupervisorRequest,
   current: OperationJournalStage,
   next: OperationJournalStage,
 ): boolean {
+  if (request.protocol_version === 2) return false;
   if (current === "reserved") {
     return (request.kind === "start" && next === "start_pending")
       || (request.kind === "stop" && next === "stop_pending")
@@ -212,7 +214,7 @@ function canAdvanceStage(
   return request.kind === "restart" && current === "stop_pending" && next === "start_pending";
 }
 
-function isCompletedRecord(record: JournalRecordV1 | PendingJournalRecordV1): record is JournalRecordV1 {
+function isCompletedRecord(record: JournalRecord | PendingJournalRecord): record is JournalRecord {
   return "completed_at" in record;
 }
 
@@ -304,7 +306,7 @@ export class OperationJournal {
   readonly #guardPollMs: number;
   readonly #guardWaitMs: number;
   readonly #inFlight = new Map<string, InFlightEntry>();
-  readonly #complete = new Map<string, { readonly requestHash: string; readonly response: SupervisorResponseV1 }>();
+  readonly #complete = new Map<string, { readonly requestHash: string; readonly response: SupervisorResponse }>();
 
   public constructor(options: OperationJournalOptions) {
     this.#directory = resolve(options.directory);
@@ -318,19 +320,19 @@ export class OperationJournal {
   public run(
     value: unknown,
     operation: (
-      request: SupervisorRequestV1,
+      request: SupervisorRequest,
       context: OperationJournalContext,
-    ) => Promise<SupervisorResponseV1 | TransientOperationJournalResponse>,
+    ) => Promise<SupervisorResponse | TransientOperationJournalResponse>,
     options: OperationJournalRunOptions = {},
-  ): Promise<SupervisorResponseV1> {
+  ): Promise<SupervisorResponse> {
     const request = validateSupervisorRequest(value);
     const complete = this.#complete.get(request.operation_id);
     if (complete !== undefined) {
-      return Promise.resolve(complete.requestHash === request.request_hash ? complete.response : conflict(request.operation_id));
+      return Promise.resolve(complete.requestHash === request.request_hash ? complete.response : conflict(request.operation_id, request.protocol_version));
     }
     const prior = this.#inFlight.get(request.operation_id);
     if (prior !== undefined) {
-      return prior.requestHash === request.request_hash ? prior.response : Promise.resolve(conflict(request.operation_id));
+      return prior.requestHash === request.request_hash ? prior.response : Promise.resolve(conflict(request.operation_id, request.protocol_version));
     }
     if (
       (options.admissionDeadlineMs === undefined) !== (options.admissionExpiredResponse === undefined)
@@ -347,13 +349,13 @@ export class OperationJournal {
   }
 
   async #runReserved(
-    request: SupervisorRequestV1,
+    request: SupervisorRequest,
     operation: (
-      request: SupervisorRequestV1,
+      request: SupervisorRequest,
       context: OperationJournalContext,
-    ) => Promise<SupervisorResponseV1 | TransientOperationJournalResponse>,
+    ) => Promise<SupervisorResponse | TransientOperationJournalResponse>,
     options: OperationJournalRunOptions,
-  ): Promise<SupervisorResponseV1> {
+  ): Promise<SupervisorResponse> {
     const directory = await this.#openDirectory();
     try {
       const deadline = Date.now() + this.#guardWaitMs;
@@ -379,11 +381,14 @@ export class OperationJournal {
           committed = true;
           return expired;
         }
-        if (stored !== undefined && stored.request_hash !== request.request_hash) return conflict(request.operation_id);
+        if (stored !== undefined && stored.protocol_version !== request.protocol_version) return conflict(request.operation_id, request.protocol_version);
+        if (stored !== undefined && stored.request_hash !== request.request_hash) return conflict(request.operation_id, request.protocol_version);
         const recovered = stored !== undefined;
         const state: { stage: OperationJournalStage } = { stage: stored?.stage ?? "reserved" };
         if (!stageIsCompatible(request, state.stage)) throw journalError();
-        if (stored === undefined) await this.#writePending(directory, request.operation_id, request.request_hash, state.stage);
+        if (stored === undefined) {
+          await this.#writePending(directory, request.protocol_version, request.operation_id, request.request_hash, state.stage);
+        }
         const result = await operation(request, this.#pendingContext(directory, request, state, recovered));
         if (isTransientOperationJournalResponse(result)) {
           const transient = validateSupervisorResponse(result.response);
@@ -395,8 +400,9 @@ export class OperationJournal {
         }
         const response = validateSupervisorResponse(result);
         if (response.operation_id !== request.operation_id) throw journalError();
-        const record: JournalRecordV1 = {
-          protocol_version: 1,
+        if (response.protocol_version !== request.protocol_version) throw journalError();
+        const record: JournalRecord = {
+          protocol_version: request.protocol_version,
           operation_id: request.operation_id,
           request_hash: request.request_hash,
           completed_at: new Date().toISOString(),
@@ -420,7 +426,7 @@ export class OperationJournal {
 
   #pendingContext(
     directory: FileHandle,
-    request: SupervisorRequestV1,
+    request: SupervisorRequest,
     state: { stage: OperationJournalStage },
     recovered: boolean,
   ): OperationJournalContext {
@@ -430,15 +436,17 @@ export class OperationJournal {
       recovered,
       async advance(stage: OperationJournalStage): Promise<void> {
         if (!canAdvanceStage(request, state.stage, stage)) throw journalError();
-        await journal.#writePending(directory, request.operation_id, request.request_hash, stage);
+        await journal.#writePending(directory, request.protocol_version, request.operation_id, request.request_hash, stage);
         state.stage = stage;
       },
     });
   }
 
-  #replay(request: SupervisorRequestV1, stored: JournalRecordV1): SupervisorResponseV1 {
+  #replay(request: SupervisorRequest, stored: JournalRecord): SupervisorResponse {
     this.#complete.set(request.operation_id, { requestHash: stored.request_hash, response: stored.response });
-    return stored.request_hash === request.request_hash ? stored.response : conflict(request.operation_id);
+    return stored.protocol_version === request.protocol_version && stored.request_hash === request.request_hash
+      ? stored.response
+      : conflict(request.operation_id, request.protocol_version);
   }
 
   async #openDirectory(): Promise<FileHandle> {
@@ -568,7 +576,7 @@ export class OperationJournal {
     }
   }
 
-  async #read(operationIdDirectory: FileHandle, operationId: string): Promise<JournalRecordV1 | PendingJournalRecordV1 | undefined> {
+  async #read(operationIdDirectory: FileHandle, operationId: string): Promise<JournalRecord | PendingJournalRecord | undefined> {
     const filename = `${this.#digest(operationId)}.json`;
     const handle = await this.#openChild(operationIdDirectory, filename);
     if (handle === undefined) return undefined;
@@ -609,7 +617,7 @@ export class OperationJournal {
     return payload;
   }
 
-  async #write(directory: FileHandle, record: JournalRecordV1): Promise<void> {
+  async #write(directory: FileHandle, record: JournalRecord): Promise<void> {
     const payload = Buffer.from(`${canonicalJson(record)}\n`, "utf8");
     if (payload.length === 0 || payload.length > maximumRecordBytes) throw journalError();
     const temporaryName = `.pending-${randomBytes(16).toString("hex")}`;
@@ -641,12 +649,13 @@ export class OperationJournal {
 
   async #writePending(
     directory: FileHandle,
+    protocolVersion: 1 | 2,
     operationId: string,
     requestHash: string,
     stage: OperationJournalStage,
   ): Promise<void> {
-    const record: PendingJournalRecordV1 = {
-      protocol_version: 1,
+    const record: PendingJournalRecord = {
+      protocol_version: protocolVersion,
       operation_id: operationId,
       request_hash: requestHash,
       stage,

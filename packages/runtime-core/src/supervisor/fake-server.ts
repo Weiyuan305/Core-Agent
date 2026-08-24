@@ -7,26 +7,28 @@ import {
   encodeSupervisorFrame,
   validateSupervisorRequest,
   validateSupervisorResponse,
+  type SupervisorRequest,
   type SupervisorRequestV1,
+  type SupervisorResponse,
   type SupervisorResponseV1,
 } from "./contracts.js";
 
 export interface FakeRuntimeSupervisorServerOptions {
   readonly socketPath: string;
   readonly responseChunkBytes?: number;
-  readonly dispatch?: (request: SupervisorRequestV1) => SupervisorResponseV1 | Promise<SupervisorResponseV1>;
+  readonly dispatch?: (request: SupervisorRequest) => SupervisorResponse | Promise<SupervisorResponse>;
 }
 
 interface InFlightJournalEntry {
   readonly requestHash: string;
   readonly state: "in_flight";
-  readonly response: Promise<SupervisorResponseV1>;
+  readonly response: Promise<SupervisorResponse>;
 }
 
 interface CompleteJournalEntry {
   readonly requestHash: string;
   readonly state: "complete";
-  readonly response: SupervisorResponseV1;
+  readonly response: SupervisorResponse;
 }
 
 type JournalEntry = InFlightJournalEntry | CompleteJournalEntry;
@@ -35,8 +37,26 @@ function serverError(): Error {
   return new Error("Runtime Supervisor fake server failed");
 }
 
-function defaultResponse(request: SupervisorRequestV1): SupervisorResponseV1 {
+function defaultResponse(request: SupervisorRequest): SupervisorResponse {
   const metadata = request.kind === "provision" ? request.runtime : request;
+  if (request.protocol_version === 2) {
+    return {
+      protocol_version: 2,
+      operation_id: request.operation_id,
+      outcome: "accepted",
+      observation: {
+        tenant_id: metadata.tenant_id,
+        runtime_id: metadata.runtime_id,
+        generation: metadata.generation,
+        exists: true,
+        lifecycle: "running",
+        health: "healthy",
+        image_ref: request.kind === "provision" ? request.runtime.image_ref : `managed/unknown@sha256:${"0".repeat(64)}`,
+        ...(request.kind === "provision" ? { profile_ids: request.runtime.profiles.map((profile) => profile.profile_id) } : { profile_ids: ["unknown_profile"] }),
+        capability_manifest_digest: request.capability_manifest_digest,
+      },
+    };
+  }
   return {
     protocol_version: 1,
     operation_id: request.operation_id,
@@ -53,9 +73,9 @@ function defaultResponse(request: SupervisorRequestV1): SupervisorResponseV1 {
   };
 }
 
-function dispatchFailure(request: SupervisorRequestV1): SupervisorResponseV1 {
+function dispatchFailure(request: SupervisorRequest): SupervisorResponse {
   return {
-    protocol_version: 1,
+    protocol_version: request.protocol_version,
     operation_id: request.operation_id,
     outcome: "failed",
     code: "DEPENDENCY_UNAVAILABLE",
@@ -70,8 +90,8 @@ function deepFreeze(value: unknown): void {
   Object.freeze(value);
 }
 
-function cloneRequest(request: SupervisorRequestV1): SupervisorRequestV1 {
-  const cloned = JSON.parse(JSON.stringify(request)) as SupervisorRequestV1;
+function cloneRequest(request: SupervisorRequest): SupervisorRequest {
+  const cloned = JSON.parse(JSON.stringify(request)) as SupervisorRequest;
   deepFreeze(cloned);
   return cloned;
 }
@@ -81,7 +101,7 @@ export class FakeRuntimeSupervisorServer {
   readonly #server: Server;
   readonly #sockets = new Set<Socket>();
   readonly #journal = new Map<string, JournalEntry>();
-  readonly #requests: SupervisorRequestV1[] = [];
+  readonly #requests: SupervisorRequest[] = [];
 
   public constructor(options: FakeRuntimeSupervisorServerOptions) {
     if (options.responseChunkBytes !== undefined && (!Number.isSafeInteger(options.responseChunkBytes) || options.responseChunkBytes < 1)) {
@@ -91,7 +111,7 @@ export class FakeRuntimeSupervisorServer {
     this.#server = createServer({ allowHalfOpen: true }, (socket) => this.#handle(socket));
   }
 
-  public get requests(): readonly SupervisorRequestV1[] {
+  public get requests(): readonly SupervisorRequest[] {
     return this.#requests;
   }
 
@@ -135,12 +155,12 @@ export class FakeRuntimeSupervisorServer {
     try {
       const request = validateSupervisorRequest(decodeSupervisorFrame(Buffer.concat(chunks, total)));
       const prior = this.#journal.get(request.operation_id);
-      let response: SupervisorResponseV1;
+      let response: SupervisorResponse;
       if (prior !== undefined) {
         response = prior.requestHash === request.request_hash
           ? await prior.response
           : {
-            protocol_version: 1,
+            protocol_version: request.protocol_version,
             operation_id: request.operation_id,
             outcome: "rejected",
             code: "SUPERVISOR_REJECTED",

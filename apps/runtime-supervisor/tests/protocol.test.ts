@@ -9,6 +9,7 @@ import {
   encodeSupervisorFrame,
   validateSupervisorRequest,
   validateSupervisorResponse,
+  type CapabilityProvisionRuntimeCommandDataV2,
   type ProvisionRuntimeCommandDataV1,
 } from "../src/protocol.js";
 
@@ -42,6 +43,68 @@ function signed() {
   const data = provisionData();
   return { ...data, request_hash: canonicalSupervisorRequestHash(data) };
 }
+
+function capabilityProvisionData(): CapabilityProvisionRuntimeCommandDataV2 {
+  const base = provisionData();
+  return {
+    ...base,
+    protocol_version: 2,
+    capability_manifest: {
+      schema_version: 1,
+      tenant_id: "tenant_a",
+      snapshot_id: "snapshot_a",
+      snapshot_version: 3,
+      runtime_generation: 1,
+      capabilities: [{
+        capability_id: "capability_a",
+        capability_version_id: "version_a",
+        version: "1.0.0",
+        kind: "mcp",
+      }],
+    },
+    capability_manifest_digest: "sha256:bbb6a3b4021b53bbd2ae7368944e150d1e83ec4ccf612803dd0d5190ef99d386",
+  };
+}
+
+test("Supervisor protocol v2 binds an exact non-executing capability manifest", () => {
+  const data = capabilityProvisionData();
+  const request = { ...data, request_hash: canonicalSupervisorRequestHash(data) };
+  assert.deepEqual(validateSupervisorRequest(request), request);
+  assert.equal(validateSupervisorResponse({
+    protocol_version: 2,
+    operation_id: data.operation_id,
+    outcome: "accepted",
+    observation: {
+      tenant_id: data.runtime.tenant_id,
+      runtime_id: data.runtime.runtime_id,
+      generation: data.runtime.generation,
+      exists: true,
+      lifecycle: "running",
+      health: "healthy",
+      image_ref: data.runtime.image_ref,
+      private_origin: "http://127.0.0.1:8642",
+      profile_ids: ["profile_a"],
+      capability_manifest_digest: data.capability_manifest_digest,
+    },
+  }).protocol_version, 2);
+});
+
+test("Supervisor protocol v2 rejects manifest digest identity and executable-surface drift", () => {
+  const data = capabilityProvisionData();
+  const invalid = [
+    { ...data, capability_manifest_digest: `sha256:${"0".repeat(64)}` },
+    { ...data, capability_manifest: { ...data.capability_manifest, tenant_id: "tenant_b" } },
+    { ...data, capability_manifest: { ...data.capability_manifest, runtime_generation: 2 } },
+    { ...data, capability_manifest: { ...data.capability_manifest, tools: [] } },
+    { ...data, capability_manifest: { ...data.capability_manifest, capabilities: [{ ...data.capability_manifest.capabilities[0]!, kind: "external_write" }] } },
+  ];
+  for (const candidate of invalid) {
+    assert.throws(() => validateSupervisorRequest({
+      ...candidate,
+      request_hash: canonicalSupervisorRequestHash(candidate),
+    }), /SUPERVISOR_REJECTED/);
+  }
+});
 
 test("unsafe Supervisor operations and unknown Docker controls are rejected", () => {
   const valid = signed();

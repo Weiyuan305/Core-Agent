@@ -140,7 +140,8 @@ test("Agent Run execution atomically begins, persists ordered unsafe deltas, and
   const session = await db.selectFrom("sessions").selectAll().where("tenant_id", "=", setup.tenantId).executeTakeFirstOrThrow();
   assert.equal(session.last_active_at.toISOString(), executionNow.toISOString());
   assert.equal(session.resource_version, "2");
-  const storedJob = await db.selectFrom("worker_jobs").selectAll().where("tenant_id", "=", setup.tenantId).executeTakeFirstOrThrow();
+  const storedJob = await db.selectFrom("worker_jobs").selectAll()
+    .where("tenant_id", "=", setup.tenantId).where("job_id", "=", setup.job.jobId).executeTakeFirstOrThrow();
   assert.equal(storedJob.effect_state, "unsafe_to_replay");
   assert.equal(storedJob.status, "succeeded");
   assert.equal(storedJob.lease_owner, null);
@@ -250,7 +251,8 @@ test("dispatch mark rejects a queued Run before begin", { timeout: 5_000 }, asyn
 
   await assert.rejects(setup.repository.markDispatched(ref), /Run is not running/);
   assert.deepEqual(
-    await db.selectFrom("worker_jobs").select("effect_state").where("tenant_id", "=", setup.tenantId).executeTakeFirstOrThrow(),
+    await db.selectFrom("worker_jobs").select("effect_state")
+      .where("tenant_id", "=", setup.tenantId).where("job_id", "=", setup.job.jobId).executeTakeFirstOrThrow(),
     { effect_state: "pre_effect" },
   );
 });
@@ -267,13 +269,15 @@ test("dispatch is durably marked unsafe before any delta and pre-dispatch deltas
     /requires durable dispatch/,
   );
   assert.deepEqual(
-    await db.selectFrom("worker_jobs").select("effect_state").where("tenant_id", "=", setup.tenantId).executeTakeFirstOrThrow(),
+    await db.selectFrom("worker_jobs").select("effect_state")
+      .where("tenant_id", "=", setup.tenantId).where("job_id", "=", setup.job.jobId).executeTakeFirstOrThrow(),
     { effect_state: "pre_effect" },
   );
 
   assert.deepEqual(await setup.repository.markDispatched(ref), { kind: "updated" });
   assert.deepEqual(
-    await db.selectFrom("worker_jobs").select("effect_state").where("tenant_id", "=", setup.tenantId).executeTakeFirstOrThrow(),
+    await db.selectFrom("worker_jobs").select("effect_state")
+      .where("tenant_id", "=", setup.tenantId).where("job_id", "=", setup.job.jobId).executeTakeFirstOrThrow(),
     { effect_state: "unsafe_to_replay" },
   );
   assert.deepEqual(await setup.repository.persistDelta(ref, begun.facts.assistantMessageId, "after mark"), { kind: "updated" });
@@ -302,7 +306,8 @@ test("dispatch mark loses authority when a worker-job row wait crosses the datab
     blocker.release();
   }
   assert.deepEqual(
-    await db.selectFrom("worker_jobs").select(["status", "effect_state"]).where("tenant_id", "=", setup.tenantId).executeTakeFirstOrThrow(),
+    await db.selectFrom("worker_jobs").select(["status", "effect_state"])
+      .where("tenant_id", "=", setup.tenantId).where("job_id", "=", setup.job.jobId).executeTakeFirstOrThrow(),
     { status: "running", effect_state: "pre_effect" },
   );
 });

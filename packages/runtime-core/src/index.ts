@@ -9,6 +9,16 @@ export {
   type ManagedRuntimeNames,
 } from "./runtime/managed-names.js";
 export {
+  MAX_CAPABILITY_RUNTIME_MANIFEST_BYTES,
+  MAX_CAPABILITY_RUNTIME_MANIFEST_ENTRIES,
+  createCapabilityRuntimeManifest,
+  validateCapabilityRuntimeManifest,
+  type CapabilityRuntimeManifestInput,
+  type CapabilityRuntimeManifestKind,
+  type CapabilityRuntimeManifestV1,
+  type CreatedCapabilityRuntimeManifest,
+} from "./runtime/capability-manifest.js";
+export {
   loadProviderCatalog,
   type ProviderCatalog,
   type ProviderConfig,
@@ -126,6 +136,15 @@ export {
   type AgentRunConversationLockInput,
 } from "./repositories/agent-run-conversation-lock.js";
 export { WorkerRuntimeRepository, type ProvisionAdmissionResult, type ProvisionCompletionResult, type ProvisionFailureResult, type ReconcileClaimedIntent, type ReconcileFailureResult, type ReconcileRetryResult, type ReconcileSuccessIntent, type RuntimeWorkerJobRef, type StoredProvisionFacts, type StoredProvisionProfile, type StoredReconcileFacts } from "./repositories/worker-runtime.js";
+export {
+  CapabilityProjectionRepository,
+  capabilityProjectionJobId,
+  type CapabilityProjectionCompletionResult,
+  type CapabilityProjectionFailureResult,
+  type CapabilityProjectionPreparationResult,
+  type CapabilityProjectionWorkerJobRef,
+  type StoredCapabilityProjectionFacts,
+} from "./repositories/entitlements/projections.js";
 export {
   WorkerAgentRunRepository,
   type AgentRunFailure,
@@ -279,12 +298,20 @@ export {
   encodeSupervisorFrame,
   validateSupervisorRequest,
   validateSupervisorResponse,
+  type CapabilityInspectRuntimeCommandDataV2,
+  type CapabilityProvisionRuntimeCommandDataV2,
+  type CapabilityProvisionRuntimeCommandV2,
+  type CapabilityRuntimeObservation,
   type LifecycleRuntimeCommandDataV1,
   type ProvisionRuntimeCommandDataV1,
   type RuntimeObservation,
   type SupervisorRequestDataV1,
   type SupervisorRequestV1,
+  type SupervisorRequestV2,
+  type SupervisorRequest,
   type SupervisorResponseV1,
+  type SupervisorResponseV2,
+  type SupervisorResponse,
 } from "./supervisor/contracts.js";
 export { RuntimeSupervisorClient, RuntimeSupervisorDependencyError, type RuntimeSupervisorClientOptions } from "./supervisor/client.js";
 export {

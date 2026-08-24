@@ -88,7 +88,8 @@ test("Agent Run admission atomically creates queued Run, completed user Message,
   assert.equal(message.role, "user");
   assert.equal(message.status, "completed");
   assert.equal(message.content, "Keep this exact message.");
-  const job = await db.selectFrom("worker_jobs").selectAll().where("tenant_id", "=", tenantId).executeTakeFirstOrThrow();
+  const job = await db.selectFrom("worker_jobs").selectAll()
+    .where("tenant_id", "=", tenantId).where("job_kind", "=", "execute_agent_run").executeTakeFirstOrThrow();
   assert.equal(job.job_kind, "execute_agent_run");
   assert.equal(job.payload_ref, first.run_id);
   assert.equal(job.run_id, first.run_id);
@@ -245,7 +246,9 @@ test("Agent Run identical replay survives later Runtime and Session admission dr
   assert.deepEqual(replay, first);
   assert.equal(await db.selectFrom("agent_runs").selectAll().where("tenant_id", "=", setup.context.tenantId).execute().then((rows) => rows.length), 1);
   assert.equal(await db.selectFrom("messages").selectAll().where("tenant_id", "=", setup.context.tenantId).execute().then((rows) => rows.length), 1);
-  assert.equal(await db.selectFrom("worker_jobs").selectAll().where("tenant_id", "=", setup.context.tenantId).execute().then((rows) => rows.length), 1);
+  assert.equal(await db.selectFrom("worker_jobs").selectAll()
+    .where("tenant_id", "=", setup.context.tenantId).where("job_kind", "=", "execute_agent_run")
+    .execute().then((rows) => rows.length), 1);
 });
 
 test("Agent Run retry creates a distinct queued child only from a failed parent in the same Conversation", async () => {
@@ -368,7 +371,9 @@ test("Agent Run late job failure rolls back Message, Run, job, events, audit, Ou
   );
   assert.equal(await db.selectFrom("agent_runs").selectAll().where("tenant_id", "=", setup.context.tenantId).execute().then((rows) => rows.length), 0);
   assert.equal(await db.selectFrom("messages").selectAll().where("tenant_id", "=", setup.context.tenantId).execute().then((rows) => rows.length), 0);
-  assert.equal(await db.selectFrom("worker_jobs").selectAll().where("tenant_id", "=", setup.context.tenantId).execute().then((rows) => rows.length), 0);
+  assert.equal(await db.selectFrom("worker_jobs").selectAll()
+    .where("tenant_id", "=", setup.context.tenantId).where("job_kind", "=", "execute_agent_run")
+    .execute().then((rows) => rows.length), 0);
   assert.equal(await db.selectFrom("idempotency_records").selectAll().where("tenant_id", "=", setup.context.tenantId).where("idempotency_key", "=", request.idempotency_key).execute().then((rows) => rows.length), 0);
   assert.equal(await db.selectFrom("product_events").selectAll().where("tenant_id", "=", setup.context.tenantId).execute().then((rows) => rows.length), before.events);
   assert.equal(await db.selectFrom("audit_events").selectAll().where("tenant_id", "=", setup.context.tenantId).execute().then((rows) => rows.length), before.audits);

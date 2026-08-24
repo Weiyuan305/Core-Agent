@@ -9,6 +9,7 @@ import test from "node:test";
 import {
   canonicalSupervisorRequestHash,
   type SupervisorResponseV1,
+  type SupervisorResponseV2,
 } from "@core-agent/runtime-core";
 
 import { OperationJournal } from "../src/operation-journal.js";
@@ -84,6 +85,39 @@ function response(operationId = request().operation_id): SupervisorResponseV1 {
       health: "healthy",
       image_ref: imageRef,
       private_origin: "http://172.30.0.7:8642",
+    },
+  };
+}
+
+function capabilityInspect(operationId = "operation_journal_capability") {
+  const data = {
+    protocol_version: 2 as const,
+    operation_id: operationId,
+    kind: "inspect" as const,
+    tenant_id: "tenant_a",
+    runtime_id: "runtime_a",
+    generation: 2,
+    capability_manifest_digest: `sha256:${"b".repeat(64)}` as const,
+  };
+  return { ...data, request_hash: canonicalSupervisorRequestHash(data) };
+}
+
+function capabilityResponse(operationId = capabilityInspect().operation_id): SupervisorResponseV2 {
+  return {
+    protocol_version: 2,
+    operation_id: operationId,
+    outcome: "accepted",
+    observation: {
+      tenant_id: "tenant_a",
+      runtime_id: "runtime_a",
+      generation: 2,
+      exists: true,
+      lifecycle: "running",
+      health: "healthy",
+      image_ref: imageRef,
+      private_origin: "http://172.30.0.7:8642",
+      profile_ids: ["profile_a"],
+      capability_manifest_digest: `sha256:${"b".repeat(64)}`,
     },
   };
 }
@@ -669,4 +703,23 @@ test("journal fails closed when a legacy digest-scoped reservation is present", 
   );
   assert.equal(executions, 0);
   assert.equal((await lstat(lockPath)).isFile(), true);
+});
+
+test("journal durably replays protocol v2 observations and rejects cross-protocol operation reuse", async () => {
+  const value = capabilityInspect();
+  const first = await new OperationJournal({ directory: journalRoot }).run(value, async () => capabilityResponse());
+  assert.deepEqual(first, capabilityResponse());
+
+  let replayDispatches = 0;
+  const replay = await new OperationJournal({ directory: journalRoot }).run(value, async () => {
+    replayDispatches += 1;
+    return capabilityResponse();
+  });
+  assert.deepEqual(replay, capabilityResponse());
+  assert.equal(replayDispatches, 0);
+
+  const crossProtocol = requestFor(value.operation_id, 2);
+  const conflictResponse = await new OperationJournal({ directory: journalRoot }).run(crossProtocol, async () => response(value.operation_id));
+  assert.equal(conflictResponse.protocol_version, 1);
+  assert.equal(conflictResponse.outcome, "rejected");
 });

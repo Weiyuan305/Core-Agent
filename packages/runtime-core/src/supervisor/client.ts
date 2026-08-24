@@ -7,8 +7,12 @@ import {
   encodeSupervisorFrame,
   validateSupervisorRequest,
   validateSupervisorResponse,
+  type SupervisorRequest,
   type SupervisorRequestV1,
+  type SupervisorRequestV2,
+  type SupervisorResponse,
   type SupervisorResponseV1,
+  type SupervisorResponseV2,
 } from "./contracts.js";
 
 export interface RuntimeSupervisorClientOptions {
@@ -44,7 +48,9 @@ export class RuntimeSupervisorClient {
     this.#timeoutMs = timeoutMs;
   }
 
-  public async execute(request: SupervisorRequestV1, signal?: AbortSignal): Promise<SupervisorResponseV1> {
+  public execute(request: SupervisorRequestV1, signal?: AbortSignal): Promise<SupervisorResponseV1>;
+  public execute(request: SupervisorRequestV2, signal?: AbortSignal): Promise<SupervisorResponseV2>;
+  public async execute(request: SupervisorRequest, signal?: AbortSignal): Promise<SupervisorResponse> {
     const validated = validateSupervisorRequest(request);
     const frame = encodeSupervisorFrame(validated);
     const socket = createConnection({ path: this.#socketPath, allowHalfOpen: true });
@@ -57,8 +63,8 @@ export class RuntimeSupervisorClient {
     }
   }
 
-  async #exchange(socket: Socket, frame: Buffer, signal?: AbortSignal): Promise<SupervisorResponseV1> {
-    return new Promise<SupervisorResponseV1>((resolve, reject) => {
+  async #exchange(socket: Socket, frame: Buffer, signal?: AbortSignal): Promise<SupervisorResponse> {
+    return new Promise<SupervisorResponse>((resolve, reject) => {
       const chunks: Buffer[] = [];
       let total = 0;
       let settled = false;
@@ -69,7 +75,7 @@ export class RuntimeSupervisorClient {
         signal?.removeEventListener("abort", onAbort);
         socket.removeAllListeners();
       };
-      const finish = (error?: Error, response?: SupervisorResponseV1) => {
+      const finish = (error?: Error, response?: SupervisorResponse) => {
         if (settled) return;
         settled = true;
         cleanup();

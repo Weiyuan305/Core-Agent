@@ -230,7 +230,8 @@ export async function resolveProfileSnapshotInTransaction(
   const generation = Number(generationRow.maximum) + 1;
   if (!Number.isSafeInteger(generation)) throw new DomainError("INTERNAL_ERROR", "Runtime projection generation overflow");
   const projectionId = derivedId("capability_projection", input.tenantId, input.profileId, String(generation), snapshotId);
-  const projectionReleaseId = effective.sourceReleaseIds.length === 1 ? effective.sourceReleaseIds[0]! : null;
+  const projectionReleaseId = input.candidateReleaseId
+    ?? (effective.sourceReleaseIds.length === 1 ? effective.sourceReleaseIds[0]! : null);
   await sql`
     insert into capability_runtime_projections (
       projection_id, tenant_id, profile_id, snapshot_id, snapshot_version, evaluated_at,
@@ -246,6 +247,26 @@ export async function resolveProfileSnapshotInTransaction(
       and snapshot.profile_id = ${input.profileId}
       and snapshot.snapshot_id = ${snapshotId}
   `.execute(input.trx);
+  await input.trx.insertInto("worker_jobs").values({
+    tenant_id: input.tenantId,
+    job_id: derivedId("job_capability_projection", projectionId),
+    job_kind: "reconcile_capability_projection",
+    status: "queued",
+    attempt_count: 0,
+    max_attempts: 5,
+    lease_owner: null,
+    lease_expires_at: null,
+    next_attempt_at: new Date(snapshot.evaluated_at),
+    payload_ref: projectionId,
+    runtime_command: null,
+    target_command_version: null,
+    effect_state: "pre_effect",
+    last_error_summary: null,
+    run_id: null,
+    container_id: null,
+    created_at: new Date(snapshot.evaluated_at),
+    updated_at: new Date(snapshot.evaluated_at),
+  }).onConflict((conflict) => conflict.columns(["tenant_id", "job_id"]).doNothing()).execute();
 
   const snapshotRef: EntitlementSnapshotRef = Object.freeze({
     snapshot_id: snapshotId,

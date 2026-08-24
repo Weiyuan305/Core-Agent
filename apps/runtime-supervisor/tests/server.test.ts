@@ -164,7 +164,10 @@ function buildServer(
     socketPath,
     journal: new OperationJournal({ directory: join(temporaryRoot, "journal") }),
     validateRequest: validateSupervisorRequest,
-    execute,
+    execute: async (request, signal) => {
+      if (request.protocol_version !== 1) throw new Error("unexpected protocol v2 request");
+      return execute(request, signal);
+    },
     ...options,
   });
 }

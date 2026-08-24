@@ -1,6 +1,6 @@
 {
   "runtimeCorePostgres": {
-    "testCount": 428,
+    "testCount": 434,
     "suitePaths": [
       "tests/migrations.test.ts",
       "tests/entitlement-schema.test.ts",
@@ -11,6 +11,7 @@
       "tests/b2b-seat-concurrency.test.ts",
       "tests/effective-capabilities.test.ts",
       "tests/snapshot-immutability.test.ts",
+      "tests/capability-projections.test.ts",
       "tests/entitlement-admission.test.ts",
       "tests/revocation-semantics.test.ts",
       "tests/tenant-isolation.test.ts",

@@ -36,13 +36,19 @@ test("duplicate provisioning creates one tenant runtime job and Supervisor opera
   await harness.worker.untilRuntimeReady(provisioned.runtime_id);
 
   const tenantId = provisioned.tenant_id;
-  for (const table of ["tenants", "runtime_containers", "worker_jobs"] as const) {
+  for (const table of ["tenants", "runtime_containers"] as const) {
     const row = await harness.db.selectFrom(table)
       .select(({ fn }) => fn.countAll<string>().as("count"))
       .where("tenant_id", "=", tenantId)
       .executeTakeFirstOrThrow();
     assert.equal(row.count, "1", table);
   }
+  const provisionJobs = await harness.db.selectFrom("worker_jobs")
+    .select(({ fn }) => fn.countAll<string>().as("count"))
+    .where("tenant_id", "=", tenantId)
+    .where("job_kind", "=", "provision_runtime")
+    .executeTakeFirstOrThrow();
+  assert.equal(provisionJobs.count, "1", "provision_runtime jobs");
   assert.equal(
     harness.fakeSupervisor.requests.filter(
       (request) => request.kind === "provision"

@@ -126,12 +126,23 @@ async function readCurrentSnapshotAuthority(
     .where("tenant_id", "=", input.tenantId)
     .where("container_id", "=", deriveRuntimeContainerId(input.tenantId))
     .executeTakeFirst();
+  const currentRuntimeProof = runtime?.capability_manifest_digest === null || runtime === undefined
+    ? undefined
+    : await input.trx.selectFrom("capability_runtime_projections").select("projection_id")
+      .where("tenant_id", "=", input.tenantId)
+      .where("runtime_generation", "=", String(runtime.generation))
+      .where("capability_manifest_digest", "=", runtime.capability_manifest_digest)
+      .where("status", "=", "available")
+      .executeTakeFirst();
+  // An available projection records exact proof for its immutable generation. A later
+  // healthy non-executing manifest generation may belong to another Profile in the
+  // same company Runtime, so it must not revoke this already-proven Profile authority.
   const current = projection?.status === "available"
     && runtime?.desired_state === "running"
     && runtime.observed_state === "ready"
     && runtime.health_status === "healthy"
-    && runtime.generation === safeVersion(projection.runtime_generation)
-    && runtime.capability_manifest_digest === projection.capability_manifest_digest;
+    && runtime.generation >= safeVersion(projection.runtime_generation)
+    && currentRuntimeProof !== undefined;
   return Object.freeze({
     tenantId: input.tenantId,
     profileId: input.profileId,

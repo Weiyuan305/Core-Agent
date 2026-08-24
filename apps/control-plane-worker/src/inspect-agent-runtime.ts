@@ -5,16 +5,21 @@ import {
   HermesStreamError,
   validateManagedHermesOrigin,
   type LifecycleRuntimeCommandDataV1,
-  type RuntimeSupervisorClient,
   type StoredAgentRunExecutionFacts,
+  type SupervisorRequestV1,
+  type SupervisorResponseV1,
 } from "@core-agent/runtime-core";
+
+export interface AgentRuntimeSupervisorPort {
+  execute(request: SupervisorRequestV1, signal?: AbortSignal): Promise<SupervisorResponseV1>;
+}
 
 function operationId(jobId: string, attemptCount: number): string {
   return `op_${createHash("sha256").update(`${jobId}:${attemptCount}:inspect-agent-run-runtime`, "utf8").digest("hex").slice(0, 48)}`;
 }
 
 export async function inspectAgentRunRuntime(
-  supervisor: Pick<RuntimeSupervisorClient, "execute">,
+  supervisor: AgentRuntimeSupervisorPort,
   facts: StoredAgentRunExecutionFacts,
   attemptCount: number,
   signal: AbortSignal,

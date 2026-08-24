@@ -1,11 +1,13 @@
 import {
   claimOutboxWakeups, claimPlatformWorkerJobs, completeJob, createRedactor, failJob, failOutbox,
+  deriveRuntimeContainerId,
   finalizeAccountDeletion, heartbeatJob, loadAccountDeletionFinalization, markJobEffectDispatched,
   markOutboxDelivered, projectPlatformMemberships, rescheduleJob, rescheduleOutbox, retryDecision,
   OUTBOX_MAX_ATTEMPTS,
   withAgentRunConversationLock, withRuntimeAdvisoryLock, WorkerAgentRunRepository, WorkerRuntimeRepository,
+  CapabilityProjectionRepository,
   type ClaimedJob, type HermesChatInput, type ProviderCatalog, type Redactor, type RuntimeDatabase,
-  type RuntimeSupervisorClient, type SecretStore,
+  type SecretStore, type SupervisorRequest, type SupervisorResponse,
 } from "@core-agent/runtime-core";
 import { sql, type Kysely } from "kysely";
 
@@ -15,6 +17,7 @@ import { handleExecuteAgentRun } from "./handlers/execute-agent-run.js";
 import { handleFinalizeAccountDeletion } from "./handlers/finalize-account-deletion.js";
 import { handleProjectPlatformMemberships } from "./handlers/project-platform-memberships.js";
 import { buildProvisionRuntimeRequest, handleProvisionRuntime, validatePrivateHermesOrigin } from "./handlers/provision-runtime.js";
+import { handleReconcileCapabilityProjection } from "./handlers/reconcile-capability-projection.js";
 import { handleReconcileRuntime } from "./handlers/reconcile-runtime.js";
 import { inspectAgentRunRuntime } from "./inspect-agent-runtime.js";
 import { handleNonReconcileRecovery } from "./recovery-boundary.js";
@@ -22,7 +25,7 @@ import { runWorkerLoop } from "./worker-loop.js";
 
 export const implementedWorkerJobKinds = [
   "provision_runtime", "reconcile_runtime", "execute_agent_run", "dispatch_outbox",
-  "project_platform_memberships", "finalize_account_deletion",
+  "project_platform_memberships", "finalize_account_deletion", "reconcile_capability_projection",
 ] as const;
 
 export function workerClaimJobKinds(
@@ -52,7 +55,15 @@ export interface WorkerIdentityProviderDeletionClient {
   inspectProviderSubject(providerSubject: string): Promise<"present" | "absent">;
   deleteProviderSubject(providerSubject: string): Promise<void>;
 }
-export interface WorkerRepositories { readonly runtimes: WorkerRuntimeRepository; readonly agentRuns: WorkerAgentRunRepository; readonly redactor: Redactor }
+export interface WorkerSupervisorClient {
+  execute(request: SupervisorRequest, signal?: AbortSignal): Promise<SupervisorResponse>;
+}
+export interface WorkerRepositories {
+  readonly runtimes: WorkerRuntimeRepository;
+  readonly capabilityProjections: CapabilityProjectionRepository;
+  readonly agentRuns: WorkerAgentRunRepository;
+  readonly redactor: Redactor;
+}
 export interface WorkerDependencies {
   readonly db: Kysely<RuntimeDatabase>;
   readonly identityDb?: Kysely<RuntimeDatabase>;
@@ -61,7 +72,7 @@ export interface WorkerDependencies {
   readonly logger: WorkerLogger;
   readonly repositories: WorkerRepositories;
   readonly providerCatalog: ProviderCatalog;
-  readonly supervisorClient: Pick<RuntimeSupervisorClient, "execute">;
+  readonly supervisorClient: WorkerSupervisorClient;
   readonly ingressSecretStore: SecretStore;
   readonly hermesClient: HermesReadinessClient;
   readonly executionHermesClient: HermesExecutionClient;
@@ -132,6 +143,68 @@ async function dispatchRuntimeJob(dependencies: WorkerDependencies, job: Claimed
       })).kind === "updated",
     }, job, signal);
   }
+  if (job.jobKind === "reconcile_capability_projection") {
+    const owned = {
+      tenantId: job.tenantId,
+      jobId: job.jobId,
+      workerId: dependencies.workerId,
+      attemptCount: job.attemptCount,
+      projectionId: job.payloadRef,
+    };
+    return withRuntimeAdvisoryLock(dependencies.db, job.tenantId, deriveRuntimeContainerId(job.tenantId), () => (
+      handleReconcileCapabilityProjection({
+        prepare: async () => {
+          const prepared = await dependencies.repositories.capabilityProjections.prepare(owned);
+          if (prepared.kind !== "ready") return prepared;
+          const runtime = await dependencies.repositories.runtimes.loadProvisionFacts(
+            job.tenantId,
+            prepared.facts.runtimeId,
+            dependencies.providerCatalog,
+          );
+          if (runtime.imageRef !== prepared.facts.imageRef) throw new Error("Capability projection Runtime image changed");
+          return {
+            kind: "ready" as const,
+            facts: Object.freeze({
+              ...prepared.facts,
+              platform: runtime.platform,
+              volumeRef: runtime.volumeRef,
+              ingressSecretRef: runtime.ingressSecretRef,
+              profiles: runtime.profiles,
+            }),
+          };
+        },
+        markEffectDispatched: async () => (
+          await markJobEffectDispatched(dependencies.db, {
+            tenantId: job.tenantId,
+            jobId: job.jobId,
+            workerId: dependencies.workerId,
+            attemptCount: job.attemptCount,
+          })
+        ).kind === "updated",
+        supervisor: async (request, operationSignal) => {
+          const response = await dependencies.supervisorClient.execute(request, operationSignal);
+          if (response.protocol_version !== 2) throw new Error("Capability projection Supervisor protocol mismatch");
+          return response;
+        },
+        complete: (_projectionJob, facts, observation) => dependencies.repositories.capabilityProjections.complete(owned, facts, observation),
+        retry: async (_projectionJob, failure) => {
+          const retry = nextAttempt(dependencies, job, failure.summary);
+          return dependencies.repositories.capabilityProjections.retry(owned, retry.summary, retry.at);
+        },
+        fail: (_projectionJob, failure) => dependencies.repositories.capabilityProjections.fail(
+          owned,
+          failure.reasonCode,
+          failure.summary,
+        ),
+      }, {
+        tenantId: job.tenantId,
+        jobId: job.jobId,
+        attemptCount: job.attemptCount,
+        maxAttempts: job.maxAttempts,
+        effectState: job.effectState,
+      }, signal)
+    ));
+  }
   const ref = jobRef(dependencies, job);
   if (job.jobKind === "provision_runtime") return withRuntimeAdvisoryLock(dependencies.db, job.tenantId, job.payloadRef, async () => {
     const recovery = await handleNonReconcileRecovery({
@@ -142,7 +215,11 @@ async function dispatchRuntimeJob(dependencies: WorkerDependencies, job: Claimed
     return handleProvisionRuntime({
       transitionToProvisioning: () => dependencies.repositories.runtimes.beginProvision(ref),
       loadFacts: () => dependencies.repositories.runtimes.loadProvisionFacts(job.tenantId, job.payloadRef, dependencies.providerCatalog),
-      supervisor: (request, operationSignal) => dependencies.supervisorClient.execute(request, operationSignal),
+      supervisor: async (request, operationSignal) => {
+        const response = await dependencies.supervisorClient.execute(request, operationSignal);
+        if (response.protocol_version !== 1) throw new Error("Runtime provisioning Supervisor protocol mismatch");
+        return response;
+      },
       getIngressMaterial: (reference) => dependencies.ingressSecretStore.get(reference),
       probe: (input, operationSignal) => dependencies.hermesClient.probe(input, operationSignal),
       succeed: () => dependencies.repositories.runtimes.finishProvision(ref),
@@ -152,10 +229,15 @@ async function dispatchRuntimeJob(dependencies: WorkerDependencies, job: Claimed
   });
   if (job.jobKind === "reconcile_runtime") return withRuntimeAdvisoryLock(dependencies.db, job.tenantId, job.payloadRef, () => handleReconcileRuntime({
     loadFacts: () => dependencies.repositories.runtimes.loadReconcileFacts(job.tenantId, job.payloadRef),
-    supervisor: (request, operationSignal) => dependencies.supervisorClient.execute(request, operationSignal),
+    supervisor: async (request, operationSignal) => {
+      const response = await dependencies.supervisorClient.execute(request, operationSignal);
+      if (response.protocol_version !== 1) throw new Error("Runtime reconcile Supervisor protocol mismatch");
+      return response;
+    },
     reprovision: async (_job, operationSignal) => {
       const facts = await dependencies.repositories.runtimes.loadProvisionFacts(job.tenantId, job.payloadRef, dependencies.providerCatalog);
       const response = await dependencies.supervisorClient.execute(buildProvisionRuntimeRequest(facts, `${job.jobId}:effect-reprovision`), operationSignal);
+      if (response.protocol_version !== 1) throw new Error("Runtime reprovision Supervisor protocol mismatch");
       if (response.outcome !== "accepted") return response;
       const observation = response.observation;
       if (observation.tenant_id !== facts.tenantId || observation.runtime_id !== facts.runtimeId || observation.generation !== facts.generation || observation.image_ref !== facts.imageRef || !observation.exists || observation.lifecycle !== "running") throw new Error("Supervisor reprovision observation does not match stored runtime identity");
@@ -184,7 +266,13 @@ async function dispatchRuntimeJob(dependencies: WorkerDependencies, job: Claimed
     { tenantId: job.tenantId, runId: job.payloadRef, signal },
     () => handleExecuteAgentRun({
     begin: (runJob) => dependencies.repositories.agentRuns.begin(runJob),
-    inspectRuntime: (facts, operationSignal) => inspectAgentRunRuntime(dependencies.supervisorClient, facts, job.attemptCount, operationSignal),
+    inspectRuntime: (facts, operationSignal) => inspectAgentRunRuntime({
+      execute: async (request, inspectSignal) => {
+        const response = await dependencies.supervisorClient.execute(request, inspectSignal);
+        if (response.protocol_version !== 1) throw new Error("Agent Runtime inspect Supervisor protocol mismatch");
+        return response;
+      },
+    }, facts, job.attemptCount, operationSignal),
     markDispatched: (runJob) => dependencies.repositories.agentRuns.markDispatched(runJob),
     stream: (facts, origin, operationSignal) => ({ async *[Symbol.asyncIterator]() {
       const material = await dependencies.ingressSecretStore.get(facts.ingressSecretRef);
@@ -249,5 +337,10 @@ export function createWorkerRuntimeRepositories(
   providerCatalog: ProviderCatalog,
   redactor: Redactor = createRedactor([]),
 ): WorkerRepositories {
-  return { runtimes: new WorkerRuntimeRepository(db, redactor), agentRuns: new WorkerAgentRunRepository(db, providerCatalog, redactor), redactor };
+  return {
+    runtimes: new WorkerRuntimeRepository(db, redactor),
+    capabilityProjections: new CapabilityProjectionRepository(db),
+    agentRuns: new WorkerAgentRunRepository(db, providerCatalog, redactor),
+    redactor,
+  };
 }
