@@ -13,6 +13,7 @@
       "tests/snapshot-immutability.test.ts",
       "tests/capability-projections.test.ts",
       "tests/entitlement-admission.test.ts",
+      "tests/entitlement-runtime-lifecycle.test.ts",
       "tests/revocation-semantics.test.ts",
       "tests/tenant-isolation.test.ts",
       "tests/optimistic-concurrency.test.ts",

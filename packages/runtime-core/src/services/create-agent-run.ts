@@ -26,8 +26,10 @@ import {
 } from "../domain/idempotency.js";
 import { appendAuditEvent, appendProductEvents } from "../repositories/events.js";
 import { ResourceRepositories } from "../repositories/index.js";
+import { touchRuntimeActivity } from "../repositories/entitlements/runtime-activity.js";
 import { deriveRuntimeContainerId } from "./provision-tenant.js";
 import { loadCurrentSnapshotAuthority } from "./entitlements/current-authority.js";
+import { ensureRuntimeWakeIntent } from "./entitlements/runtime-lifecycle.js";
 
 export interface CreateAgentRunDependencies {
   readonly db: Kysely<RuntimeDatabase>;
@@ -163,7 +165,7 @@ export async function createAgentRun(
   const messageId = deriveMessageId(tenantId, conversationId, request.input_message.client_message_id);
 
   try {
-    return await serializable(dependencies.db, async (trx) => {
+    const outcome = await serializable(dependencies.db, async (trx) => {
       const now = dependencies.now?.() ?? new Date();
       const nowIso = now.toISOString();
       const tenant = await trx.selectFrom("tenants").select("status")
@@ -187,18 +189,23 @@ export async function createAgentRun(
         || !membership.roles.includes(context.effectiveRole)
       ) notFound();
       const tenantTransaction: TenantTransaction = { tenantId, trx };
-      const admission = await beginIdempotentCommand<AgentRun>(tenantTransaction, {
-        key: request.idempotency_key,
-        payloadHash: request.payload_hash,
-        operation,
-        now,
-        expiresAt: new Date(now.getTime() + dayMs),
-      });
-      if (admission.kind === "replay") {
-        if (admission.resultRef !== runId) {
+      const priorAdmission = await trx.selectFrom("idempotency_records")
+        .select(["payload_hash", "operation", "status", "result_ref", "response_json"])
+        .where("tenant_id", "=", tenantId)
+        .where("idempotency_key", "=", request.idempotency_key)
+        .forUpdate()
+        .executeTakeFirst();
+      if (priorAdmission !== undefined) {
+        if (priorAdmission.payload_hash !== request.payload_hash || priorAdmission.operation !== operation) {
+          throw new DomainError("IDEMPOTENCY_CONFLICT", "Idempotency key payload mismatch");
+        }
+        if (priorAdmission.status !== "completed") {
+          throw new DomainError("IDEMPOTENCY_CONFLICT", "AgentRun command is already in progress");
+        }
+        if (priorAdmission.result_ref !== runId || priorAdmission.response_json === null) {
           throw new DomainError("INTERNAL_ERROR", "AgentRun replay result reference is invalid");
         }
-        assertReplay(admission.response, {
+        assertReplay(priorAdmission.response_json, {
           tenantId,
           conversationId,
           runId,
@@ -206,10 +213,7 @@ export async function createAgentRun(
           idempotencyKey: request.idempotency_key,
           ...(request.parent_run_id === undefined ? {} : { parentRunId: request.parent_run_id }),
         });
-        return admission.response;
-      }
-      if (admission.kind === "in_progress") {
-        throw new DomainError("IDEMPOTENCY_CONFLICT", "AgentRun command is already in progress");
+        return { kind: "admitted" as const, response: priorAdmission.response_json };
       }
       if (conversation.status !== "active") notFound();
       const profile = await trx.selectFrom("profiles")
@@ -231,26 +235,73 @@ export async function createAgentRun(
         || activeSessions[0]!.expires_at.getTime() <= now.getTime()
         || activeSessions[0]!.hermes_session_ref === null
       ) notFound();
+      const runtimeId = deriveRuntimeContainerId(tenantId);
       const runtime = await trx.selectFrom("runtime_containers")
         .select(["desired_state", "observed_state", "health_status"])
         .where("tenant_id", "=", tenantId)
-        .where("container_id", "=", deriveRuntimeContainerId(tenantId))
-        .forShare().executeTakeFirst();
+        .where("container_id", "=", runtimeId)
+        .executeTakeFirst();
       if (runtime === undefined) notFound();
-      if (runtime.desired_state !== "running" || runtime.observed_state !== "ready" || runtime.health_status !== "healthy") {
-        runtimeNotReady();
-      }
+      const executionReady = runtime.desired_state === "running"
+        && runtime.observed_state === "ready"
+        && runtime.health_status === "healthy";
+      const activeWake = runtime.desired_state === "running" && runtime.observed_state === "stopped"
+        ? await trx.selectFrom("worker_jobs").select("job_id")
+          .where("tenant_id", "=", tenantId)
+          .where("job_kind", "=", "reconcile_runtime")
+          .where("runtime_command", "=", "start")
+          .where("container_id", "=", runtimeId)
+          .where("status", "in", ["queued", "running", "retrying"])
+          .limit(1)
+          .executeTakeFirst()
+        : undefined;
+      const wakeable = runtime.desired_state === "stopped" && runtime.observed_state === "stopped"
+        || activeWake !== undefined;
+      if (!executionReady && !wakeable) runtimeNotReady();
       const entitlementAuthority = await loadCurrentSnapshotAuthority({
         trx,
         tenantId,
         profileId: conversation.profile_id,
         now,
+        allowStoppedRuntime: wakeable,
       });
       if (!entitlementAuthority.current) {
         if (entitlementAuthority.state === "preparing") {
           throw new DomainError("SERVICE_PREPARING", "Capability service is preparing", true);
         }
         throw new DomainError("ENTITLEMENT_DENIED", "Current entitlement authority is unavailable");
+      }
+      const wake = await ensureRuntimeWakeIntent(trx, {
+        tenantId,
+        runtimeId,
+      });
+      if (wake === "not_found") notFound();
+      if (wake === "preparing") {
+        return { kind: "preparing" as const };
+      }
+      const admission = await beginIdempotentCommand<AgentRun>(tenantTransaction, {
+        key: request.idempotency_key,
+        payloadHash: request.payload_hash,
+        operation,
+        now,
+        expiresAt: new Date(now.getTime() + dayMs),
+      });
+      if (admission.kind === "replay") {
+        if (admission.resultRef !== runId) {
+          throw new DomainError("INTERNAL_ERROR", "AgentRun replay result reference is invalid");
+        }
+        assertReplay(admission.response, {
+          tenantId,
+          conversationId,
+          runId,
+          clientRequestId: request.client_request_id,
+          idempotencyKey: request.idempotency_key,
+          ...(request.parent_run_id === undefined ? {} : { parentRunId: request.parent_run_id }),
+        });
+        return { kind: "admitted" as const, response: admission.response };
+      }
+      if (admission.kind === "in_progress") {
+        throw new DomainError("IDEMPOTENCY_CONFLICT", "AgentRun command is already in progress");
       }
       if (request.parent_run_id !== undefined) {
         const parent = await trx.selectFrom("agent_runs").select(["run_id", "conversation_id", "status"])
@@ -330,6 +381,7 @@ export async function createAgentRun(
         created_at: now,
         updated_at: now,
       }).execute();
+      await touchRuntimeActivity(trx, tenantId);
       let studentRef: StudentRef | undefined;
       let caseRef: CaseRef | undefined;
       if (conversation.student_ref !== null) {
@@ -401,8 +453,12 @@ export async function createAgentRun(
         response: run,
         updatedAt: now,
       });
-      return run;
+      return { kind: "admitted" as const, response: run };
     });
+    if (outcome.kind === "preparing") {
+      throw new DomainError("SERVICE_PREPARING", "Managed Runtime wake is preparing", true);
+    }
+    return outcome.response;
   } catch (error) {
     if (isClientIdentityUniqueConflict(error)) identityConflict();
     throw error;

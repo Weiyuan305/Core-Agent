@@ -558,3 +558,11 @@ export {
   type CreateAgentRunContext,
   type CreateAgentRunDependencies,
 } from "./services/create-agent-run.js";
+export {
+  enqueueIdleB2cRuntimeStopJobs,
+  queueRuntimeLifecycleCommand,
+  RuntimeActivityRepository,
+  touchRuntimeActivity,
+  type StopIdleRuntimeResult,
+} from "./repositories/entitlements/runtime-activity.js";
+export { ensureRuntimeWakeIntent } from "./services/entitlements/runtime-lifecycle.js";

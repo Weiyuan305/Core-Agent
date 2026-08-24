@@ -24,6 +24,8 @@ export interface LoadCurrentSnapshotAuthorityInput {
   readonly tenantId: string;
   readonly profileId: string;
   readonly now: Date;
+  /** Admission-only recovery of an already-proven immutable generation. */
+  readonly allowStoppedRuntime?: boolean;
 }
 
 export interface RequireCurrentSnapshotAuthorityInput {
@@ -137,10 +139,14 @@ async function readCurrentSnapshotAuthority(
   // An available projection records exact proof for its immutable generation. A later
   // healthy non-executing manifest generation may belong to another Profile in the
   // same company Runtime, so it must not revoke this already-proven Profile authority.
-  const current = projection?.status === "available"
-    && runtime?.desired_state === "running"
+  const runtimeExecutionReady = runtime?.desired_state === "running"
     && runtime.observed_state === "ready"
-    && runtime.health_status === "healthy"
+    && runtime.health_status === "healthy";
+  const stoppedGenerationCanWake = input.allowStoppedRuntime === true
+    && runtime?.observed_state === "stopped"
+    && (runtime.desired_state === "stopped" || runtime.desired_state === "running");
+  const current = projection?.status === "available"
+    && (runtimeExecutionReady || stoppedGenerationCanWake)
     && runtime.generation >= safeVersion(projection.runtime_generation)
     && currentRuntimeProof !== undefined;
   return Object.freeze({

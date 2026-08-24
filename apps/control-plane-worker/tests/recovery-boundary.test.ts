@@ -34,11 +34,13 @@ test("production Worker claims only job kinds whose normal and recovery handlers
   assert.deepEqual(implementedWorkerJobKinds, [
     "provision_runtime", "reconcile_runtime", "execute_agent_run", "dispatch_outbox",
     "project_platform_memberships", "finalize_account_deletion", "reconcile_capability_projection",
+    "stop_idle_b2c_runtime",
   ]);
   assert.equal((implementedWorkerJobKinds as readonly string[]).includes("execute_agent_run"), true);
   assert.equal((implementedWorkerJobKinds as readonly string[]).includes("project_platform_memberships"), true);
   assert.equal((implementedWorkerJobKinds as readonly string[]).includes("finalize_account_deletion"), true);
   assert.equal((implementedWorkerJobKinds as readonly string[]).includes("reconcile_capability_projection"), true);
+  assert.equal((implementedWorkerJobKinds as readonly string[]).includes("stop_idle_b2c_runtime"), true);
 });
 
 test("final non-reconcile recovery reports lease loss instead of claiming terminal ownership", async () => {

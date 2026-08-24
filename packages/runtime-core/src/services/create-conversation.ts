@@ -26,6 +26,7 @@ import {
 } from "../domain/idempotency.js";
 import { appendAuditEvent, appendProductEvents } from "../repositories/events.js";
 import { ResourceRepositories } from "../repositories/index.js";
+import { touchRuntimeActivity } from "../repositories/entitlements/runtime-activity.js";
 import { deriveRuntimeContainerId } from "./provision-tenant.js";
 import { loadCurrentSnapshotAuthority } from "./entitlements/current-authority.js";
 
@@ -232,6 +233,7 @@ export async function createConversation(
       created_at: nowIso,
       updated_at: nowIso,
     });
+    await touchRuntimeActivity(trx, tenantId);
     const eventId = deriveId("event_conversation_created", tenantId, request.idempotency_key);
     await appendProductEvents(tenantTransaction, {
       streamId: `conversation_${conversationId}`,
