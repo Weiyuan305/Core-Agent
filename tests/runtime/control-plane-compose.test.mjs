@@ -944,6 +944,11 @@ test("CI preserves contracts and separates deterministic runtime gates", async (
     30,
     "compose must reserve enough time for both serial PostgreSQL topology suites",
   );
+  assert.equal(
+    workflow.jobs.unit["timeout-minutes"],
+    30,
+    "unit must reserve enough time for every workspace build and test suite",
+  );
   const workflowSource = await source(".github/workflows/runtime-contract.yml");
   for (const uses of workflowSource.matchAll(/^\s*uses:\s*([^\s#]+).*$/gmu)) {
     assert.match(uses[1], /@[a-f0-9]{40}$/u);
