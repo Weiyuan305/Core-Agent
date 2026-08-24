@@ -93,6 +93,49 @@ export async function seedPlatformAuthority(suffix = "primary"): Promise<TestAut
   });
 }
 
+export async function seedCompanyAdminAuthority(
+  tenantId: string,
+  actorIndex = 1,
+  suffix = "primary",
+): Promise<TestAuthority> {
+  const actorId = `actor_${tenantId}_${actorIndex}`;
+  const authSubjectId = `subject_company_${suffix}`;
+  const sessionId = `session_company_${suffix}`;
+  await entitlementTestPool.query(
+    `insert into auth_subjects (
+       auth_subject_id, actor_id, provider, provider_subject, provider_identity_kind,
+       verified_at, status, resource_version, created_at, updated_at
+     ) values ($1, $2, 'supabase', $3, 'email_password', $4, 'active', 1, $4, $4)`,
+    [authSubjectId, actorId, `provider_company_${suffix}`, entitlementTestNow],
+  );
+  await entitlementTestPool.query(
+    `insert into core_sessions (
+       session_id, secret_digest, csrf_digest, actor_id, auth_subject_id, client_kind, status,
+       device_label, created_at, last_seen_at, idle_expires_at, absolute_expires_at,
+       reauthenticated_at, revocation_reason, resource_version, updated_at
+     ) values (
+       $1, decode($2, 'hex'), null, $3, $4, 'web', 'active', 'Company entitlement test',
+       $5, $5, $6, $7, $5, null, 1, $5
+     )`,
+    [
+      sessionId,
+      digestHex(sessionId),
+      actorId,
+      authSubjectId,
+      entitlementTestNow,
+      new Date(entitlementTestNow.getTime() + 30 * 60_000),
+      new Date(entitlementTestNow.getTime() + 24 * 60 * 60_000),
+    ],
+  );
+  return Object.freeze({
+    performingActorId: actorId,
+    performingAuthSubjectId: authSubjectId,
+    performingSessionId: sessionId,
+    requestId: `request_company_${suffix}`,
+    traceId: `trace_company_${suffix}`,
+  });
+}
+
 export async function seedTenant(
   tenantId: string,
   tenantMode: "b2b" | "b2c",
@@ -193,4 +236,3 @@ export async function seedPublishedPack(
   );
   return Object.freeze({ packProductId: productId, packVersionId, capabilityId, capabilityVersionId });
 }
-

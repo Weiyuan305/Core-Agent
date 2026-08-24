@@ -208,6 +208,19 @@ export {
 } from "./services/entitlements/expire-entitlements.js";
 export type { EntitlementCommandContext } from "./services/entitlements/authority.js";
 export {
+  assignPackSeat,
+  type AssignPackSeatDependencies,
+  type PackSeatAssignmentResult,
+} from "./services/entitlements/assign-pack-seat.js";
+export {
+  revokePackSeat,
+  type RevokePackSeatDependencies,
+} from "./services/entitlements/revoke-pack-seat.js";
+export type {
+  AssignmentCommandDependencies,
+  AssignmentResolverInput,
+} from "./services/entitlements/assignment-authority.js";
+export {
   assertAgentRunTransition,
   assertRuntimeObservedTransition,
   redactedFailureSummary,

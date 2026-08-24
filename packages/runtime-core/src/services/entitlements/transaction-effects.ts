@@ -113,3 +113,73 @@ export async function appendEntitlementLifecycleEffects(
     }).onConflict((conflict) => conflict.columns(["tenant_id", "job_id"]).doNothing()).execute();
   }
 }
+
+/** Appends customer-authority assignment evidence without fabricating platform authority. */
+export async function appendCustomerEntitlementLifecycleEffects(
+  trx: Transaction<RuntimeDatabase>,
+  membershipId: string,
+  context: EntitlementCommandContext,
+  effect: EntitlementLifecycleEffect,
+): Promise<void> {
+  await appendAuditEvent({ tenantId: effect.tenantId, trx }, {
+    schema_version: 1,
+    audit_event_id: derivedId("audit_assignment", effect.idempotencyKey, effect.operation),
+    occurred_at: effect.now.toISOString(),
+    tenant_id: effect.tenantId,
+    actor_id: context.performingActorId,
+    membership_id: membershipId,
+    effective_role: "admin",
+    action: effect.operation,
+    resource_type: effect.resourceType,
+    resource_id: effect.resourceId,
+    decision: "allowed",
+    outcome: "succeeded",
+    request_id: context.requestId,
+    trace_id: context.traceId,
+    reason_summary: "Applied a versioned company Pack seat authority change",
+    resource_version: effect.resourceVersion,
+  });
+  if (effect.eventType !== undefined && effect.eventPayload !== undefined) {
+    const eventId = derivedId("event_assignment", effect.idempotencyKey, effect.operation);
+    const event = {
+      schema_version: 1,
+      event_id: eventId,
+      occurred_at: effect.now.toISOString(),
+      tenant_id: effect.tenantId,
+      request_id: context.requestId,
+      trace_id: context.traceId,
+      correlation_id: derivedId("correlation_assignment", effect.idempotencyKey),
+      causation_id: derivedId("causation_assignment", effect.idempotencyKey),
+      ...(effect.profileId === undefined ? {} : { profile_id: effect.profileId }),
+      event_type: effect.eventType,
+      payload: effect.eventPayload,
+    } as unknown as ProductEventWithoutSequence;
+    await appendProductEvents(
+      { tenantId: effect.tenantId, trx },
+      { streamId: effect.resourceId, deliveryTarget: "internal_event_stream", events: [event] },
+    );
+  }
+  if (effect.reconcilePayloadRef !== undefined) {
+    const jobId = derivedId("job_assignment", effect.idempotencyKey, effect.operation);
+    await trx.insertInto("worker_jobs").values({
+      tenant_id: effect.tenantId,
+      job_id: jobId,
+      job_kind: "reconcile_capability_projection",
+      status: "queued",
+      attempt_count: 0,
+      max_attempts: 5,
+      lease_owner: null,
+      lease_expires_at: null,
+      next_attempt_at: effect.now,
+      payload_ref: effect.reconcilePayloadRef,
+      runtime_command: null,
+      target_command_version: null,
+      effect_state: "pre_effect",
+      last_error_summary: null,
+      run_id: null,
+      container_id: null,
+      created_at: effect.now,
+      updated_at: effect.now,
+    }).onConflict((conflict) => conflict.columns(["tenant_id", "job_id"]).doNothing()).execute();
+  }
+}
