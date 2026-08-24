@@ -939,6 +939,11 @@ test("runtime Dockerfile has locked bases and exact non-root service targets", a
 test("CI preserves contracts and separates deterministic runtime gates", async () => {
   const workflow = await yaml(".github/workflows/runtime-contract.yml");
   assert.deepEqual(Object.keys(workflow.jobs).sort(), ["compose", "contract", "integration", "postgres", "unit", "web-browser"]);
+  assert.equal(
+    workflow.jobs.compose["timeout-minutes"],
+    30,
+    "compose must reserve enough time for both serial PostgreSQL topology suites",
+  );
   const workflowSource = await source(".github/workflows/runtime-contract.yml");
   for (const uses of workflowSource.matchAll(/^\s*uses:\s*([^\s#]+).*$/gmu)) {
     assert.match(uses[1], /@[a-f0-9]{40}$/u);
