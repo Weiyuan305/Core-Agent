@@ -10,8 +10,8 @@ import {
   decodeSupervisorFrame,
   encodeSupervisorFrame,
   validateSupervisorResponse,
-  type SupervisorRequestV1,
-  type SupervisorResponseV1,
+  type SupervisorRequest,
+  type SupervisorResponse,
 } from "@core-agent/runtime-core";
 
 import {
@@ -46,12 +46,12 @@ interface HeldSingleton {
 export interface RuntimeSupervisorServerOptions {
   readonly socketPath: string;
   readonly journal: OperationJournal;
-  readonly validateRequest: (value: unknown) => SupervisorRequestV1;
+  readonly validateRequest: (value: unknown) => SupervisorRequest;
   readonly execute: (
-    request: SupervisorRequestV1,
+    request: SupervisorRequest,
     signal: AbortSignal,
     context: OperationJournalContext,
-  ) => Promise<SupervisorResponseV1>;
+  ) => Promise<SupervisorResponse>;
   readonly maximumConcurrent?: number;
   readonly admissionTimeoutMs?: number;
   readonly effectTimeoutMs?: number;
@@ -70,9 +70,9 @@ function errorCode(error: unknown): unknown {
   return descriptor !== undefined && "value" in descriptor ? descriptor.value : undefined;
 }
 
-function rejectedResponse(operationId = "invalid_request"): SupervisorResponseV1 {
+function rejectedResponse(operationId = "invalid_request", protocolVersion: 1 | 2 = 1): SupervisorResponse {
   return {
-    protocol_version: 1,
+    protocol_version: protocolVersion,
     operation_id: operationId,
     outcome: "rejected",
     code: "SUPERVISOR_REJECTED",
@@ -81,9 +81,9 @@ function rejectedResponse(operationId = "invalid_request"): SupervisorResponseV1
   };
 }
 
-function unavailableResponse(operationId: string): SupervisorResponseV1 {
+function unavailableResponse(operationId: string, protocolVersion: 1 | 2): SupervisorResponse {
   return {
-    protocol_version: 1,
+    protocol_version: protocolVersion,
     operation_id: operationId,
     outcome: "failed",
     code: "DEPENDENCY_UNAVAILABLE",
@@ -92,9 +92,9 @@ function unavailableResponse(operationId: string): SupervisorResponseV1 {
   };
 }
 
-function timeoutResponse(operationId: string): SupervisorResponseV1 {
+function timeoutResponse(operationId: string, protocolVersion: 1 | 2): SupervisorResponse {
   return {
-    protocol_version: 1,
+    protocol_version: protocolVersion,
     operation_id: operationId,
     outcome: "failed",
     code: "DEPENDENCY_TIMEOUT",
@@ -103,9 +103,9 @@ function timeoutResponse(operationId: string): SupervisorResponseV1 {
   };
 }
 
-function redactResponse(value: unknown, operationId: string): SupervisorResponseV1 {
+function redactResponse(value: unknown, operationId: string, protocolVersion: 1 | 2): SupervisorResponse {
   const response = validateSupervisorResponse(value);
-  if (response.operation_id !== operationId) throw rejectedError();
+  if (response.operation_id !== operationId || response.protocol_version !== protocolVersion) throw rejectedError();
   if (response.outcome === "accepted") return response;
   const summary = response.code === "DEPENDENCY_TIMEOUT"
     ? "Runtime Supervisor operation timed out"
@@ -494,7 +494,7 @@ export class RuntimeSupervisorServer {
 
   async #respond(socket: Socket, chunks: readonly Buffer[], total: number): Promise<void> {
     const admissionDeadlineMs = Date.now() + (this.#options.admissionTimeoutMs ?? defaultAdmissionTimeoutMs);
-    let request: SupervisorRequestV1;
+    let request: SupervisorRequest;
     try {
       request = this.#options.validateRequest(decodeSupervisorFrame(Buffer.concat(chunks, total)));
     } catch {
@@ -506,25 +506,25 @@ export class RuntimeSupervisorServer {
         this.#executeAfterAdmission(reserved, admissionDeadlineMs, context)
       ), {
         admissionDeadlineMs,
-        admissionExpiredResponse: unavailableResponse(request.operation_id),
+        admissionExpiredResponse: unavailableResponse(request.operation_id, request.protocol_version),
       });
       this.#trackActiveOperation(journalResponse);
-      const response = await this.#waitForJournalSettlement(journalResponse, request.operation_id);
-      this.#writeResponse(socket, redactResponse(response, request.operation_id));
+      const response = await this.#waitForJournalSettlement(journalResponse, request);
+      this.#writeResponse(socket, redactResponse(response, request.operation_id, request.protocol_version));
     } catch {
-      this.#writeResponse(socket, unavailableResponse(request.operation_id));
+      this.#writeResponse(socket, unavailableResponse(request.operation_id, request.protocol_version));
     }
   }
 
   async #executeAfterAdmission(
-    request: SupervisorRequestV1,
+    request: SupervisorRequest,
     admissionDeadlineMs: number,
     context: OperationJournalContext,
   ) {
     const release = await this.#acquireSlot(admissionDeadlineMs);
     if (release === undefined || this.#closing || Date.now() >= admissionDeadlineMs) {
       release?.();
-      return transientOperationJournalResponse(unavailableResponse(request.operation_id));
+      return transientOperationJournalResponse(unavailableResponse(request.operation_id, request.protocol_version));
     }
     try {
       const response = await this.#executeWithDeadline(request, context);
@@ -541,15 +541,15 @@ export class RuntimeSupervisorServer {
   }
 
   async #waitForJournalSettlement(
-    journalResponse: Promise<SupervisorResponseV1>,
-    operationId: string,
-  ): Promise<SupervisorResponseV1> {
+    journalResponse: Promise<SupervisorResponse>,
+    request: SupervisorRequest,
+  ): Promise<SupervisorResponse> {
     const responseTimeoutMs = (this.#options.admissionTimeoutMs ?? defaultAdmissionTimeoutMs)
       + (this.#options.operationTimeoutMs ?? defaultOperationTimeoutMs)
       + (this.#options.cancellationSettlementTimeoutMs ?? defaultCancellationSettlementTimeoutMs);
     let timer: NodeJS.Timeout | undefined;
-    const responseBoundary = new Promise<SupervisorResponseV1>((resolvePromise) => {
-      timer = setTimeout(() => resolvePromise(timeoutResponse(operationId)), responseTimeoutMs);
+    const responseBoundary = new Promise<SupervisorResponse>((resolvePromise) => {
+      timer = setTimeout(() => resolvePromise(timeoutResponse(request.operation_id, request.protocol_version)), responseTimeoutMs);
       timer.unref?.();
     });
     try {
@@ -559,7 +559,7 @@ export class RuntimeSupervisorServer {
     }
   }
 
-  #writeResponse(socket: Socket, response: SupervisorResponseV1): void {
+  #writeResponse(socket: Socket, response: SupervisorResponse): void {
     if (socket.destroyed) return;
     try {
       socket.end(encodeSupervisorFrame(response));
@@ -625,9 +625,9 @@ export class RuntimeSupervisorServer {
   }
 
   async #executeWithDeadline(
-    request: SupervisorRequestV1,
+    request: SupervisorRequest,
     context: OperationJournalContext,
-  ): Promise<SupervisorResponseV1> {
+  ): Promise<SupervisorResponse> {
     const controller = new AbortController();
     const timeoutMs = this.#options.effectTimeoutMs ?? defaultEffectTimeoutMs;
     let deadlineExpired = false;
@@ -641,14 +641,15 @@ export class RuntimeSupervisorServer {
       const response = redactResponse(
         await this.#options.execute(request, controller.signal, context),
         request.operation_id,
+        request.protocol_version,
       );
       return deadlineExpired && response.outcome !== "accepted"
-        ? timeoutResponse(request.operation_id)
+        ? timeoutResponse(request.operation_id, request.protocol_version)
         : response;
     } catch {
       return deadlineExpired
-        ? timeoutResponse(request.operation_id)
-        : unavailableResponse(request.operation_id);
+        ? timeoutResponse(request.operation_id, request.protocol_version)
+        : unavailableResponse(request.operation_id, request.protocol_version);
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }

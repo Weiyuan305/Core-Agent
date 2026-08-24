@@ -2,6 +2,7 @@ import {
   deriveManagedRuntimeNames,
   validateSupervisorRequest,
   type ProviderCatalog,
+  type SupervisorRequest,
   type SupervisorRequestV1,
 } from "@core-agent/runtime-core";
 
@@ -61,7 +62,7 @@ function parseImageLock(value: unknown): ManagedImageLock {
 export function validateSupervisorPolicy(
   value: unknown,
   dependencies: SupervisorPolicyDependencies,
-): SupervisorRequestV1 {
+): SupervisorRequest {
   const request = validateSupervisorRequest(value);
   if (request.kind !== "provision") return request;
   const runtime = request.runtime;

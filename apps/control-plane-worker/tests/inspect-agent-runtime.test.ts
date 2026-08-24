@@ -2,9 +2,9 @@ import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { RuntimeSupervisorClient, StoredAgentRunExecutionFacts, SupervisorRequestV1 } from "@core-agent/runtime-core";
+import type { StoredAgentRunExecutionFacts, SupervisorRequestV1 } from "@core-agent/runtime-core";
 
-import { inspectAgentRunRuntime } from "../src/inspect-agent-runtime.js";
+import { inspectAgentRunRuntime, type AgentRuntimeSupervisorPort } from "../src/inspect-agent-runtime.js";
 
 const imageRef = `managed/runtime:v1@sha256:${"a".repeat(64)}`;
 const facts: StoredAgentRunExecutionFacts = {
@@ -17,7 +17,7 @@ const facts: StoredAgentRunExecutionFacts = {
 
 test("Agent Run inspect uses a stable job-scoped operation and requires full current runtime identity", async () => {
   const requests: SupervisorRequestV1[] = [];
-  const supervisor: Pick<RuntimeSupervisorClient, "execute"> = {
+  const supervisor: AgentRuntimeSupervisorPort = {
     execute: async (request) => {
       requests.push(request);
       return { protocol_version: 1, operation_id: request.operation_id, outcome: "accepted", observation: {
@@ -51,12 +51,12 @@ test("Agent Run inspect fails closed on every mismatched identity/readiness fiel
     { private_origin: "http://public.example:8642" },
   ];
   for (const change of changes) {
-    const supervisor: Pick<RuntimeSupervisorClient, "execute"> = { execute: async (request) => ({
+    const supervisor: AgentRuntimeSupervisorPort = { execute: async (request) => ({
       protocol_version: 1, operation_id: request.operation_id, outcome: "accepted", observation: { ...valid, ...change },
     }) as never };
     await assert.rejects(inspectAgentRunRuntime(supervisor, facts, 1, new AbortController().signal));
   }
-  const failed: Pick<RuntimeSupervisorClient, "execute"> = { execute: async (request) => ({
+  const failed: AgentRuntimeSupervisorPort = { execute: async (request) => ({
     protocol_version: 1, operation_id: request.operation_id, outcome: "failed", code: "DEPENDENCY_UNAVAILABLE",
     retryable: true, summary: "provider-body private-token",
   }) };

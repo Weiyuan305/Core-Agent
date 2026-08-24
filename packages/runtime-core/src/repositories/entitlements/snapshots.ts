@@ -208,5 +208,6 @@ export async function insertSnapshotAggregate(
     }).execute();
   }
   await sql`set constraints all immediate`.execute(trx);
+  await sql`set constraints all deferred`.execute(trx);
   return snapshot;
 }

@@ -74,7 +74,7 @@ test("account-deletion revocation removes only the Actor's entitlement authority
   assert.deepEqual(await entitlementTestDatabase.selectFrom("entitlement_snapshot_capabilities")
     .select("capability_id").where("tenant_id", "=", tenantId).where("profile_id", "=", profileId!).execute(), []);
   assert.deepEqual(await entitlementTestDatabase.selectFrom("worker_jobs").select(["job_kind", "payload_ref"])
-    .where("tenant_id", "=", tenantId).execute(), [{
+    .where("tenant_id", "=", tenantId).where("payload_ref", "=", profileId!).execute(), [{
     job_kind: "reconcile_capability_projection", payload_ref: profileId!,
   }]);
   assert.equal(canonicalPayloadHash({ account_deletion_id: "account_deletion_authority" }).startsWith("sha256:"), true);
@@ -149,7 +149,7 @@ test("B2B account deletion preserves company Entitlement history and other consu
   assert.deepEqual(await entitlementTestDatabase.selectFrom("entitlement_snapshot_capabilities")
     .select("capability_id").where("snapshot_id", "=", retainedPointer.snapshot_id).execute(), [{ capability_id: pack.capabilityId }]);
   assert.deepEqual(await entitlementTestDatabase.selectFrom("worker_jobs").select(["job_kind", "payload_ref"])
-    .where("tenant_id", "=", tenantId).execute(), [{
+    .where("tenant_id", "=", tenantId).where("payload_ref", "=", deletedProfileId!).execute(), [{
     job_kind: "reconcile_capability_projection", payload_ref: deletedProfileId!,
   }]);
   const currentAuthority = await (runtime.loadCurrentSnapshotAuthority as (input: Record<string, unknown>) => Promise<{
@@ -213,7 +213,7 @@ test("B2B account deletion revokes the Actor's suspended Profile assignment and 
   assert.equal((await entitlementTestDatabase.selectFrom("entitlement_assignments").select("status")
     .where("assignment_id", "=", "assignment_deletion_b2b_suspended").executeTakeFirstOrThrow()).status, "revoked");
   assert.deepEqual(await entitlementTestDatabase.selectFrom("worker_jobs").select(["job_kind", "payload_ref"])
-    .where("tenant_id", "=", tenantId).execute(), [{
+    .where("tenant_id", "=", tenantId).where("payload_ref", "=", profileId!).execute(), [{
     job_kind: "reconcile_capability_projection", payload_ref: profileId!,
   }]);
 });

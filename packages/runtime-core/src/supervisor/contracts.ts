@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 
+import {
+  validateCapabilityRuntimeManifest,
+  type CapabilityRuntimeManifestV1,
+} from "../runtime/capability-manifest.js";
 import type { SecretReference } from "../secrets/secret-store.js";
 
 export const MAX_SUPERVISOR_FRAME_BYTES = 262_144;
@@ -56,6 +60,32 @@ export type ProvisionRuntimeCommandV1 = ProvisionRuntimeCommandDataV1 & { readon
 export type LifecycleRuntimeCommandV1 = LifecycleRuntimeCommandDataV1 & { readonly request_hash: string };
 export type SupervisorRequestV1 = ProvisionRuntimeCommandV1 | LifecycleRuntimeCommandV1;
 
+export interface SupervisorEnvelopeDataV2 {
+  readonly protocol_version: 2;
+  readonly operation_id: string;
+}
+
+export interface CapabilityProvisionRuntimeCommandDataV2 extends SupervisorEnvelopeDataV2 {
+  readonly kind: "provision";
+  readonly runtime: ProvisionRuntimeCommandDataV1["runtime"];
+  readonly capability_manifest: CapabilityRuntimeManifestV1;
+  readonly capability_manifest_digest: `sha256:${string}`;
+}
+
+export interface CapabilityInspectRuntimeCommandDataV2 extends SupervisorEnvelopeDataV2 {
+  readonly kind: "inspect";
+  readonly tenant_id: string;
+  readonly runtime_id: string;
+  readonly generation: number;
+  readonly capability_manifest_digest: `sha256:${string}`;
+}
+
+export type SupervisorRequestDataV2 = CapabilityProvisionRuntimeCommandDataV2 | CapabilityInspectRuntimeCommandDataV2;
+export type CapabilityProvisionRuntimeCommandV2 = CapabilityProvisionRuntimeCommandDataV2 & { readonly request_hash: string };
+export type CapabilityInspectRuntimeCommandV2 = CapabilityInspectRuntimeCommandDataV2 & { readonly request_hash: string };
+export type SupervisorRequestV2 = CapabilityProvisionRuntimeCommandV2 | CapabilityInspectRuntimeCommandV2;
+export type SupervisorRequest = SupervisorRequestV1 | SupervisorRequestV2;
+
 export interface RuntimeObservation {
   readonly tenant_id: string;
   readonly runtime_id: string;
@@ -82,6 +112,29 @@ export type SupervisorResponseV1 =
     readonly retryable: boolean;
     readonly summary: string;
   };
+
+export interface CapabilityRuntimeObservation extends RuntimeObservation {
+  readonly profile_ids: readonly string[];
+  readonly capability_manifest_digest: `sha256:${string}`;
+}
+
+export type SupervisorResponseV2 =
+  | {
+    readonly protocol_version: 2;
+    readonly operation_id: string;
+    readonly outcome: "accepted";
+    readonly observation: CapabilityRuntimeObservation;
+  }
+  | {
+    readonly protocol_version: 2;
+    readonly operation_id: string;
+    readonly outcome: "rejected" | "failed";
+    readonly code: "SUPERVISOR_REJECTED" | "DEPENDENCY_UNAVAILABLE" | "DEPENDENCY_TIMEOUT";
+    readonly retryable: boolean;
+    readonly summary: string;
+  };
+
+export type SupervisorResponse = SupervisorResponseV1 | SupervisorResponseV2;
 
 const opaqueIdPattern = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const immutableImagePattern = /^[A-Za-z0-9][A-Za-z0-9./:_-]{0,511}@sha256:[a-f0-9]{64}$/;
@@ -186,25 +239,51 @@ function validateRuntime(value: unknown): void {
   for (const profile of value.profiles) validateProfile(profile);
 }
 
-function validateRequestData(value: unknown): asserts value is SupervisorRequestDataV1 {
+function validateRequestData(value: unknown): asserts value is SupervisorRequestDataV1 | SupervisorRequestDataV2 {
   const kind = ownEnumerableDataValue(value, "kind");
   if (kind === "provision") {
-    exactRecord(value, ["protocol_version", "operation_id", "kind", "runtime"]);
-    if (value.protocol_version !== 1) throw rejected();
+    const protocolVersion = ownEnumerableDataValue(value, "protocol_version");
+    const keys = protocolVersion === 2
+      ? ["protocol_version", "operation_id", "kind", "runtime", "capability_manifest", "capability_manifest_digest"]
+      : ["protocol_version", "operation_id", "kind", "runtime"];
+    exactRecord(value, keys);
+    if (value.protocol_version !== 1 && value.protocol_version !== 2) throw rejected();
     assertId(value.operation_id);
-    validateRuntime(value.runtime);
+    const runtime = value.runtime;
+    validateRuntime(runtime);
+    if (value.protocol_version === 2) {
+      let manifest: CapabilityRuntimeManifestV1;
+      try {
+        manifest = validateCapabilityRuntimeManifest(value.capability_manifest, value.capability_manifest_digest);
+      } catch {
+        throw rejected();
+      }
+      if (
+        manifest.tenant_id !== (runtime as ProvisionRuntimeCommandDataV1["runtime"]).tenant_id
+        || manifest.runtime_generation !== (runtime as ProvisionRuntimeCommandDataV1["runtime"]).generation
+      ) throw rejected();
+    }
     return;
   }
   if (!lifecycleKinds.includes(kind as never)) throw rejected();
-  exactRecord(value, ["protocol_version", "operation_id", "kind", "tenant_id", "runtime_id", "generation"]);
-  if (value.protocol_version !== 1) throw rejected();
+  const protocolVersion = ownEnumerableDataValue(value, "protocol_version");
+  const keys = protocolVersion === 2
+    ? ["protocol_version", "operation_id", "kind", "tenant_id", "runtime_id", "generation", "capability_manifest_digest"]
+    : ["protocol_version", "operation_id", "kind", "tenant_id", "runtime_id", "generation"];
+  exactRecord(value, keys);
+  if (value.protocol_version !== 1 && value.protocol_version !== 2) throw rejected();
+  if (value.protocol_version === 2 && kind !== "inspect") throw rejected();
   assertId(value.operation_id);
   assertId(value.tenant_id);
   assertId(value.runtime_id);
   assertPositiveSafeInteger(value.generation);
+  if (value.protocol_version === 2 && (
+    typeof value.capability_manifest_digest !== "string"
+    || !requestHashPattern.test(value.capability_manifest_digest)
+  )) throw rejected();
 }
 
-function requestDataFromUnknown(value: unknown): SupervisorRequestDataV1 {
+function requestDataFromUnknown(value: unknown): SupervisorRequestDataV1 | SupervisorRequestDataV2 {
   if (typeof value !== "object" || value === null || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) {
     throw rejected();
   }
@@ -241,12 +320,12 @@ export function canonicalSupervisorRequestHash(value: unknown): string {
   return `sha256:${createHash("sha256").update(canonicalJson(data), "utf8").digest("hex")}`;
 }
 
-export function validateSupervisorRequest(value: unknown): SupervisorRequestV1 {
+export function validateSupervisorRequest(value: unknown): SupervisorRequest {
   const requestHash = ownEnumerableDataValue(value, "request_hash");
   if (typeof requestHash !== "string" || !requestHashPattern.test(requestHash)) throw rejected();
   const data = requestDataFromUnknown(value);
   if (requestHash !== canonicalSupervisorRequestHash(data)) throw rejected();
-  return value as SupervisorRequestV1;
+  return value as SupervisorRequest;
 }
 
 function validateObservation(value: unknown): void {
@@ -265,22 +344,46 @@ function validateObservation(value: unknown): void {
   if (Object.hasOwn(value, "private_origin")) assertBoundedString(value.private_origin, 1, 2_048);
 }
 
-export function validateSupervisorResponse(value: unknown): SupervisorResponseV1 {
+function validateCapabilityObservation(value: unknown): void {
+  const required = [
+    "tenant_id", "runtime_id", "generation", "exists", "lifecycle", "health", "image_ref",
+    "profile_ids", "capability_manifest_digest",
+  ];
+  const keys = typeof value === "object" && value !== null && Object.hasOwn(value, "private_origin")
+    ? [...required, "private_origin"]
+    : required;
+  exactRecord(value, keys);
+  validateObservation(Object.fromEntries(required.slice(0, 7).map((key) => [key, ownEnumerableDataValue(value, key)]).concat(
+    Object.hasOwn(value, "private_origin") ? [["private_origin", ownEnumerableDataValue(value, "private_origin")]] : [],
+  )));
+  exactArray(value.profile_ids, value.exists === false ? 0 : 1, 64);
+  const seen = new Set<string>();
+  for (const profileId of value.profile_ids) {
+    assertId(profileId);
+    if (seen.has(profileId)) throw rejected();
+    seen.add(profileId);
+  }
+  if (typeof value.capability_manifest_digest !== "string" || !requestHashPattern.test(value.capability_manifest_digest)) throw rejected();
+}
+
+export function validateSupervisorResponse(value: unknown): SupervisorResponse {
   const outcome = ownEnumerableDataValue(value, "outcome");
+  const protocolVersion = ownEnumerableDataValue(value, "protocol_version");
   if (outcome === "accepted") {
     exactRecord(value, ["protocol_version", "operation_id", "outcome", "observation"]);
-    if (value.protocol_version !== 1) throw rejected();
+    if (protocolVersion !== 1 && protocolVersion !== 2) throw rejected();
     assertId(value.operation_id);
-    validateObservation(value.observation);
+    if (protocolVersion === 1) validateObservation(value.observation);
+    else validateCapabilityObservation(value.observation);
   } else {
     exactRecord(value, ["protocol_version", "operation_id", "outcome", "code", "retryable", "summary"]);
-    if (value.protocol_version !== 1 || (outcome !== "rejected" && outcome !== "failed")) throw rejected();
+    if ((protocolVersion !== 1 && protocolVersion !== 2) || (outcome !== "rejected" && outcome !== "failed")) throw rejected();
     assertId(value.operation_id);
     if (!["SUPERVISOR_REJECTED", "DEPENDENCY_UNAVAILABLE", "DEPENDENCY_TIMEOUT"].includes(value.code as string)) throw rejected();
     if (typeof value.retryable !== "boolean") throw rejected();
     assertBoundedString(value.summary, 1, 1_000);
   }
-  return value as SupervisorResponseV1;
+  return value as SupervisorResponse;
 }
 
 export function encodeSupervisorFrame(value: unknown): Buffer {

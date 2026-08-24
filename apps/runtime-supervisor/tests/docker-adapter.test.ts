@@ -11,13 +11,17 @@ import {
   RuntimeSupervisorClient,
   SUPERVISOR_DEADLINE_BUDGET,
   canonicalSupervisorRequestHash,
+  createCapabilityRuntimeManifest,
   loadProviderCatalog,
   validateSupervisorResponse,
+  type CapabilityProvisionRuntimeCommandDataV2,
+  type CapabilityProvisionRuntimeCommandV2,
   type ProvisionRuntimeCommandDataV1,
   type SecretMaterial,
   type SecretReference,
   type SecretStore,
   type SupervisorRequestV1,
+  type SupervisorRequest,
   type SupervisorResponseV1,
 } from "@core-agent/runtime-core";
 import type Dockerode from "dockerode";
@@ -94,6 +98,36 @@ function signed(data = provisionData()) {
   return { ...data, request_hash: canonicalSupervisorRequestHash(data) };
 }
 
+function capabilitySigned(
+  generation = provisionData().runtime.generation,
+  operationId = "operation_provision_a",
+  snapshotId = "snapshot_a",
+): CapabilityProvisionRuntimeCommandV2 {
+  const base = provisionData();
+  const created = createCapabilityRuntimeManifest({
+    tenantId: base.runtime.tenant_id,
+    snapshotId,
+    snapshotVersion: 3,
+    runtimeGeneration: generation,
+    capabilities: [{
+      capabilityId: "capability_a",
+      capabilityVersionId: "version_a",
+      version: "1.0.0",
+      kind: "mcp",
+      riskClass: "read",
+    }],
+  });
+  const data: CapabilityProvisionRuntimeCommandDataV2 = {
+    ...base,
+    operation_id: operationId,
+    protocol_version: 2,
+    runtime: { ...base.runtime, generation },
+    capability_manifest: created.manifest,
+    capability_manifest_digest: created.digest,
+  };
+  return { ...data, request_hash: canonicalSupervisorRequestHash(data) };
+}
+
 function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
@@ -143,7 +177,7 @@ async function waitForPendingStage(path: string, expected: OperationJournalStage
   assert.fail(`timed out waiting for pending journal stage ${expected}`);
 }
 
-function manifestFor(request = signed()): unknown {
+function manifestFor(request: ReturnType<typeof signed> | CapabilityProvisionRuntimeCommandV2 = signed()): unknown {
   const profiles = [...request.runtime.profiles]
     .sort((left, right) => left.profile_id.localeCompare(right.profile_id))
     .map((profile) => ({
@@ -173,14 +207,18 @@ function manifestFor(request = signed()): unknown {
   };
 }
 
-function lifecycle(kind: "inspect" | "start" | "stop" | "restart" | "delete", operationId: string) {
+function lifecycle(
+  kind: "inspect" | "start" | "stop" | "restart" | "delete",
+  operationId: string,
+  generation = 7,
+) {
   const data = {
     protocol_version: 1 as const,
     operation_id: operationId,
     kind,
     tenant_id: "tenant_a",
     runtime_id: "runtime_a",
-    generation: 7,
+    generation,
   };
   return { ...data, request_hash: canonicalSupervisorRequestHash(data) };
 }
@@ -236,7 +274,7 @@ class FakeContainer {
 
   public constructor(
     readonly docker: FakeDocker,
-    public readonly name: string,
+    public name: string,
     public options?: Dockerode.ContainerCreateOptions,
   ) {}
 
@@ -373,6 +411,13 @@ class FakeContainer {
           ?? `${canonicalJson(this.docker.manifestOverride ?? manifestFor())}\n`,
         { encoding: "utf8", flag: "wx", mode: 0o600 },
       );
+      if (this.docker.stagedCapabilityManifest !== undefined) {
+        await writeFile(
+          join(outputDirectory, "capability-manifest.json"),
+          this.docker.stagedCapabilityManifest,
+          { encoding: "utf8", flag: "wx", mode: 0o600 },
+        );
+      }
     }
     return { StatusCode: this.docker.initializerExitCode };
   }
@@ -405,6 +450,7 @@ class FakeContainer {
       this.docker.failedInspectionNames.add(this.name);
     }
   }
+
 }
 
 class FakeVolume {
@@ -456,6 +502,7 @@ class FakeDocker {
   public initializerLogs = "";
   public manifestOverride: unknown;
   public manifestRawOverride: string | Uint8Array | undefined;
+  public stagedCapabilityManifest: string | undefined;
   public attachExternalNetwork = false;
   public failGatewayStart = false;
   public gatewayStartError: unknown;
@@ -473,7 +520,7 @@ class FakeDocker {
     readonly releaseLateMutation: Promise<void>;
     readonly markLateMutation: () => void;
   } | undefined;
-  public blockedHelperResource: "runtime-initializer" | "runtime-manifest-verifier" | undefined;
+  public blockedHelperResource: "runtime-initializer" | "runtime-manifest-verifier" | "runtime-capability-manifest-initializer" | "runtime-capability-manifest-activator" | undefined;
   public helperWaitBarrier: Promise<void> | undefined;
   public markHelperWaitEntered: (() => void) | undefined;
   public helperLateMutations = 0;
@@ -512,6 +559,13 @@ class FakeDocker {
         this.stagedSecretNames.push(filename);
         this.stagedModes.push((await lstat(join(secretDirectory, filename))).mode & 0o777);
       }
+    }
+    if (options.Labels?.["core-agent.resource"] === "runtime-capability-manifest-initializer") {
+      const bind = options.HostConfig?.Binds?.find((value) => value.endsWith(":/run/core-agent/capability-manifest.json:ro"));
+      if (bind === undefined) throw new Error("missing capability manifest bind");
+      const source = this.localPath(bind.slice(0, -":/run/core-agent/capability-manifest.json:ro".length));
+      this.stagedModes.push((await lstat(source)).mode & 0o777);
+      this.stagedCapabilityManifest = await readFile(source, "utf8");
     }
     this.containers.set(name, container);
     this.created.push(container.options!);
@@ -647,11 +701,13 @@ function buildRecoveryServer(
     validateRequest: (value) => validateSupervisorPolicy(value, { imageLock, providerCatalog }),
     execute: async (...args: unknown[]) => {
       onExecute();
-      const [request, signal, context] = args as [SupervisorRequestV1, AbortSignal, OperationJournalContext];
+      const [request, signal, context] = args as [SupervisorRequest, AbortSignal, OperationJournalContext];
       try {
-        const value = await (options.execute ?? ((value, operationSignal, reservationContext) => (
-          adapter.execute(value, operationSignal, reservationContext)
-        )))(request, signal, context);
+        const value = options.execute === undefined
+          ? await adapter.execute(request, signal, context)
+          : request.protocol_version === 1
+            ? await options.execute(request, signal, context)
+            : (() => { throw new Error("unexpected protocol v2 recovery request"); })();
         onSettled(value);
         return value;
       } catch (error) {
@@ -1324,7 +1380,9 @@ test("an admission transient retains a pending non-reserved stage for recovery",
           markOwnerEntered();
           await ownerReleased;
         }
-        return first.adapter.execute(request, signal, context);
+        const response = await first.adapter.execute(request, signal, context);
+        if (response.protocol_version !== 1) throw new Error("unexpected protocol v2 response");
+        return response;
       },
     },
   );
@@ -1636,6 +1694,144 @@ test("accepted adapter observations contain only the exact Supervisor response s
   assert.doesNotThrow(() => validateSupervisorResponse(provisioned));
   const stopped = await adapter.execute(lifecycle("stop", "operation_exact_observation_stop"));
   assert.doesNotThrow(() => validateSupervisorResponse(stopped));
+});
+
+test("protocol v2 materializes and inspects the exact non-executing Capability manifest", async () => {
+  const { adapter, docker } = buildAdapter();
+  const request = capabilitySigned();
+  const provisioned = await adapter.execute(request);
+  assert.equal(provisioned.protocol_version, 2);
+  assert.equal(provisioned.outcome, "accepted");
+  if (provisioned.outcome !== "accepted") return;
+  assert.equal(provisioned.observation.capability_manifest_digest, request.capability_manifest_digest);
+  assert.deepEqual(provisioned.observation.profile_ids, ["profile_a"]);
+
+  assert.equal(docker.stagedCapabilityManifest, `${JSON.stringify(request.capability_manifest)}\n`);
+  assert.equal(docker.stagedCapabilityManifest.includes("artifact"), false);
+  assert.equal(docker.stagedCapabilityManifest.includes("secret"), false);
+  assert.equal(docker.stagedCapabilityManifest.includes("tools"), false);
+  assert.equal(docker.stagedCapabilityManifest.includes("mcp_servers"), false);
+  assert(docker.stagedModes.includes(0o600));
+
+  const gateway = docker.containers.get(deriveRuntimeNames(request.runtime).container)!;
+  assert.equal(gateway.options?.Labels?.["core-agent.capability-manifest"], request.capability_manifest_digest);
+  assert.equal(gateway.options?.Labels?.["core-agent.protocol-version"], "2");
+
+  const inspectData = {
+    protocol_version: 2 as const,
+    operation_id: "operation_capability_inspect_a",
+    kind: "inspect" as const,
+    tenant_id: request.runtime.tenant_id,
+    runtime_id: request.runtime.runtime_id,
+    generation: request.runtime.generation,
+    capability_manifest_digest: request.capability_manifest_digest,
+  };
+  const inspected = await adapter.execute({
+    ...inspectData,
+    request_hash: canonicalSupervisorRequestHash(inspectData),
+  });
+  assert.equal(inspected.protocol_version, 2);
+  assert.equal(inspected.outcome, "accepted");
+  if (inspected.outcome === "accepted") {
+    assert.equal(inspected.observation.capability_manifest_digest, request.capability_manifest_digest);
+    assert.deepEqual(inspected.observation.profile_ids, ["profile_a"]);
+  }
+});
+
+test("protocol v2 proves a new generation while preserving the prior runtime until authority advances", async () => {
+  const { adapter, docker } = buildAdapter();
+  const previous = capabilitySigned();
+  const previousResponse = await adapter.execute(previous);
+  assert.equal(previousResponse.outcome, "accepted");
+  const names = deriveRuntimeNames(previous.runtime);
+  const previousGateway = docker.containers.get(names.container)!;
+  assert.equal(previousGateway?.name, names.container);
+
+  const next = capabilitySigned(8, "operation_capability_generation_8", "snapshot_b");
+  docker.manifestOverride = manifestFor(next);
+  const response = await adapter.execute(next);
+  assert.equal(response.outcome, "accepted");
+  if (response.outcome !== "accepted") return;
+  assert.equal(response.observation.generation, 8);
+  assert.equal(
+    "capability_manifest_digest" in response.observation
+      ? response.observation.capability_manifest_digest
+      : undefined,
+    next.capability_manifest_digest,
+  );
+  assert.equal(docker.volumes.has(names.volume), true);
+  assert.equal(previousGateway.removed, false);
+  assert.equal(previousGateway.running, true);
+
+  const nextNames = deriveRuntimeNames(next.runtime);
+  const newGateway = docker.containers.get(nextNames.container)!;
+  assert.notEqual(newGateway, previousGateway);
+  assert.equal(newGateway.running, true);
+  assert.equal(newGateway.options?.Labels?.["core-agent.generation"], "8");
+});
+
+test("protocol v1 lifecycle manages the current protocol v2 generation without deleting its predecessor", async () => {
+  const { adapter, docker } = buildAdapter();
+  const previous = capabilitySigned();
+  assert.equal((await adapter.execute(previous)).outcome, "accepted");
+  const next = capabilitySigned(8, "operation_capability_generation_8_lifecycle", "snapshot_b");
+  docker.manifestOverride = manifestFor(next);
+  assert.equal((await adapter.execute(next)).outcome, "accepted");
+
+  const stopped = await adapter.execute(lifecycle("stop", "operation_v1_stop_v2_generation", 8));
+  assert.equal(stopped.protocol_version, 1);
+  assert.equal(stopped.outcome, "accepted");
+  if (stopped.outcome === "accepted") assert.equal(stopped.observation.lifecycle, "stopped");
+  assert.equal(docker.containers.get(deriveRuntimeNames(previous.runtime).container)?.running, true);
+
+  const started = await adapter.execute(lifecycle("start", "operation_v1_start_v2_generation", 8));
+  assert.equal(started.protocol_version, 1);
+  assert.equal(started.outcome, "accepted");
+  if (started.outcome === "accepted") assert.equal(started.observation.lifecycle, "running");
+});
+
+test("protocol v2 candidate failure preserves the exact prior running generation", async () => {
+  const { adapter, docker } = buildAdapter();
+  const previous = capabilitySigned();
+  await adapter.execute(previous);
+  const names = deriveRuntimeNames(previous.runtime);
+  const previousGateway = docker.containers.get(names.container)!;
+  const mutationsBefore = docker.mutations.length;
+  docker.failGatewayStart = true;
+
+  const next = capabilitySigned(8, "operation_capability_generation_8_failure", "snapshot_b");
+  docker.manifestOverride = manifestFor(next);
+  const response = await adapter.execute(next);
+  assert.equal(response.outcome, "failed");
+  if (response.outcome === "failed") assert.equal(response.retryable, true);
+  assert.equal(docker.containers.get(names.container), previousGateway);
+  assert.equal(docker.containers.has(deriveRuntimeNames(next.runtime).container), false);
+  assert.equal(previousGateway.running, true);
+  assert.equal(previousGateway.removed, false);
+  assert.equal(docker.volumes.has(names.volume), true);
+  assert.equal(docker.mutations.slice(mutationsBefore).includes(`remove:${names.container}`), false);
+});
+
+test("protocol v2 rejects a changed expected manifest before Docker lifecycle mutation", async () => {
+  const { adapter, docker } = buildAdapter();
+  const request = capabilitySigned();
+  await adapter.execute(request);
+  const before = [...docker.mutations];
+  const inspectData = {
+    protocol_version: 2 as const,
+    operation_id: "operation_capability_inspect_mismatch",
+    kind: "inspect" as const,
+    tenant_id: request.runtime.tenant_id,
+    runtime_id: request.runtime.runtime_id,
+    generation: request.runtime.generation,
+    capability_manifest_digest: `sha256:${"f".repeat(64)}` as const,
+  };
+  const response = await adapter.execute({
+    ...inspectData,
+    request_hash: canonicalSupervisorRequestHash(inspectData),
+  });
+  assert.equal(response.outcome, "rejected");
+  assert.deepEqual(docker.mutations, before);
 });
 
 test("provision validates the fixed non-secret manifest before starting the gateway", async () => {

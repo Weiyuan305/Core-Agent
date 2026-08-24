@@ -160,3 +160,21 @@
 - Reviews: task review and cumulative whole-branch review approved with zero
   Critical, Important, or Minor findings; final assessment is Ready to merge.
 - Report: `.superpowers/sdd/task-3-report.md`.
+
+## Entitlement and Capability Registry v1 — Task 8 Runtime Projection
+
+- Status: COMPLETE_WITH_DOCKER_CI_PENDING.
+- Branch: `feat/entitlement-runtime-projection-v1`.
+- Base: `e3f51cbd0058b0c405749f9f03d14b1fa5982546`.
+- Result: exact non-executing Capability manifests, Supervisor protocol v2,
+  generation-safe materialization/inspection, durable Worker effect fencing,
+  serializable authority revalidation, atomic multi-Profile Pack finalization,
+  and rollback/failure preservation are implemented. Hermes MCP servers, tools,
+  and Skills remain empty.
+- Verification: Runtime Core 95/95; Worker 104/104; Supervisor 93/93; formal
+  native PostgreSQL 17 Runtime Core 434/434; root PostgreSQL 434+2+15;
+  integration 98/98; deterministic runtime markers 200/200; root check, root
+  unit, secret, immutable-history, and diff gates PASS.
+- Constraint: Docker-only CI-equivalent was not run because Colima remains
+  removed and no Docker daemon is available; it remains the later GitHub CI gate.
+- Report: `.superpowers/sdd/task-8-report.md`.

@@ -33,7 +33,7 @@ export type ClaimedJob =
   | (ClaimedJobBase & { jobKind: "dispatch_outbox"; runtimeCommand: null; targetCommandVersion: null; effectState: "pre_effect" })
   | (ClaimedJobBase & { jobKind: "project_platform_memberships"; runtimeCommand: null; targetCommandVersion: null; effectState: "pre_effect" })
   | (ClaimedJobBase & { jobKind: "finalize_account_deletion"; runtimeCommand: null; targetCommandVersion: null; effectState: WorkerEffectState })
-  | (ClaimedJobBase & { jobKind: "reconcile_capability_projection"; runtimeCommand: null; targetCommandVersion: null; effectState: "pre_effect" })
+  | (ClaimedJobBase & { jobKind: "reconcile_capability_projection"; runtimeCommand: null; targetCommandVersion: null; effectState: ReconcileEffectState })
   | (ClaimedJobBase & { jobKind: "stop_idle_b2c_runtime"; runtimeCommand: null; targetCommandVersion: null; effectState: "pre_effect" });
 
 function workerEffectState(value: string): WorkerEffectState {
