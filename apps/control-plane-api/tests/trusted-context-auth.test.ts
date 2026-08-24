@@ -3,8 +3,8 @@ import { generateKeyPairSync, sign } from "node:crypto";
 import test from "node:test";
 
 import type {
+  EntitlementAwareTrustedContextAuthority,
   SignedTrustedRequestContext,
-  TrustedContextAuthority,
   TrustedRequestContext,
 } from "@core-agent/contracts";
 import { canonicalJson, encodeSignedTrustedContext } from "@core-agent/runtime-core";
@@ -55,7 +55,7 @@ function envelope(context = payload()): SignedTrustedRequestContext {
   };
 }
 
-function authority(context = payload()): TrustedContextAuthority {
+function authority(context = payload()): EntitlementAwareTrustedContextAuthority {
   return {
     expected_issuer: "identity-gateway",
     expected_audience: "control-plane-api",
@@ -72,6 +72,12 @@ function authority(context = payload()): TrustedContextAuthority {
       tenant_id: context.tenant_id,
       owner_actor_id: context.actor_id,
       status: "active",
+    },
+    entitlement_snapshot: {
+      tenant_id: context.tenant_id,
+      profile_id: context.profile_id,
+      snapshot_ref: context.entitlement_snapshot_ref,
+      capability_ids: context.capability_ids,
     },
   };
 }
@@ -133,6 +139,24 @@ test("trusted-context authentication verifies signature before loading current a
     rawHeaders: ["x-core-agent-context", encodeSignedTrustedContext(tampered)],
   }), /UNAUTHENTICATED|trusted context/i);
   assert.equal(authorityCalls, 1, "current authority must not load before signature verification succeeds");
+});
+
+test("trusted-context authentication rejects a valid signature after current Snapshot authority changes", async () => {
+  const signed = envelope();
+  const encoded = encodeSignedTrustedContext(signed);
+  await assert.rejects(auth.authenticateTrustedContextRequest({
+    db: fakeDatabase() as never,
+    keys: [{ keyId: "key_api_context", publicKey: pair.publicKey, status: "active" as const, activatedAt: "2026-08-19T00:00:00.000Z" }],
+    expectedIssuer: "identity-gateway",
+    expectedAudience: "control-plane-api",
+    databaseNow: async () => new Date(now),
+    loadCurrentAuthority: async () => authority(payload({
+      entitlement_snapshot_ref: { snapshot_id: "snapshot_new", version: 2, evaluated_at: now.toISOString() },
+    })),
+  }, {
+    headers: { "x-core-agent-context": encoded },
+    rawHeaders: ["x-core-agent-context", encoded],
+  }), /UNAUTHENTICATED/u);
 });
 
 test("trusted-context authentication rejects duplicate accessor and browser authority headers before authority reads", async () => {

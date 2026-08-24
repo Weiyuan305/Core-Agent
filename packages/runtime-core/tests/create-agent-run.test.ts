@@ -106,8 +106,22 @@ test("Agent Run admission atomically creates queued Run, completed user Message,
       { event_type: "run.queued", sequence: "3" },
     ],
   );
-  assert.equal(await db.selectFrom("audit_events").selectAll().where("tenant_id", "=", tenantId).execute().then((rows) => rows.length), 2);
+  const audit = await db.selectFrom("audit_events").select(["entitlement_snapshot_ref"])
+    .where("tenant_id", "=", tenantId).where("action", "=", "agent_run.create").executeTakeFirstOrThrow();
+  assert.equal(typeof (audit.entitlement_snapshot_ref as { snapshot_id?: unknown })?.snapshot_id, "string");
   assert.equal(await db.selectFrom("outbox").selectAll().where("tenant_id", "=", tenantId).execute().then((rows) => rows.length), 3);
+});
+
+test("Agent Run admission denies a stale Snapshot after current entitlement authority is revoked", async () => {
+  const setup = await setupConversation("tenant_run_stale_entitlement");
+  await db.updateTable("entitlements").set({
+    status: "revoked", reason_code: "platform_revoked", resource_version: 2, updated_at: admissionNow,
+  }).where("tenant_id", "=", setup.context.tenantId).execute();
+  await assert.rejects(
+    createAgentRun({ db, providerCatalog, now: () => admissionNow }, setup.context, setup.conversation.conversation_id, runRequest("idem_stale_entitlement")),
+    (error: unknown) => error instanceof DomainError && error.code === "ENTITLEMENT_DENIED",
+  );
+  assert.equal(await db.selectFrom("agent_runs").selectAll().where("tenant_id", "=", setup.context.tenantId).execute().then((rows) => rows.length), 0);
 });
 
 test("Agent Run replay and conflict remain stable after idempotency retention expiry", async () => {

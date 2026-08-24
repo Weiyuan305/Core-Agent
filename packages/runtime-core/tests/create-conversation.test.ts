@@ -67,13 +67,37 @@ test("Conversation admission atomically creates one active Conversation, one Her
     await db.selectFrom("product_events").select(["event_type", "sequence"]).where("tenant_id", "=", tenantId).execute(),
     [{ event_type: "conversation.created", sequence: "1" }],
   );
-  assert.equal(await db.selectFrom("audit_events").selectAll().where("tenant_id", "=", tenantId).execute().then((rows) => rows.length), 1);
+  const audit = await db.selectFrom("audit_events").select(["entitlement_snapshot_ref"])
+    .where("tenant_id", "=", tenantId).where("action", "=", "conversation.create").executeTakeFirstOrThrow();
+  assert.equal(typeof (audit.entitlement_snapshot_ref as { snapshot_id?: unknown })?.snapshot_id, "string");
   assert.equal(await db.selectFrom("outbox").selectAll().where("tenant_id", "=", tenantId).execute().then((rows) => rows.length), 1);
   const idempotency = await db.selectFrom("idempotency_records").select(["status", "result_ref", "response_json"])
     .where("tenant_id", "=", tenantId).where("idempotency_key", "=", request.idempotency_key).executeTakeFirstOrThrow();
   assert.equal(idempotency.status, "completed");
   assert.equal(idempotency.result_ref, first.conversation_id);
   assert.deepEqual(idempotency.response_json, first);
+});
+
+test("Conversation admission distinguishes denied authority from a preparing Runtime projection", async () => {
+  const deniedTenant = "tenant_conversation_entitlement_denied";
+  const denied = await seedReadyTenant(db, deniedTenant);
+  await db.updateTable("entitlements").set({
+    status: "revoked", reason_code: "platform_revoked", resource_version: 2, updated_at: admissionNow,
+  }).where("tenant_id", "=", deniedTenant).execute();
+  await assert.rejects(
+    createConversation({ db, now: () => admissionNow }, serviceContext(deniedTenant), conversationRequest(deniedTenant, denied.profileId)),
+    (error: unknown) => error instanceof DomainError && error.code === "ENTITLEMENT_DENIED",
+  );
+
+  const preparingTenant = "tenant_conversation_service_preparing";
+  const preparing = await seedReadyTenant(db, preparingTenant);
+  await db.updateTable("capability_runtime_projections").set({ status: "preparing", updated_at: admissionNow })
+    .where("tenant_id", "=", preparingTenant).execute();
+  await assert.rejects(
+    createConversation({ db, now: () => admissionNow }, serviceContext(preparingTenant), conversationRequest(preparingTenant, preparing.profileId)),
+    (error: unknown) => error instanceof DomainError && error.code === "SERVICE_PREPARING" && error.retryable === true,
+  );
+  assert.equal(await db.selectFrom("conversations").selectAll().execute().then((rows) => rows.length), 0);
 });
 
 test("Conversation replay and conflict remain stable after idempotency retention expiry", async () => {

@@ -10,6 +10,7 @@ import {
   beginIdempotentCommand,
   beginEmailVerificationTransaction,
   checkpointEmailVerificationTransaction,
+  createAccountDeletionEntitlementRevocationPort,
   canonicalEmailVerificationStartPayloadHash,
   canonicalPayloadHash,
   constantTimeDigestMatches,
@@ -1330,12 +1331,7 @@ function productionOperations(
           return requestAccountDeletion({
             db,
             transaction: trx,
-            entitlementRevocation: {
-              async revokeInTransaction() {
-                // Entitlements are not persisted until their dedicated task; the port is
-                // intentionally present so that implementation can replace this boundary.
-              },
-            },
+            entitlementRevocation: createAccountDeletionEntitlementRevocationPort(),
             runtimeStopIntent: {
               async stopInTransaction() {
                 // The account.deletion_requested ProductEvent/Outbox row written below is

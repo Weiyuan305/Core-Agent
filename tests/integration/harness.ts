@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -18,6 +18,7 @@ import {
   deriveAgentRunId,
   deriveConversationId,
   encodeSignedTrustedContext,
+  resolveProfileSnapshotInTransaction,
   type RuntimeDatabase,
   type SecretMaterial,
   type SecretReference,
@@ -1766,6 +1767,15 @@ export class IntegrationHarness {
     this.worker = Object.freeze({
       untilRuntimeReady: async (runtimeId) => {
         await this.#untilRuntime(runtimeId, "ready");
+        const runtime = await this.db.selectFrom("runtime_containers")
+          .select("tenant_id").where("container_id", "=", runtimeId).executeTakeFirstOrThrow();
+        const profiles = await this.db.selectFrom("profiles").select("profile_id")
+          .where("tenant_id", "=", runtime.tenant_id).where("status", "=", "active")
+          .orderBy("profile_id", "asc").execute();
+        await this.seedEntitlementAuthority({
+          tenantId: runtime.tenant_id,
+          profileIds: profiles.map((profile) => profile.profile_id),
+        });
       },
       untilRuntimeStatus: (runtimeId, status) => this.#untilRuntime(runtimeId, status),
       untilRunStatus: (runId, status) => this.#untilRun(runId, status),
@@ -2020,6 +2030,122 @@ export class IntegrationHarness {
       profile_ids: request.identity_graph.profiles.map((profile) => profile.profile_id),
       request,
     };
+  }
+
+  public async seedEntitlementAuthority(input: {
+    readonly tenantId: string;
+    readonly profileIds: readonly string[];
+    readonly now?: Date;
+  }): Promise<{
+    readonly snapshotId: string;
+    readonly snapshotVersion: number;
+    readonly evaluatedAt: string;
+    readonly capabilityIds: readonly string[];
+  }> {
+    assert.equal(input.profileIds.length, 1, "integration entitlement authority is Profile-specific");
+    const profileId = input.profileIds[0]!;
+    const existing = await this.db.selectFrom("profile_snapshot_pointers")
+      .select(["snapshot_id", "snapshot_version", "evaluated_at"])
+      .where("tenant_id", "=", input.tenantId).where("profile_id", "=", profileId).executeTakeFirst();
+    if (existing !== undefined) {
+      const capabilities = await this.db.selectFrom("entitlement_snapshot_capabilities")
+        .select("capability_id").where("tenant_id", "=", input.tenantId)
+        .where("profile_id", "=", profileId).where("snapshot_id", "=", existing.snapshot_id)
+        .orderBy("capability_order", "asc").execute();
+      return Object.freeze({
+        snapshotId: existing.snapshot_id,
+        snapshotVersion: Number(existing.snapshot_version),
+        evaluatedAt: existing.evaluated_at.toISOString(),
+        capabilityIds: Object.freeze(capabilities.map((row) => row.capability_id)),
+      });
+    }
+    const now = input.now === undefined
+      ? (await this.#childPool.query<{ now: Date }>("select clock_timestamp() as now")).rows[0]!.now
+      : new Date(input.now);
+    const suffix = createHash("sha256").update(input.tenantId, "utf8").digest("hex").slice(0, 24);
+    const capabilityId = `capability_integration_${suffix}`;
+    const capabilityVersionId = `capability_version_integration_${suffix}`;
+    const packProductId = `pack_product_integration_${suffix}`;
+    const packVersionId = `pack_version_integration_${suffix}`;
+    const releaseId = `release_integration_${suffix}`;
+    const entitlementId = `entitlement_integration_${suffix}`;
+    const profile = await this.db.selectFrom("profiles").select("owner_actor_id")
+      .where("tenant_id", "=", input.tenantId).where("profile_id", "=", profileId).executeTakeFirstOrThrow();
+    const membership = await this.db.selectFrom("memberships").select("membership_id")
+      .where("tenant_id", "=", input.tenantId).where("actor_id", "=", profile.owner_actor_id)
+      .where("status", "=", "active").orderBy("membership_id", "asc").executeTakeFirstOrThrow();
+    await this.db.insertInto("capabilities").values({
+      capability_id: capabilityId, display_name: "Integration capability", owning_domain: "integration",
+      kind: "mcp", resource_version: 1, created_at: now, updated_at: now,
+    }).execute();
+    await this.db.insertInto("capability_versions").values({
+      capability_version_id: capabilityVersionId, capability_id: capabilityId, version: "1.0.0", kind: "mcp",
+      artifact_ref: `manifest:sha256:${createHash("sha256").update(capabilityVersionId).digest("hex")}`,
+      contract_ref: "integration/capability@1.0.0", risk_class: "read", approval_requirement: "none",
+      compatibility_json: {
+        core_contract_version: "0.8.0", domain_contract_version: "1.0.0",
+        runtime_protocol_version: "1.0.0", tenant_modes: ["b2b"],
+      },
+      status: "reviewed", resource_version: 1, created_at: now, updated_at: now,
+    }).execute();
+    await this.db.insertInto("pack_products").values({
+      pack_product_id: packProductId, display_name: "Integration pack", tenant_modes: ["b2b"],
+      resource_version: 1, created_at: now, updated_at: now,
+    }).execute();
+    await this.db.insertInto("pack_versions").values({
+      pack_version_id: packVersionId, pack_product_id: packProductId, version: "1.0.0", status: "draft",
+      resource_version: 1, created_at: now, updated_at: now,
+    }).execute();
+    await this.db.insertInto("pack_members").values({
+      pack_member_id: `pack_member_integration_${suffix}`, pack_version_id: packVersionId, member_order: 1,
+      capability_id: capabilityId, capability_version_id: capabilityVersionId, version: "1.0.0",
+      resource_version: 1, created_at: now, updated_at: now,
+    }).execute();
+    await this.db.updateTable("pack_versions").set({ status: "reviewed", resource_version: 2, updated_at: now })
+      .where("pack_version_id", "=", packVersionId).execute();
+    await this.db.updateTable("pack_versions").set({ status: "published", resource_version: 3, updated_at: now })
+      .where("pack_version_id", "=", packVersionId).execute();
+    await this.db.insertInto("tenant_pack_releases").values({
+      tenant_pack_release_id: releaseId, tenant_id: input.tenantId, pack_product_id: packProductId,
+      pack_version_id: packVersionId, pack_version: "1.0.0", generation: 1, status: "preparing",
+      resource_version: 1, created_at: now, updated_at: now,
+    }).execute();
+    await this.db.updateTable("tenant_pack_releases").set({ status: "current", resource_version: 2, updated_at: now })
+      .where("tenant_pack_release_id", "=", releaseId).execute();
+    await this.db.insertInto("entitlements").values({
+      entitlement_id: entitlementId, tenant_id: input.tenantId, pack_product_id: packProductId,
+      tenant_pack_release_id: releaseId, pack_version_id: packVersionId, pack_version: "1.0.0",
+      source: "platform_manual", external_order_ref: `integration_order_${suffix}`, tenant_mode: "b2b",
+      assignment_mode: "seat", seat_quantity: 1, valid_from: now, expires_at: null,
+      status: "active", reason_code: "platform_grant", resource_version: 1, created_at: now, updated_at: now,
+    }).execute();
+    await this.db.insertInto("entitlement_assignments").values({
+      assignment_id: `assignment_integration_${suffix}`, tenant_id: input.tenantId,
+      entitlement_id: entitlementId, profile_id: profileId, status: "preparing",
+      reason_code: "seat_assigned", resource_version: 1, created_at: now, updated_at: now,
+    }).execute();
+    await this.db.updateTable("entitlement_assignments")
+      .set({ status: "available", resource_version: 2, updated_at: now })
+      .where("tenant_id", "=", input.tenantId).where("entitlement_id", "=", entitlementId).execute();
+    const snapshot = await this.db.transaction().execute((trx) => resolveProfileSnapshotInTransaction({
+      trx, tenantId: input.tenantId, profileId, now,
+      evidence: {
+        actorId: profile.owner_actor_id, membershipId: membership.membership_id,
+        requestId: `request_integration_seed_${suffix}`, traceId: `trace_integration_seed_${suffix}`,
+      },
+    }));
+    await this.db.updateTable("capability_runtime_projections")
+      .set({ status: "available", updated_at: now })
+      .where("projection_id", "=", snapshot.projection.projectionId).execute();
+    await this.db.updateTable("runtime_containers")
+      .set({ generation: snapshot.projection.generation, capability_manifest_digest: snapshot.canonicalInputHash })
+      .where("tenant_id", "=", input.tenantId).execute();
+    return Object.freeze({
+      snapshotId: snapshot.snapshotRef.snapshot_id,
+      snapshotVersion: snapshot.snapshotRef.version,
+      evaluatedAt: snapshot.snapshotRef.evaluated_at,
+      capabilityIds: snapshot.capabilityIds,
+    });
   }
 
   public async createConversation(input: {
@@ -2326,6 +2452,15 @@ export class IntegrationHarness {
       .where("tenant_id", "=", tenantId).executeTakeFirst();
     const container = await this.db.selectFrom("runtime_containers").select("container_id")
       .where("tenant_id", "=", tenantId).orderBy("container_id", "asc").executeTakeFirst();
+    const snapshot = await this.db.selectFrom("profile_snapshot_pointers")
+      .select(["snapshot_id", "snapshot_version", "evaluated_at"])
+      .where("tenant_id", "=", tenantId)
+      .where("profile_id", "=", requestedProfileId ?? fallbackProfile?.profile_id ?? "")
+      .executeTakeFirst();
+    const capabilities = snapshot === undefined ? [] : await this.db.selectFrom("entitlement_snapshot_capabilities")
+      .select("capability_id").where("tenant_id", "=", tenantId)
+      .where("profile_id", "=", requestedProfileId ?? fallbackProfile?.profile_id ?? "")
+      .where("snapshot_id", "=", snapshot.snapshot_id).orderBy("capability_order", "asc").execute();
     const completeRunPayload = runCreate && typeof payload === "object" && payload !== null
       ? payload as Parameters<typeof deriveAgentRunId>[2]
       : undefined;
@@ -2352,11 +2487,13 @@ export class IntegrationHarness {
         : "student",
       profile_id: requestedProfileId ?? fallbackProfile?.profile_id ?? `profile_context_${tenantId}`,
       entitlement_snapshot_ref: {
-        snapshot_id: "snapshot_integration_context",
-        version: 1,
-        evaluated_at: issuedAt.toISOString(),
+        snapshot_id: snapshot?.snapshot_id ?? "snapshot_integration_context",
+        version: snapshot === undefined ? 1 : Number(snapshot.snapshot_version),
+        evaluated_at: snapshot?.evaluated_at.toISOString() ?? issuedAt.toISOString(),
       },
-      capability_ids: ["capability_integration_context"],
+      capability_ids: capabilities.length === 0
+        ? ["capability_integration_context"]
+        : capabilities.map((capability) => capability.capability_id),
       container_id: container?.container_id ?? `container_context_${tenantId}`,
       conversation_id: conversationId,
       run_id: runId,

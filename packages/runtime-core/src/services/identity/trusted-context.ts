@@ -65,6 +65,7 @@ export interface CurrentEntitlementSnapshotAuthority {
   readonly capabilityIds: readonly string[];
   readonly current: boolean;
   readonly bootstrapOnly: boolean;
+  readonly state?: "current" | "preparing" | "denied";
 }
 
 export interface EntitlementSnapshotAuthorityPort {
@@ -242,7 +243,7 @@ export function assertTrustedContextAgentRunAdmission(envelope: SignedTrustedReq
     envelope.payload.entitlement_snapshot_ref.snapshot_id === "identity_bootstrap_empty"
     || envelope.payload.capability_ids.length === 0
   ) {
-    throw new DomainError("INVALID_STATE_TRANSITION", "Agent Run entitlement authority is not available");
+    throw new DomainError("ENTITLEMENT_DENIED", "Agent Run entitlement authority is not available");
   }
 }
 
@@ -328,7 +329,12 @@ export async function issueTrustedContext(
       trx, tenantId: input.tenantId, profileId: input.profileId, membershipId: input.membershipId,
       actorId: actor.actor_id, now,
     });
-    if (snapshot.current !== true) invalidIssuance();
+    if (snapshot.current !== true) {
+      if (snapshot.state === "preparing") {
+        throw new DomainError("SERVICE_PREPARING", "Capability service is preparing", true);
+      }
+      throw new DomainError("ENTITLEMENT_DENIED", "Current entitlement authority is unavailable");
+    }
     const capabilityIds = sortedUniqueIds(snapshot.capabilityIds);
     const trustedPayload: TrustedRequestContext = {
       schema_version: 1,

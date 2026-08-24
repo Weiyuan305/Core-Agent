@@ -192,6 +192,51 @@ export {
   type PackWriteResult,
 } from "./services/entitlements/manage-pack.js";
 export {
+  selectTenantPackRelease,
+  type SelectTenantPackReleaseDependencies,
+  type TenantPackReleaseSelectionResult,
+} from "./services/entitlements/select-pack-release.js";
+export {
+  grantEntitlement,
+  changeEntitlementStatus,
+  type EntitlementWriteResult,
+  type ManageEntitlementDependencies,
+} from "./services/entitlements/manage-entitlement.js";
+export {
+  expireEntitlements,
+  type ExpireEntitlementsDependencies,
+} from "./services/entitlements/expire-entitlements.js";
+export type { EntitlementCommandContext } from "./services/entitlements/authority.js";
+export {
+  assignPackSeat,
+  type AssignPackSeatDependencies,
+  type PackSeatAssignmentResult,
+} from "./services/entitlements/assign-pack-seat.js";
+export {
+  revokePackSeat,
+  type RevokePackSeatDependencies,
+} from "./services/entitlements/revoke-pack-seat.js";
+export type {
+  AssignmentCommandDependencies,
+  AssignmentResolverInput,
+} from "./services/entitlements/assignment-authority.js";
+export {
+  resolveEffectiveCapabilities,
+  type EffectiveCapabilitySet,
+  type EffectiveCapabilitySource,
+  type EffectiveCapabilityTriple,
+} from "./services/entitlements/effective-capabilities.js";
+export {
+  resolveProfileSnapshot,
+  resolveProfileSnapshotInTransaction,
+  type ResolveProfileSnapshotDependencies,
+  type ResolveProfileSnapshotInput,
+  type ResolveProfileSnapshotTransactionInput,
+  type ResolvedProfileSnapshot,
+  type SnapshotResolutionEvidence,
+} from "./services/entitlements/resolve-profile-snapshot.js";
+export { assertAutomaticB2cProfile } from "./services/entitlements/automatic-b2c-assignment.js";
+export {
   assertAgentRunTransition,
   assertRuntimeObservedTransition,
   redactedFailureSummary,
@@ -310,6 +355,16 @@ export {
   type TrustedContextPublicKey,
   type VerifyTrustedContextSignatureInput,
 } from "./services/identity/trusted-context.js";
+export {
+  createEntitlementSnapshotAuthorityPort,
+  loadCurrentSnapshotAuthority,
+  requireCurrentSnapshot,
+  recheckCapabilityBeforeEffect,
+  requireCurrentSnapshotAuthority,
+  type CurrentSnapshotAuthority,
+  type LoadCurrentSnapshotAuthorityInput,
+  type RequireCurrentSnapshotAuthorityInput,
+} from "./services/entitlements/current-authority.js";
 export {
   beginEmailVerificationTransaction,
   admitEmailVerificationProviderAttempt,
@@ -446,6 +501,10 @@ export {
   type AuthenticatedAccountDeletionRecovery,
   type EstablishAccountDeletionRecoveryReauthenticationInput,
 } from "./services/identity/manage-account-deletion.js";
+export {
+  createAccountDeletionEntitlementRevocationPort,
+  type CreateAccountDeletionEntitlementRevocationPortDependencies,
+} from "./services/entitlements/revoke-actor-entitlements.js";
 export {
   readAccountDeletionFinalizationFacts,
   type StoredAccountDeletionFinalizationFacts,

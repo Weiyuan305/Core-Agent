@@ -222,7 +222,7 @@ test("trusted context issuance fails closed on stale Session Membership Profile 
   await resetDatabase();
   await seedCurrentAuthority();
   current = false;
-  await assert.rejects(issueTrustedContext(dependencies, input()), /UNAUTHENTICATED|INVALID_STATE_TRANSITION/);
+  await assert.rejects(issueTrustedContext(dependencies, input()), /UNAUTHENTICATED|INVALID_STATE_TRANSITION|ENTITLEMENT_DENIED/);
 });
 
 test("identity bootstrap snapshot is explicit and cannot admit an Agent Run", async () => {

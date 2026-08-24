@@ -1,8 +1,12 @@
+import { randomInt } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
+
 import type { Kysely, Transaction } from "kysely";
 
 import type { RuntimeDatabase } from "./database.js";
 
 const maximumAttempts = 3;
+const baseRetryDelayMs = 10;
 
 export class DatabaseTransactionRetryExhaustedError extends Error {
   public constructor() { super("Database concurrency retry exhausted"); }
@@ -33,6 +37,16 @@ export function isDatabaseTransactionRetryExhaustedError(error: unknown): error 
   return error instanceof DatabaseTransactionRetryExhaustedError;
 }
 
+async function waitForDatabaseTransactionRetry(attempt: number, signal?: AbortSignal): Promise<void> {
+  const exponentialDelayMs = baseRetryDelayMs * (2 ** (attempt - 1));
+  try {
+    await delay(exponentialDelayMs + randomInt(exponentialDelayMs), undefined, { signal });
+  } catch (error) {
+    if (signal?.aborted) throw new DatabaseTransactionRetryAbortedError();
+    throw error;
+  }
+}
+
 export async function withDatabaseTransactionRetry<T>(
   db: Kysely<RuntimeDatabase>,
   work: (trx: Transaction<RuntimeDatabase>) => Promise<T>,
@@ -49,6 +63,7 @@ export async function withDatabaseTransactionRetry<T>(
     } catch (error) {
       if (!isRetryableDatabaseTransactionError(error)) throw error;
       if (attempt === maximumAttempts) throw new DatabaseTransactionRetryExhaustedError();
+      await waitForDatabaseTransactionRetry(attempt, options.signal);
     }
   }
   throw new DatabaseTransactionRetryExhaustedError();

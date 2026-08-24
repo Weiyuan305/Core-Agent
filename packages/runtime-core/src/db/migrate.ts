@@ -137,6 +137,7 @@ const schemaManifestEntries = [
   [12, "email_verification_transactions", "2e7a7d0b8f910ff5253ace5dff1f0cc242224ec432e75621f15f57d93d14af12"],
   [13, "entitlement_capability_authority", "b2bf71c90115f32ee7c2f8ac270fcc598b6cdae9a27168c64beaa3f681ba181d"],
   [14, "catalog_artifact_contract_parity", "f95542be7709937690c0f944bf71d2fa9b322fdcc3496fc7e5b63ca43ddb1fa6"],
+  [15, "snapshot_recurrence", "f38bfbdd6015f7baf8d7e0e0ca29897a9e5996ce01b356c36f9fdb50294aacd2"],
 ] as const;
 
 const schemaManifests = new Map<number, SchemaManifest>(schemaManifestEntries.map(([version, name, checksum]) => [
@@ -1022,6 +1023,33 @@ schemaManifests.set(14, {
     action: "replace",
     before: schema13ImmutableArtifactRoutine,
     after: schema14ImmutableArtifactRoutine,
+  }],
+});
+
+schemaManifests.set(15, {
+  ...schemaManifests.get(15)!,
+  constraintAmendments: [{
+    action: "revoke",
+    before: {
+      schema: "public", relation: "entitlement_snapshots", relkind: "r",
+      name: "entitlement_snapshots_input_key", type: "u", validated: true,
+      definition: "UNIQUE (tenant_id, profile_id, canonical_input_hash)",
+    },
+  }],
+  indexAmendments: [{
+    action: "revoke",
+    before: {
+      schema: "public", relation: "entitlement_snapshots", relkind: "r",
+      name: "entitlement_snapshots_input_key",
+      definition: "CREATE UNIQUE INDEX entitlement_snapshots_input_key ON public.entitlement_snapshots USING btree (tenant_id, profile_id, canonical_input_hash)",
+    },
+  }, {
+    action: "add",
+    after: {
+      schema: "public", relation: "entitlement_snapshots", relkind: "r",
+      name: "entitlement_snapshots_input_lookup_idx",
+      definition: "CREATE INDEX entitlement_snapshots_input_lookup_idx ON public.entitlement_snapshots USING btree (tenant_id, profile_id, canonical_input_hash, snapshot_version DESC)",
+    },
   }],
 });
 

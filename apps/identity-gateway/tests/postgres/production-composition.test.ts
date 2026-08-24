@@ -1700,7 +1700,8 @@ test("production composition atomically verifies email, registers Task 3, issues
     )).rows[0]?.provider_verification_status, "pending");
     await checkpointRecoveryApp.close();
     await pool.query(`update email_verification_transactions
-      set provider_verification_attempt_expires_at = clock_timestamp() - interval '1 millisecond'
+      set provider_verification_started_at = clock_timestamp() - interval '2 milliseconds',
+          provider_verification_attempt_expires_at = clock_timestamp() - interval '1 millisecond'
       where email_verification_transaction_id = $1`, [checkpointVerificationId]);
     const checkpointRestartApp = await buildIdentityGatewayApp({
       config: onboardingConfig, provider, flowCookieKey: Buffer.alloc(32, 0x38), now: () => timestamp,

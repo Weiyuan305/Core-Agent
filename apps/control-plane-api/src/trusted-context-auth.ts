@@ -2,15 +2,16 @@ import { createPublicKey } from "node:crypto";
 import { types as utilTypes } from "node:util";
 
 import {
-  validateTrustedRequestContext,
+  validateEntitlementAwareTrustedRequestContext,
   type EntitlementSnapshotRef,
-  type TrustedContextAuthority,
+  type EntitlementAwareTrustedContextAuthority,
   type TrustedRequestContext,
 } from "@core-agent/contracts";
 import {
   canonicalJson,
   decodeSignedTrustedContext,
   DomainError,
+  loadCurrentSnapshotAuthority,
   loadActorIdentityAuthority,
   verifyTrustedContextSignature,
   type RuntimeDatabase,
@@ -47,7 +48,7 @@ export interface AuthenticateTrustedContextDependencies {
     trx: Transaction<RuntimeDatabase>,
     context: TrustedRequestContext,
     now: Date,
-  ) => Promise<TrustedContextAuthority>;
+  ) => Promise<EntitlementAwareTrustedContextAuthority>;
 }
 
 export interface TrustedContextRequestHeaders {
@@ -123,7 +124,7 @@ async function loadDatabaseAuthority(
   trx: Transaction<RuntimeDatabase>,
   context: TrustedRequestContext,
   now: Date,
-): Promise<TrustedContextAuthority> {
+): Promise<EntitlementAwareTrustedContextAuthority> {
   const actor = await loadActorIdentityAuthority(trx, context.actor_id);
   if (actor.actorStatus !== "active") unauthenticated();
   const membership = actor.memberships.find((candidate) => (
@@ -146,6 +147,13 @@ async function loadDatabaseAuthority(
     || container.observed_state !== "ready"
     || container.health_status !== "healthy"
   ) unauthenticated();
+  const snapshot = await loadCurrentSnapshotAuthority({
+    trx,
+    tenantId: context.tenant_id,
+    profileId: context.profile_id,
+    now,
+  });
+  if (!snapshot.current) unauthenticated();
   return {
     expected_issuer: context.issuer,
     expected_audience: "control-plane-api",
@@ -163,6 +171,12 @@ async function loadDatabaseAuthority(
       owner_actor_id: profile.owner_actor_id,
       status: profile.status === "active" ? "active" : "suspended",
     },
+    entitlement_snapshot: {
+      tenant_id: context.tenant_id,
+      profile_id: context.profile_id,
+      snapshot_ref: snapshot.snapshotRef,
+      capability_ids: snapshot.capabilityIds,
+    },
   };
 }
 
@@ -177,7 +191,8 @@ export async function authenticateTrustedContextRequest(
   validateRawHeaders(request.rawHeaders);
   const encoded = ownHeader(request.headers, "x-core-agent-context");
   if (encoded === undefined) unauthenticated();
-  return dependencies.db.transaction().execute(async (trx) => {
+  try {
+    return await dependencies.db.transaction().execute(async (trx) => {
     const now = await readDatabaseNow(dependencies, trx);
     const envelope = verifyTrustedContextSignature({
       envelope: decodeSignedTrustedContext(encoded),
@@ -194,7 +209,7 @@ export async function authenticateTrustedContextRequest(
     if (
       authority.expected_issuer !== dependencies.expectedIssuer
       || authority.expected_audience !== dependencies.expectedAudience
-      || validateTrustedRequestContext(envelope.payload, authority).length > 0
+      || validateEntitlementAwareTrustedRequestContext(envelope.payload, authority).length > 0
     ) unauthenticated();
     const result: TrustedContextApiRequestContext = {
       authenticationKind: "trusted_context",
@@ -213,8 +228,12 @@ export async function authenticateTrustedContextRequest(
       capabilityIds: Object.freeze([...envelope.payload.capability_ids]),
       entitlementSnapshotRef: Object.freeze({ ...envelope.payload.entitlement_snapshot_ref }),
     };
-    return Object.freeze(result);
-  });
+      return Object.freeze(result);
+    });
+  } catch (error) {
+    if (error instanceof DomainError) throw error;
+    throw new DomainError("DEPENDENCY_UNAVAILABLE", "Trusted context authority is unavailable", true);
+  }
 }
 
 function configurationError(): Error {

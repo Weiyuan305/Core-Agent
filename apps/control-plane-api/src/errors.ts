@@ -19,6 +19,10 @@ const HTTP_BY_CODE: Readonly<Record<StableApiErrorCode, number>> = {
   RESOURCE_NOT_FOUND: 404,
   IDEMPOTENCY_CONFLICT: 409,
   RESOURCE_VERSION_CONFLICT: 409,
+  CAPABILITY_CONFLICT: 409,
+  ENTITLEMENT_DENIED: 403,
+  SEAT_EXHAUSTED: 409,
+  SERVICE_PREPARING: 503,
   INVALID_STATE_TRANSITION: 409,
   RUNTIME_NOT_READY: 409,
   SUPERVISOR_REJECTED: 409,
@@ -33,6 +37,10 @@ const CATEGORY_BY_CODE: Readonly<Record<StableApiErrorCode, ErrorEnvelope["categ
   RESOURCE_NOT_FOUND: "authorization",
   IDEMPOTENCY_CONFLICT: "conflict",
   RESOURCE_VERSION_CONFLICT: "conflict",
+  CAPABILITY_CONFLICT: "conflict",
+  ENTITLEMENT_DENIED: "authorization",
+  SEAT_EXHAUSTED: "conflict",
+  SERVICE_PREPARING: "unavailable",
   INVALID_STATE_TRANSITION: "conflict",
   RUNTIME_NOT_READY: "conflict",
   SUPERVISOR_REJECTED: "conflict",
@@ -47,6 +55,10 @@ const PUBLIC_MESSAGE_BY_CODE: Readonly<Record<StableApiErrorCode, string>> = {
   RESOURCE_NOT_FOUND: "The requested resource was not found.",
   IDEMPOTENCY_CONFLICT: "The idempotency key conflicts with an earlier request.",
   RESOURCE_VERSION_CONFLICT: "The resource version has changed.",
+  CAPABILITY_CONFLICT: "The requested capabilities conflict.",
+  ENTITLEMENT_DENIED: "Current entitlement authority denied the request.",
+  SEAT_EXHAUSTED: "No entitlement seat is available.",
+  SERVICE_PREPARING: "The capability service is preparing.",
   INVALID_STATE_TRANSITION: "The requested state transition is not allowed.",
   RUNTIME_NOT_READY: "The runtime is not ready.",
   SUPERVISOR_REJECTED: "The runtime operation was rejected.",
@@ -105,7 +117,7 @@ export function mapApiError(error: unknown, context: ApiErrorMappingContext): Ma
   try {
     if (error instanceof DomainError) {
       code = error.code;
-      retryable = (code === "DEPENDENCY_UNAVAILABLE" || code === "DEPENDENCY_TIMEOUT")
+      retryable = (code === "DEPENDENCY_UNAVAILABLE" || code === "DEPENDENCY_TIMEOUT" || code === "SERVICE_PREPARING")
         && error.retryable === true;
     } else if (isFastifyInvalidRequest(error)) {
       code = "INVALID_REQUEST";
