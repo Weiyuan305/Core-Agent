@@ -1756,6 +1756,7 @@ export class IntegrationHarness {
   #workerPromise: Promise<void> | undefined;
   #workerFailed = false;
   #workerIdCounter = 0;
+  readonly #workerIds = new Set<string>();
   #resourceCounter = 0;
   #closed = false;
 
@@ -1921,6 +1922,8 @@ export class IntegrationHarness {
   public async startWorker(workerId?: string): Promise<void> {
     if (this.#workerPromise !== undefined) throw new Error("Worker is already running");
     this.#workerIdCounter += 1;
+    const activeWorkerId = workerId ?? `worker_task16_${this.#workerIdCounter}`;
+    this.#workerIds.add(activeWorkerId);
     const controller = new AbortController();
     const fetchImpl = rewriteToFakeHermes(
       this.fakeHermes,
@@ -1943,7 +1946,7 @@ export class IntegrationHarness {
     this.#workerFailed = false;
     this.#workerPromise = runControlPlaneWorker({
       db: this.db,
-      workerId: workerId ?? `worker_task16_${this.#workerIdCounter}`,
+      workerId: activeWorkerId,
       clock: workerClock(),
       logger,
       repositories: createWorkerRuntimeRepositories(
@@ -2344,6 +2347,7 @@ export class IntegrationHarness {
     this.#closed = true;
     const failures = await runCleanupStages([
       { category: "worker", work: () => this.stopWorker() },
+      { category: "recoverable lease release", work: () => this.#releaseRecoverableWorkerLeases() },
       { category: "api", work: () => this.#closeApi() },
       { category: "supervisor", work: () => this.#supervisor.close() },
       { category: "hermes", work: () => this.fakeHermes.close() },
@@ -2609,6 +2613,30 @@ export class IntegrationHarness {
     );
     assert.equal(jobs.rows[0]?.count, "0", "lease category: worker_jobs");
     assert.equal(outbox.rows[0]?.count, "0", "lease category: outbox");
+  }
+
+  async #releaseRecoverableWorkerLeases(): Promise<void> {
+    const workerIds = [...this.#workerIds];
+    if (workerIds.length === 0) return;
+    await this.#childPool.query(
+      `update worker_jobs
+       set status = 'retrying', lease_owner = null, lease_expires_at = null,
+           next_attempt_at = clock_timestamp(),
+           last_error_summary = 'Integration worker stopped before external dispatch',
+           updated_at = clock_timestamp()
+       where status = 'running' and effect_state = 'pre_effect'
+         and lease_owner = any($1::text[])`,
+      [workerIds],
+    );
+    await this.#childPool.query(
+      `update outbox
+       set status = 'pending', lease_owner = null, lease_expires_at = null,
+           next_attempt_at = clock_timestamp(),
+           last_error_summary = 'Integration worker stopped before wake delivery',
+           updated_at = clock_timestamp()
+       where status = 'pending' and lease_owner = any($1::text[])`,
+      [workerIds],
+    );
   }
 
   async #assertSentinelAbsent(): Promise<void> {
