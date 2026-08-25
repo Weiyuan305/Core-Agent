@@ -77,6 +77,20 @@ export {
   withDatabaseTransactionRetry,
 } from "./db/transaction-retry.js";
 export { applyMigrations } from "./db/migrate.js";
+export { BUILTIN_READ_POLICY, BUILTIN_READ_POLICY_HASH, canonicalPolicyHash } from "./policy/builtin-read-policy.js";
+export { canonicalizeToolArguments, type CanonicalToolArguments } from "./policy/canonical-json.js";
+export { argumentsMatchReviewedSchema, validateReviewedInputSchema, type ReviewedInputSchema } from "./policy/argument-validation.js";
+export { evaluateReadMcp, type ReadMcpEvaluationInput } from "./policy/evaluate-read-mcp.js";
+export { loadReviewedToolBinding, listReviewedToolBindings, bootstrapPolicyMcpCatalog } from "./repositories/policy/catalog.js";
+export { bootstrapBuiltinPolicy, type SyntheticBindingDocument } from "./services/policy/bootstrap-policy.js";
+export { openPolicySession, type OpenPolicySessionDependencies } from "./services/policy/open-policy-session.js";
+export { closePolicySession } from "./services/policy/close-policy-session.js";
+export { issueToolDecision, type IssueToolDecisionDependencies } from "./services/policy/issue-tool-decision.js";
+export { consumeExecutionProof, type ConsumeExecutionProofResult } from "./services/policy/consume-execution-proof.js";
+export { deriveExecutionProof, executionProofDigest, proofDigestMatches, type PolicyProofKey } from "./services/policy/proof-crypto.js";
+export { createSyntheticMcpInvocationPort, createUnavailableRemoteMcpInvocationPort, type McpInvocationPort, type McpInvocationRequest } from "./policy/mcp-invocation-port.js";
+export { listAuthorizedTools } from "./services/policy/list-authorized-tools.js";
+export { invokeAuthorizedTool, type InvokeAuthorizedToolDependencies } from "./services/policy/invoke-authorized-tool.js";
 export {
   bootstrapRuntimeDatabaseAuth,
   type RuntimeDatabaseAuthBootstrapInput,
