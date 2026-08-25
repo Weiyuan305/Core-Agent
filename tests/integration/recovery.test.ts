@@ -279,6 +279,7 @@ test("foreign tenant and stream wakeups never cross an SSE stream", async () => 
     { tenantId: first.provisioned.tenant_id },
   );
   const received = await firstPending;
+  await harness.worker.untilRunJobStatus(ownRun.run_id, "succeeded");
   assert(received.events.every(
     (event) => event.tenant_id === first.provisioned.tenant_id
       && event.conversation_id === first.conversation.conversation_id,
