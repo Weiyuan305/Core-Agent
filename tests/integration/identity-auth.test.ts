@@ -271,7 +271,9 @@ test.before(async () => {
   app = await buildIdentityGatewayApp({
     config,
     provider,
-    operations: identityGatewayServerTestInternals.productionOperations(harness.db, piiKey, piiProtector, oauthProtector),
+    operations: identityGatewayServerTestInternals.productionOperations(
+      harness.db, piiKey, piiProtector, oauthProtector, "tenant_platform_authority",
+    ),
     flowCookieKey: Buffer.alloc(32, 0x44),
     now: () => new Date(now),
   });

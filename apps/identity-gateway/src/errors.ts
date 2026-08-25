@@ -63,6 +63,18 @@ interface ErrorDescription {
 
 function describe(error: unknown): ErrorDescription {
   const code = safeCode(error);
+  if (code === "SEAT_EXHAUSTED") {
+    return { statusCode: 409, code: "AUTH_CONFLICT", category: "conflict", message: "可分配名额已用完。", retryable: false };
+  }
+  if (code === "CAPABILITY_CONFLICT") {
+    return { statusCode: 409, code: "AUTH_CONFLICT", category: "conflict", message: "当前服务组合暂时无法启用，请联系支持。", retryable: false };
+  }
+  if (code === "SERVICE_PREPARING") {
+    return { statusCode: 503, code: "SERVICE_PREPARING", category: "unavailable", message: "服务准备未完成，我们正在处理。", retryable: true };
+  }
+  if (code === "ENTITLEMENT_DENIED") {
+    return { statusCode: 403, code: "ENTITLEMENT_DENIED", category: "authorization", message: "当前服务不可用，请联系管理员。", retryable: false };
+  }
   if (code === "AUTH_RATE_LIMITED") {
     const value = ownData(error, "retryAfterMs");
     const retryAfterMs = typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;

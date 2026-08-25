@@ -14,6 +14,7 @@ import { lockEntitlement } from "../../repositories/entitlements/entitlements.js
 import { databaseClock, type EntitlementCommandContext } from "./authority.js";
 import {
   lockEligibleConsultantProfile,
+  requireAssignmentRecentReauthentication,
   requireCompanyAdminAuthority,
   type AssignmentCommandDependencies,
 } from "./assignment-authority.js";
@@ -61,10 +62,14 @@ export async function assignPackSeat(
   const input = validateEntitlementCommand<AssignPackSeatRequest>(AssignPackSeatRequestSchema, raw);
   try {
     return await withDatabaseTransactionRetry(dependencies.db, async (trx) => {
+      await requireAssignmentRecentReauthentication(trx, dependencies, context);
       const discovered = await trx.selectFrom("entitlements").select("tenant_id")
         .where("entitlement_id", "=", input.entitlement_id).executeTakeFirst();
       if (discovered === undefined) throw new DomainError("RESOURCE_NOT_FOUND", "Entitlement was not found");
-      const actingMembershipId = await requireCompanyAdminAuthority(trx, dependencies, context, discovered.tenant_id);
+      if (dependencies.authorityTenantId !== undefined && discovered.tenant_id !== dependencies.authorityTenantId) {
+        throw new DomainError("RESOURCE_NOT_FOUND", "Entitlement was not found");
+      }
+      const actingMembershipId = await requireCompanyAdminAuthority(trx, context, discovered.tenant_id);
       const now = await databaseClock(dependencies, trx);
       const admission = await beginIdempotentCommand<PackSeatAssignmentResult>({ tenantId: discovered.tenant_id, trx }, {
         key: input.idempotency_key,

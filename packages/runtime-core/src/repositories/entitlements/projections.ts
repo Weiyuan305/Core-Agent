@@ -3,10 +3,11 @@ import { createHash } from "node:crypto";
 import { sql, type Kysely, type Transaction } from "kysely";
 
 import type { RuntimeDatabase } from "../../db/database.js";
+import type { ProviderCatalog } from "../../config/provider-catalog.js";
 import { withDatabaseTransactionRetry } from "../../db/transaction-retry.js";
 import { appendProductEvents, type ProductEventWithoutSequence } from "../events.js";
 import { createCapabilityRuntimeManifest, type CapabilityRuntimeManifestV1 } from "../../runtime/capability-manifest.js";
-import { deriveRuntimeContainerId } from "../../services/provision-tenant.js";
+import { deriveRuntimeContainerId, deriveRuntimeVolumeRef } from "../../services/provision-tenant.js";
 import { loadEffectiveCapabilitySources } from "./snapshots.js";
 import { resolveEffectiveCapabilities } from "../../services/entitlements/effective-capabilities.js";
 import type { CapabilityRuntimeObservation } from "../../supervisor/contracts.js";
@@ -40,6 +41,13 @@ export type CapabilityProjectionPreparationResult =
 
 export type CapabilityProjectionCompletionResult = { readonly kind: "completed" | "superseded" | "lease_lost" };
 export type CapabilityProjectionFailureResult = { readonly kind: "failed" | "superseded" | "lease_lost" };
+
+export interface EntitlementRuntimeProvisioningTemplate {
+  readonly imageRef: string;
+  readonly platform: "linux/amd64" | "linux/arm64";
+  readonly ingressSecretReferenceId: string;
+  readonly providerCatalog: ProviderCatalog;
+}
 
 class ProjectionLeaseLost extends Error {}
 
@@ -185,7 +193,98 @@ export class CapabilityProjectionRepository {
   public constructor(
     private readonly db: Kysely<RuntimeDatabase>,
     private readonly now: () => Date = () => new Date(),
+    private readonly provisioningTemplate?: EntitlementRuntimeProvisioningTemplate,
   ) {}
+
+  private async ensureRuntime(
+    trx: Transaction<RuntimeDatabase>,
+    tenantId: string,
+    runtimeId: string,
+  ) {
+    let runtime = await trx.selectFrom("runtime_containers")
+      .select(["generation", "image_ref"])
+      .where("tenant_id", "=", tenantId)
+      .where("container_id", "=", runtimeId)
+      .forUpdate().executeTakeFirst();
+    if (runtime !== undefined) return runtime;
+    const template = this.provisioningTemplate;
+    if (template === undefined) throw new Error("Managed Runtime provisioning template is unavailable");
+    const profiles = await trx.selectFrom("profiles")
+      .select(["provider_config_id", "model_id"])
+      .where("tenant_id", "=", tenantId)
+      .where("status", "in", ["provisioning", "active"])
+      .orderBy("profile_id").execute();
+    if (profiles.length === 0) throw new Error("Managed Runtime Profiles are unavailable");
+    const now = sql<Date>`clock_timestamp()`;
+    const references = new Map<string, "provider_credential" | "integration">([
+      [template.ingressSecretReferenceId, "integration"],
+    ]);
+    for (const profile of profiles) {
+      const provider = template.providerCatalog.require(profile.provider_config_id, profile.model_id);
+      const existing = references.get(provider.credential_secret_ref);
+      if (existing !== undefined && existing !== "provider_credential") {
+        throw new Error("Managed Runtime secret purposes conflict");
+      }
+      references.set(provider.credential_secret_ref, "provider_credential");
+    }
+    for (const [referenceId, purpose] of references) {
+      await trx.insertInto("secret_references").values({
+        tenant_id: tenantId,
+        reference_id: referenceId,
+        purpose,
+        version: 1,
+        status: "active",
+        created_at: now,
+        updated_at: now,
+      }).onConflict((conflict) => conflict.columns(["tenant_id", "reference_id"]).doNothing()).execute();
+      const stored = await trx.selectFrom("secret_references")
+        .select(["purpose", "version", "status"])
+        .where("tenant_id", "=", tenantId).where("reference_id", "=", referenceId)
+        .executeTakeFirstOrThrow();
+      if (stored.purpose !== purpose || Number(stored.version) !== 1 || stored.status !== "active") {
+        throw new Error("Managed Runtime secret metadata conflicts");
+      }
+    }
+    await trx.insertInto("runtime_containers").values({
+      tenant_id: tenantId,
+      container_id: runtimeId,
+      schema_version: 1,
+      resource_version: 1,
+      command_version: 0,
+      runtime_kind: "hermes",
+      desired_state: "running",
+      observed_state: "requested",
+      image_ref: template.imageRef,
+      runtime_platform: template.platform,
+      generation: 1,
+      volume_ref: deriveRuntimeVolumeRef(tenantId),
+      health_status: "unknown",
+      last_probed_at: null,
+      failure_summary: null,
+      capability_manifest_digest: null,
+      created_at: now,
+      updated_at: now,
+    }).onConflict((conflict) => conflict.columns(["tenant_id", "container_id"]).doNothing()).execute();
+    await trx.insertInto("runtime_activity").values({
+      tenant_id: tenantId,
+      runtime_generation: 1,
+      last_work_at: now,
+      active_conversation_count: 0,
+      active_run_count: 0,
+      resource_version: 1,
+      created_at: now,
+      updated_at: now,
+    }).onConflict((conflict) => conflict.columns(["tenant_id", "runtime_generation"]).doNothing()).execute();
+    runtime = await trx.selectFrom("runtime_containers")
+      .select(["generation", "image_ref"])
+      .where("tenant_id", "=", tenantId)
+      .where("container_id", "=", runtimeId)
+      .forUpdate().executeTakeFirst();
+    if (runtime === undefined || runtime.image_ref !== template.imageRef) {
+      throw new Error("Managed Runtime provisioning identity conflicts");
+    }
+    return runtime;
+  }
 
   public async prepare(job: CapabilityProjectionWorkerJobRef): Promise<CapabilityProjectionPreparationResult> {
     try {
@@ -217,11 +316,7 @@ export class CapabilityProjectionRepository {
           return { kind: "superseded" } as const;
         }
         const runtimeId = deriveRuntimeContainerId(job.tenantId);
-        const runtime = await trx.selectFrom("runtime_containers")
-          .select(["generation", "image_ref"])
-          .where("tenant_id", "=", job.tenantId)
-          .where("container_id", "=", runtimeId)
-          .forUpdate().executeTakeFirstOrThrow();
+        const runtime = await this.ensureRuntime(trx, job.tenantId, runtimeId);
         const maximum = await trx.selectFrom("capability_runtime_projections")
           .select(sql<string>`coalesce(max(runtime_generation), 0)`.as("maximum"))
           .where("tenant_id", "=", job.tenantId).executeTakeFirstOrThrow();

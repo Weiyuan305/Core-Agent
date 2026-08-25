@@ -240,6 +240,7 @@ test("service mounts and networks preserve each process boundary", async () => {
   });
   assert.deepEqual(volumeTargets(worker).sort(), [
     "/app/infra/runtime/providers.json",
+    "/run/core-agent/config/hermes-images.lock.json",
     "/run/core-agent/database-credentials",
     "/run/core-agent/ingress",
     "/run/core-agent/supervisor",
@@ -259,6 +260,7 @@ test("service mounts and networks preserve each process boundary", async () => {
   assert.deepEqual(secretTargets(supervisor), []);
   assert.equal(volumeAt(api, "/app/infra/runtime/providers.json").read_only, true);
   assert.equal(volumeAt(worker, "/app/infra/runtime/providers.json").read_only, true);
+  assert.equal(volumeAt(worker, "/run/core-agent/config/hermes-images.lock.json").read_only, true);
   assert.equal(volumeAt(supervisor, "/app/infra/runtime/providers.json").read_only, true);
   assert.equal(volumeAt(worker, "/run/core-agent/ingress").read_only, true);
   assert.equal(volumeAt(worker, "/run/core-agent/supervisor").read_only, true);

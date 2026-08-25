@@ -602,10 +602,12 @@ test("security config rejects dynamic recovery redirects and unsafe production b
     IDENTITY_SESSION_HMAC_KEY_REF: "secret/session-hmac",
     IDENTITY_PII_HMAC_KEY_REF: "secret/pii-hmac",
     IDENTITY_SIGNING_KEY_REF: "secret/signing-key",
+    IDENTITY_CATALOG_AUTHORITY_TENANT_ID: "tenant_platform",
     IDENTITY_GATEWAY_PORT: "8080",
     IDENTITY_PUBLIC_AUTH_ENABLED: "1",
   } satisfies NodeJS.ProcessEnv;
   assert.equal(loadIdentityGatewayConfig(valid).host, "127.0.0.1");
+  assert.equal(loadIdentityGatewayConfig(valid).catalogAuthorityTenantId, "tenant_platform");
   assert.deepEqual([...loadIdentityGatewayConfig({
     ...valid, IDENTITY_TRUSTED_PROXY_ADDRESSES: "127.0.0.1,2001:db8::1",
   }).trustedProxyAddresses], ["127.0.0.1", "2001:db8::1"]);
@@ -617,6 +619,7 @@ test("security config rejects dynamic recovery redirects and unsafe production b
     { ...valid, IDENTITY_GATEWAY_HOST: "0.0.0.0", IDENTITY_GATEWAY_CONTAINER_BIND: "0" },
     { ...valid, IDENTITY_TRUSTED_PROXY_ADDRESSES: "127.0.0.1, attacker.example.test" },
     { ...valid, IDENTITY_TRUSTED_PROXY_ADDRESSES: "127.0.0.1,127.0.0.1" },
+    { ...valid, IDENTITY_CATALOG_AUTHORITY_TENANT_ID: "" },
     { ...valid, IDENTITY_UNPLANNED_SETTING: "1" },
   ]) assert.throws(() => loadIdentityGatewayConfig(environment), /configuration is invalid/u);
   const container = loadIdentityGatewayConfig({ ...valid, IDENTITY_GATEWAY_HOST: "0.0.0.0", IDENTITY_GATEWAY_CONTAINER_BIND: "1" });

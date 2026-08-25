@@ -15,6 +15,7 @@ import { appendAuditEvent, appendProductEvents } from "./events.js";
 import type { JobLeaseResult } from "./jobs.js";
 import { ResourceRepositories } from "./index.js";
 import { safeContractInteger } from "./resources.js";
+import { touchRuntimeActivity } from "./entitlements/runtime-activity.js";
 
 const workerActorId = "core_agent_provisioner";
 const workerMembershipId = "core_agent_provisioner_admin";
@@ -229,6 +230,7 @@ export class WorkerAgentRunRepository {
         run.status = "running";
         run.started_at = now;
         run.resource_version = String(safeContractInteger(run.resource_version) + 1);
+        await touchRuntimeActivity(trx, job.tenantId);
       } else if (run.status !== "running" || run.started_at === null) {
         throw new Error("Stored Agent Run is not executable");
       }
@@ -384,6 +386,7 @@ export class WorkerAgentRunRepository {
       await trx.updateTable("sessions").set({ last_active_at: now, resource_version: sql`resource_version + 1`, updated_at: now })
         .where("tenant_id", "=", job.tenantId).where("session_id", "=", sessions[0]!.session_id).executeTakeFirstOrThrow();
       await appendRunAudit(context, job, updated, "succeeded", "Managed Agent Run completed", now);
+      await touchRuntimeActivity(trx, job.tenantId);
       await updateOwnedJob(trx, job, { status: "succeeded", lease_owner: null, lease_expires_at: null, last_error_summary: null, updated_at: now });
       return { kind: "updated" as const };
     }) as Promise<JobLeaseResult>;
@@ -419,6 +422,7 @@ export class WorkerAgentRunRepository {
         event_type: "run.failed", payload: { run_id: job.runId, status: "failed", failure_code: failure.code, summary: redacted },
       }] });
       await appendRunAudit(context, job, updated, "failed", redacted, now);
+      await touchRuntimeActivity(trx, job.tenantId);
       await updateOwnedJob(trx, job, { status: "failed", lease_owner: null, lease_expires_at: null, last_error_summary: redacted, updated_at: now });
       return { kind: "updated" as const };
     }) as Promise<JobLeaseResult>;

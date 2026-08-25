@@ -25,14 +25,15 @@ export interface AssignmentResolverInput {
 
 export interface AssignmentCommandDependencies extends EntitlementTransactionDependencies {
   readonly resolveProfileSnapshotInTransaction: (input: AssignmentResolverInput) => Promise<unknown>;
+  /** Optional transport-bound Tenant that must match the discovered resource. */
+  readonly authorityTenantId?: string;
 }
 
-export async function requireCompanyAdminAuthority(
+export async function requireAssignmentRecentReauthentication(
   trx: Transaction<RuntimeDatabase>,
   dependencies: AssignmentCommandDependencies,
   context: EntitlementCommandContext,
-  tenantId: string,
-): Promise<string> {
+): Promise<void> {
   assertCommandContext(context);
   await requireRecentReauthentication({
     trx,
@@ -42,6 +43,14 @@ export async function requireCompanyAdminAuthority(
     authSubjectId: context.performingAuthSubjectId,
     sessionId: context.performingSessionId,
   });
+}
+
+export async function requireCompanyAdminAuthority(
+  trx: Transaction<RuntimeDatabase>,
+  context: EntitlementCommandContext,
+  tenantId: string,
+): Promise<string> {
+  assertCommandContext(context);
   const tenant = await requireActiveTenant(trx, tenantId);
   if (tenant.tenant_mode !== "b2b") throw new DomainError("INVALID_STATE_TRANSITION", "Pack seats require an active B2B Tenant");
   const membership = await trx.selectFrom("memberships").select(["membership_id", "roles", "status", "membership_source"])

@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 
-import { assertSchemaVersion, createRedactor, createRuntimeDatabase, databaseConnectionOptions, FileSecretStore, HermesClient, loadProviderCatalog, loadRuntimeEnvironment, readProtectedDatabasePassword, RuntimeSupervisorClient } from "@core-agent/runtime-core";
+import { assertSchemaVersion, assertSecretReferenceId, createRedactor, createRuntimeDatabase, databaseConnectionOptions, FileSecretStore, HermesClient, loadProviderCatalog, loadRuntimeEnvironment, loadRuntimeImageLock, readProtectedDatabasePassword, RuntimeSupervisorClient } from "@core-agent/runtime-core";
 import { Pool } from "pg";
 
 import { HttpHermesReadinessClient } from "./hermes-readiness-client.js";
@@ -109,6 +109,19 @@ export async function startControlPlaneWorker(environment: NodeJS.ProcessEnv = p
   let providerJson: unknown;
   try { providerJson = JSON.parse(await readFile(providerPath, "utf8")) as unknown; }
   catch { throw new Error("Control Plane Worker configuration is invalid"); }
+  const imageLockPath = resolve(environment.CONTROL_PLANE_IMAGE_LOCK_FILE ?? "");
+  if (imageLockPath !== environment.CONTROL_PLANE_IMAGE_LOCK_FILE) throw new Error("Control Plane Worker configuration is invalid");
+  let imageLockJson: unknown;
+  try { imageLockJson = JSON.parse(await readFile(imageLockPath, "utf8")) as unknown; }
+  catch { throw new Error("Control Plane Worker configuration is invalid"); }
+  const imageLock = loadRuntimeImageLock(imageLockJson);
+  const runtimePlatform = environment.CONTROL_PLANE_RUNTIME_PLATFORM;
+  if (runtimePlatform !== "linux/amd64" && runtimePlatform !== "linux/arm64") {
+    throw new Error("Control Plane Worker configuration is invalid");
+  }
+  const ingressSecretReferenceId = environment.CONTROL_PLANE_INGRESS_SECRET_REFERENCE_ID ?? "";
+  try { assertSecretReferenceId(ingressSecretReferenceId); }
+  catch { throw new Error("Control Plane Worker configuration is invalid"); }
   const databasePassword = await readProtectedDatabasePassword(configuration.databasePasswordFile);
   const identityConfiguration = loadIdentityFinalizerConfiguration(environment);
   const identityPassword = identityConfiguration === undefined
@@ -139,7 +152,12 @@ export async function startControlPlaneWorker(environment: NodeJS.ProcessEnv = p
       db, ...(identityDb === undefined ? {} : { identityDb }),
       ...(identityProviderDeletion === undefined ? {} : { identityProviderDeletion }),
       workerId: createWorkerLeaseOwner(configuration.workerId), clock: createWorkerClock(), logger: pino(),
-      repositories: createWorkerRuntimeRepositories(db, providerCatalog, createRedactor([])),
+      repositories: createWorkerRuntimeRepositories(db, providerCatalog, createRedactor([]), {
+        imageRef: imageLock.platforms[runtimePlatform].reference,
+        platform: runtimePlatform,
+        ingressSecretReferenceId,
+        providerCatalog,
+      }),
       providerCatalog,
       supervisorClient: new RuntimeSupervisorClient({ socketPath: configuration.supervisorSocket }),
       ingressSecretStore: new FileSecretStore(configuration.secretRoot),

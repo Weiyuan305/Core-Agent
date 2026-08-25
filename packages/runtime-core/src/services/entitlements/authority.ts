@@ -57,6 +57,10 @@ export async function requirePlatformEntitlementAuthority(
     authSubjectId: context.performingAuthSubjectId,
     sessionId: context.performingSessionId,
   });
+  const authorityTenant = await requireActiveTenant(trx, dependencies.platformAuthorityTenantId);
+  if (authorityTenant.tenant_mode !== "b2b") {
+    throw new DomainError("INVALID_STATE_TRANSITION", "Platform entitlement authority Tenant must be B2B");
+  }
   const role = await trx.selectFrom("platform_role_assignments")
     .select("status")
     .where("actor_id", "=", context.performingActorId)

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { Buffer } from "node:buffer";
 
-import type { Kysely, Transaction } from "kysely";
+import type { Transaction } from "kysely";
 
 import type { RuntimeDatabase } from "../../db/database.js";
 import { withDatabaseTransactionRetry } from "../../db/transaction-retry.js";
@@ -12,6 +12,11 @@ import { validateCatalogCommandInput, validateCatalogTransition, type ValidatedP
 
 export interface PackWriteResult { readonly schema_version: 1; readonly pack_version_id: string; readonly pack_product_id: string; readonly version: string; readonly status: "draft" | "reviewed" | "published" | "retired" | "blocked"; readonly resource_version: number; }
 const dayMs = 24 * 60 * 60 * 1_000;
+function catalogTransaction<T>(dependencies: CatalogCommandDependencies, work: (trx: Transaction<RuntimeDatabase>) => Promise<T>): Promise<T> {
+  return dependencies.transaction === undefined
+    ? withDatabaseTransactionRetry(dependencies.db, work, { isolationLevel: "serializable" })
+    : work(dependencies.transaction);
+}
 function safeVersion(value: string): number { const number = Number(value); if (!/^\d+$/u.test(value) || !Number.isSafeInteger(number) || number < 1) throw new DomainError("INTERNAL_ERROR", "Stored catalog version is invalid"); return number; }
 function safeContext(context: CatalogCommandContext): void { if ([context.performingActorId, context.requestId, context.traceId].some((value) => typeof value !== "string" || value.length < 1 || value.length > 255)) throw new DomainError("INVALID_REQUEST", "Catalog command context is invalid"); }
 function auditId(key: string, action: string): string { return `audit_catalog_${createHash("sha256").update(`${key}:${action}`, "utf8").digest("hex").slice(0, 32)}`; }
@@ -39,7 +44,7 @@ function canonicalMembers(input: ValidatedPackCreate): readonly { capability_id:
 }
 async function transition(dependencies: CatalogCommandDependencies, context: CatalogCommandContext, raw: unknown, desired: "reviewed" | "published" | "retired" | "blocked"): Promise<PackWriteResult> {
   const input = validateCatalogTransition(raw, "pack"); safeContext(context);
-  return withDatabaseTransactionRetry(dependencies.db, async (trx) => {
+  return catalogTransaction(dependencies, async (trx) => {
     const now = dependencies.now?.() ?? new Date(); const scope = await platformScope(trx, context, dependencies.catalogAuthorityTenantId); const operation = `entitlements.pack.${desired}`;
     const admission = await beginIdempotentCommand<PackWriteResult>({ tenantId: scope.tenantId, trx }, { key: input.idempotency_key, payloadHash: input.payload_hash, operation, now, expiresAt: new Date(now.getTime() + dayMs) });
     if (admission.kind === "replay") { assertReplay(admission.response); return Object.freeze(admission.response); }
@@ -76,12 +81,12 @@ async function transition(dependencies: CatalogCommandDependencies, context: Cat
     await audit(trx, scope, context, input.idempotency_key, operation, pack.pack_version_id, resourceVersion, now);
     await appendLifecycle(trx, scope, context, input.idempotency_key, operation, result, now);
     await completeIdempotentCommand({ tenantId: scope.tenantId, trx }, { key: input.idempotency_key, payloadHash: input.payload_hash, operation, resultRef: pack.pack_version_id, response: result, updatedAt: now }); return result;
-  }, { isolationLevel: "serializable" });
+  });
 }
 
 export async function createPackVersion(dependencies: CatalogCommandDependencies, context: CatalogCommandContext, raw: unknown): Promise<PackWriteResult> {
   const input = validateCatalogCommandInput(raw, "pack") as ValidatedPackCreate; safeContext(context); const members = canonicalMembers(input);
-  try { return await withDatabaseTransactionRetry(dependencies.db, async (trx) => {
+  try { return await catalogTransaction(dependencies, async (trx) => {
     const now = dependencies.now?.() ?? new Date(); const scope = await platformScope(trx, context, dependencies.catalogAuthorityTenantId); const operation = "entitlements.pack.create";
     const admission = await beginIdempotentCommand<PackWriteResult>({ tenantId: scope.tenantId, trx }, { key: input.idempotency_key, payloadHash: input.payload_hash, operation, now, expiresAt: new Date(now.getTime() + dayMs) });
     if (admission.kind === "replay") { assertReplay(admission.response); return Object.freeze(admission.response); }
@@ -107,7 +112,7 @@ export async function createPackVersion(dependencies: CatalogCommandDependencies
     await audit(trx, scope, context, input.idempotency_key, operation, input.pack_version_id, 1, now);
     await appendLifecycle(trx, scope, context, input.idempotency_key, operation, result, now);
     await completeIdempotentCommand({ tenantId: scope.tenantId, trx }, { key: input.idempotency_key, payloadHash: input.payload_hash, operation, resultRef: input.pack_version_id, response: result, updatedAt: now }); return result;
-  }, { isolationLevel: "serializable" }); } catch (error) { throw mapCatalogDatabaseError(error); }
+  }); } catch (error) { throw mapCatalogDatabaseError(error); }
 }
 function mapCatalogDatabaseError(error: unknown): never {
   if (error === null || typeof error !== "object") throw error;

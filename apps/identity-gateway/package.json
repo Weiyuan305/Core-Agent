@@ -7,7 +7,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/main.js",
     "test": "node --import tsx --test tests/*.test.ts",
-    "test:postgres": "node --import tsx --test --test-concurrency=1 tests/postgres/production-composition.test.ts",
+    "test:postgres": "node --import tsx --test --test-concurrency=1 tests/postgres/production-composition.test.ts tests/postgres/entitlement-production.test.ts",
     "check": "npm run build && npm test"
   },
   "dependencies": {

@@ -4,9 +4,10 @@ import {
   finalizeAccountDeletion, heartbeatJob, loadAccountDeletionFinalization, markJobEffectDispatched,
   markOutboxDelivered, projectPlatformMemberships, rescheduleJob, rescheduleOutbox, retryDecision,
   OUTBOX_MAX_ATTEMPTS,
+  enqueueIdleB2cRuntimeStopJobs, RuntimeActivityRepository,
   withAgentRunConversationLock, withRuntimeAdvisoryLock, WorkerAgentRunRepository, WorkerRuntimeRepository,
   CapabilityProjectionRepository,
-  type ClaimedJob, type HermesChatInput, type ProviderCatalog, type Redactor, type RuntimeDatabase,
+  type ClaimedJob, type EntitlementRuntimeProvisioningTemplate, type HermesChatInput, type ProviderCatalog, type Redactor, type RuntimeDatabase,
   type SecretStore, type SupervisorRequest, type SupervisorResponse,
 } from "@core-agent/runtime-core";
 import { sql, type Kysely } from "kysely";
@@ -19,6 +20,7 @@ import { handleProjectPlatformMemberships } from "./handlers/project-platform-me
 import { buildProvisionRuntimeRequest, handleProvisionRuntime, validatePrivateHermesOrigin } from "./handlers/provision-runtime.js";
 import { handleReconcileCapabilityProjection } from "./handlers/reconcile-capability-projection.js";
 import { handleReconcileRuntime } from "./handlers/reconcile-runtime.js";
+import { handleStopIdleB2cRuntime } from "./handlers/stop-idle-b2c-runtime.js";
 import { inspectAgentRunRuntime } from "./inspect-agent-runtime.js";
 import { handleNonReconcileRecovery } from "./recovery-boundary.js";
 import { runWorkerLoop } from "./worker-loop.js";
@@ -26,6 +28,7 @@ import { runWorkerLoop } from "./worker-loop.js";
 export const implementedWorkerJobKinds = [
   "provision_runtime", "reconcile_runtime", "execute_agent_run", "dispatch_outbox",
   "project_platform_memberships", "finalize_account_deletion", "reconcile_capability_projection",
+  "stop_idle_b2c_runtime",
 ] as const;
 
 export function workerClaimJobKinds(
@@ -88,6 +91,9 @@ function nextAttempt(dependencies: WorkerDependencies, job: ClaimedJob, summary:
 }
 
 async function dispatchRuntimeJob(dependencies: WorkerDependencies, job: ClaimedJob, signal: AbortSignal): Promise<HandlerResult> {
+  if (job.jobKind === "stop_idle_b2c_runtime") return handleStopIdleB2cRuntime({
+    stop: (input) => new RuntimeActivityRepository(dependencies.db).stopIdle(input),
+  }, job, signal, dependencies.workerId);
   if (job.jobKind === "project_platform_memberships") return handleProjectPlatformMemberships({
     project: (assignmentId, cursor, limit) => projectPlatformMemberships(dependencies.db, assignmentId, cursor, limit),
     succeed: async (projectionJob) => (await completeJob(dependencies.db, {
@@ -314,6 +320,13 @@ async function pollOutbox(dependencies: WorkerDependencies): Promise<void> {
   }, dependencies.workerId);
 }
 
+async function pollLifecycle(dependencies: WorkerDependencies): Promise<void> {
+  await Promise.all([
+    pollOutbox(dependencies),
+    enqueueIdleB2cRuntimeStopJobs(dependencies.db, 100),
+  ]);
+}
+
 export async function runControlPlaneWorker(dependencies: WorkerDependencies, signal: AbortSignal): Promise<void> {
   const claimJobKinds = workerClaimJobKinds(dependencies);
   const dispatchPort: DispatchPort = {
@@ -323,7 +336,7 @@ export async function runControlPlaneWorker(dependencies: WorkerDependencies, si
     handle: (job, operationSignal) => dispatchRuntimeJob(dependencies, job, operationSignal),
   };
   await runWorkerLoop({
-    tick: () => pollOutbox(dependencies),
+    tick: () => pollLifecycle(dependencies),
     claim: (limit) => claimPlatformWorkerJobs(dependencies.db, {
       workerId: dependencies.workerId, limit, leaseMs: 30_000, jobKinds: claimJobKinds,
     }),
@@ -336,10 +349,11 @@ export function createWorkerRuntimeRepositories(
   db: Kysely<RuntimeDatabase>,
   providerCatalog: ProviderCatalog,
   redactor: Redactor = createRedactor([]),
+  provisioningTemplate?: EntitlementRuntimeProvisioningTemplate,
 ): WorkerRepositories {
   return {
     runtimes: new WorkerRuntimeRepository(db, redactor),
-    capabilityProjections: new CapabilityProjectionRepository(db),
+    capabilityProjections: new CapabilityProjectionRepository(db, () => new Date(), provisioningTemplate),
     agentRuns: new WorkerAgentRunRepository(db, providerCatalog, redactor),
     redactor,
   };
