@@ -106,15 +106,18 @@ test("entitlement and catalog routes expose closed public summaries", async () =
     switch (input.kind) {
       case "platform_catalog_list": return {
         schema_version: 1,
-        capabilities: [{ schema_version: 1, capability_id: "capability_read", display_name: "Knowledge read", kind: "mcp", status: "reviewed" }],
-        packs: [{ schema_version: 1, pack_product_id: "pack_student", display_name: "Student Suite", tenant_modes: ["b2c"], status: "published" }],
+        capabilities: [{ schema_version: 1, capability_id: "capability_read", capability_version_id: "capability_version_read", version: "1.2.0", display_name: "Knowledge read", kind: "mcp", status: "reviewed", resource_version: 2 }],
+        packs: [{ schema_version: 1, pack_product_id: "pack_student", pack_version_id: "pack_version_student", version: "1.2.0", display_name: "Student Suite", tenant_modes: ["b2c"], status: "published", resource_version: 3 }],
       };
       case "platform_entitlement_list": return { schema_version: 1, entitlements: [] };
       case "company_service_list": return {
         schema_version: 1,
-        services: [{ schema_version: 1, service_id: "entitlement_company", display_name: "Company Suite", valid_from: "2026-08-24T00:00:00.000Z", service_state: "available", used_seats: 1, total_seats: 3, available_seats: 2 }],
+        services: [{ schema_version: 1, service_id: "entitlement_company", entitlement_resource_version: 4, display_name: "Company Suite", valid_from: "2026-08-24T00:00:00.000Z", service_state: "available", used_seats: 1, total_seats: 3, available_seats: 2 }],
       };
-      case "company_assignment_list": return { schema_version: 1, assignments: [] };
+      case "company_assignment_list": return {
+        schema_version: 1,
+        assignments: [{ schema_version: 1, assignment_id: "assignment_company", assignment_resource_version: 2, profile_id: "profile_company", profile_display_name: "Consultant", service_display_name: "Company Suite", service_state: "available" }],
+      };
       case "student_service_list": return {
         schema_version: 1,
         services: [{ schema_version: 1, service_id: "entitlement_student", display_name: "Student Suite", valid_from: "2026-08-24T00:00:00.000Z", service_state: "preparing" }],
@@ -123,6 +126,7 @@ test("entitlement and catalog routes expose closed public summaries", async () =
     }
   });
 
+  const responses = new Map<string, unknown>();
   for (const url of [
     "/app/v1/platform/catalog",
     "/app/v1/platform/entitlements",
@@ -133,7 +137,18 @@ test("entitlement and catalog routes expose closed public summaries", async () =
     const response = await app.inject({ method: "GET", url, headers: headers() });
     assert.equal(response.statusCode, 200, `${url}: ${response.body}`);
     assert.equal(response.headers["cache-control"], "no-store");
+    responses.set(url, response.json());
   }
+  assert.equal((responses.get("/app/v1/company/services?tenant_id=tenant_company") as { services: { entitlement_resource_version?: number }[] }).services[0]?.entitlement_resource_version, 4);
+  assert.equal((responses.get("/app/v1/company/assignments?tenant_id=tenant_company") as { assignments: { assignment_resource_version?: number }[] }).assignments[0]?.assignment_resource_version, 2);
+  assert.deepEqual(
+    (responses.get("/app/v1/platform/catalog") as { capabilities: { version?: string }[]; packs: { version?: string }[] }),
+    {
+      schema_version: 1,
+      capabilities: [{ schema_version: 1, capability_id: "capability_read", capability_version_id: "capability_version_read", version: "1.2.0", display_name: "Knowledge read", kind: "mcp", status: "reviewed", resource_version: 2 }],
+      packs: [{ schema_version: 1, pack_product_id: "pack_student", pack_version_id: "pack_version_student", version: "1.2.0", display_name: "Student Suite", tenant_modes: ["b2c"], status: "published", resource_version: 3 }],
+    },
+  );
 
   assert.deepEqual(calls.map(({ name }) => name), Array(5).fill(["consumeRateLimit", "authenticateSession", "executeAuthorityCommand"]).flat());
   assert.deepEqual(calls.filter(({ name }) => name === "executeAuthorityCommand").map(({ input }) => (input as { kind: string }).kind), [

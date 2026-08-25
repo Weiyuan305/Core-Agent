@@ -512,6 +512,7 @@ async function companyServices(
     .innerJoin("pack_products", "pack_products.pack_product_id", "entitlements.pack_product_id")
     .select([
       "entitlements.entitlement_id", "entitlements.valid_from", "entitlements.expires_at",
+      "entitlements.resource_version as entitlement_resource_version",
       "entitlements.status as entitlement_status", "entitlements.seat_quantity",
       "pack_products.display_name",
     ])
@@ -567,6 +568,7 @@ async function companyAssignments(
       .onRef("profiles.profile_id", "=", "entitlement_assignments.profile_id"))
     .select([
       "entitlement_assignments.assignment_id", "entitlement_assignments.profile_id",
+      "entitlement_assignments.resource_version as assignment_resource_version",
       "entitlement_assignments.status as assignment_status", "profiles.description as profile_display_name",
       "pack_products.display_name as service_display_name",
     ])
@@ -1074,13 +1076,13 @@ function productionOperations(
             .select([
               "capability_versions.capability_version_id", "capability_versions.capability_id",
               "capabilities.display_name", "capabilities.kind", "capability_versions.status",
-              "capability_versions.resource_version",
+              "capability_versions.version", "capability_versions.resource_version",
             ]).orderBy("capability_versions.capability_version_id").limit(201).execute();
           const packs = await trx.selectFrom("pack_versions")
             .innerJoin("pack_products", "pack_products.pack_product_id", "pack_versions.pack_product_id")
             .select([
               "pack_versions.pack_version_id", "pack_versions.pack_product_id", "pack_products.display_name",
-              "pack_products.tenant_modes", "pack_versions.status", "pack_versions.resource_version",
+              "pack_products.tenant_modes", "pack_versions.version", "pack_versions.status", "pack_versions.resource_version",
             ]).orderBy("pack_versions.pack_version_id").limit(201).execute();
           if (capabilities.length > 200 || packs.length > 200) {
             throw new DomainError("DEPENDENCY_UNAVAILABLE", "Platform catalog result is too large", true);
@@ -1090,12 +1092,14 @@ function productionOperations(
             capabilities: capabilities.map((row) => ({
               schema_version: 1, capability_id: row.capability_id,
               capability_version_id: row.capability_version_id,
+              version: row.version,
               display_name: row.display_name, kind: row.kind, status: row.status,
               resource_version: safeContractInteger(row.resource_version),
             })),
             packs: packs.map((row) => ({
               schema_version: 1, pack_product_id: row.pack_product_id,
               pack_version_id: row.pack_version_id,
+              version: row.version,
               display_name: row.display_name, tenant_modes: row.tenant_modes, status: row.status,
               resource_version: safeContractInteger(row.resource_version),
             })),

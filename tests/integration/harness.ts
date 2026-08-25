@@ -62,6 +62,31 @@ import {
 } from "./fixtures/synthetic-tenant.js";
 
 export const LEAK_SENTINEL = "synthetic-leak-sentinel-4d83f17f";
+export const ENTITLEMENT_PRIVATE_CANARIES = Object.freeze({
+  price: "synthetic-private-price-canary-8b31f10a",
+  receipt: "synthetic-private-receipt-canary-a4d627ce",
+  artifact: "manifest:sha256:237dc659237dc659237dc659237dc659237dc659237dc659237dc659237dc659",
+  tool_schema: "synthetic-private-tool-schema-canary-c981a20f",
+  provider_secret: "synthetic-private-provider-secret-canary-5d0e126b",
+  external_order: "synthetic-private-external-order-canary-b71f826c",
+  customer_content: "synthetic-private-customer-content-canary-09ce74a5",
+});
+const PRIVATE_SURFACE_SENTINELS = Object.freeze([
+  LEAK_SENTINEL,
+  ...Object.values(ENTITLEMENT_PRIVATE_CANARIES),
+]);
+const GLOBALLY_FORBIDDEN_PRIVATE_SENTINELS = Object.freeze([
+  LEAK_SENTINEL,
+  ENTITLEMENT_PRIVATE_CANARIES.price,
+  ENTITLEMENT_PRIVATE_CANARIES.receipt,
+  ENTITLEMENT_PRIVATE_CANARIES.tool_schema,
+  ENTITLEMENT_PRIVATE_CANARIES.provider_secret,
+  ENTITLEMENT_PRIVATE_CANARIES.customer_content,
+]);
+const PRIVATE_AUTHORITY_CANARY_COLUMNS = Object.freeze(new Map([
+  [ENTITLEMENT_PRIVATE_CANARIES.artifact, "capability_versions.artifact_ref"],
+  [ENTITLEMENT_PRIVATE_CANARIES.external_order, "entitlements.external_order_ref"],
+]));
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const migrationsDirectory = join(
@@ -1349,7 +1374,7 @@ function scanSentinel(...roots: readonly unknown[]): SentinelScan {
     }
     const value = pending.pop();
     if (typeof value === "string") {
-      if (value.includes(LEAK_SENTINEL)) {
+      if (PRIVATE_SURFACE_SENTINELS.some((sentinel) => value.includes(sentinel))) {
         return {
           detected: true,
           incomplete,
@@ -1421,7 +1446,7 @@ function scanSentinel(...roots: readonly unknown[]): SentinelScan {
       continue;
     }
     for (const key of keys) {
-      if (typeof key === "string" && key.includes(LEAK_SENTINEL)) {
+      if (typeof key === "string" && PRIVATE_SURFACE_SENTINELS.some((sentinel) => key.includes(sentinel))) {
         return {
           detected: true,
           incomplete,
@@ -1608,7 +1633,7 @@ function assertStructuredLogsSentinelFree(records: readonly unknown[]): void {
   let serialized: string;
   try { serialized = JSON.stringify(records); }
   catch { throw new Error("sentinel category: structured logs"); }
-  if (serialized.includes(LEAK_SENTINEL)) {
+  if (PRIVATE_SURFACE_SENTINELS.some((sentinel) => serialized.includes(sentinel))) {
     throw new Error("sentinel category: structured logs");
   }
 }
@@ -1731,6 +1756,7 @@ export class IntegrationHarness {
   #workerPromise: Promise<void> | undefined;
   #workerFailed = false;
   #workerIdCounter = 0;
+  readonly #workerIds = new Set<string>();
   #resourceCounter = 0;
   #closed = false;
 
@@ -1851,7 +1877,7 @@ export class IntegrationHarness {
         forbiddenSecretBytes: [
           SYNTHETIC_BOOTSTRAP_KEY,
           SYNTHETIC_INGRESS_KEY,
-          LEAK_SENTINEL,
+          ...PRIVATE_SURFACE_SENTINELS,
         ],
       });
       await boundedExternal("Supervisor start", () => supervisor!.start());
@@ -1896,6 +1922,8 @@ export class IntegrationHarness {
   public async startWorker(workerId?: string): Promise<void> {
     if (this.#workerPromise !== undefined) throw new Error("Worker is already running");
     this.#workerIdCounter += 1;
+    const activeWorkerId = workerId ?? `worker_task16_${this.#workerIdCounter}`;
+    this.#workerIds.add(activeWorkerId);
     const controller = new AbortController();
     const fetchImpl = rewriteToFakeHermes(
       this.fakeHermes,
@@ -1904,7 +1932,7 @@ export class IntegrationHarness {
     const redactor = createRedactor([
       SYNTHETIC_BOOTSTRAP_KEY,
       SYNTHETIC_INGRESS_KEY,
-      LEAK_SENTINEL,
+      ...PRIVATE_SURFACE_SENTINELS,
     ]);
     const logger: WorkerLogger = {
       info: (fields, message) => {
@@ -1918,7 +1946,7 @@ export class IntegrationHarness {
     this.#workerFailed = false;
     this.#workerPromise = runControlPlaneWorker({
       db: this.db,
-      workerId: workerId ?? `worker_task16_${this.#workerIdCounter}`,
+      workerId: activeWorkerId,
       clock: workerClock(),
       logger,
       repositories: createWorkerRuntimeRepositories(
@@ -1974,7 +2002,7 @@ export class IntegrationHarness {
       forbiddenSecretBytes: [
         SYNTHETIC_BOOTSTRAP_KEY,
         SYNTHETIC_INGRESS_KEY,
-        LEAK_SENTINEL,
+        ...PRIVATE_SURFACE_SENTINELS,
       ],
     });
     await boundedExternal(
@@ -2319,6 +2347,7 @@ export class IntegrationHarness {
     this.#closed = true;
     const failures = await runCleanupStages([
       { category: "worker", work: () => this.stopWorker() },
+      { category: "recoverable lease release", work: () => this.#releaseRecoverableWorkerLeases() },
       { category: "api", work: () => this.#closeApi() },
       { category: "supervisor", work: () => this.#supervisor.close() },
       { category: "hermes", work: () => this.fakeHermes.close() },
@@ -2368,7 +2397,7 @@ export class IntegrationHarness {
       redactor: createRedactor([
         SYNTHETIC_BOOTSTRAP_KEY,
         SYNTHETIC_INGRESS_KEY,
-        LEAK_SENTINEL,
+        ...PRIVATE_SURFACE_SENTINELS,
       ]),
       eventNotifier: notifier,
       trustedContext: {
@@ -2586,6 +2615,30 @@ export class IntegrationHarness {
     assert.equal(outbox.rows[0]?.count, "0", "lease category: outbox");
   }
 
+  async #releaseRecoverableWorkerLeases(): Promise<void> {
+    const workerIds = [...this.#workerIds];
+    if (workerIds.length === 0) return;
+    await this.#childPool.query(
+      `update worker_jobs
+       set status = 'retrying', lease_owner = null, lease_expires_at = null,
+           next_attempt_at = clock_timestamp(),
+           last_error_summary = 'Integration worker stopped before external dispatch',
+           updated_at = clock_timestamp()
+       where status = 'running' and effect_state = 'pre_effect'
+         and lease_owner = any($1::text[])`,
+      [workerIds],
+    );
+    await this.#childPool.query(
+      `update outbox
+       set status = 'pending', lease_owner = null, lease_expires_at = null,
+           next_attempt_at = clock_timestamp(),
+           last_error_summary = 'Integration worker stopped before wake delivery',
+           updated_at = clock_timestamp()
+       where status = 'pending' and lease_owner = any($1::text[])`,
+      [workerIds],
+    );
+  }
+
   async #assertSentinelAbsent(): Promise<void> {
     let columns;
     try {
@@ -2602,16 +2655,24 @@ export class IntegrationHarness {
       if (!/^[a-z_][a-z0-9_]*$/.test(column.table_name) || !/^[a-z_][a-z0-9_]*$/.test(column.column_name)) {
         throw new Error("sentinel category: database metadata");
       }
-      let result;
-      try {
-        result = await this.#childPool.query<{ present: boolean }>(
-          `select exists(select 1 from "${column.table_name}" where "${column.column_name}"::text like $1) as present`,
-          [`%${LEAK_SENTINEL}%`],
-        );
-      } catch {
-        throw new Error("sentinel category: application database scan");
+      const sentinels = [
+        ...GLOBALLY_FORBIDDEN_PRIVATE_SENTINELS,
+        ...PRIVATE_AUTHORITY_CANARY_COLUMNS.keys(),
+      ];
+      for (const sentinel of sentinels) {
+        const privateAuthorityColumn = PRIVATE_AUTHORITY_CANARY_COLUMNS.get(sentinel);
+        if (privateAuthorityColumn === `${column.table_name}.${column.column_name}`) continue;
+        let result;
+        try {
+          result = await this.#childPool.query<{ present: boolean }>(
+            `select exists(select 1 from "${column.table_name}" where "${column.column_name}"::text like $1) as present`,
+            [`%${sentinel}%`],
+          );
+        } catch {
+          throw new Error("sentinel category: application database scan");
+        }
+        assert.equal(result.rows[0]?.present, false, "sentinel category: application database");
       }
-      assert.equal(result.rows[0]?.present, false, "sentinel category: application database");
     }
     let events;
     let audit;
@@ -2638,7 +2699,7 @@ export class IntegrationHarness {
       let serialized: string;
       try { serialized = JSON.stringify(value); }
       catch { throw new Error(`sentinel category: ${category} serialization`); }
-      assert.equal(serialized.includes(LEAK_SENTINEL), false, `sentinel category: ${category}`);
+      assert.equal(PRIVATE_SURFACE_SENTINELS.some((sentinel) => serialized.includes(sentinel)), false, `sentinel category: ${category}`);
     }
   }
 }

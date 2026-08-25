@@ -7,10 +7,11 @@ import {
   decodeSupervisorFrame,
   encodeSupervisorFrame,
   validateSupervisorResponse,
+  type CapabilityRuntimeObservation,
   type ProviderCatalog,
   type RuntimeObservation,
-  type SupervisorRequestV1,
-  type SupervisorResponseV1,
+  type SupervisorRequest,
+  type SupervisorResponse,
 } from "@core-agent/runtime-core";
 
 import { validateSupervisorPolicy } from "../../../apps/runtime-supervisor/src/policy.js";
@@ -27,13 +28,13 @@ export type SupervisorScript =
 
 interface JournalEntry {
   readonly requestHash: string;
-  readonly response: SupervisorResponseV1;
+  readonly response: SupervisorResponse;
 }
 
 export interface FakeSupervisorState {
   readonly journal: Map<string, JournalEntry>;
   readonly observations: Map<string, RuntimeObservation>;
-  readonly requests: SupervisorRequestV1[];
+  readonly requests: SupervisorRequest[];
   readonly scripts: SupervisorScript[];
   rejectedFrameCount: number;
   secretRejectedFrameCount: number;
@@ -63,9 +64,9 @@ function runtimeKey(tenantId: string, runtimeId: string): string {
   return `${tenantId}\0${runtimeId}`;
 }
 
-function changedOperation(request: SupervisorRequestV1): SupervisorResponseV1 {
+function changedOperation(request: SupervisorRequest): SupervisorResponse {
   return {
-    protocol_version: 1,
+    protocol_version: request.protocol_version,
     operation_id: request.operation_id,
     outcome: "rejected",
     code: "SUPERVISOR_REJECTED",
@@ -75,11 +76,11 @@ function changedOperation(request: SupervisorRequestV1): SupervisorResponseV1 {
 }
 
 function rejection(
-  request: SupervisorRequestV1,
+  request: SupervisorRequest,
   script: Extract<SupervisorScript, { readonly kind: "reject" }>,
-): SupervisorResponseV1 {
+): SupervisorResponse {
   return {
-    protocol_version: 1,
+    protocol_version: request.protocol_version,
     operation_id: request.operation_id,
     outcome: script.retryable ? "failed" : "rejected",
     code: script.retryable ? "DEPENDENCY_UNAVAILABLE" : "SUPERVISOR_REJECTED",
@@ -88,7 +89,7 @@ function rejection(
   };
 }
 
-function cloneRequest(request: SupervisorRequestV1): SupervisorRequestV1 {
+function cloneRequest(request: SupervisorRequest): SupervisorRequest {
   return structuredClone(request);
 }
 
@@ -104,7 +105,7 @@ export class FakeSupervisor {
     });
   }
 
-  public get requests(): readonly SupervisorRequestV1[] {
+  public get requests(): readonly SupervisorRequest[] {
     return this.#options.state.requests;
   }
 
@@ -192,7 +193,7 @@ export class FakeSupervisor {
         providerCatalog: this.#options.providerCatalog,
       });
       const prior = this.#options.state.journal.get(request.operation_id);
-      let response: SupervisorResponseV1;
+      let response: SupervisorResponse;
       if (prior !== undefined) {
         response = prior.requestHash === request.request_hash
           ? prior.response
@@ -217,7 +218,7 @@ export class FakeSupervisor {
     }
   }
 
-  #accepted(request: SupervisorRequestV1): SupervisorResponseV1 {
+  #accepted(request: SupervisorRequest): SupervisorResponse {
     const metadata = request.kind === "provision" ? request.runtime : request;
     const key = runtimeKey(metadata.tenant_id, metadata.runtime_id);
     const prior = this.#options.state.observations.get(key);
@@ -226,23 +227,45 @@ export class FakeSupervisor {
       : request.kind === "delete"
         ? REMOVED_RUNTIME_IMAGE_REF
         : prior?.image_ref ?? `managed/unknown@sha256:${"0".repeat(64)}`;
-    const exists = request.kind !== "delete";
-    const lifecycle = request.kind === "delete"
+    const exists = request.kind === "inspect" ? prior?.exists ?? true : request.kind !== "delete";
+    const lifecycle = request.kind === "inspect"
+      ? prior?.lifecycle ?? "running"
+      : request.kind === "delete"
       ? "removed"
       : request.kind === "stop"
         ? "stopped"
         : "running";
+    const health = request.kind === "inspect"
+      ? prior?.health ?? "healthy"
+      : exists && lifecycle === "running" ? "healthy" : "unknown";
     const observation: RuntimeObservation = {
       tenant_id: metadata.tenant_id,
       runtime_id: metadata.runtime_id,
       generation: metadata.generation,
       exists,
       lifecycle,
-      health: exists && lifecycle === "running" ? "healthy" : "unknown",
+      health,
       image_ref: imageRef,
-      ...(exists ? { private_origin: this.#options.privateOrigin } : {}),
+      ...(exists ? { private_origin: prior?.private_origin ?? this.#options.privateOrigin } : {}),
     };
     this.#options.state.observations.set(key, observation);
+    if (request.protocol_version === 2) {
+      const capabilityPrior = prior as CapabilityRuntimeObservation | undefined;
+      const capabilityObservation: CapabilityRuntimeObservation = {
+        ...observation,
+        profile_ids: request.kind === "provision"
+          ? request.runtime.profiles.map((profile) => profile.profile_id)
+          : capabilityPrior?.profile_ids ?? [],
+        capability_manifest_digest: request.capability_manifest_digest,
+      };
+      this.#options.state.observations.set(key, capabilityObservation);
+      return {
+        protocol_version: 2,
+        operation_id: request.operation_id,
+        outcome: "accepted",
+        observation: capabilityObservation,
+      };
+    }
     return {
       protocol_version: 1,
       operation_id: request.operation_id,

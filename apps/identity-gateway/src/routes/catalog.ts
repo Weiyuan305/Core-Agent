@@ -2,10 +2,10 @@ import { types as utilTypes } from "node:util";
 
 import {
   ApprovalRequirementSchema,
+  CanonicalSemanticVersionSchema,
   CapabilityCompatibilitySchema,
   CapabilityKindSchema,
   CapabilityRiskClassSchema,
-  CanonicalSemanticVersionSchema,
   ExactContractRefSchema,
   IdempotencyRequestSchema,
   ImmutableArtifactRefSchema,
@@ -77,6 +77,7 @@ const CatalogResponseSchema = Type.Object({
     schema_version: SchemaVersionSchema,
     capability_id: OpaqueIdSchema,
     capability_version_id: Type.Optional(OpaqueIdSchema),
+    version: CanonicalSemanticVersionSchema,
     display_name: Type.String({ minLength: 1, maxLength: 200 }),
     kind: CapabilityKindSchema,
     status: Type.Union([Type.Literal("draft"), Type.Literal("reviewed"), Type.Literal("retired"), Type.Literal("blocked")]),
@@ -86,6 +87,7 @@ const CatalogResponseSchema = Type.Object({
     schema_version: SchemaVersionSchema,
     pack_product_id: OpaqueIdSchema,
     pack_version_id: Type.Optional(OpaqueIdSchema),
+    version: CanonicalSemanticVersionSchema,
     display_name: Type.String({ minLength: 1, maxLength: 200 }),
     tenant_modes: Type.Array(TenantModeSchema, { minItems: 1, maxItems: 2, uniqueItems: true }),
     status: Type.Union([Type.Literal("draft"), Type.Literal("reviewed"), Type.Literal("published"), Type.Literal("retired"), Type.Literal("blocked")]),

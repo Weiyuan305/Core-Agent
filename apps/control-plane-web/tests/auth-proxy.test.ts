@@ -94,6 +94,37 @@ describe("Identity Gateway same-origin proxy", () => {
     await app.close();
   });
 
+  it("proxies public service reads and writes through the same hardened Identity boundary", async () => {
+    const fetchImpl = vi.fn(async () => Response.json({ schema_version: 1, services: [] }));
+    const app = await buildClientGatewayApp({
+      authProxy: {
+        origin: "http://127.0.0.1:4910",
+        publicOrigin: "https://app.example.com",
+        fetchImpl,
+      },
+      staticRoot: await staticRoot(),
+    });
+    const response = await app.inject({
+      method: "GET",
+      url: "/app/v1/student/services",
+      headers: {
+        host: "app.example.com",
+        cookie: "core_agent_session=opaque",
+        "x-private-debug": "must-not-forward",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ schema_version: 1, services: [] });
+    const [url, init] = fetchImpl.mock.calls[0]!;
+    expect(url).toBe("http://127.0.0.1:4910/app/v1/student/services");
+    const forwarded = init.headers as Headers;
+    expect(forwarded.get("cookie")).toBe("core_agent_session=opaque");
+    expect(forwarded.has("x-private-debug")).toBe(false);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    await app.close();
+  });
+
   it("fails closed on invalid mode combinations, non-loopback upstreams, and oversized upstream bodies", async () => {
     const root = await staticRoot();
     await expect(buildClientGatewayApp({ staticRoot: root })).rejects.toThrowError("CLIENT_CONFIGURATION_INVALID");

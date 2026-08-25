@@ -837,21 +837,21 @@ git commit -m "feat(identity): expose service entitlement administration"
 - Consumes: public management views from Task 10 and existing auth shell.
 - Produces: role-specific Apple-aligned management surfaces and service-aware conversation admission.
 
-- [ ] **Step 1: Write failing desktop/compact/iPhone journeys**
+- [x] **Step 1: Write failing desktop/compact/iPhone journeys**
 
 Cover platform catalog draft/review/publish and manual grant; company seat totals, eligible consultant assignment, concurrent seat-exhausted refresh, revoke; B2C suite + add-on list; preparing -> available; failed calm state; suspended/expired; rollback generation; and empty service state.
 
 Assert there is no price, checkout, fake payment, raw Capability/tool/schema/artifact, external order reference, container/image ID, technical failure code, Hermes/Supabase/provider name, or other-Tenant data. Run axe, keyboard/focus, reduced-motion, 200% zoom, and horizontal-overflow checks for every role.
 
-- [ ] **Step 2: Implement role-specific navigation and forms**
+- [x] **Step 2: Implement role-specific navigation and forms**
 
 Platform controls live under a clearly internal administration section. Company admins see `服务与名额`; students see `我的服务`; consultants without admin role do not see management navigation. Every mutation uses the auth client CSRF/re-auth flow and disables duplicate submission while pending.
 
-- [ ] **Step 3: Integrate calm preparation with conversation admission**
+- [x] **Step 3: Integrate calm preparation with conversation admission**
 
 When state is `preparing`, keep the composer disabled with `“服务正在准备，完成后即可开始对话。”`; when available, enable chat; when suspended/expired/unavailable, show account/service guidance. Do not poll faster than a bounded backoff and stop polling on terminal/auth/navigation states.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run: `npm run check -w @core-agent/control-plane-web`
 
@@ -885,7 +885,7 @@ git commit -m "feat(web): add capability pack management"
 - Consumes: complete catalog, Identity, Entitlement, Snapshot, Worker, Supervisor, Gateway, and Web implementations.
 - Produces: default deterministic CI coverage, opt-in local Runtime proof, operator runbook, and the go/no-go boundary for the separate Policy/MCP Gateway design.
 
-- [ ] **Step 1: Implement the real-PostgreSQL/fake-Runtime full slice**
+- [x] **Step 1: Implement the real-PostgreSQL/fake-Runtime full slice**
 
 Prove in one integration suite:
 
@@ -901,23 +901,23 @@ Prove in one integration suite:
 10. valid rollback creates a new generation; and
 11. B2C stop at 30 minutes and idempotent wake preserve Volume.
 
-- [ ] **Step 2: Extend default CI and sentinel scans**
+- [x] **Step 2: Extend default CI and sentinel scans**
 
 Add all deterministic packages to `npm run check`, PostgreSQL suites to `test:postgres`, full slices to `test:integration`, and service UI to Playwright. Extend database/file/event scans with canaries for price, receipt, artifact, tool schema, provider secret, external order, and customer content.
 
-- [ ] **Step 3: Implement opt-in local Runtime acceptance**
+- [x] **Step 3: Implement opt-in local Runtime acceptance**
 
 Require `CORE_AGENT_CAPABILITY_ACCEPTANCE=1` and a disposable local Tenant. Through the same public/admin commands, load a reviewed non-executing manifest, grant/assign, prove preparing/available, inspect exact manifest digest, prove Hermes has zero managed MCP tools/Skills, revoke, stop/wake B2C, rollback, and clean up the Runtime while preserving/removing the Volume only through separately selected cleanup mode.
 
 The script outputs redacted JSON with IDs hashed, states, generations, digests, durations, and pass/fail only.
 
-- [ ] **Step 4: Document operations, rollout, and rollback**
+- [x] **Step 4: Document operations, rollout, and rollback**
 
-Give exact commands and gates for contracts 0.7.0, schema 13, feature flags, catalog review, initial non-executing data, grant/revoke, release canary, projection health, conflict diagnosis, Worker retry, B2C idle, release rollback through a new generation, application rollback with mutations disabled, and confirmation that no real MCP is exposed.
+Give exact commands and gates for Contracts 0.8.0, schema 15, catalog review, initial non-executing data, grant/revoke, release canary, projection health, conflict diagnosis, Worker retry, B2C idle, release rollback through a new generation, application rollback with mutations disabled, and confirmation that no real MCP is exposed.
 
-- [ ] **Step 5: Run final acceptance**
+- [x] **Step 5: Run final acceptance**
 
-Run: `node scripts/verify-no-secret.mjs entitlement-private-sentinel`
+Run: the exact seven-canary evidence scan and five-canary PostgreSQL scan in the operations runbook and CI workflow
 
 Run: `npm run contracts:check`
 
@@ -933,7 +933,7 @@ Optional approved local Runtime only: `CORE_AGENT_CAPABILITY_ACCEPTANCE=1 node s
 
 Expected: all deterministic gates pass; opt-in Runtime evidence proves generation/preparation/revocation/rollback/idle wake with an empty Hermes tool surface.
 
-- [ ] **Step 6: Mark the specification implemented and commit evidence**
+- [x] **Step 6: Mark the specification implemented and commit evidence**
 
 Record exact commands, commit SHA, contract/schema versions, test counts, concurrency counts, manifest digests, opt-in status, remaining exclusions, and rollback readiness before changing design status.
 

@@ -1,9 +1,17 @@
 # Entitlement and Capability Registry v1 Design
 
-**Status:** Approved design; implementation not started
+**Status:** Implemented with deterministic acceptance; opt-in local Runtime evidence pending
 **Date:** 2026-08-10
 **Depends on:** [Identity Runtime and Public Auth v1](2026-08-10-identity-runtime-public-auth-v1-design.md)
 **Next phase:** Core-Agent Policy Plugin and Capability/MCP Gateway
+
+**2026-08-25 implementation record:** Contracts `0.8.0`, database schema `15`,
+and Runtime Capability protocol `2` are implemented. Deterministic contract, type,
+build, real PostgreSQL, fake-Supervisor integration, Runtime, and browser gates pass.
+The opt-in real local Runtime driver and profile-only acceptance companion are
+implemented, but the live report remains `NOT_RUN` because no Docker-compatible
+local daemon is available after Colima removal. This status does not authorize a
+public Conversation gateway or a real managed MCP/tool/Skill surface.
 
 **2026-08-21 approved amendment:** Contracts 0.7.0 remains immutable. Catalog
 Lifecycle facts are released compatibly as Contracts 0.8.0: the only new branches

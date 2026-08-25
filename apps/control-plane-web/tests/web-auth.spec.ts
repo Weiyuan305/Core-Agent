@@ -24,7 +24,7 @@ async function signIn(page: import("playwright/test").Page, navigate = true): Pr
   await page.getByLabel("邮箱").fill("admin@example.com");
   await page.getByLabel("密码", { exact: true }).fill("password-long-enough");
   await page.getByRole("button", { name: "登录", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "服务尚未开通" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "账户与安全" })).toBeVisible();
   expect((await page.context().cookies()).map(({ name }) => name).sort()).toEqual(["core_agent_csrf", "core_agent_session"]);
 }
 
@@ -65,7 +65,7 @@ test("handles invitation copy and an authenticated admin acceptance", async ({ b
   await accepted.goto(`/?invitation=${adminSecret}`);
   await expect(accepted.getByText("公司管理员")).toBeVisible();
   await accepted.getByRole("button", { name: "接受邀请" }).click();
-  await expect(accepted.getByRole("heading", { name: "服务尚未开通" })).toBeVisible();
+  await expect(accepted.getByRole("heading", { name: "服务与名额" })).toBeVisible();
   await accepted.getByRole("button", { name: "公司成员" }).click();
   const platform = accepted.getByTestId("member-membership_platform");
   await expect(platform.getByText("平台管理成员")).toBeVisible();

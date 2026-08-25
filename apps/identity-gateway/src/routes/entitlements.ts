@@ -5,6 +5,7 @@ import {
   CompanyServiceSummarySchema,
   GrantEntitlementRequestSchema,
   OpaqueIdSchema,
+  ResourceVersionSchema,
   RevokePackSeatRequestSchema,
   SchemaVersionSchema,
   SelectTenantPackReleaseRequestSchema,
@@ -21,13 +22,21 @@ import { IdentityGatewayFailure } from "../errors.js";
 import { assertClientTransport, requireMutationCredentials, requireSessionCredential } from "../security.js";
 
 const TenantQuerySchema = Type.Object({ tenant_id: OpaqueIdSchema }, { additionalProperties: false });
+const CompanyManageableServiceSummarySchema = Type.Object({
+  ...CompanyServiceSummarySchema.properties,
+  entitlement_resource_version: ResourceVersionSchema,
+}, { additionalProperties: false });
+const CompanyManageableAssignmentSummarySchema = Type.Object({
+  ...CompanyAssignmentSummarySchema.properties,
+  assignment_resource_version: ResourceVersionSchema,
+}, { additionalProperties: false });
 const ServiceResponseSchema = Type.Object({
   schema_version: SchemaVersionSchema,
-  services: Type.Array(CompanyServiceSummarySchema),
+  services: Type.Array(CompanyManageableServiceSummarySchema),
 }, { additionalProperties: false });
 const AssignmentResponseSchema = Type.Object({
   schema_version: SchemaVersionSchema,
-  assignments: Type.Array(CompanyAssignmentSummarySchema),
+  assignments: Type.Array(CompanyManageableAssignmentSummarySchema),
 }, { additionalProperties: false });
 const StudentResponseSchema = Type.Object({
   schema_version: SchemaVersionSchema,

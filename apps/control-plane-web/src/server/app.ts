@@ -142,8 +142,24 @@ async function proxyIdentityRequest(
   if (request.method !== "GET" && request.method !== "POST") {
     throw new ClientGatewayError("CLIENT_INPUT_INVALID", 405);
   }
-  const pathname = new URL(request.url, "http://gateway.invalid").pathname;
-  if (!pathname.startsWith("/auth/v1/") || request.url !== pathname) {
+  const parsed = new URL(request.url, "http://gateway.invalid");
+  const pathname = parsed.pathname;
+  const authPath = pathname.startsWith("/auth/v1/") && parsed.search.length === 0;
+  const appPath = pathname === "/app/v1/platform/catalog"
+    || pathname === "/app/v1/platform/entitlements"
+    || pathname === "/app/v1/student/services";
+  const companyPath = pathname === "/app/v1/company/services" || pathname === "/app/v1/company/assignments";
+  let targetPath = pathname;
+  if (companyPath) {
+    const entries = [...parsed.searchParams.entries()];
+    if (entries.length !== 1 || entries[0]?.[0] !== "tenant_id" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/u.test(entries[0][1])) {
+      throw new ClientGatewayError("CLIENT_INPUT_INVALID", 400);
+    }
+    targetPath = `${pathname}?tenant_id=${encodeURIComponent(entries[0][1])}`;
+  } else if (parsed.search.length > 0) {
+    throw new ClientGatewayError("CLIENT_INPUT_INVALID", 400);
+  }
+  if (!authPath && !appPath && !companyPath) {
     throw new ClientGatewayError("CLIENT_INPUT_INVALID", 400);
   }
   let body: string | undefined;
@@ -173,7 +189,7 @@ async function proxyIdentityRequest(
       signal: controller.signal,
     };
     if (body !== undefined) requestInit.body = body;
-    const response = await (options.fetchImpl ?? fetch)(`${options.origin}${pathname}`, requestInit);
+    const response = await (options.fetchImpl ?? fetch)(`${options.origin}${targetPath}`, requestInit);
     const responseBytes = await readBoundedResponse(response);
     const contentType = response.headers.get("content-type");
     if (contentType === null || !/^application\/json(?:\s*;|$)/iu.test(contentType)) {
@@ -342,6 +358,7 @@ export async function buildClientGatewayApp(options: BuildClientGatewayAppOption
 
   if (authProxy !== undefined) {
     app.all("/auth/v1/*", async (request, reply) => proxyIdentityRequest(request, reply, authProxy));
+    app.all("/app/v1/*", async (request, reply) => proxyIdentityRequest(request, reply, authProxy));
   }
 
   if (chatPort !== undefined) {

@@ -1230,8 +1230,10 @@ async function scanDumpForSecrets(filePath, secretValues) {
   }
 }
 
-export function createManagedRuntimeDependencies(environment, signal) {
-  const identifiers = createSyntheticIdentifiers();
+export function createManagedRuntimeDependencies(environment, signal, options = {}) {
+  const identifiers = options.identifiers === undefined
+    ? createSyntheticIdentifiers()
+    : validateSyntheticIdentifiers(options.identifiers);
   const state = {
     bootstrapKey: undefined,
     providerSecret: undefined,
@@ -1248,6 +1250,52 @@ export function createManagedRuntimeDependencies(environment, signal) {
     signal: options.cleanup === true ? undefined : signal,
   });
   const secretValues = () => [state.bootstrapKey, state.providerSecret, state.ingressSecret].filter(Buffer.isBuffer);
+  const runtimeContainerIds = async (context, cleanup = false) => {
+    const raw = await child("docker", [
+      "ps", "--all", "--quiet",
+      "--filter", "label=core-agent.managed=runtime-v1",
+      "--filter", "label=core-agent.resource=runtime",
+      "--filter", `label=core-agent.tenant-id=${context.tenantId}`,
+      "--filter", `label=core-agent.runtime-id=${context.runtimeId}`,
+    ], { cleanup });
+    return raw.trim() === "" ? [] : raw.trim().split("\n");
+  };
+  const inspectManagedVolume = async (context, cleanup = false) => {
+    const names = deriveManagedNames(context.tenantId, context.runtimeId, 1);
+    const volumeRaw = await child("docker", ["volume", "inspect", names.volume], {
+      cleanup,
+      maxOutputBytes: 1024 * 1024,
+    });
+    const volumes = parseJson(volumeRaw, "SMOKE_CLEANUP_FAILED");
+    if (!Array.isArray(volumes) || volumes.length !== 1) throw smokeError("SMOKE_CLEANUP_FAILED");
+    const labels = dataProperty(volumes[0], "Labels", "SMOKE_CLEANUP_FAILED");
+    if (dataProperty(labels, "core-agent.managed", "SMOKE_CLEANUP_FAILED") !== "runtime-v1"
+      || dataProperty(labels, "core-agent.resource", "SMOKE_CLEANUP_FAILED") !== "runtime-volume"
+      || dataProperty(labels, "core-agent.tenant-id", "SMOKE_CLEANUP_FAILED") !== context.tenantId
+      || dataProperty(labels, "core-agent.runtime-id", "SMOKE_CLEANUP_FAILED") !== context.runtimeId) {
+      throw smokeError("SMOKE_CLEANUP_FAILED");
+    }
+    return names.volume;
+  };
+  const waitForManagedRuntimeRemoval = async (context, { removeVolume = false, requireVolume = true } = {}) => {
+    const deadline = Date.now() + maximumPollMs;
+    while (Date.now() < deadline) {
+      if ((await runtimeContainerIds(context, true)).length === 0) break;
+      await delay(1_000);
+    }
+    if ((await runtimeContainerIds(context, true)).length !== 0) throw smokeError("SMOKE_CLEANUP_FAILED");
+    let volume;
+    try {
+      volume = await inspectManagedVolume(context, true);
+    } catch (error) {
+      if (requireVolume) throw error;
+      return;
+    }
+    if (removeVolume) {
+      const removed = await child("docker", ["volume", "rm", volume], { cleanup: true });
+      if (removed.trim() !== volume) throw smokeError("SMOKE_CLEANUP_FAILED");
+    }
+  };
 
   return {
     stage(name) {
@@ -1403,14 +1451,7 @@ export function createManagedRuntimeDependencies(environment, signal) {
     },
     async inspectRuntime(context, runtime) {
       const names = deriveManagedNames(context.tenantId, context.runtimeId, runtime.generation);
-      const rawId = await child("docker", [
-        "ps", "--all", "--quiet",
-        "--filter", "label=core-agent.managed=runtime-v1",
-        "--filter", "label=core-agent.resource=runtime",
-        "--filter", `label=core-agent.tenant-id=${context.tenantId}`,
-        "--filter", `label=core-agent.runtime-id=${context.runtimeId}`,
-      ]);
-      const ids = rawId.trim() === "" ? [] : rawId.trim().split("\n");
+      const ids = await runtimeContainerIds(context);
       if (ids.length !== 1) throw smokeError("SMOKE_CONTAINER_INVALID");
       const rawInspection = await child("docker", ["inspect", ids[0]], { maxOutputBytes: 4 * 1024 * 1024 });
       const parsed = parseJson(rawInspection, "SMOKE_CONTAINER_INVALID");
@@ -1431,6 +1472,42 @@ export function createManagedRuntimeDependencies(environment, signal) {
         "--filter", `label=core-agent.runtime-id=${context.runtimeId}`,
       ]);
       if (initializers.trim() !== "") throw smokeError("SMOKE_CONTAINER_INVALID");
+    },
+    async runCapabilityAcceptanceCompanion(context, phase) {
+      if (!new Set(["run", "cleanup"]).has(phase) || context?.tenantId !== identifiers.tenantId) {
+        throw smokeError("SMOKE_CHILD_COMMAND_INVALID");
+      }
+      const raw = await child("docker", composeArgs(
+        "--profile", "capability-acceptance", "run", "--rm", "--no-deps",
+        "capability-acceptance", phase, context.tenantId,
+      ), { timeoutMs: maximumPollMs, maxOutputBytes: 1024 * 1024, cleanup: phase === "cleanup" });
+      return parseJson(raw.trim(), "SMOKE_API_RESPONSE_INVALID");
+    },
+    async inspectEmptyCapabilitySurface(context, generation, digest) {
+      if (!Number.isSafeInteger(generation) || generation < 1
+        || typeof digest !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(digest)) {
+        throw smokeError("SMOKE_CONTAINER_INVALID");
+      }
+      const ids = await runtimeContainerIds(context);
+      if (ids.length !== 1) throw smokeError("SMOKE_CONTAINER_INVALID");
+      const script = "import hashlib,json,sys;from pathlib import Path;p=json.loads(Path(sys.argv[1]).read_text());raw=Path(sys.argv[2]).read_bytes();assert raw.endswith(b'\\n') and raw.count(b'\\n')==1;m=json.loads(raw);assert set(p)=={'model','providers'};assert not (set(p)&{'mcp_servers','tools','tool_schema','skills'});assert not (Path(sys.argv[1]).parent/'skills').exists();assert set(m)=={'schema_version','tenant_id','snapshot_id','snapshot_version','runtime_generation','capabilities'};assert m['runtime_generation']==int(sys.argv[4]);assert 'sha256:'+hashlib.sha256(raw[:-1]).hexdigest()==sys.argv[3];assert all(set(x)=={'capability_id','capability_version_id','version','kind'} for x in m['capabilities']);print(json.dumps({'managedMcpServers':0,'managedTools':0,'managedSkills':0},separators=(',',':')))";
+      const output = await child("docker", [
+        "exec", ids[0], "/opt/hermes/.venv/bin/python", "-c", script,
+        `/opt/data/profiles/${context.profileId}/config.yaml`,
+        `/opt/data/.core-agent/capabilities/g-${generation}.json`,
+        digest,
+        String(generation),
+      ]);
+      const surface = parseJson(output.trim(), "SMOKE_CONTAINER_INVALID");
+      exactStringRecord(surface, {
+        managedMcpServers: 0,
+        managedTools: 0,
+        managedSkills: 0,
+      }, "SMOKE_CONTAINER_INVALID");
+      return surface;
+    },
+    async waitForAdditionalRuntimeRemoval(context, options) {
+      await waitForManagedRuntimeRemoval(context, options);
     },
     async scanDatabase() {
       const directory = await mkdtemp(join(tmpdir(), "core-agent-runtime-smoke-"));
@@ -1463,34 +1540,7 @@ export function createManagedRuntimeDependencies(environment, signal) {
       });
     },
     async waitForContainerRemoval(context) {
-      const deadline = Date.now() + maximumPollMs;
-      let removed = false;
-      while (Date.now() < deadline) {
-        const raw = await child("docker", [
-          "ps", "--all", "--quiet",
-          "--filter", "label=core-agent.managed=runtime-v1",
-          "--filter", "label=core-agent.resource=runtime",
-          "--filter", `label=core-agent.tenant-id=${context.tenantId}`,
-          "--filter", `label=core-agent.runtime-id=${context.runtimeId}`,
-        ], { cleanup: true });
-        if (raw.trim() === "") {
-          removed = true;
-          break;
-        }
-        await delay(1_000);
-      }
-      if (!removed) throw smokeError("SMOKE_CLEANUP_FAILED");
-      const names = deriveManagedNames(context.tenantId, context.runtimeId, 1);
-      const volumeRaw = await child("docker", ["volume", "inspect", names.volume], { cleanup: true, maxOutputBytes: 1024 * 1024 });
-      const volumes = parseJson(volumeRaw, "SMOKE_CLEANUP_FAILED");
-      if (!Array.isArray(volumes) || volumes.length !== 1) throw smokeError("SMOKE_CLEANUP_FAILED");
-      const labels = dataProperty(volumes[0], "Labels", "SMOKE_CLEANUP_FAILED");
-      if (dataProperty(labels, "core-agent.managed", "SMOKE_CLEANUP_FAILED") !== "runtime-v1"
-        || dataProperty(labels, "core-agent.resource", "SMOKE_CLEANUP_FAILED") !== "runtime-volume"
-        || dataProperty(labels, "core-agent.tenant-id", "SMOKE_CLEANUP_FAILED") !== context.tenantId
-        || dataProperty(labels, "core-agent.runtime-id", "SMOKE_CLEANUP_FAILED") !== context.runtimeId) {
-        throw smokeError("SMOKE_CLEANUP_FAILED");
-      }
+      await waitForManagedRuntimeRemoval(context);
     },
     async stopTopology({ projectName, removeVolumes }) {
       if (projectName !== composeProject || removeVolumes !== false) throw smokeError("SMOKE_CLEANUP_FAILED");

@@ -159,7 +159,7 @@ function parseDockerfile(text) {
 test("only the fixed API ingress publishes a loopback port and only Supervisor mounts Docker", async () => {
   const config = await yaml("infra/runtime/compose.dev.yaml");
   assert.deepEqual(Object.keys(config.services).sort(), [
-    "api", "api-bootstrap-key-projector", "api-ingress", "database-credential-projector", "identity-role-bootstrap", "migrate", "postgres",
+    "api", "api-bootstrap-key-projector", "api-ingress", "capability-acceptance", "database-credential-projector", "identity-role-bootstrap", "migrate", "postgres",
     "postgres-auth-convergence", "supervisor", "supervisor-socket-preflight",
     "supervisor-socket-volume-init", "worker",
   ]);
@@ -167,11 +167,11 @@ test("only the fixed API ingress publishes a loopback port and only Supervisor m
   assert.deepEqual(config.services["api-ingress"].ports, ["127.0.0.1:8787:8787"]);
   for (const name of [
     "postgres", "api-bootstrap-key-projector", "database-credential-projector", "identity-role-bootstrap", "postgres-auth-convergence", "migrate", "api", "worker", "supervisor", "supervisor-socket-preflight",
-    "supervisor-socket-volume-init",
+    "supervisor-socket-volume-init", "capability-acceptance",
   ]) {
     assert.equal(config.services[name].ports, undefined);
   }
-  for (const name of ["postgres", "api-bootstrap-key-projector", "database-credential-projector", "identity-role-bootstrap", "postgres-auth-convergence", "migrate", "api", "api-ingress", "worker"]) {
+  for (const name of ["postgres", "api-bootstrap-key-projector", "database-credential-projector", "identity-role-bootstrap", "postgres-auth-convergence", "migrate", "api", "api-ingress", "worker", "capability-acceptance"]) {
     assert(!JSON.stringify(config.services[name]).includes("docker.sock"));
   }
   for (const service of Object.values(config.services)) {
@@ -291,8 +291,43 @@ test("service mounts and networks preserve each process boundary", async () => {
   assert(!volumeTargets(api).some((target) => /secrets\/provider|ingress|docker|supervisor/u.test(target)));
   assert(!volumeTargets(worker).some((target) => /secrets\/provider|docker/u.test(target)));
   assert(![...volumeTargets(supervisor), ...secretTargets(supervisor)].some((target) => /bootstrap/u.test(target)));
-  assert.deepEqual(Object.keys(config.volumes).sort(), ["api-bootstrap-key", "api-credentials", "migrate-credentials", "postgres-auth-credentials", "postgres-credentials", "postgres-data", "role-bootstrap-credentials", "supervisor-socket", "worker-credentials"]);
+  assert.deepEqual(Object.keys(config.volumes).sort(), ["api-bootstrap-key", "api-credentials", "capability-acceptance-credentials", "migrate-credentials", "postgres-auth-credentials", "postgres-credentials", "postgres-data", "role-bootstrap-credentials", "supervisor-socket", "worker-credentials"]);
   assert.equal(config.secrets, undefined);
+});
+
+test("capability acceptance is an opt-in least-privilege dual-role test companion", async () => {
+  const config = await yaml("infra/runtime/compose.dev.yaml");
+  const service = config.services["capability-acceptance"];
+  assert(service, "capability acceptance service must exist");
+  assert.deepEqual(service.profiles, ["capability-acceptance"]);
+  assert.equal(service.image, config.services.worker.image);
+  assert.deepEqual(service.build, config.services.worker.build);
+  assert.equal(service.user, "12003:12003");
+  assert.equal(service.read_only, true);
+  assert.equal(service.privileged, false);
+  assert.deepEqual(service.cap_drop, ["ALL"]);
+  assert.deepEqual(service.security_opt, ["no-new-privileges:true"]);
+  assert.deepEqual(service.entrypoint, ["node", "scripts/capability-runtime-acceptance-local.mjs"]);
+  assert.deepEqual(service.networks, ["core-agent-control"]);
+  assert.equal(service.ports, undefined);
+  assert.equal(service.tmpfs, undefined);
+  assert.deepEqual(service.depends_on, {
+    migrate: { condition: "service_completed_successfully" },
+    postgres: { condition: "service_healthy" },
+  });
+  assert.deepEqual(environmentMap(service), {
+    CORE_AGENT_ACCEPTANCE_APPLICATION_DATABASE_PASSWORD_FILE: "/run/core-agent/database-credentials/application-password",
+    CORE_AGENT_ACCEPTANCE_APPLICATION_DATABASE_URL: "postgresql://core_agent_app@postgres:5432/core_agent_runtime",
+    CORE_AGENT_ACCEPTANCE_IDENTITY_DATABASE_PASSWORD_FILE: "/run/core-agent/database-credentials/identity-password",
+    CORE_AGENT_ACCEPTANCE_IDENTITY_DATABASE_URL: "postgresql://core_agent_identity@postgres:5432/core_agent_runtime",
+  });
+  assert.deepEqual(service.volumes, [{
+    type: "volume",
+    source: "capability-acceptance-credentials",
+    target: "/run/core-agent/database-credentials",
+    read_only: true,
+  }]);
+  assert.doesNotMatch(JSON.stringify(service), /docker\.sock|supervisor-socket|provider-secret|ingress-secret/iu);
 });
 
 test("application services use least privilege and bounded resources", async () => {
@@ -586,6 +621,7 @@ test("database credential projector is private networkless and owns the only hos
   const outputs = {
     "/run/core-agent/projected/api": "api-credentials",
     "/run/core-agent/projected/auth": "postgres-auth-credentials",
+    "/run/core-agent/projected/capability-acceptance": "capability-acceptance-credentials",
     "/run/core-agent/projected/migrate": "migrate-credentials",
     "/run/core-agent/projected/postgres": "postgres-credentials",
     "/run/core-agent/projected/role-bootstrap": "role-bootstrap-credentials",
@@ -612,12 +648,13 @@ test("each database consumer mounts only its isolated credential volume and Work
     migrate: "migrate-credentials",
     api: "api-credentials",
     worker: "worker-credentials",
+    "capability-acceptance": "capability-acceptance-credentials",
   };
   for (const [serviceName, source] of Object.entries(expected)) {
     const databaseMounts = (config.services[serviceName].volumes ?? []).filter((mount) => mount.target === "/run/core-agent/database-credentials");
     assert.deepEqual(databaseMounts, [{ type: "volume", source, target: "/run/core-agent/database-credentials", read_only: true }], serviceName);
   }
-  assert.deepEqual(Object.keys(config.volumes).filter((name) => name.endsWith("-credentials")).sort(), Object.values(expected).sort());
+  assert.deepEqual(Object.keys(config.volumes).filter((name) => name.endsWith("-credentials")).sort(), [...new Set(Object.values(expected))].sort());
   assert.equal(config.services.api.user, "${CORE_AGENT_API_UID:-12000}:${CORE_AGENT_API_GID:-12000}");
   assert.equal(config.services.worker.user, config.services.supervisor.user);
   assert.equal(config.services.worker.user, "${CORE_AGENT_RUNTIME_UID:-12002}:${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}");

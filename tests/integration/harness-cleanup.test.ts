@@ -6,10 +6,47 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 
-import { LEAK_SENTINEL, testHarnessInternals } from "./harness.js";
+import { createIntegrationHarness, LEAK_SENTINEL, testHarnessInternals } from "./harness.js";
 
 const databaseName = "core_agent_test_0123456789abcdef";
 const repositoryRoot = join(import.meta.dirname, "..", "..");
+
+test("integration harness cleanup releases its safely recoverable pre-effect lease", async () => {
+  const harness = await createIntegrationHarness("recoverable-shutdown-lease");
+  const now = new Date();
+  await harness.db.insertInto("tenants").values({
+    tenant_id: "tenant_recoverable_shutdown_lease",
+    schema_version: 1,
+    resource_version: 1,
+    tenant_mode: "b2b",
+    status: "active",
+    display_name: "Recoverable shutdown lease",
+    created_at: now,
+    updated_at: now,
+  }).execute();
+  await harness.db.insertInto("worker_jobs").values({
+    tenant_id: "tenant_recoverable_shutdown_lease",
+    job_id: "job_recoverable_shutdown_lease",
+    job_kind: "provision_runtime",
+    status: "running",
+    attempt_count: 1,
+    max_attempts: 5,
+    lease_owner: "worker_task16_1",
+    lease_expires_at: new Date(now.getTime() + 30_000),
+    next_attempt_at: now,
+    payload_ref: "runtime_recoverable_shutdown_lease",
+    runtime_command: null,
+    target_command_version: null,
+    effect_state: "pre_effect",
+    last_error_summary: null,
+    run_id: null,
+    container_id: null,
+    created_at: now,
+    updated_at: now,
+  }).execute();
+
+  await harness.close();
+});
 
 async function runCleanupChild(
   scenario: "delayed-backends" | "delayed-backends-release" | "drop-connect-failure" | "drop-end-hang" | "statement-timeout-drop" | "termination-failure" | "transient-drop",

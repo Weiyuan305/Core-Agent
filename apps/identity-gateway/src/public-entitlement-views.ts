@@ -11,6 +11,14 @@ import type { Static } from "typebox";
 
 type PublicServiceState = Static<typeof PublicServiceStateSchema>;
 
+export type CompanyManageableServiceSummary = CompanyServiceSummary & {
+  readonly entitlement_resource_version: number;
+};
+
+export type CompanyManageableAssignmentSummary = CompanyAssignmentSummary & {
+  readonly assignment_resource_version: number;
+};
+
 type StoredEntitlementStatus = "active" | "suspended" | "expired" | "revoked";
 type StoredAssignmentStatus = "preparing" | "available" | "suspended" | "expired" | "failed" | "revoked";
 type StoredProjectionStatus = "preparing" | "available" | "failed";
@@ -62,10 +70,13 @@ function optionalDate(row: Readonly<Record<string, unknown>>, key: string): Date
 
 function integer(row: Readonly<Record<string, unknown>>, key: string): number {
   const value = row[key];
-  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+  const parsed = typeof value === "string" && /^(?:0|[1-9]\d*)$/u.test(value)
+    ? Number(value)
+    : value;
+  if (!Number.isSafeInteger(parsed) || (parsed as number) < 0) {
     throw new DomainError("INTERNAL_ERROR", "Stored public service projection is invalid");
   }
-  return value as number;
+  return parsed as number;
 }
 
 function state(
@@ -113,15 +124,18 @@ function projectionStatus(row: Readonly<Record<string, unknown>>): StoredProject
   return value;
 }
 
-export function toCompanyServiceSummary(value: unknown): CompanyServiceSummary {
+export function toCompanyServiceSummary(value: unknown): CompanyManageableServiceSummary {
   const row = plainRecord(value);
   const usedSeats = integer(row, "used_seats");
   const totalSeats = integer(row, "seat_quantity");
   if (totalSeats < 1 || usedSeats > totalSeats) throw new DomainError("INTERNAL_ERROR", "Stored seat authority is invalid");
   const expiresAt = optionalDate(row, "expires_at");
+  const resourceVersion = integer(row, "entitlement_resource_version");
+  if (resourceVersion < 1) throw new DomainError("INTERNAL_ERROR", "Stored Entitlement version is invalid");
   return Object.freeze({
     schema_version: 1,
     service_id: text(row, "entitlement_id"),
+    entitlement_resource_version: resourceVersion,
     display_name: text(row, "display_name"),
     valid_from: date(row, "valid_from").toISOString(),
     ...(expiresAt === null ? {} : { expires_at: expiresAt.toISOString() }),
@@ -145,13 +159,16 @@ export function toStudentServiceSummary(value: unknown): StudentServiceSummary {
   });
 }
 
-export function toCompanyAssignmentSummary(value: unknown): CompanyAssignmentSummary {
+export function toCompanyAssignmentSummary(value: unknown): CompanyManageableAssignmentSummary {
   const row = plainRecord(value);
   const status = assignmentStatus(row);
   if (status === undefined) throw new DomainError("INTERNAL_ERROR", "Stored Assignment status is invalid");
+  const resourceVersion = integer(row, "assignment_resource_version");
+  if (resourceVersion < 1) throw new DomainError("INTERNAL_ERROR", "Stored Assignment version is invalid");
   return Object.freeze({
     schema_version: 1,
     assignment_id: text(row, "assignment_id"),
+    assignment_resource_version: resourceVersion,
     profile_id: text(row, "profile_id"),
     profile_display_name: boundedDisplayName(row, "profile_display_name"),
     service_display_name: text(row, "service_display_name"),

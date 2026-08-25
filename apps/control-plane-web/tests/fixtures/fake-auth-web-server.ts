@@ -37,7 +37,16 @@ function error(reply: FastifyReply, status: number): FastifyReply {
 }
 
 function signedIn(request: FastifyRequest): boolean {
-  return /(?:^|;\s*)core_agent_session=(?:active|needs_reauth)(?:;|$)/u.test(request.headers.cookie ?? "");
+  return /(?:^|;\s*)core_agent_session=(?:active|needs_reauth|platform|student|consultant)(?:;|$)/u.test(request.headers.cookie ?? "");
+}
+
+function sessionKind(request: FastifyRequest): "platform" | "student" | "company" | "consultant" | undefined {
+  const cookie = request.headers.cookie ?? "";
+  if (/(?:^|;\s*)core_agent_session=platform(?:;|$)/u.test(cookie)) return "platform";
+  if (/(?:^|;\s*)core_agent_session=student(?:;|$)/u.test(cookie)) return "student";
+  if (/(?:^|;\s*)core_agent_session=consultant(?:;|$)/u.test(cookie)) return "consultant";
+  if (signedIn(request)) return "company";
+  return undefined;
 }
 
 function setSession(reply: FastifyReply, value = "active"): void {
@@ -46,6 +55,7 @@ function setSession(reply: FastifyReply, value = "active"): void {
 
 async function start(): Promise<void> {
   const identity = Fastify({ logger: false, bodyLimit: 64 * 1_024 });
+  let pendingVerificationRole: "consultant" | undefined;
   identity.all("/auth/v1/*", async (request, reply) => {
     const path = request.url;
     if (path === "/auth/v1/session" && request.method === "GET") {
@@ -53,15 +63,19 @@ async function start(): Promise<void> {
       return { schema_version: 1, session: session((request.headers.cookie ?? "").includes("core_agent_session=needs_reauth")) };
     }
     if (path === "/auth/v1/email/sign-up") {
+      pendingVerificationRole = undefined;
       return { schema_version: 1, verification_id: "verification_browser", status: "verification_pending" };
     }
     if (path === "/auth/v1/email/verification") {
-      setSession(reply);
+      setSession(reply, pendingVerificationRole ?? "active");
+      pendingVerificationRole = undefined;
       return { schema_version: 1, transport: "web_cookie", session: session(false) };
     }
     if (path === "/auth/v1/email/sign-in") {
-      setSession(reply, "needs_reauth");
-      return { schema_version: 1, transport: "web_cookie", session: session(true) };
+      const body = request.body as { email?: string };
+      const value = body.email === "platform@example.com" ? "platform" : body.email === "student@example.com" ? "student" : "needs_reauth";
+      setSession(reply, value);
+      return { schema_version: 1, transport: "web_cookie", session: session(value === "needs_reauth") };
     }
     if (path === "/auth/v1/apple/start") {
       return { schema_version: 1, authorization_url: "https://appleid.apple.com/auth/authorize?opaque=browser-fixture" };
@@ -80,6 +94,7 @@ async function start(): Promise<void> {
       };
     }
     if (path === "/auth/v1/invitations/register") {
+      pendingVerificationRole = "consultant";
       return { schema_version: 1, verification_id: "verification_invited_browser", status: "verification_pending" };
     }
     if (path === "/auth/v1/invitations/accept") {
@@ -107,6 +122,7 @@ async function start(): Promise<void> {
         members: [
           { schema_version: 1, membership_id: "membership_platform", actor_id: "actor_platform", membership_resource_version: 1, source: "platform", status: "active", roles: ["admin"] },
           { schema_version: 1, membership_id: "membership_company", actor_id: "actor_company", membership_resource_version: 2, source: "company", status: "active", roles: ["admin"] },
+          { schema_version: 1, membership_id: "membership_consultant", actor_id: "actor_consultant", membership_resource_version: 1, source: "company", status: "active", roles: ["consultant"], profile_id: "profile_consultant", profile_resource_version: 1, profile_status: "active" },
         ],
         page_info: { schema_version: 1, has_more: false },
       };
@@ -136,6 +152,48 @@ async function start(): Promise<void> {
     if (path === "/auth/v1/session/sign-out") {
       reply.header("set-cookie", ["core_agent_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0", "core_agent_csrf=; SameSite=Lax; Path=/; Max-Age=0"]);
       return { schema_version: 1, signed_out: true };
+    }
+    return error(reply, 404);
+  });
+  identity.all("/app/v1/*", async (request, reply) => {
+    const path = new URL(request.url, "http://identity.invalid").pathname;
+    const role = sessionKind(request);
+    if (role === undefined) return error(reply, 401);
+    if (path === "/app/v1/platform/catalog") {
+      if (role !== "platform") return error(reply, 403);
+      if (request.method === "POST") return { schema_version: 1, accepted: true };
+      return {
+        schema_version: 1,
+        capabilities: [{ schema_version: 1, capability_id: "capability_browser", capability_version_id: "capability_version_browser", version: "1.0.0", display_name: "资料读取", kind: "mcp", status: "reviewed", resource_version: 2 }],
+        packs: [{ schema_version: 1, pack_product_id: "pack_browser", pack_version_id: "pack_version_browser", version: "1.0.0", display_name: "学生全能服务", tenant_modes: ["b2c"], status: "published", resource_version: 3 }],
+      };
+    }
+    if (path === "/app/v1/platform/entitlements") {
+      if (role !== "platform") return error(reply, 403);
+      if (request.method === "POST") return { schema_version: 1, accepted: true };
+      return {
+        schema_version: 1,
+        entitlements: [{ schema_version: 1, entitlement_id: "entitlement_browser", tenant_id: "tenant_browser", display_name: "学生全能服务", tenant_mode: "b2c", status: "active", valid_from: "2026-08-25T00:00:00.000Z", resource_version: 1 }],
+      };
+    }
+    if (path === "/app/v1/company/services") {
+      if (role !== "company") return error(reply, 403);
+      return {
+        schema_version: 1,
+        services: [{ schema_version: 1, service_id: "entitlement_company_browser", entitlement_resource_version: 1, display_name: "顾问工作台", valid_from: "2026-08-25T00:00:00.000Z", service_state: "available", used_seats: 1, total_seats: 3, available_seats: 2 }],
+      };
+    }
+    if (path === "/app/v1/company/assignments") {
+      if (role !== "company") return error(reply, 403);
+      if (request.method === "POST") return { schema_version: 1, accepted: true };
+      return { schema_version: 1, assignments: [] };
+    }
+    if (path === "/app/v1/student/services") {
+      if (role !== "student") return error(reply, 403);
+      return {
+        schema_version: 1,
+        services: [{ schema_version: 1, service_id: "entitlement_student_browser", display_name: "学生全能服务", valid_from: "2026-08-25T00:00:00.000Z", service_state: "preparing" }],
+      };
     }
     return error(reply, 404);
   });

@@ -15,6 +15,10 @@ test("database credential projector creates isolated owner-only service projecti
   assert.deepEqual(projector.DATABASE_CREDENTIAL_LAYOUT, {
     api: { application: "database-password" },
     auth: { bootstrap: "database-password" },
+    capabilityAcceptance: {
+      application: "application-password",
+      identity: "identity-password",
+    },
     migrate: { migrator: "database-password" },
     postgres: { bootstrap: "database-password" },
     roleBootstrap: {
@@ -52,7 +56,7 @@ test("database credential projector creates isolated owner-only service projecti
   const workerUid = [999, 12003, 12004].includes(uid + 1) ? uid + 2 : uid + 1;
   const targetIdentities = {
     api: { uid, gid }, auth: { uid: 999, gid: 999 }, migrate: { uid: 12004, gid: 12004 },
-    postgres: { uid: 999, gid: 999 }, roleBootstrap: { uid: 12003, gid: 12003 }, worker: { uid: workerUid, gid },
+    capabilityAcceptance: { uid: 12003, gid: 12003 }, postgres: { uid: 999, gid: 999 }, roleBootstrap: { uid: 12003, gid: 12003 }, worker: { uid: workerUid, gid },
   };
   const requestedIdentities = new Map();
   const projectFileImplementation = async (root, filename, material, identity) => {
@@ -101,7 +105,7 @@ test("database credential projector rejects every unsafe host source without ref
   const workerUid = [999, 12003, 12004].includes(uid + 1) ? uid + 2 : uid + 1;
   const targetIdentities = {
     api: { uid, gid }, auth: { uid: 999, gid: 999 }, migrate: { uid: 12004, gid: 12004 },
-    postgres: { uid: 999, gid: 999 }, roleBootstrap: { uid: 12003, gid: 12003 }, worker: { uid: workerUid, gid },
+    capabilityAcceptance: { uid: 12003, gid: 12003 }, postgres: { uid: 999, gid: 999 }, roleBootstrap: { uid: 12003, gid: 12003 }, worker: { uid: workerUid, gid },
   };
   const projectFileImplementation = async (root, filename, material) => {
     await writeFile(join(root, filename), material, { mode: 0o400 });
@@ -157,7 +161,7 @@ test("database credential projector rejects privileged application UID collision
   const outputRoots = Object.fromEntries(Object.keys(projector.DATABASE_CREDENTIAL_LAYOUT).map((name) => [name, join(root, name)]));
   for (const path of Object.values(outputRoots)) await mkdir(path, { mode: 0o700 });
   const identities = {
-    postgres: { uid: 999, gid: 999 }, roleBootstrap: { uid: 12003, gid: 12003 },
+    capabilityAcceptance: { uid: 12003, gid: 12003 }, postgres: { uid: 999, gid: 999 }, roleBootstrap: { uid: 12003, gid: 12003 },
     auth: { uid: 999, gid: 999 }, migrate: { uid: 12004, gid: 12004 },
     api: { uid: 12000, gid: 12000 }, worker: { uid: 12001, gid: 12001 },
   };

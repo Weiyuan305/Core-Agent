@@ -300,11 +300,13 @@ async function scenario(kind) {
       "run", "--rm", "--no-deps", "--entrypoint", "sh", "database-credential-projector",
       "-ceu", "find /run/core-agent/projected -type f -maxdepth 3 -exec stat -c '%n|%u|%g|%a|%i' {} + | sort",
     ).trim().split("\n").filter((line) => line.startsWith("/run/core-agent/projected/"));
-    assert.equal(projected.length, 9);
-    assert.equal(new Set(projected.map((line) => line.split("|")[4])).size, 9);
+    assert.equal(projected.length, 11);
+    assert.equal(new Set(projected.map((line) => line.split("|")[4])).size, 11);
     const expectedOwners = new Map([
       ["api/database-password", process.getuid?.() ?? 0],
       ["auth/database-password", 999],
+      ["capability-acceptance/application-password", 12003],
+      ["capability-acceptance/identity-password", 12003],
       ["migrate/database-password", 12004],
       ["postgres/database-password", 999],
       ["role-bootstrap/application-password", 12003],
@@ -318,6 +320,11 @@ async function scenario(kind) {
       assert.equal(Number(uid), expectedOwners.get(path.split("/projected/")[1]), path);
       assert.equal(mode, "400", path);
     }
+
+    assert.match(compose(
+      "run", "--rm", "--no-deps", "--entrypoint", "sh", "capability-acceptance", "-ceu",
+      "test -r /run/core-agent/database-credentials/application-password; test -r /run/core-agent/database-credentials/identity-password; test ! -e /run/core-agent/database-credentials/bootstrap-password; test ! -e /run/core-agent/database-credentials/migrator-password; printf capability-acceptance-credentials-ok",
+    ), /capability-acceptance-credentials-ok/u);
 
     const postgresConnect = (role, credentialPath, user = "0:0", extra = []) => compose(
       "run", "--rm", "--no-deps", "--user", user, ...extra,

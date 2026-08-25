@@ -215,6 +215,10 @@ async function runCiEquivalentScenario({ injectedFailure = false, injectedOutput
     assert.match(integrationOutput, /fake-provider B2C slice enforces Cookie CSRF reauthentication outage revocation deletion recovery and public-safe errors/u);
     assert.match(integrationOutput, /fake-provider invited B2B slice preserves invitation-only onboarding and server-derived platform cross-company access/u);
     assert.match(integrationOutput, /trusted context derives Control Plane Actor Membership Profile and role from current PostgreSQL authority/u);
+    assert.match(integrationOutput, /reviewed catalog authority reaches one exact v2 Runtime manifest and available assignment/u);
+    assert.match(integrationOutput, /revocation denies new admission and stale pre-effect authority while an already-dispatched model-only Run completes/u);
+    assert.match(integrationOutput, /a conflicting Pack upgrade preserves current authority and a valid rollback proves a newer Runtime generation/u);
+    assert.match(integrationOutput, /a B2C Runtime stops after 30 idle minutes and one idempotent wake preserves its Volume/u);
     protectedRun("docker", ["logs", container], environment, credential, credentialFile);
     const changed = spawnSync("git", ["diff", "--name-only", "-z"], { cwd: repositoryRoot, env: environment, encoding: "buffer" });
     const untracked = spawnSync("git", ["ls-files", "--others", "--exclude-standard", "-z"], { cwd: repositoryRoot, env: environment, encoding: "buffer" });

@@ -949,6 +949,19 @@ test("CI validates runtime contracts without building or publishing images", asy
   assert.match(workflow, /^\s+run: npm run check$/m);
   assert.match(workflow, /^\s+run: node scripts\/run-protected-ci-command\.mjs --secret-file "\$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- npm run test:postgres$/m);
   assert.match(workflow, /^\s+run: node scripts\/run-protected-ci-command\.mjs --secret-file "\$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- npm run test:integration$/m);
+  assert.match(workflow, /Run fake provider Supervisor Hermes and entitlement capability full slices/u);
+  for (const canary of [
+    "synthetic-private-price-canary-8b31f10a",
+    "synthetic-private-receipt-canary-a4d627ce",
+    "manifest:sha256:237dc659237dc659237dc659237dc659237dc659237dc659237dc659237dc659",
+    "synthetic-private-tool-schema-canary-c981a20f",
+    "synthetic-private-provider-secret-canary-5d0e126b",
+    "synthetic-private-external-order-canary-b71f826c",
+    "synthetic-private-customer-content-canary-09ce74a5",
+  ]) assert.match(workflow, new RegExp(canary, "u"));
+  assert.match(workflow, /scan-runtime-database\.mjs "\$canary"/u);
+  assert.match(workflow, /verify-no-secret\.mjs "\$canary"/u);
+  assert.doesNotMatch(workflow, /entitlement-private-sentinel/u);
   assert.match(workflow, /^\s+run: npm run test:runtime$/m);
   assert.match(workflow, /github\.event\.pull_request\.base\.sha \|\| github\.event\.before/);
   assert.match(

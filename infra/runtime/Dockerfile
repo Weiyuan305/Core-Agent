@@ -64,6 +64,7 @@ COPY scripts/converge-runtime-postgres-auth.mjs ./scripts/converge-runtime-postg
 COPY scripts/api-ingress-proxy.mjs ./scripts/api-ingress-proxy.mjs
 COPY scripts/preflight-runtime-docker-socket.mjs ./scripts/preflight-runtime-docker-socket.mjs
 COPY scripts/prepare-supervisor-socket-volume.mjs ./scripts/prepare-supervisor-socket-volume.mjs
+COPY scripts/capability-runtime-acceptance-local.mjs ./scripts/capability-runtime-acceptance-local.mjs
 COPY infra/hermes/base-images.lock.json ./infra/hermes/base-images.lock.json
 COPY infra/runtime/providers.dev.json ./infra/runtime/providers.dev.json
 
