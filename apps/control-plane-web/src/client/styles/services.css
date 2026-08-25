@@ -1,0 +1,62 @@
+.service-workspace { margin: 0 auto; max-width: 1180px; padding: 64px 28px 96px; width: 100%; }
+.service-workspace--student { max-width: 920px; }
+.service-hero { margin-bottom: 38px; max-width: 720px; }
+.service-hero h1 { font-size: clamp(36px, 6vw, 64px); letter-spacing: -0.052em; line-height: 1.02; }
+.service-hero > p:last-child { color: var(--muted); font-size: 18px; margin-top: 14px; }
+.service-panel { background: rgba(255,255,255,.82); border: 1px solid var(--hairline); border-radius: 26px; box-shadow: 0 18px 54px rgba(0,0,0,.055); margin-top: 22px; padding: 28px; }
+.service-section-heading { align-items: end; display: flex; gap: 24px; justify-content: space-between; margin-bottom: 24px; }
+.service-section-heading h2 { font-size: 26px; letter-spacing: -.025em; }
+.service-section-heading > p { color: var(--muted); font-size: 14px; max-width: 430px; text-align: right; }
+.service-grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); }
+.service-card { background: var(--canvas-secondary); border: 1px solid transparent; border-radius: 18px; min-width: 0; padding: 20px; }
+.service-card:focus-within { border-color: var(--action); box-shadow: 0 0 0 4px var(--focus-ring); }
+.service-card h2, .service-card h3 { font-size: 19px; letter-spacing: -.015em; }
+.service-card__heading { align-items: flex-start; display: flex; gap: 12px; justify-content: space-between; }
+.service-card__meta { color: var(--muted); font-size: 13px; margin: 8px 0 18px; }
+.service-chip { background: var(--canvas); border: 1px solid var(--hairline); border-radius: 999px; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .06em; padding: 5px 8px; }
+.service-card > button { margin-top: 18px; }
+.service-status { align-items: flex-start; color: var(--muted); display: flex; font-size: 14px; gap: 9px; margin-top: 16px; }
+.service-status__dot { background: #86868b; border-radius: 50%; flex: 0 0 auto; height: 8px; margin-top: .42em; width: 8px; }
+.service-status--available .service-status__dot { background: #248a3d; }
+.service-status--preparing .service-status__dot { background: #d97706; }
+.service-status--suspended .service-status__dot, .service-status--expired .service-status__dot, .service-status--unavailable .service-status__dot { background: #b42318; }
+.service-status--compact { font-size: 13px; }
+.seat-meter { align-items: center; display: flex; gap: 12px; justify-content: space-between; margin-top: 18px; }
+.seat-meter span { color: var(--muted); }
+.seat-meter strong { color: var(--action); font-size: 14px; }
+.seat-form { align-items: end; display: grid; gap: 12px; grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) auto; }
+.seat-form label { color: var(--muted); display: grid; font-size: 14px; font-weight: 600; gap: 7px; }
+.seat-form select { background: var(--canvas); border: 1px solid var(--hairline-strong); border-radius: 12px; color: var(--ink); font: inherit; min-height: 48px; padding: 10px 13px; width: 100%; }
+.service-list { display: grid; gap: 10px; list-style: none; margin: 0; padding: 0; }
+.service-list li { align-items: center; background: var(--canvas-secondary); border-radius: 16px; display: flex; gap: 18px; justify-content: space-between; min-height: 72px; padding: 16px 18px; }
+.service-list li span { color: var(--muted); display: block; font-size: 13px; margin-top: 4px; }
+.service-list--assignments { margin-top: 22px; }
+.service-empty-inline { background: var(--canvas-secondary); border-radius: 14px; color: var(--muted); padding: 18px; }
+.service-admin-forms { border-top: 1px solid var(--hairline); display: grid; gap: 12px; margin-top: 26px; padding-top: 22px; }
+.service-admin-forms details { background: var(--canvas-secondary); border-radius: 16px; padding: 16px 18px; }
+.service-admin-forms summary { cursor: pointer; font-weight: 650; }
+.service-admin-forms summary:focus-visible { border-radius: 6px; outline: 3px solid var(--focus-ring); outline-offset: 4px; }
+.service-form-grid { align-items: end; display: grid; gap: 14px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 18px; }
+.service-form-grid label { color: var(--muted); display: grid; font-size: 13px; font-weight: 600; gap: 7px; min-width: 0; }
+.service-form-grid input, .service-form-grid select { background: var(--canvas); border: 1px solid var(--hairline-strong); border-radius: 12px; color: var(--ink); font: inherit; min-height: 46px; min-width: 0; padding: 9px 12px; width: 100%; }
+.service-form-grid button { justify-self: start; }
+.service-loading { align-items: center; display: flex; flex-direction: column; gap: 14px; min-height: calc(100dvh - 72px); justify-content: center; }
+.service-loading__mark { animation: service-pulse 1.2s ease-in-out infinite alternate; background: var(--action); border-radius: 50%; height: 12px; width: 12px; }
+.conversation-admission { align-items: center; background: rgba(255,255,255,.84); border: 1px solid var(--hairline); border-radius: 20px; display: flex; gap: 18px; justify-content: space-between; margin-top: 22px; padding: 20px; }
+.conversation-admission p { color: var(--muted); font-size: 14px; }
+@keyframes service-pulse { from { opacity: .35; transform: scale(.8); } to { opacity: 1; transform: scale(1); } }
+
+@media (max-width: 720px) {
+  .service-workspace { padding: 38px 16px calc(56px + env(safe-area-inset-bottom, 0px)); }
+  .service-section-heading { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .service-section-heading > p { text-align: left; }
+  .service-panel { border-radius: 20px; padding: 20px; }
+  .seat-form { align-items: stretch; grid-template-columns: 1fr; }
+  .service-form-grid { grid-template-columns: 1fr; }
+  .service-list li, .conversation-admission { align-items: flex-start; flex-direction: column; }
+  .service-list li button, .conversation-admission button { width: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) { .service-loading__mark { animation: none; } }
+@media (prefers-reduced-transparency: reduce) { .service-panel, .conversation-admission { background: var(--canvas); } }
+@media (prefers-contrast: more) { .service-panel, .service-card, .conversation-admission { border-color: currentColor; } }

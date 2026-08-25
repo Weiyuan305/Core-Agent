@@ -2,7 +2,7 @@ import { defineConfig } from "playwright/test";
 
 export default defineConfig({
   testDir: "./tests",
-  testMatch: ["web-chat.spec.ts", "web-auth.spec.ts"],
+  testMatch: ["web-chat.spec.ts", "web-auth.spec.ts", "web-services.spec.ts"],
   fullyParallel: false,
   workers: 1,
   timeout: 30_000,
@@ -37,5 +37,8 @@ export default defineConfig({
     { name: "auth-desktop", testMatch: "web-auth.spec.ts", use: { baseURL: "http://127.0.0.1:4175", viewport: { width: 1_440, height: 960 } } },
     { name: "auth-compact", testMatch: "web-auth.spec.ts", use: { baseURL: "http://127.0.0.1:4175", viewport: { width: 1_024, height: 820 } } },
     { name: "auth-iphone", testMatch: "web-auth.spec.ts", use: { baseURL: "http://127.0.0.1:4175", viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true } },
+    { name: "services-desktop", testMatch: "web-services.spec.ts", use: { baseURL: "http://127.0.0.1:4175", viewport: { width: 1_440, height: 960 } } },
+    { name: "services-compact", testMatch: "web-services.spec.ts", use: { baseURL: "http://127.0.0.1:4175", viewport: { width: 1_024, height: 820 } } },
+    { name: "services-iphone", testMatch: "web-services.spec.ts", use: { baseURL: "http://127.0.0.1:4175", viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true } },
   ],
 });

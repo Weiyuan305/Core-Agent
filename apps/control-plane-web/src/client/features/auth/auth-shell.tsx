@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 
 import type { AuthSessionView } from "@core-agent/contracts";
 
@@ -15,6 +15,8 @@ import { CompanyMembersView } from "./company-members-view.js";
 import { InvitationView } from "./invitation-view.js";
 import { SignInView } from "./sign-in-view.js";
 import { SignUpView } from "./sign-up-view.js";
+import { createServicesApi, type ServicesApi } from "../services/services-api.js";
+import { ServicesWorkspace } from "../services/services-workspace.js";
 
 export type AppAdmission =
   | { readonly kind: "loading" }
@@ -43,6 +45,7 @@ export interface AuthShellProps {
   readonly initialTenantId?: string;
   readonly invitationSecret?: string;
   readonly navigate?: (url: string) => void;
+  readonly serviceApi?: ServicesApi;
 }
 
 function storedTenantHint(): string | undefined {
@@ -118,9 +121,14 @@ function VerificationView(props: {
 }
 
 function AuthenticatedHome(props: {
+  readonly authApi: AuthApi;
   readonly onAccount: () => void;
   readonly onCompany?: (() => void) | undefined;
+  readonly onReauthenticationRequired: (action: () => Promise<void>) => void;
+  readonly onSessionExpired: () => void;
   readonly onSignOut: () => void;
+  readonly serviceApi: ServicesApi;
+  readonly tenantId?: string | undefined;
 }) {
   return (
     <main className="authenticated-shell">
@@ -132,13 +140,7 @@ function AuthenticatedHome(props: {
           <button className="auth-link" onClick={props.onSignOut} type="button">退出登录</button>
         </nav>
       </header>
-      <section className="service-empty" aria-labelledby="service-title">
-        <span aria-hidden="true">◎</span>
-        <p className="auth-eyebrow">Core Agent</p>
-        <h1 id="service-title">服务尚未开通</h1>
-        <p>你的身份已经安全建立。服务开通后，这里会显示可用的工作空间。</p>
-        <p className="service-empty__note">请联系管理员确认服务开通状态。</p>
-      </section>
+      <ServicesWorkspace api={props.serviceApi} loadCompanyMembers={props.authApi.listCompanyMembers} onReauthenticationRequired={props.onReauthenticationRequired} onSessionExpired={props.onSessionExpired} {...(props.tenantId === undefined ? {} : { tenantId: props.tenantId })} />
     </main>
   );
 }
@@ -148,8 +150,10 @@ export function AuthShell({
   initialTenantId,
   invitationSecret,
   navigate = (url) => { window.location.assign(url); },
+  serviceApi: providedServiceApi,
 }: AuthShellProps) {
   const api = useMemo(() => providedApi ?? createAuthApi(), [providedApi]);
+  const serviceApi = useMemo(() => providedServiceApi ?? createServicesApi(), [providedServiceApi]);
   const [screen, setScreen] = useState<Screen>({ kind: "loading" });
   const [session, setSession] = useState<AuthSessionView>();
   const [tenantId, setTenantId] = useState(initialTenantId ?? storedTenantHint());
@@ -244,6 +248,16 @@ export function AuthShell({
     setScreen({ kind: "home", session: current });
   };
 
+  const requestServiceReauthentication = useCallback((action: () => Promise<void>): void => {
+    setReauthAction(() => async () => action());
+    setReauthError(undefined);
+  }, []);
+
+  const expireServiceSession = useCallback((): void => {
+    setSession(undefined);
+    setScreen({ kind: "sign_in" });
+  }, []);
+
   let content;
   if (screen.kind === "loading" || screen.kind === "invitation_loading") {
     content = <div aria-live="polite" className="launch-state"><span className="launch-state__mark">CA</span><p>正在建立安全连接…</p></div>;
@@ -308,7 +322,7 @@ export function AuthShell({
   } else if (screen.kind === "company") {
     content = <CompanyMembersView api={api} busy={busy} onBack={() => setScreen({ kind: "home", session: screen.session })} onProtectedAction={(action) => protectedAction(async () => action())} tenantId={screen.tenantId} />;
   } else {
-    content = <AuthenticatedHome onAccount={() => setScreen({ kind: "account", session: screen.session })} onCompany={tenantId === undefined ? undefined : () => setScreen({ kind: "company", session: screen.session, tenantId })} onSignOut={() => { void perform(async () => { await api.signOut(); setSession(undefined); setScreen({ kind: "sign_in" }); }); }} />;
+    content = <AuthenticatedHome authApi={api} onAccount={() => setScreen({ kind: "account", session: screen.session })} onCompany={tenantId === undefined ? undefined : () => setScreen({ kind: "company", session: screen.session, tenantId })} onReauthenticationRequired={requestServiceReauthentication} onSessionExpired={expireServiceSession} onSignOut={() => { void perform(async () => { await api.signOut(); setSession(undefined); setScreen({ kind: "sign_in" }); }); }} serviceApi={serviceApi} {...(tenantId === undefined ? {} : { tenantId })} />;
   }
 
   return (

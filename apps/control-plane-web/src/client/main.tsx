@@ -5,6 +5,7 @@ import { ControlPlaneWebApp } from "./app.js";
 import "./styles/tokens.css";
 import "./styles/workspace.css";
 import "./styles/auth.css";
+import "./styles/services.css";
 import "./styles/accessibility.css";
 
 const root = document.getElementById("root");
