@@ -11,7 +11,7 @@ import { loadCurrentSnapshotAuthority } from "../entitlements/current-authority.
 import { executionProofDigest, proofDigestMatches, type PolicyProofKey } from "./proof-crypto.js";
 
 export type ConsumeExecutionProofResult = Readonly<
-  | { allowed: true; policySessionId: string; decisionId: string; proofId: string; binding: NonNullable<Awaited<ReturnType<typeof loadReviewedToolBinding>>>; arguments: Readonly<Record<string, unknown>> }
+  | { allowed: true; policySessionId: string; decisionId: string; proofId: string; toolCallId: string; binding: NonNullable<Awaited<ReturnType<typeof loadReviewedToolBinding>>>; arguments: Readonly<Record<string, unknown>> }
   | { allowed: false; reason: "PROOF_INVALID" | "PROOF_EXPIRED" | "PROOF_REPLAYED" | "CURRENT_AUTHORITY_CHANGED" | "SESSION_NOT_ACTIVE" }
 >;
 
@@ -53,6 +53,6 @@ export async function consumeExecutionProof(
     }).where("tenant_id", "=", input.tenantId).where("proof_id", "=", proof.proof_id)
       .where("state", "=", "issued").returning("proof_id").executeTakeFirst();
     if (updated === undefined) return { allowed: false, reason: "PROOF_REPLAYED" };
-    return { allowed: true, policySessionId: session.policy_session_id, decisionId: decision.decision_id, proofId: proof.proof_id, binding, arguments: canonical.value };
+    return { allowed: true, policySessionId: session.policy_session_id, decisionId: decision.decision_id, proofId: proof.proof_id, toolCallId: decision.tool_call_id, binding, arguments: canonical.value };
   });
 }

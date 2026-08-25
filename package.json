@@ -12,10 +12,11 @@
   },
   "scripts": {
     "build": "npm run build --workspaces --if-present",
-    "check": "npm run contracts:check && npm run check -w @core-agent/runtime-core && npm run check -w @core-agent/identity-gateway && npm run check -w @core-agent/control-plane-api && npm run check -w @core-agent/control-plane-worker && npm run check -w @core-agent/runtime-supervisor && npm run check -w @core-agent/control-plane-web",
+    "check": "npm run contracts:check && npm run check -w @core-agent/runtime-core && npm run check -w @core-agent/policy-mcp-gateway && npm run check -w @core-agent/identity-gateway && npm run check -w @core-agent/control-plane-api && npm run check -w @core-agent/control-plane-worker && npm run check -w @core-agent/runtime-supervisor && npm run check -w @core-agent/control-plane-web",
     "test": "npm run test:unit",
     "build:runtime-deps": "npm run contracts:build && npm run build -w @core-agent/runtime-core",
-    "test:unit": "npm run build:runtime-deps && npm run test:runtime && npm run test -w @core-agent/contracts && npm run test -w @core-agent/runtime-core && npm test -w @core-agent/identity-gateway && npm test -w @core-agent/control-plane-web",
+    "test:unit": "npm run build:runtime-deps && npm run test:runtime && npm run test -w @core-agent/contracts && npm run test -w @core-agent/runtime-core && npm test -w @core-agent/policy-mcp-gateway && npm test -w @core-agent/identity-gateway && npm test -w @core-agent/control-plane-web",
+    "test:policy-mcp": "npm run build:runtime-deps && npm test -w @core-agent/policy-mcp-gateway",
     "test:identity": "npm run contracts:build && npm test -w @core-agent/identity-gateway",
     "test:postgres": "npm run build:runtime-deps && npm run test:postgres -w @core-agent/runtime-core && npm run test:postgres -w @core-agent/identity-gateway && npm run test:postgres -w @core-agent/control-plane-api",
     "test:integration": "npm run build:runtime-deps && node --import tsx --test --test-concurrency=1 tests/integration/*.test.ts",

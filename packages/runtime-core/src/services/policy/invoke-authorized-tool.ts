@@ -21,8 +21,8 @@ export interface InvokeAuthorizedToolDependencies {
 }
 
 export async function invokeAuthorizedTool(dependencies: InvokeAuthorizedToolDependencies, input: {
-  readonly tenantId: string; readonly hermesSessionRef: string; readonly toolCallId: string;
-  readonly toolName: string; readonly proof: unknown; readonly arguments: unknown; readonly signal?: AbortSignal;
+  readonly tenantId: string; readonly toolName: string; readonly proof: unknown;
+  readonly arguments: unknown; readonly signal?: AbortSignal;
 }): Promise<GatewayToolResult> {
   const consumed = await consumeExecutionProof(dependencies, {
     tenantId: input.tenantId, proof: input.proof, toolName: input.toolName, arguments: input.arguments,
@@ -31,7 +31,7 @@ export async function invokeAuthorizedTool(dependencies: InvokeAuthorizedToolDep
   const facts = await dependencies.db.transaction().execute(async (trx) => {
     const now = (await sql<{ now: Date }>`select clock_timestamp() as now`.execute(trx)).rows[0]!.now;
     const session = await trx.selectFrom("policy_sessions").selectAll().where("tenant_id", "=", input.tenantId)
-      .where("hermes_session_ref", "=", input.hermesSessionRef).where("policy_session_id", "=", consumed.policySessionId)
+      .where("policy_session_id", "=", consumed.policySessionId)
       .executeTakeFirstOrThrow();
     const membership = await trx.selectFrom("memberships").select("roles").where("tenant_id", "=", input.tenantId)
       .where("membership_id", "=", session.membership_id).executeTakeFirstOrThrow();
@@ -40,7 +40,7 @@ export async function invokeAuthorizedTool(dependencies: InvokeAuthorizedToolDep
     await recordRequestedToolCall(trx, {
       tenantId: input.tenantId, mcpToolCallId, policySessionId: session.policy_session_id,
       decisionId: consumed.decisionId, proofId: consumed.proofId, bindingId: consumed.binding.mcpToolBindingId,
-      toolCallId: input.toolCallId, toolName: input.toolName, argumentsHash: canonicalizeToolArguments(input.arguments).hash,
+      toolCallId: consumed.toolCallId, toolName: input.toolName, argumentsHash: canonicalizeToolArguments(input.arguments).hash,
       now, runId: session.run_id, profileId: session.profile_id, requestId: session.request_id,
       traceId: session.trace_id, correlationId: session.correlation_id,
     });
@@ -52,7 +52,7 @@ export async function invokeAuthorizedTool(dependencies: InvokeAuthorizedToolDep
       tenantId: input.tenantId, mcpToolCallId: facts.mcpToolCallId, from, to, now, reasonCode: reason, summary,
       runId: facts.session.run_id, profileId: facts.session.profile_id, actorId: facts.session.actor_id,
       membershipId: facts.session.membership_id, effectiveRole: facts.effectiveRole, requestId: facts.session.request_id,
-      traceId: facts.session.trace_id, correlationId: facts.session.correlation_id, toolCallId: input.toolCallId,
+      traceId: facts.session.trace_id, correlationId: facts.session.correlation_id, toolCallId: consumed.toolCallId,
       toolName: input.toolName, policyVersion: facts.session.policy_version_id,
     });
   });
