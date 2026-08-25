@@ -10,6 +10,7 @@ import {
 test("public entitlement projections allowlist fields and map calm states", () => {
   const internal = {
     entitlement_id: "entitlement_01", pack_product_id: "pack_01", display_name: "Student Suite",
+    entitlement_resource_version: 4,
     valid_from: new Date("2026-08-24T00:00:00.000Z"), expires_at: null,
     entitlement_status: "active", assignment_status: "available", projection_status: "available",
     used_seats: 1, seat_quantity: 3,
@@ -20,6 +21,7 @@ test("public entitlement projections allowlist fields and map calm states", () =
   const company = toCompanyServiceSummary(internal);
   assert.deepEqual(company, {
     schema_version: 1, service_id: "entitlement_01", display_name: "Student Suite",
+    entitlement_resource_version: 4,
     valid_from: "2026-08-24T00:00:00.000Z", service_state: "available",
     used_seats: 1, total_seats: 3, available_seats: 2,
   });
@@ -30,16 +32,19 @@ test("public entitlement projections allowlist fields and map calm states", () =
 
   const assignment = toCompanyAssignmentSummary({
     assignment_id: "assignment_01", profile_id: "profile_01", profile_display_name: "Consultant profile",
+    assignment_resource_version: 3,
     service_display_name: "Company Suite", assignment_status: "failed",
     failure_summary: "technical failure must stay private",
   });
   assert.deepEqual(assignment, {
     schema_version: 1, assignment_id: "assignment_01", profile_id: "profile_01",
+    assignment_resource_version: 3,
     profile_display_name: "Consultant profile", service_display_name: "Company Suite", service_state: "unavailable",
   });
 
   const longDisplayName = toCompanyAssignmentSummary({
     assignment_id: "assignment_long", profile_id: "profile_long", profile_display_name: "x".repeat(300),
+    assignment_resource_version: 1,
     service_display_name: "Company Suite", assignment_status: "available",
   });
   assert.equal(longDisplayName.profile_display_name.length, 200);
