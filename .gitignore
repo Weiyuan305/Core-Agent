@@ -8,3 +8,5 @@ dist/
 apps/control-plane-web/output/
 .superpowers/
 *.log
+__pycache__/
+*.py[cod]

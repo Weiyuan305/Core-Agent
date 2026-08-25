@@ -8,7 +8,18 @@ platform_toolsets:
     - clarify
 
 plugins:
-  enabled: []
+  enabled:
+    - core-agent-policy
+
+mcp_servers:
+  core_agent_gateway:
+    url: http://policy-mcp-gateway:8787/mcp
+    headers:
+      Authorization: "Bearer ${CORE_AGENT_POLICY_RUNTIME_TOKEN}"
+    strict_redirect_headers: true
+    skip_preflight: true
+    connect_timeout: 5
+    timeout: 30
 
 security:
   redact_secrets: true

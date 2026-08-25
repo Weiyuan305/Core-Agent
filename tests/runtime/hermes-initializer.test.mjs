@@ -220,9 +220,24 @@ test("initializer creates sorted profiles, exact env projections, and an idempot
     const configurationText = await readFile(configurationPath, "utf8");
     assert.doesNotMatch(configurationText, /sentinel-secret|sentinel-ingress/);
     assert.deepEqual(JSON.parse(configurationText), {
+      mcp_servers: {
+        core_agent_gateway: {
+          connect_timeout: 5,
+          headers: {
+            Authorization: "Bearer ${CORE_AGENT_POLICY_RUNTIME_TOKEN}"
+          },
+          skip_preflight: true,
+          strict_redirect_headers: true,
+          timeout: 30,
+          url: "http://policy-mcp-gateway:8787/mcp"
+        }
+      },
       model: {
         default: "cywx/gpt-5.6-sol",
         provider: "core-agent-managed"
+      },
+      plugins: {
+        enabled: ["core-agent-policy"]
       },
       providers: {
         "core-agent-managed": {

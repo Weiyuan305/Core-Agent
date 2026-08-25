@@ -575,6 +575,21 @@ def configure_profile(
                     "transport": "chat_completions",
                 },
             },
+            "plugins": {
+                "enabled": ["core-agent-policy"],
+            },
+            "mcp_servers": {
+                "core_agent_gateway": {
+                    "url": "http://policy-mcp-gateway:8787/mcp",
+                    "headers": {
+                        "Authorization": "Bearer ${CORE_AGENT_POLICY_RUNTIME_TOKEN}",
+                    },
+                    "strict_redirect_headers": True,
+                    "skip_preflight": True,
+                    "connect_timeout": 5,
+                    "timeout": 30,
+                },
+            },
         }) + b"\n"
         atomic_write(profile_descriptor, ".env", environment, 0o600)
         atomic_write(profile_descriptor, "config.yaml", configuration, 0o600)
