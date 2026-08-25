@@ -1,0 +1,42 @@
+{
+  "$id": "core-agent://v1/tool-policy-decision-request",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "arguments": {
+      "maxProperties": 128,
+      "patternProperties": {
+        "^.*$": {}
+      },
+      "type": "object"
+    },
+    "hermes_session_ref": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "tool_call_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "tool_name": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "hermes_session_ref",
+    "tool_call_id",
+    "tool_name",
+    "arguments"
+  ],
+  "type": "object"
+}

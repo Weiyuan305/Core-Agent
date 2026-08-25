@@ -1,0 +1,18 @@
+{
+  "$id": "core-agent://v1/policy-session-state",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "const": "active",
+      "type": "string"
+    },
+    {
+      "const": "closed",
+      "type": "string"
+    },
+    {
+      "const": "expired",
+      "type": "string"
+    }
+  ]
+}

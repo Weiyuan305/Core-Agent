@@ -1,0 +1,32 @@
+{
+  "$id": "core-agent://v1/versioned-write-request",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "expected_resource_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "idempotency_key": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "payload_hash": {
+      "pattern": "^sha256:[a-f0-9]{64}$",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    }
+  },
+  "required": [
+    "schema_version",
+    "idempotency_key",
+    "payload_hash",
+    "expected_resource_version"
+  ],
+  "type": "object"
+}

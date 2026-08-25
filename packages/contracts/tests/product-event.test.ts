@@ -19,6 +19,7 @@ import {
   MessageCompletedEventSchema,
   MessageDeltaEventSchema,
   ProductEventSchema,
+  PolicyEventSchema,
   RuntimeEventSchema,
   RunEventSchema,
   StableErrorCodeSchema,
@@ -479,6 +480,7 @@ test("marks only event and error-code extension points extensible", () => {
     ErrorReportedEventSchema,
     EntitlementEventSchema,
     ServiceEventSchema,
+    PolicyEventSchema,
   ] as const;
   assert.equal(ProductEventSchema["x-extensible-union"], true);
   for (const eventSchema of eventTypeSchemas) {

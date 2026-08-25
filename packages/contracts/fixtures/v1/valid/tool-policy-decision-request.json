@@ -1,0 +1,1 @@
+{"schema_key":"tool-policy-decision-request","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"hermes_session_ref":"hermes_session_demo","tool_call_id":"tool_call_demo","tool_name":"core_agent.synthetic_profile","arguments":{"subject":"platform"}}}

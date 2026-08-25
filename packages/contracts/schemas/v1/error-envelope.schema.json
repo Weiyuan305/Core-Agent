@@ -102,6 +102,14 @@
           "type": "string"
         },
         {
+          "const": "POLICY_DENIED",
+          "type": "string"
+        },
+        {
+          "const": "TOOL_UNAVAILABLE",
+          "type": "string"
+        },
+        {
           "const": "APPROVAL_REQUIRED",
           "type": "string"
         },

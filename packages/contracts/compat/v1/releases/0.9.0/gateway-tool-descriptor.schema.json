@@ -1,0 +1,65 @@
+{
+  "$id": "core-agent://v1/gateway-tool-descriptor",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "annotations": {
+      "additionalProperties": false,
+      "properties": {
+        "destructiveHint": {
+          "const": false,
+          "type": "boolean"
+        },
+        "idempotentHint": {
+          "const": true,
+          "type": "boolean"
+        },
+        "openWorldHint": {
+          "const": false,
+          "type": "boolean"
+        },
+        "readOnlyHint": {
+          "const": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "readOnlyHint",
+        "destructiveHint",
+        "idempotentHint",
+        "openWorldHint"
+      ],
+      "type": "object"
+    },
+    "description": {
+      "maxLength": 1000,
+      "minLength": 1,
+      "type": "string"
+    },
+    "inputSchema": {
+      "additionalProperties": true,
+      "maxProperties": 32,
+      "properties": {},
+      "type": "object"
+    },
+    "name": {
+      "maxLength": 255,
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_.-]*$",
+      "type": "string"
+    },
+    "title": {
+      "maxLength": 200,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "name",
+    "title",
+    "description",
+    "inputSchema",
+    "annotations"
+  ],
+  "type": "object"
+}

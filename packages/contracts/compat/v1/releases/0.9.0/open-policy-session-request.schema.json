@@ -1,0 +1,371 @@
+{
+  "$id": "core-agent://v1/open-policy-session-request",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "correlation_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "hermes_session_ref": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "idempotency_key": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "runtime_container_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "runtime_generation": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "signed_context": {
+      "$id": "core-agent://v1/signed-trusted-request-context",
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {
+          "const": "EdDSA",
+          "type": "string"
+        },
+        "key_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "payload": {
+          "$id": "core-agent://v1/trusted-request-context",
+          "additionalProperties": false,
+          "properties": {
+            "actor_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "audience": {
+              "items": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "capability_ids": {
+              "items": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "case_ref": {
+              "$id": "core-agent://v1/case-ref",
+              "additionalProperties": false,
+              "properties": {
+                "capability_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "case_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_system": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_version": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "student_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "case_id",
+                "student_id",
+                "capability_id"
+              ],
+              "type": "object"
+            },
+            "client_request_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "consent_snapshot_ref": {
+              "$id": "core-agent://v1/consent-snapshot-ref",
+              "additionalProperties": false,
+              "properties": {
+                "evaluated_at": {
+                  "format": "date-time",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+                  "type": "string"
+                },
+                "snapshot_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "version": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "snapshot_id",
+                "version",
+                "evaluated_at"
+              ],
+              "type": "object"
+            },
+            "container_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "context_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "conversation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "delegation_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "delegation_reason": {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            },
+            "effective_role": {
+              "anyOf": [
+                {
+                  "const": "admin",
+                  "type": "string"
+                },
+                {
+                  "const": "consultant",
+                  "type": "string"
+                },
+                {
+                  "const": "student",
+                  "type": "string"
+                }
+              ]
+            },
+            "entitlement_snapshot_ref": {
+              "$id": "core-agent://v1/entitlement-snapshot-ref",
+              "additionalProperties": false,
+              "properties": {
+                "evaluated_at": {
+                  "format": "date-time",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+                  "type": "string"
+                },
+                "snapshot_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "version": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "snapshot_id",
+                "version",
+                "evaluated_at"
+              ],
+              "type": "object"
+            },
+            "expires_at": {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+              "type": "string"
+            },
+            "issued_at": {
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+              "type": "string"
+            },
+            "issuer": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "key_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "membership_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "original_actor_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "profile_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "request_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "run_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "schema_version": {
+              "const": 1,
+              "title": "SchemaVersion",
+              "type": "number"
+            },
+            "student_ref": {
+              "$id": "core-agent://v1/student-ref",
+              "additionalProperties": false,
+              "properties": {
+                "source_system": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_version": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "student_id": {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "student_id",
+                "source_system"
+              ],
+              "type": "object"
+            },
+            "target_profile_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "tenant_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "tenant_mode": {
+              "anyOf": [
+                {
+                  "const": "b2b",
+                  "type": "string"
+                },
+                {
+                  "const": "b2c",
+                  "type": "string"
+                }
+              ]
+            },
+            "trace_id": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema_version",
+            "tenant_mode",
+            "tenant_id",
+            "actor_id",
+            "original_actor_id",
+            "membership_id",
+            "effective_role",
+            "profile_id",
+            "entitlement_snapshot_ref",
+            "capability_ids",
+            "container_id",
+            "conversation_id",
+            "run_id",
+            "request_id",
+            "trace_id",
+            "client_request_id",
+            "context_id",
+            "issuer",
+            "audience",
+            "issued_at",
+            "expires_at",
+            "key_id"
+          ],
+          "type": "object"
+        },
+        "schema_version": {
+          "const": 1,
+          "title": "SchemaVersion",
+          "type": "number"
+        },
+        "signature": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "algorithm",
+        "key_id",
+        "payload",
+        "signature"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "signed_context",
+    "runtime_container_id",
+    "runtime_generation",
+    "hermes_session_ref",
+    "idempotency_key",
+    "correlation_id"
+  ],
+  "type": "object"
+}

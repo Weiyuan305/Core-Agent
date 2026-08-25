@@ -1,0 +1,1 @@
+{"schema_key":"tool-policy-decision-response","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"decision_id":"decision_demo","decision":"deny","reason":"SESSION_NOT_ACTIVE"}}

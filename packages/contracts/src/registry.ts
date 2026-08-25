@@ -1,6 +1,23 @@
 import type { TSchema } from "typebox";
 
 import { ApprovalSchema } from "./approval/schema.js";
+import {
+  GatewayToolDescriptorSchema,
+  GatewayToolResultSchema,
+  McpToolCallArgumentsSchema,
+} from "./mcp/gateway.js";
+import {
+  PolicyDecisionReasonSchema,
+  ToolPolicyDecisionRequestSchema,
+  ToolPolicyDecisionResponseSchema,
+} from "./policy/policy-decision.js";
+import {
+  ClosePolicySessionRequestSchema,
+  ClosePolicySessionResponseSchema,
+  OpenPolicySessionRequestSchema,
+  OpenPolicySessionResponseSchema,
+  PolicySessionStateSchema,
+} from "./policy/policy-session.js";
 import { AuditEventSchema } from "./audit/audit-event.js";
 import {
   PageInfoSchema,
@@ -99,6 +116,7 @@ import {
 import {
   MessageCreatedEventSchema,
   CatalogEventSchema,
+  PolicyEventSchema,
   ProductEventEnvelopeSchema,
   ProductEventSchema,
 } from "./events/product-event.js";
@@ -169,12 +187,24 @@ export const ContractSchemas = {
   message: MessageSchema,
   task: TaskSchema,
   approval: ApprovalSchema,
+  "policy-session-state": PolicySessionStateSchema,
+  "open-policy-session-request": OpenPolicySessionRequestSchema,
+  "open-policy-session-response": OpenPolicySessionResponseSchema,
+  "close-policy-session-request": ClosePolicySessionRequestSchema,
+  "close-policy-session-response": ClosePolicySessionResponseSchema,
+  "policy-decision-reason": PolicyDecisionReasonSchema,
+  "tool-policy-decision-request": ToolPolicyDecisionRequestSchema,
+  "tool-policy-decision-response": ToolPolicyDecisionResponseSchema,
+  "gateway-tool-descriptor": GatewayToolDescriptorSchema,
+  "mcp-tool-call-arguments": McpToolCallArgumentsSchema,
+  "gateway-tool-result": GatewayToolResultSchema,
   "trusted-request-context": TrustedRequestContextSchema,
   "signed-trusted-request-context": SignedTrustedRequestContextSchema,
   "product-event-envelope": ProductEventEnvelopeSchema,
   "product-event": ProductEventSchema,
   "message-created-event": MessageCreatedEventSchema,
   "catalog-event": CatalogEventSchema,
+  "policy-event": PolicyEventSchema,
   "audit-event": AuditEventSchema,
   "error-envelope": ErrorEnvelopeSchema,
   "idempotency-request": IdempotencyRequestSchema,

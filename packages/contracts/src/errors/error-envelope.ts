@@ -33,6 +33,8 @@ export const StableErrorCodeSchema = Type.Union([
   Type.Literal("SEAT_EXHAUSTED"),
   Type.Literal("CAPABILITY_CONFLICT"),
   Type.Literal("SERVICE_PREPARING"),
+  Type.Literal("POLICY_DENIED"),
+  Type.Literal("TOOL_UNAVAILABLE"),
   Type.Literal("APPROVAL_REQUIRED"),
   Type.Literal("IDEMPOTENCY_CONFLICT"),
   Type.Literal("DEPENDENCY_UNAVAILABLE"),
