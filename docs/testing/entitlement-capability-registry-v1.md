@@ -10,7 +10,7 @@ management Web surface.
 - Runtime contract and acceptance-runner suites: **PASS**, 208/208.
 - Real PostgreSQL suites: **PASS**, Runtime Core 445/445, Identity Gateway 3/3,
   and Control Plane API 15/15.
-- Real PostgreSQL/fake-Supervisor integration: **PASS**, 104/104, including
+- Real PostgreSQL/fake-Supervisor integration: **PASS**, 105/105, including
   catalog-to-Runtime admission, revocation/in-flight semantics, conflicting
   upgrade/rollback, and B2C idle stop/wake.
 - Browser acceptance: **PASS**, 49 passed, 0 failed, 2 documented conditional
@@ -30,11 +30,12 @@ management Web surface.
 
 - Date: `2026-08-25` (`Asia/Shanghai`).
 - Implementation commit: `b1fb4e5c79aff22e5396a09ae54ca04b77b4a0db`.
+- CI-equivalent teardown review fix: `c1f00a35ce146878f82e5b027704b2ffd90356ad`.
 - `npm run check`: exit `0`.
 - `npm run test:runtime`: 208 passed, 0 failed, 0 skipped.
 - `npm run test:postgres`: Runtime Core 445/445, Identity Gateway 3/3,
   Control Plane API 15/15; all exited `0`.
-- `npm run test:integration`: 104 passed, 0 failed, 0 skipped. The B2B
+- `npm run test:integration`: 105 passed, 0 failed, 0 skipped. The B2B
   concurrency authority additionally proves 20 concurrent attempts consume exactly
   3 seats.
 - `npm run test:browser -w @core-agent/control-plane-web`: 51 scheduled,
