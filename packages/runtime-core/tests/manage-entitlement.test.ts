@@ -140,6 +140,8 @@ test("B2C grants are automatic without seats and status transitions are optimist
 test("expiry claims only database-due active Entitlements in pages and cannot be forged through the public status command", async () => {
   const arranged = await arrange("b2c");
   const releaseId = String(arranged.release.releaseId);
+  const validFrom = new Date(entitlementTestNow.getTime() - 2 * 24 * 60 * 60_000);
+  const expiresAt = new Date(entitlementTestNow.getTime() - 24 * 60 * 60_000);
   await entitlementTestPool.query(
     `insert into entitlements (
        entitlement_id, tenant_id, pack_product_id, tenant_pack_release_id, pack_version_id,
@@ -147,11 +149,11 @@ test("expiry claims only database-due active Entitlements in pages and cannot be
        valid_from, expires_at, status, reason_code, resource_version, created_at, updated_at
      ) values (
        'entitlement_due', $1, $2, $3, $4, '1.0.0', 'platform_manual', 'order_due',
-       'b2c', 'automatic', null, clock_timestamp() - interval '2 days',
-       clock_timestamp() - interval '1 day', 'active', 'platform_grant', 1,
-       clock_timestamp() - interval '2 days', clock_timestamp() - interval '2 days'
+       'b2c', 'automatic', null, $5,
+       $6, 'active', 'platform_grant', 1,
+       $5, $5
      )`,
-    [arranged.tenantId, arranged.pack.packProductId, releaseId, arranged.pack.packVersionId],
+    [arranged.tenantId, arranged.pack.packProductId, releaseId, arranged.pack.packVersionId, validFrom, expiresAt],
   );
   await assert.rejects(() => required("changeEntitlementStatus")(arranged.dependencies, arranged.context, command({
     schema_version: 1,
