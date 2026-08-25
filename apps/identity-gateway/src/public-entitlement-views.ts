@@ -70,10 +70,13 @@ function optionalDate(row: Readonly<Record<string, unknown>>, key: string): Date
 
 function integer(row: Readonly<Record<string, unknown>>, key: string): number {
   const value = row[key];
-  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+  const parsed = typeof value === "string" && /^(?:0|[1-9]\d*)$/u.test(value)
+    ? Number(value)
+    : value;
+  if (!Number.isSafeInteger(parsed) || (parsed as number) < 0) {
     throw new DomainError("INTERNAL_ERROR", "Stored public service projection is invalid");
   }
-  return value as number;
+  return parsed as number;
 }
 
 function state(

@@ -12,6 +12,10 @@ const maximumCredentialBytes = 256;
 export const DATABASE_CREDENTIAL_LAYOUT = Object.freeze({
   api: Object.freeze({ application: "database-password" }),
   auth: Object.freeze({ bootstrap: "database-password" }),
+  capabilityAcceptance: Object.freeze({
+    application: "application-password",
+    identity: "identity-password",
+  }),
   migrate: Object.freeze({ migrator: "database-password" }),
   postgres: Object.freeze({ bootstrap: "database-password" }),
   roleBootstrap: Object.freeze({
@@ -192,6 +196,7 @@ export async function runDatabaseCredentialProjector(environment = process.env) 
     outputRoots: {
       api: "/run/core-agent/projected/api",
       auth: "/run/core-agent/projected/auth",
+      capabilityAcceptance: "/run/core-agent/projected/capability-acceptance",
       migrate: "/run/core-agent/projected/migrate",
       postgres: "/run/core-agent/projected/postgres",
       roleBootstrap: "/run/core-agent/projected/role-bootstrap",
@@ -202,6 +207,7 @@ export async function runDatabaseCredentialProjector(environment = process.env) 
     targetIdentities: {
       postgres: { uid: 999, gid: 999 },
       auth: { uid: 999, gid: 999 },
+      capabilityAcceptance: { uid: 12003, gid: 12003 },
       roleBootstrap: { uid: 12003, gid: 12003 },
       migrate: { uid: 12004, gid: 12004 },
       api: {

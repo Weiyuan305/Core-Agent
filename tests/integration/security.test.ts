@@ -5,6 +5,7 @@ import { Client, Pool } from "pg";
 
 import {
   createIntegrationHarness,
+  ENTITLEMENT_PRIVATE_CANARIES,
   LEAK_SENTINEL,
   testHarnessInternals,
   type IntegrationHarness,

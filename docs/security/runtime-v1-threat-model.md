@@ -4,7 +4,8 @@
 
 This model covers the public Identity Gateway, provider adapter, Core identity
 authority, Core Sessions, Trusted Context, the private Control Plane, and
-tenant-isolated Runtime boundary. Real customer or **student data is
+tenant-isolated Runtime boundary, Entitlement authority, Capability Registry,
+and exact Runtime Capability projection. Real customer or **student data is
 prohibited** in this release. Payments, MCP/Skills execution, Human Approval,
 final submissions, and irreversible external actions remain disabled.
 
@@ -40,6 +41,11 @@ irreversible actions reduce impact but do not replace MFA.
 | provider identity collision | exact provider subject/email-method compatibility, same-email CAS, explicit password-authenticated manual link | deny and retain separate Actors |
 | provider outage/unknown outcome | durable reservation/fencing/checkpoint, provider work outside DB retry, bounded settlement recovery | block new provider work; valid Core Sessions are not extended |
 | stale or revoked authority | DB-clock Session checks, current Actor/AuthSubject/Tenant/Membership/Profile locks, serializable mutation | reject and audit |
+| forged purchase or seat authority | platform-only manual grants, opaque unique order identity, same-Tenant admin seat assignment, database-clock validity | deny; never trust prompt, JWT metadata, browser state, price, or receipt |
+| mutable or incompatible Capability | reviewed exact semantic versions, immutable artifact grammar, known contracts, risk allowlist, atomic conflict rejection | preserve current release/snapshot/Runtime and return a calm conflict |
+| stale Capability at external effect | signed exact snapshot on admission plus current-authority pre-effect recheck | deny before side effect; an already-dispatched model-only reply may finish |
+| private commercial or Capability leakage | closed public summaries/events, seven-category database/event/log/Supervisor/Hermes canaries | fail release; retain only safe IDs, states, counts, generations, and digests |
+| unauthorized tool activation | v2 manifest digest binding, staged-manifest verification, zero managed MCP/tools/Skills in this release | fail projection and keep Assignment unavailable |
 | platform impersonation | immutable platform-origin Membership, original Actor retained, tenant audit/outbox | reject non-platform grant/revoke |
 | cross-Tenant access | server-derived authority, composite Tenant keys, no provider metadata/JWT claims | fail closed |
 | signing-key substitution | allowlisted unique `key_id`, Ed25519 type checks, publish-before-activate rotation, unknown/retired rejection | disable key and revoke affected Sessions |
@@ -61,6 +67,9 @@ irreversible actions reduce impact but do not replace MFA.
   proves fail-closed orchestration but cannot claim a live Apple pass.
 - Public deployment is blocked until all deterministic gates and a redacted
   opt-in provider report pass with successful cleanup.
+- Capability management does not authorize public chat. The student chat entry
+  remains fail-closed until the separate authenticated Conversation gateway is
+  designed, accepted, and tested.
 
 ## Incident priorities
 

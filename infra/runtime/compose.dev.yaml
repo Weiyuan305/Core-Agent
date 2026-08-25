@@ -53,6 +53,7 @@ services:
         read_only: true
       - { type: volume, source: postgres-credentials, target: /run/core-agent/projected/postgres }
       - { type: volume, source: role-bootstrap-credentials, target: /run/core-agent/projected/role-bootstrap }
+      - { type: volume, source: capability-acceptance-credentials, target: /run/core-agent/projected/capability-acceptance }
       - { type: volume, source: postgres-auth-credentials, target: /run/core-agent/projected/auth }
       - { type: volume, source: migrate-credentials, target: /run/core-agent/projected/migrate }
       - { type: volume, source: api-credentials, target: /run/core-agent/projected/api }
@@ -252,6 +253,45 @@ services:
         condition: service_completed_successfully
     networks:
       - core-agent-control
+
+  capability-acceptance:
+    image: core-agent/control-plane-worker:dev
+    platform: ${CORE_AGENT_PLATFORM:?set CORE_AGENT_PLATFORM}
+    build:
+      <<: *service-build
+      target: worker
+    user: "12003:12003"
+    entrypoint: ["node", "scripts/capability-runtime-acceptance-local.mjs"]
+    environment:
+      CORE_AGENT_ACCEPTANCE_APPLICATION_DATABASE_URL: postgresql://core_agent_app@postgres:5432/core_agent_runtime
+      CORE_AGENT_ACCEPTANCE_APPLICATION_DATABASE_PASSWORD_FILE: /run/core-agent/database-credentials/application-password
+      CORE_AGENT_ACCEPTANCE_IDENTITY_DATABASE_URL: postgresql://core_agent_identity@postgres:5432/core_agent_runtime
+      CORE_AGENT_ACCEPTANCE_IDENTITY_DATABASE_PASSWORD_FILE: /run/core-agent/database-credentials/identity-password
+    volumes:
+      - type: volume
+        source: capability-acceptance-credentials
+        target: /run/core-agent/database-credentials
+        read_only: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    privileged: false
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 0.5
+    restart: "no"
+    stop_grace_period: 15s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    networks:
+      - core-agent-control
+    profiles:
+      - capability-acceptance
 
   api:
     <<: *application-security
@@ -516,6 +556,7 @@ services:
 volumes:
   api-bootstrap-key:
   api-credentials:
+  capability-acceptance-credentials:
   migrate-credentials:
   postgres-auth-credentials:
   postgres-credentials:

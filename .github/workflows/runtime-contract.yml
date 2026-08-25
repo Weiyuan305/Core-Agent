@@ -67,6 +67,20 @@ jobs:
       - name: Scan tracked evidence for the CI sentinel
         run: node scripts/verify-no-secret.mjs synthetic-ci-sentinel-runtime-v1
 
+      - name: Scan tracked evidence for the actual entitlement canaries
+        run: |
+          for canary in \
+            synthetic-private-price-canary-8b31f10a \
+            synthetic-private-receipt-canary-a4d627ce \
+            manifest:sha256:237dc659237dc659237dc659237dc659237dc659237dc659237dc659237dc659 \
+            synthetic-private-tool-schema-canary-c981a20f \
+            synthetic-private-provider-secret-canary-5d0e126b \
+            synthetic-private-external-order-canary-b71f826c \
+            synthetic-private-customer-content-canary-09ce74a5
+          do
+            node scripts/verify-no-secret.mjs "$canary"
+          done
+
   web-browser:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -147,6 +161,18 @@ jobs:
       - name: Scan every public database text surface for the CI sentinel
         run: node scripts/run-protected-ci-command.mjs --secret-file "$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- node scripts/scan-runtime-database.mjs synthetic-ci-sentinel-runtime-v1
 
+      - name: Scan public PostgreSQL surfaces for globally forbidden entitlement canaries
+        run: |
+          for canary in \
+            synthetic-private-price-canary-8b31f10a \
+            synthetic-private-receipt-canary-a4d627ce \
+            synthetic-private-tool-schema-canary-c981a20f \
+            synthetic-private-provider-secret-canary-5d0e126b \
+            synthetic-private-customer-content-canary-09ce74a5
+          do
+            node scripts/run-protected-ci-command.mjs --secret-file "$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- node scripts/scan-runtime-database.mjs "$canary"
+          done
+
       - name: Scan actual CI database credential from protected file
         run: node scripts/run-protected-ci-command.mjs --secret-file "$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- node scripts/verify-no-secret.mjs --secret-file "$RUNNER_TEMP/core-agent-ci-db-secret"
 
@@ -195,7 +221,7 @@ jobs:
       - name: Bootstrap exact test database role prerequisites
         run: node scripts/run-protected-ci-command.mjs --secret-file "$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- node scripts/bootstrap-test-database-roles.mjs
 
-      - name: Run fake provider Supervisor and Hermes full slice
+      - name: Run fake provider Supervisor Hermes and entitlement capability full slices
         run: node scripts/run-protected-ci-command.mjs --secret-file "$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- npm run test:integration
 
       - name: Release scanned PostgreSQL service logs
@@ -204,6 +230,20 @@ jobs:
 
       - name: Scan integration evidence for the CI sentinel
         run: node scripts/run-protected-ci-command.mjs --secret-file "$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- node scripts/verify-no-secret.mjs synthetic-ci-sentinel-runtime-v1
+
+      - name: Scan integration evidence for the actual entitlement canaries
+        run: |
+          for canary in \
+            synthetic-private-price-canary-8b31f10a \
+            synthetic-private-receipt-canary-a4d627ce \
+            manifest:sha256:237dc659237dc659237dc659237dc659237dc659237dc659237dc659237dc659 \
+            synthetic-private-tool-schema-canary-c981a20f \
+            synthetic-private-provider-secret-canary-5d0e126b \
+            synthetic-private-external-order-canary-b71f826c \
+            synthetic-private-customer-content-canary-09ce74a5
+          do
+            node scripts/run-protected-ci-command.mjs --secret-file "$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- node scripts/verify-no-secret.mjs "$canary"
+          done
 
       - name: Scan actual CI database credential from protected file
         run: node scripts/run-protected-ci-command.mjs --secret-file "$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- node scripts/verify-no-secret.mjs --secret-file "$RUNNER_TEMP/core-agent-ci-db-secret"
