@@ -3,6 +3,8 @@ export const secretPurposes = [
   "hermes_ingress",
   "bootstrap_service",
   "identity_signing",
+  "policy_runtime",
+  "policy_plugin",
 ] as const;
 
 export type SecretPurpose = (typeof secretPurposes)[number];

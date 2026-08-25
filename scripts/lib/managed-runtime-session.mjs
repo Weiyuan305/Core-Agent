@@ -66,6 +66,14 @@ const requiredEnvironmentNames = Object.freeze([
   "CORE_AGENT_DATABASE_IDENTITY_PASSWORD_FILE",
   "CORE_AGENT_PROVIDER_SECRET_ROOT",
   "CORE_AGENT_INGRESS_SECRET_ROOT",
+  "CORE_AGENT_POLICY_RUNTIME_SECRET_ROOT",
+  "CORE_AGENT_POLICY_GATEWAY_WORKER_TOKEN_FILE",
+  "CORE_AGENT_POLICY_WORKER_TOKEN_FILE",
+  "CORE_AGENT_POLICY_PLUGIN_IDENTITIES_FILE",
+  "CORE_AGENT_POLICY_RUNTIME_IDENTITIES_FILE",
+  "CORE_AGENT_POLICY_PROOF_KEY_FILE",
+  "CORE_AGENT_POLICY_TRUSTED_CONTEXT_PUBLIC_KEYS_FILE",
+  "CORE_AGENT_POLICY_TRUSTED_CONTEXT_SIGNING_KEY_FILE",
   "CORE_AGENT_SUPERVISOR_STATE_ROOT",
   "CORE_AGENT_API_UID",
   "CORE_AGENT_API_GID",
@@ -1176,6 +1184,7 @@ export async function startControlPlaneTopology(child) {
       "api-ingress",
       "worker",
       "supervisor",
+      "policy-gateway-ingress",
     ),
     { timeoutMs: 180_000, maxOutputBytes: 4 * 1024 * 1024 },
   );
@@ -1234,6 +1243,11 @@ export function createManagedRuntimeDependencies(environment, signal, options = 
   const identifiers = options.identifiers === undefined
     ? createSyntheticIdentifiers()
     : validateSyntheticIdentifiers(options.identifiers);
+  const additionalSecretValues = options.additionalSecretValues ?? [];
+  if (!Array.isArray(additionalSecretValues) || additionalSecretValues.length > 32
+    || additionalSecretValues.some((value) => !Buffer.isBuffer(value) || value.length < 1 || value.length > maximumSecretBytes)) {
+    throw smokeError("SMOKE_SECRET_FILE_INVALID");
+  }
   const state = {
     bootstrapKey: undefined,
     providerSecret: undefined,
@@ -1249,7 +1263,7 @@ export function createManagedRuntimeDependencies(environment, signal, options = 
     environment: childEnv(),
     signal: options.cleanup === true ? undefined : signal,
   });
-  const secretValues = () => [state.bootstrapKey, state.providerSecret, state.ingressSecret].filter(Buffer.isBuffer);
+  const secretValues = () => [state.bootstrapKey, state.providerSecret, state.ingressSecret, ...additionalSecretValues].filter(Buffer.isBuffer);
   const runtimeContainerIds = async (context, cleanup = false) => {
     const raw = await child("docker", [
       "ps", "--all", "--quiet",
@@ -1374,6 +1388,71 @@ export function createManagedRuntimeDependencies(environment, signal, options = 
         await delay(1_000, signal);
       }
       throw smokeError("SMOKE_RUNTIME_TIMEOUT");
+    },
+    async bootstrapPolicyAcceptance(context) {
+      if (context?.tenantId !== identifiers.tenantId || context.profileId !== identifiers.profileId
+        || context.actorId !== identifiers.actorId || context.membershipId !== identifiers.membershipId
+        || context.runtimeId !== deriveProvisionedRuntimeId(identifiers.tenantId)) {
+        throw smokeError("SMOKE_SYNTHETIC_INPUT_REQUIRED");
+      }
+      const raw = await child("docker", composeArgs(
+        "run", "--rm", "--no-deps", "--entrypoint", "node", "identity-role-bootstrap",
+        "scripts/bootstrap-policy-mcp-acceptance.mjs",
+        context.tenantId, context.actorId, context.membershipId, context.profileId,
+      ), { timeoutMs: 120_000, maxOutputBytes: 64 * 1024 });
+      const result = parseJson(raw.trim(), "SMOKE_POLICY_ACCEPTANCE_FAILED");
+      exactRecord(result, ["tenant_id", "profile_id", "runtime_id", "projection_id", "expected_generation"],
+        "SMOKE_POLICY_ACCEPTANCE_FAILED");
+      if (result.tenant_id !== context.tenantId || result.profile_id !== context.profileId
+        || result.runtime_id !== context.runtimeId || typeof result.projection_id !== "string"
+        || !Number.isSafeInteger(result.expected_generation) || result.expected_generation < 2) {
+        throw smokeError("SMOKE_POLICY_ACCEPTANCE_FAILED");
+      }
+      return result;
+    },
+    async pollPolicyRuntime(context, expectedGeneration) {
+      if (context?.tenantId !== identifiers.tenantId || context.runtimeId !== deriveProvisionedRuntimeId(identifiers.tenantId)
+        || !Number.isSafeInteger(expectedGeneration) || expectedGeneration < 2) {
+        throw smokeError("SMOKE_POLICY_ACCEPTANCE_FAILED");
+      }
+      const deadline = Date.now() + maximumPollMs;
+      while (Date.now() < deadline) {
+        const runtime = await requestJson(`/internal/v1/tenants/${encodeURIComponent(context.tenantId)}/runtime`, {
+          bootstrapKey: state.bootstrapKey, tenantId: context.tenantId, statuses: [200], signal,
+        });
+        if (runtime.generation === expectedGeneration && runtime.observed_state === "ready"
+          && runtime.health_status === "healthy") {
+          state.runtime = runtime;
+          return runtime;
+        }
+        if (runtime.observed_state === "failed" || runtime.observed_state === "deleted"
+          || Number.isSafeInteger(runtime.generation) && runtime.generation > expectedGeneration) {
+          throw smokeError("SMOKE_POLICY_ACCEPTANCE_FAILED");
+        }
+        await delay(1_000, signal);
+      }
+      throw smokeError("SMOKE_POLICY_ACCEPTANCE_FAILED");
+    },
+    async inspectPolicyAcceptance(context, runId) {
+      if (context?.tenantId !== identifiers.tenantId || typeof runId !== "string"
+        || !syntheticPattern.test(context.tenantId) || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,254}$/u.test(runId)) {
+        throw smokeError("SMOKE_POLICY_ACCEPTANCE_FAILED");
+      }
+      const query = `select json_build_object(
+        'successful_calls', (select count(*)::int from mcp_tool_calls as tool_call join policy_sessions as session using (tenant_id, policy_session_id) where tool_call.tenant_id = '${context.tenantId}' and session.run_id = '${runId}' and tool_call.public_tool_name = 'core_agent.synthetic_profile' and tool_call.status = 'succeeded'),
+        'consumed_proofs', (select count(*)::int from policy_execution_proofs as proof join policy_sessions as session using (tenant_id, policy_session_id) where proof.tenant_id = '${context.tenantId}' and session.run_id = '${runId}' and proof.state = 'consumed'),
+        'closed_sessions', (select count(*)::int from policy_sessions where tenant_id = '${context.tenantId}' and run_id = '${runId}' and state = 'closed'),
+        'proof_audits', (select count(*)::int from audit_events where tenant_id = '${context.tenantId}' and run_id = '${runId}' and action = 'policy.proof.consume' and entitlement_snapshot_ref is not null),
+        'tool_audits', (select count(*)::int from audit_events where tenant_id = '${context.tenantId}' and run_id = '${runId}' and action = 'tool.invoke' and outcome = 'succeeded' and entitlement_snapshot_ref is not null)
+      )::text`;
+      const raw = await child("docker", composeArgs(
+        "exec", "-T", "postgres", "psql", "-At", "-U", "core_agent_app", "-d", "core_agent_runtime", "-c", query,
+      ), { timeoutMs: 30_000, maxOutputBytes: 16 * 1024 });
+      const result = parseJson(raw.trim(), "SMOKE_POLICY_ACCEPTANCE_FAILED");
+      exactRecord(result, ["successful_calls", "consumed_proofs", "closed_sessions", "proof_audits", "tool_audits"],
+        "SMOKE_POLICY_ACCEPTANCE_FAILED");
+      if (Object.values(result).some((value) => value !== 1)) throw smokeError("SMOKE_POLICY_ACCEPTANCE_FAILED");
+      return result;
     },
     async createConversation(context) {
       const response = await requestJson("/internal/v1/conversations", {

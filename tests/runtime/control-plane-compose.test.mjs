@@ -41,6 +41,14 @@ async function resolvedRuntimeCompose(overrides = {}) {
     CORE_AGENT_INGRESS_SECRET_ROOT: "/tmp/core-agent-ingress-path-only",
     CORE_AGENT_NODE_IMAGE: lock.images.node.platforms[platform],
     CORE_AGENT_PLATFORM: platform,
+    CORE_AGENT_POLICY_PLUGIN_IDENTITIES_FILE: "/tmp/core-agent-policy-plugin-identities-path-only",
+    CORE_AGENT_POLICY_PROOF_KEY_FILE: "/tmp/core-agent-policy-proof-key-path-only",
+    CORE_AGENT_POLICY_RUNTIME_IDENTITIES_FILE: "/tmp/core-agent-policy-runtime-identities-path-only",
+    CORE_AGENT_POLICY_RUNTIME_SECRET_ROOT: "/tmp/core-agent-policy-runtime-secret-root-path-only",
+    CORE_AGENT_POLICY_GATEWAY_WORKER_TOKEN_FILE: "/tmp/core-agent-policy-gateway-worker-token-path-only",
+    CORE_AGENT_POLICY_TRUSTED_CONTEXT_PUBLIC_KEYS_FILE: "/tmp/core-agent-policy-public-keys-path-only",
+    CORE_AGENT_POLICY_TRUSTED_CONTEXT_SIGNING_KEY_FILE: "/tmp/core-agent-policy-signing-key-path-only",
+    CORE_AGENT_POLICY_WORKER_TOKEN_FILE: "/tmp/core-agent-policy-worker-token-path-only",
     CORE_AGENT_POSTGRES_BOOTSTRAP_PASSWORD_FILE: "/tmp/core-agent-postgres-path-only",
     CORE_AGENT_POSTGRES_IMAGE: lock.images.postgres.platforms[platform],
     CORE_AGENT_PROVIDER_SECRET_ROOT: "/tmp/core-agent-provider-path-only",
@@ -77,6 +85,14 @@ test("production retained-session child environment resolves the shipped Compose
     CORE_AGENT_DATABASE_IDENTITY_PASSWORD_FILE: "/tmp/core-agent-identity-path-only",
     CORE_AGENT_PROVIDER_SECRET_ROOT: "/tmp/core-agent-provider-path-only",
     CORE_AGENT_INGRESS_SECRET_ROOT: "/tmp/core-agent-ingress-path-only",
+    CORE_AGENT_POLICY_RUNTIME_SECRET_ROOT: "/tmp/core-agent-policy-runtime-secret-root-path-only",
+    CORE_AGENT_POLICY_GATEWAY_WORKER_TOKEN_FILE: "/tmp/core-agent-policy-gateway-worker-token-path-only",
+    CORE_AGENT_POLICY_WORKER_TOKEN_FILE: "/tmp/core-agent-policy-worker-token-path-only",
+    CORE_AGENT_POLICY_PLUGIN_IDENTITIES_FILE: "/tmp/core-agent-policy-plugin-identities-path-only",
+    CORE_AGENT_POLICY_RUNTIME_IDENTITIES_FILE: "/tmp/core-agent-policy-runtime-identities-path-only",
+    CORE_AGENT_POLICY_PROOF_KEY_FILE: "/tmp/core-agent-policy-proof-key-path-only",
+    CORE_AGENT_POLICY_TRUSTED_CONTEXT_PUBLIC_KEYS_FILE: "/tmp/core-agent-policy-public-keys-path-only",
+    CORE_AGENT_POLICY_TRUSTED_CONTEXT_SIGNING_KEY_FILE: "/tmp/core-agent-policy-signing-key-path-only",
     CORE_AGENT_SUPERVISOR_STATE_ROOT: "/tmp/core-agent-state-path-only",
     CORE_AGENT_API_UID: "12000",
     CORE_AGENT_API_GID: "12000",
@@ -159,19 +175,19 @@ function parseDockerfile(text) {
 test("only the fixed API ingress publishes a loopback port and only Supervisor mounts Docker", async () => {
   const config = await yaml("infra/runtime/compose.dev.yaml");
   assert.deepEqual(Object.keys(config.services).sort(), [
-    "api", "api-bootstrap-key-projector", "api-ingress", "capability-acceptance", "database-credential-projector", "identity-role-bootstrap", "migrate", "postgres",
-    "postgres-auth-convergence", "supervisor", "supervisor-socket-preflight",
+    "api", "api-bootstrap-key-projector", "api-ingress", "capability-acceptance", "database-credential-projector", "identity-role-bootstrap", "migrate",
+    "policy-gateway-ingress", "policy-mcp-gateway", "postgres", "postgres-auth-convergence", "supervisor", "supervisor-socket-preflight",
     "supervisor-socket-volume-init", "worker",
   ]);
   assert.equal(config.services.api.ports, undefined);
   assert.deepEqual(config.services["api-ingress"].ports, ["127.0.0.1:8787:8787"]);
   for (const name of [
     "postgres", "api-bootstrap-key-projector", "database-credential-projector", "identity-role-bootstrap", "postgres-auth-convergence", "migrate", "api", "worker", "supervisor", "supervisor-socket-preflight",
-    "supervisor-socket-volume-init", "capability-acceptance",
+    "supervisor-socket-volume-init", "capability-acceptance", "policy-gateway-ingress", "policy-mcp-gateway",
   ]) {
     assert.equal(config.services[name].ports, undefined);
   }
-  for (const name of ["postgres", "api-bootstrap-key-projector", "database-credential-projector", "identity-role-bootstrap", "postgres-auth-convergence", "migrate", "api", "api-ingress", "worker", "capability-acceptance"]) {
+  for (const name of ["postgres", "api-bootstrap-key-projector", "database-credential-projector", "identity-role-bootstrap", "postgres-auth-convergence", "migrate", "api", "api-ingress", "worker", "capability-acceptance", "policy-gateway-ingress", "policy-mcp-gateway"]) {
     assert(!JSON.stringify(config.services[name]).includes("docker.sock"));
   }
   for (const service of Object.values(config.services)) {
@@ -211,6 +227,8 @@ test("service mounts and networks preserve each process boundary", async () => {
   assert.deepEqual(networkNames(api), ["core-agent-control"]);
   assert.deepEqual(networkNames(ingress), ["core-agent-control", "core-agent-host-ingress"]);
   assert.deepEqual(networkNames(worker), ["core-agent-backplane", "core-agent-control"]);
+  assert.deepEqual(networkNames(config.services["policy-mcp-gateway"]), ["core-agent-control"]);
+  assert.deepEqual(networkNames(config.services["policy-gateway-ingress"]), ["core-agent-backplane", "core-agent-control"]);
   assert.deepEqual(networkNames(supervisor), []);
   assert.deepEqual(config.networks["core-agent-control"], { driver: "bridge", internal: true });
   assert.deepEqual(config.networks["core-agent-host-ingress"], { driver: "bridge", internal: false });
@@ -222,6 +240,11 @@ test("service mounts and networks preserve each process boundary", async () => {
     external: true,
     name: "core-agent-egress",
   });
+  const gatewayWorkerToken = volumeAt(config.services["policy-mcp-gateway"], "/run/core-agent/policy/worker-token");
+  const workerWorkerToken = volumeAt(worker, "/run/core-agent/policy/worker-token");
+  assert.equal(gatewayWorkerToken.source, "${CORE_AGENT_POLICY_GATEWAY_WORKER_TOKEN_FILE:?set CORE_AGENT_POLICY_GATEWAY_WORKER_TOKEN_FILE}");
+  assert.equal(workerWorkerToken.source, "${CORE_AGENT_POLICY_WORKER_TOKEN_FILE:?set CORE_AGENT_POLICY_WORKER_TOKEN_FILE}");
+  assert.notEqual(gatewayWorkerToken.source, workerWorkerToken.source);
 
   assert.deepEqual(volumeTargets(api), [
     "/run/core-agent/config/hermes-images.lock.json",
@@ -243,6 +266,8 @@ test("service mounts and networks preserve each process boundary", async () => {
     "/run/core-agent/config/hermes-images.lock.json",
     "/run/core-agent/database-credentials",
     "/run/core-agent/ingress",
+    "/run/core-agent/policy/trusted-context-signing-key.pem",
+    "/run/core-agent/policy/worker-token",
     "/run/core-agent/supervisor",
   ]);
   assert.deepEqual(secretTargets(worker), []);
@@ -251,6 +276,7 @@ test("service mounts and networks preserve each process boundary", async () => {
     "/run/core-agent/config/hermes-images.lock.json",
     "/run/core-agent/ingress",
     "/run/core-agent/secrets/ingress",
+    "/run/core-agent/secrets/policy",
     "/run/core-agent/secrets/provider",
     "/run/core-agent/staging",
     "/run/core-agent/supervisor",
@@ -271,6 +297,7 @@ test("service mounts and networks preserve each process boundary", async () => {
   assert.equal(volumeAt(worker, "/run/core-agent/supervisor").type, "volume");
   assert.equal(volumeAt(supervisor, "/run/core-agent/secrets/provider").read_only, true);
   assert.equal(volumeAt(supervisor, "/run/core-agent/secrets/ingress").read_only, true);
+  assert.equal(volumeAt(supervisor, "/run/core-agent/secrets/policy").read_only, true);
   assert.equal(volumeAt(supervisor, "/run/core-agent/supervisor").read_only, undefined);
   assert.equal(
     volumeAt(supervisor, "/run/core-agent/supervisor").source,
@@ -337,7 +364,7 @@ test("application services use least privilege and bounded resources", async () 
   assert.equal(config.services.migrate.read_only, true);
   assert.deepEqual(config.services.migrate.cap_drop, ["ALL"]);
   assert.deepEqual(config.services.migrate.security_opt, ["no-new-privileges:true"]);
-  for (const name of ["api", "api-ingress", "worker", "supervisor"]) {
+  for (const name of ["api", "api-ingress", "worker", "supervisor", "policy-mcp-gateway", "policy-gateway-ingress"]) {
     const service = config.services[name];
     assert.notEqual(service.user, "0:0");
     assert.equal(service.read_only, true);
@@ -472,6 +499,7 @@ test("startup order gates applications on one successful migration", async () =>
     migrate: { condition: "service_completed_successfully" },
     postgres: { condition: "service_healthy" },
     supervisor: { condition: "service_started" },
+    "policy-mcp-gateway": { condition: "service_healthy" },
   });
   assert.deepEqual(config.services.supervisor.depends_on, {
     "supervisor-socket-preflight": { condition: "service_completed_successfully" },
@@ -930,6 +958,7 @@ test("runtime Dockerfile has locked bases and exact non-root service targets", a
     "${NODE_IMAGE} AS runtime",
     "runtime AS api",
     "runtime AS worker",
+    "runtime AS policy-gateway",
     "runtime AS supervisor",
   ]);
   assert(instructions.some(({ name, value }) => name === "ARG" && value === "NODE_IMAGE"));
@@ -957,6 +986,7 @@ test("runtime Dockerfile has locked bases and exact non-root service targets", a
     "npm run build -w @core-agent/runtime-core",
     "npm run build -w @core-agent/control-plane-api",
     "npm run build -w @core-agent/control-plane-worker",
+    "npm run build -w @core-agent/policy-mcp-gateway",
     "npm run build -w @core-agent/runtime-supervisor",
   ];
   assert(buildCommands.every((command) => buildRun.includes(command)));
@@ -967,6 +997,7 @@ test("runtime Dockerfile has locked bases and exact non-root service targets", a
   const targets = {
     api: { user: "12000:12000", entrypoint: ["node", "apps/control-plane-api/dist/src/server.js"] },
     worker: { user: "12002:12002", entrypoint: ["node", "apps/control-plane-worker/dist/src/server.js"] },
+    "policy-gateway": { user: "12002:12002", entrypoint: ["node", "apps/policy-mcp-gateway/dist/src/main.js"] },
     supervisor: { user: "12002:12002", entrypoint: ["node", "apps/runtime-supervisor/dist/src/main.js"] },
   };
   for (const [name, expected] of Object.entries(targets)) {

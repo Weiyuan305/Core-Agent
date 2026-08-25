@@ -83,7 +83,7 @@ export class PolicyGatewayClient {
   }
 
   public async open(request: OpenPolicySessionRequest): Promise<OpenPolicySessionResponse> {
-    const response = await this.#post("/v1/policy/sessions/open", request);
+    const response = await this.#post("/v1/policy-sessions/open", request);
     if (!response.ok) throw new PolicyGatewayClientError(response.status >= 500);
     const body = await responseJson(response);
     if (!openValidator.Check(body)) throw new PolicyGatewayClientError(false);
@@ -91,7 +91,7 @@ export class PolicyGatewayClient {
   }
 
   public async close(tenantId: string, request: ClosePolicySessionRequest): Promise<void> {
-    const response = await this.#post("/v1/policy/sessions/close", request, tenantId);
+    const response = await this.#post(`/v1/policy-sessions/${encodeURIComponent(request.policy_session_id)}/close`, request, tenantId);
     if (!response.ok) throw new PolicyGatewayClientError(response.status >= 500);
     const body = await responseJson(response);
     if (!closeValidator.Check(body) || body.policy_session_id !== request.policy_session_id) {

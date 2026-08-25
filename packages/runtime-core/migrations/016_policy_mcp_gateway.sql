@@ -65,8 +65,10 @@ create table policy_sessions (
   policy_session_id text not null,
   actor_id text not null,
   membership_id text not null,
+  effective_role text not null check (effective_role in ('admin', 'consultant', 'student')),
   profile_id text not null,
   session_id text not null,
+  core_session_id text not null,
   conversation_id text not null,
   run_id text not null,
   runtime_container_id text not null,
@@ -99,6 +101,8 @@ create table policy_sessions (
     foreign key (tenant_id, profile_id) references profiles(tenant_id, profile_id),
   constraint policy_sessions_session_fkey
     foreign key (tenant_id, session_id) references sessions(tenant_id, session_id),
+  constraint policy_sessions_core_session_fkey
+    foreign key (core_session_id) references core_sessions(session_id),
   constraint policy_sessions_conversation_fkey
     foreign key (tenant_id, conversation_id) references conversations(tenant_id, conversation_id),
   constraint policy_sessions_run_fkey
@@ -111,8 +115,11 @@ create table policy_sessions (
   constraint policy_sessions_idempotency_key unique (tenant_id, idempotency_key),
   constraint policy_sessions_run_key unique (tenant_id, run_id),
   constraint policy_sessions_state_check check (
-    (state = 'active' and close_reason is null and closed_at is null)
-    or (state in ('closed', 'expired') and close_reason is not null and closed_at is not null)
+    expires_at > created_at and updated_at >= created_at and (
+      (state = 'active' and close_reason is null and closed_at is null)
+      or (state in ('closed', 'expired') and close_reason is not null
+        and closed_at is not null and closed_at >= created_at and updated_at >= closed_at)
+    )
   )
 );
 
@@ -180,9 +187,15 @@ create table policy_execution_proofs (
     references policy_sessions(tenant_id, policy_session_id),
   constraint policy_execution_proofs_decision_key unique (tenant_id, decision_id),
   constraint policy_execution_proofs_state_check check (
-    (state = 'issued' and consumed_at is null and invalidated_at is null)
-    or (state = 'consumed' and consumed_at is not null and invalidated_at is null)
-    or (state in ('invalidated', 'expired') and consumed_at is null and invalidated_at is not null)
+    expires_at > created_at and updated_at >= created_at and (
+      (state = 'issued' and consumed_at is null and invalidated_at is null)
+      or (state = 'consumed' and consumed_at is not null and invalidated_at is null
+        and consumed_at >= created_at and consumed_at <= expires_at and updated_at >= consumed_at)
+      or (state = 'invalidated' and consumed_at is null and invalidated_at is not null
+        and invalidated_at >= created_at and updated_at >= invalidated_at)
+      or (state = 'expired' and consumed_at is null and invalidated_at is not null
+        and invalidated_at >= expires_at and updated_at >= invalidated_at)
+    )
   )
 );
 
@@ -216,7 +229,18 @@ create table mcp_tool_calls (
     foreign key (tenant_id, decision_id) references policy_decisions(tenant_id, decision_id),
   constraint mcp_tool_calls_proof_fkey
     foreign key (tenant_id, proof_id) references policy_execution_proofs(tenant_id, proof_id),
-  constraint mcp_tool_calls_tool_call_key unique (tenant_id, policy_session_id, tool_call_id)
+  constraint mcp_tool_calls_tool_call_key unique (tenant_id, policy_session_id, tool_call_id),
+  constraint mcp_tool_calls_lifecycle_check check (
+    (status = 'requested' and started_at is null and finished_at is null
+      and reason_code is null and safe_result_summary is null)
+    or (status = 'started' and started_at is not null and started_at >= requested_at
+      and finished_at is null and reason_code is null and safe_result_summary is null)
+    or (status = 'succeeded' and started_at is not null and started_at >= requested_at
+      and finished_at is not null and finished_at >= started_at and reason_code is null)
+    or (status = 'failed' and finished_at is not null
+      and (started_at is null or started_at >= requested_at)
+      and finished_at >= coalesce(started_at, requested_at) and reason_code is not null)
+  )
 );
 
 create function core_agent_enforce_policy_catalog_immutable()
@@ -239,8 +263,92 @@ create trigger mcp_tool_bindings_immutable
 before update or delete on mcp_tool_bindings
 for each row execute function core_agent_enforce_policy_catalog_immutable();
 
+create function core_agent_enforce_policy_state_transition()
+returns trigger
+language plpgsql
+as $$
+begin
+  if tg_op = 'DELETE' then
+    raise exception 'Policy lifecycle rows cannot be deleted'
+      using errcode = '23514', constraint = tg_table_name || '_transition';
+  end if;
+  if tg_op = 'INSERT' then
+    if new.resource_version <> 1 then
+      raise exception 'Policy lifecycle initial state is invalid'
+        using errcode = '23514', constraint = tg_table_name || '_transition';
+    end if;
+    if tg_table_name = 'policy_sessions' then
+      if new.state <> 'active' then
+        raise exception 'Policy lifecycle initial state is invalid'
+          using errcode = '23514', constraint = tg_table_name || '_transition';
+      end if;
+    elsif tg_table_name = 'policy_execution_proofs' then
+      if new.state <> 'issued' then
+        raise exception 'Policy lifecycle initial state is invalid'
+          using errcode = '23514', constraint = tg_table_name || '_transition';
+      end if;
+    elsif tg_table_name = 'mcp_tool_calls' then
+      if new.status <> 'requested' then
+        raise exception 'Policy lifecycle initial state is invalid'
+          using errcode = '23514', constraint = tg_table_name || '_transition';
+      end if;
+    else
+      raise exception 'Policy lifecycle transition target is invalid'
+        using errcode = '23514', constraint = 'policy_state_transition_target';
+    end if;
+    return new;
+  end if;
+  if tg_table_name = 'policy_sessions' then
+    if old.state <> 'active' or new.state not in ('closed', 'expired')
+      or (to_jsonb(new) - array['state', 'close_reason', 'closed_at', 'resource_version', 'updated_at'])
+        is distinct from
+        (to_jsonb(old) - array['state', 'close_reason', 'closed_at', 'resource_version', 'updated_at'])
+      or new.resource_version <> old.resource_version + 1 then
+      raise exception 'Policy Session transition is invalid'
+        using errcode = '23514', constraint = 'policy_sessions_transition';
+    end if;
+  elsif tg_table_name = 'policy_execution_proofs' then
+    if old.state <> 'issued' or new.state not in ('consumed', 'invalidated', 'expired')
+      or (to_jsonb(new) - array['state', 'consumed_at', 'invalidated_at', 'resource_version', 'updated_at'])
+        is distinct from
+        (to_jsonb(old) - array['state', 'consumed_at', 'invalidated_at', 'resource_version', 'updated_at'])
+      or new.resource_version <> old.resource_version + 1 then
+      raise exception 'Policy proof transition is invalid'
+        using errcode = '23514', constraint = 'policy_execution_proofs_transition';
+    end if;
+  elsif tg_table_name = 'mcp_tool_calls' then
+    if not ((old.status = 'requested' and new.status in ('started', 'failed'))
+      or (old.status = 'started' and new.status in ('succeeded', 'failed')))
+      or (to_jsonb(new) - array['status', 'reason_code', 'safe_result_summary', 'started_at', 'finished_at', 'resource_version', 'updated_at'])
+        is distinct from
+        (to_jsonb(old) - array['status', 'reason_code', 'safe_result_summary', 'started_at', 'finished_at', 'resource_version', 'updated_at'])
+      or new.resource_version <> old.resource_version + 1 then
+      raise exception 'MCP Tool call transition is invalid'
+        using errcode = '23514', constraint = 'mcp_tool_calls_transition';
+    end if;
+  else
+    raise exception 'Policy lifecycle transition target is invalid'
+      using errcode = '23514', constraint = 'policy_state_transition_target';
+  end if;
+  return new;
+end
+$$;
+
+create trigger policy_sessions_transition
+before insert or update or delete on policy_sessions
+for each row execute function core_agent_enforce_policy_state_transition();
+create trigger policy_execution_proofs_transition
+before insert or update or delete on policy_execution_proofs
+for each row execute function core_agent_enforce_policy_state_transition();
+create trigger mcp_tool_calls_transition
+before insert or update or delete on mcp_tool_calls
+for each row execute function core_agent_enforce_policy_state_transition();
+
 alter function core_agent_enforce_policy_catalog_immutable() set search_path = pg_catalog, public;
+alter function core_agent_enforce_policy_state_transition() set search_path = pg_catalog, public;
 revoke all on function core_agent_enforce_policy_catalog_immutable()
+  from public, core_agent_app, core_agent_identity;
+revoke all on function core_agent_enforce_policy_state_transition()
   from public, core_agent_app, core_agent_identity;
 
 revoke all on table

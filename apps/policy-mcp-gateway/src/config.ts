@@ -2,13 +2,14 @@ import { resolve } from "node:path";
 
 export interface PolicyGatewayConfig {
   readonly databaseUrl: string; readonly host: "127.0.0.1" | "0.0.0.0"; readonly port: number;
+  readonly databasePasswordFile: string;
   readonly workerTokenFile: string; readonly pluginIdentitiesFile: string; readonly runtimeIdentitiesFile: string;
   readonly proofKeyFile: string; readonly trustedContextKeysFile: string;
   readonly trustedContextIssuer: string; readonly trustedContextAudience: string;
 }
 
 const allowed = new Set([
-  "POLICY_GATEWAY_DATABASE_URL", "POLICY_GATEWAY_HOST", "POLICY_GATEWAY_PORT", "POLICY_GATEWAY_CONTAINER_BIND",
+  "POLICY_GATEWAY_DATABASE_URL", "POLICY_GATEWAY_DATABASE_PASSWORD_FILE", "POLICY_GATEWAY_HOST", "POLICY_GATEWAY_PORT", "POLICY_GATEWAY_CONTAINER_BIND",
   "POLICY_GATEWAY_WORKER_TOKEN_FILE", "POLICY_GATEWAY_PLUGIN_IDENTITIES_FILE", "POLICY_GATEWAY_RUNTIME_IDENTITIES_FILE",
   "POLICY_GATEWAY_PROOF_KEY_FILE", "POLICY_GATEWAY_TRUSTED_CONTEXT_KEYS_FILE", "POLICY_GATEWAY_TRUSTED_CONTEXT_ISSUER",
   "POLICY_GATEWAY_TRUSTED_CONTEXT_AUDIENCE",
@@ -36,7 +37,8 @@ export function loadPolicyGatewayConfig(environment: NodeJS.ProcessEnv): PolicyG
   try { parsed = new URL(databaseUrl); } catch { invalid(); }
   if (!new Set(["postgres:", "postgresql:"]).has(parsed.protocol) || parsed.password !== "" || parsed.pathname.length < 2) invalid();
   return Object.freeze({
-    databaseUrl, host, port: Number(portValue), workerTokenFile: file(required(environment, "POLICY_GATEWAY_WORKER_TOKEN_FILE")),
+    databaseUrl, databasePasswordFile: file(required(environment, "POLICY_GATEWAY_DATABASE_PASSWORD_FILE")),
+    host, port: Number(portValue), workerTokenFile: file(required(environment, "POLICY_GATEWAY_WORKER_TOKEN_FILE")),
     pluginIdentitiesFile: file(required(environment, "POLICY_GATEWAY_PLUGIN_IDENTITIES_FILE")),
     runtimeIdentitiesFile: file(required(environment, "POLICY_GATEWAY_RUNTIME_IDENTITIES_FILE")),
     proofKeyFile: file(required(environment, "POLICY_GATEWAY_PROOF_KEY_FILE")),

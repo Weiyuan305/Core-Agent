@@ -13,7 +13,7 @@ plugins:
 
 mcp_servers:
   core_agent_gateway:
-    url: http://policy-mcp-gateway:8787/mcp
+    url: http://policy-gateway-ingress:8787/mcp
     headers:
       Authorization: "Bearer ${CORE_AGENT_POLICY_RUNTIME_TOKEN}"
     strict_redirect_headers: true

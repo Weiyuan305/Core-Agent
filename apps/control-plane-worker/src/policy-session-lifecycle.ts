@@ -1,5 +1,6 @@
 import { createPrivateKey, type KeyObject } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open } from "node:fs/promises";
 
 import {
   issueTrustedContext,
@@ -52,11 +53,26 @@ export function loadWorkerPolicyConfiguration(environment: NodeJS.ProcessEnv): W
 }
 
 async function protectedFile(path: string, maximum: number): Promise<Buffer> {
-  const metadata = await stat(path);
-  if (!metadata.isFile() || metadata.size < 1 || metadata.size > maximum || (metadata.mode & 0o077) !== 0) {
-    throw new Error("Policy Gateway Worker secret projection is invalid");
-  }
-  return readFile(path);
+  const invalid = (): never => { throw new Error("Policy Gateway Worker secret projection is invalid"); };
+  const before = await lstat(path);
+  const currentUid = typeof process.getuid === "function" ? process.getuid() : before.uid;
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.uid !== currentUid
+    || ![0o400, 0o600].includes(before.mode & 0o777) || before.size < 1 || before.size > maximum) invalid();
+  const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const opened = await handle.stat();
+    const identity = (value: typeof opened) => [
+      value.dev, value.ino, value.uid, value.nlink, value.mode & 0o777, value.size,
+      value.mtimeMs, value.ctimeMs,
+    ].join(":");
+    if (!opened.isFile() || identity(opened) !== identity(before)) invalid();
+    const value = await handle.readFile();
+    const after = await handle.stat();
+    if (value.byteLength !== before.size || identity(after) !== identity(opened) || value.includes(0)) {
+      value.fill(0); invalid();
+    }
+    return value;
+  } finally { await handle.close(); }
 }
 
 export async function createWorkerPolicySessionLifecycle(

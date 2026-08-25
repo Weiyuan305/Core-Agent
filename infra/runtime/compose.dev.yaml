@@ -366,6 +366,90 @@ services:
       - core-agent-control
       - core-agent-host-ingress
 
+  policy-mcp-gateway:
+    <<: *application-security
+    image: core-agent/policy-mcp-gateway:dev
+    platform: ${CORE_AGENT_PLATFORM:?set CORE_AGENT_PLATFORM}
+    build:
+      <<: *service-build
+      target: policy-gateway
+    user: "${CORE_AGENT_RUNTIME_UID:-12002}:${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}"
+    environment:
+      POLICY_GATEWAY_CONTAINER_BIND: "1"
+      POLICY_GATEWAY_DATABASE_URL: postgresql://core_agent_app@postgres:5432/core_agent_runtime
+      POLICY_GATEWAY_DATABASE_PASSWORD_FILE: /run/core-agent/database-credentials/database-password
+      POLICY_GATEWAY_HOST: 0.0.0.0
+      POLICY_GATEWAY_PLUGIN_IDENTITIES_FILE: /run/core-agent/policy/plugin-identities.json
+      POLICY_GATEWAY_PORT: "8788"
+      POLICY_GATEWAY_PROOF_KEY_FILE: /run/core-agent/policy/proof-key
+      POLICY_GATEWAY_RUNTIME_IDENTITIES_FILE: /run/core-agent/policy/runtime-identities.json
+      POLICY_GATEWAY_TRUSTED_CONTEXT_AUDIENCE: core-agent-policy-gateway
+      POLICY_GATEWAY_TRUSTED_CONTEXT_ISSUER: core-agent-control-plane-worker
+      POLICY_GATEWAY_TRUSTED_CONTEXT_KEYS_FILE: /run/core-agent/policy/trusted-context-public-keys.json
+      POLICY_GATEWAY_WORKER_TOKEN_FILE: /run/core-agent/policy/worker-token
+    volumes:
+      - type: volume
+        source: worker-credentials
+        target: /run/core-agent/database-credentials
+        read_only: true
+      - type: bind
+        source: ${CORE_AGENT_POLICY_GATEWAY_WORKER_TOKEN_FILE:?set CORE_AGENT_POLICY_GATEWAY_WORKER_TOKEN_FILE}
+        target: /run/core-agent/policy/worker-token
+        read_only: true
+      - type: bind
+        source: ${CORE_AGENT_POLICY_PLUGIN_IDENTITIES_FILE:?set CORE_AGENT_POLICY_PLUGIN_IDENTITIES_FILE}
+        target: /run/core-agent/policy/plugin-identities.json
+        read_only: true
+      - type: bind
+        source: ${CORE_AGENT_POLICY_RUNTIME_IDENTITIES_FILE:?set CORE_AGENT_POLICY_RUNTIME_IDENTITIES_FILE}
+        target: /run/core-agent/policy/runtime-identities.json
+        read_only: true
+      - type: bind
+        source: ${CORE_AGENT_POLICY_PROOF_KEY_FILE:?set CORE_AGENT_POLICY_PROOF_KEY_FILE}
+        target: /run/core-agent/policy/proof-key
+        read_only: true
+      - type: bind
+        source: ${CORE_AGENT_POLICY_TRUSTED_CONTEXT_PUBLIC_KEYS_FILE:?set CORE_AGENT_POLICY_TRUSTED_CONTEXT_PUBLIC_KEYS_FILE}
+        target: /run/core-agent/policy/trusted-context-public-keys.json
+        read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    networks:
+      - core-agent-control
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:8788/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  policy-gateway-ingress:
+    <<: *application-security
+    image: core-agent/policy-mcp-gateway:dev
+    platform: ${CORE_AGENT_PLATFORM:?set CORE_AGENT_PLATFORM}
+    build:
+      <<: *service-build
+      target: policy-gateway
+    user: "${CORE_AGENT_RUNTIME_UID:-12002}:${CORE_AGENT_SUPERVISOR_SOCKET_GID:-12002}"
+    entrypoint: ["node", "scripts/policy-gateway-ingress-proxy.mjs"]
+    pids_limit: 32
+    mem_limit: 64m
+    cpus: 0.25
+    stop_grace_period: 10s
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    depends_on:
+      policy-mcp-gateway:
+        condition: service_healthy
+    networks:
+      - core-agent-control
+      - core-agent-backplane
+
   worker:
     <<: *application-security
     image: core-agent/control-plane-worker:dev
@@ -387,6 +471,12 @@ services:
       CONTROL_PLANE_SECRET_ROOT: /run/core-agent/ingress
       CONTROL_PLANE_SUPERVISOR_SOCKET: /run/core-agent/supervisor/runtime.sock
       CONTROL_PLANE_WORKER_ID: runtime-worker-1
+      POLICY_GATEWAY_ORIGIN: http://policy-mcp-gateway:8788
+      POLICY_GATEWAY_SIGNING_KEY_FILE: /run/core-agent/policy/trusted-context-signing-key.pem
+      POLICY_GATEWAY_SIGNING_KEY_ID: worker-signing-v1
+      POLICY_GATEWAY_TRUSTED_CONTEXT_AUDIENCE: core-agent-policy-gateway
+      POLICY_GATEWAY_TRUSTED_CONTEXT_ISSUER: core-agent-control-plane-worker
+      POLICY_GATEWAY_WORKER_TOKEN_FILE: /run/core-agent/policy/worker-token
     volumes:
       - type: bind
         source: ${CORE_AGENT_HERMES_IMAGE_LOCK_FILE:?set CORE_AGENT_HERMES_IMAGE_LOCK_FILE}
@@ -408,6 +498,14 @@ services:
         source: worker-credentials
         target: /run/core-agent/database-credentials
         read_only: true
+      - type: bind
+        source: ${CORE_AGENT_POLICY_WORKER_TOKEN_FILE:?set CORE_AGENT_POLICY_WORKER_TOKEN_FILE}
+        target: /run/core-agent/policy/worker-token
+        read_only: true
+      - type: bind
+        source: ${CORE_AGENT_POLICY_TRUSTED_CONTEXT_SIGNING_KEY_FILE:?set CORE_AGENT_POLICY_TRUSTED_CONTEXT_SIGNING_KEY_FILE}
+        target: /run/core-agent/policy/trusted-context-signing-key.pem
+        read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
     depends_on:
@@ -417,6 +515,8 @@ services:
         condition: service_healthy
       supervisor:
         condition: service_started
+      policy-mcp-gateway:
+        condition: service_healthy
     networks:
       - core-agent-control
       - core-agent-backplane
@@ -511,6 +611,7 @@ services:
       CORE_AGENT_MANAGED_RUNTIME_UID: ${CORE_AGENT_RUNTIME_UID:-12002}
       CORE_AGENT_PROVIDER_CATALOG_PATH: /app/infra/runtime/providers.json
       CORE_AGENT_PROVIDER_SECRET_ROOT: /run/core-agent/secrets/provider
+      CORE_AGENT_POLICY_SECRET_ROOT: /run/core-agent/secrets/policy
       CORE_AGENT_DOCKER_HOST_INGRESS_ROOT: ${CORE_AGENT_SUPERVISOR_STATE_ROOT:?set CORE_AGENT_SUPERVISOR_STATE_ROOT}/ingress
       CORE_AGENT_DOCKER_HOST_STAGING_ROOT: ${CORE_AGENT_SUPERVISOR_STATE_ROOT:?set CORE_AGENT_SUPERVISOR_STATE_ROOT}/staging
       CORE_AGENT_SUPERVISOR_INGRESS_ROOT: /run/core-agent/ingress
@@ -533,6 +634,10 @@ services:
       - type: bind
         source: ${CORE_AGENT_INGRESS_SECRET_ROOT:?set CORE_AGENT_INGRESS_SECRET_ROOT}
         target: /run/core-agent/secrets/ingress
+        read_only: true
+      - type: bind
+        source: ${CORE_AGENT_POLICY_RUNTIME_SECRET_ROOT:?set CORE_AGENT_POLICY_RUNTIME_SECRET_ROOT}
+        target: /run/core-agent/secrets/policy
         read_only: true
       - type: volume
         source: supervisor-socket

@@ -61,6 +61,15 @@ jobs:
       - name: Run unit builds and tests
         run: npm run check
 
+      - name: Run the real Python policy plugin unit suite
+        run: npm run test:policy-plugin
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev
+
+      - name: Reject whitespace errors
+        run: git diff --check
+
       - name: Run public identity boundary tests
         run: npm run test:identity
 
@@ -224,6 +233,9 @@ jobs:
       - name: Run fake provider Supervisor Hermes and entitlement capability full slices
         run: node scripts/run-protected-ci-command.mjs --secret-file "$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- npm run test:integration
 
+      - name: Run Policy MCP deterministic acceptance twice
+        run: node scripts/run-protected-ci-command.mjs --secret-file "$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- npm run accept:policy-mcp-gateway
+
       - name: Release scanned PostgreSQL service logs
         if: always()
         run: node scripts/run-protected-ci-command.mjs --secret-file "$CONTROL_PLANE_TEST_DATABASE_PASSWORD_FILE" -- docker logs "${{ job.services.postgres.id }}"
@@ -293,6 +305,14 @@ jobs:
           CORE_AGENT_DOCKER_SOCKET_SOURCE: /var/run/docker.sock
           CORE_AGENT_HERMES_IMAGE_LOCK_FILE: /tmp/core-agent-product-image-lock-path-only
           CORE_AGENT_INGRESS_SECRET_ROOT: /tmp/core-agent-ingress-path-only
+          CORE_AGENT_POLICY_RUNTIME_SECRET_ROOT: /tmp/core-agent-policy-runtime-path-only
+          CORE_AGENT_POLICY_GATEWAY_WORKER_TOKEN_FILE: /tmp/core-agent-policy-gateway-worker-token-path-only
+          CORE_AGENT_POLICY_WORKER_TOKEN_FILE: /tmp/core-agent-policy-worker-token-path-only
+          CORE_AGENT_POLICY_PLUGIN_IDENTITIES_FILE: /tmp/core-agent-policy-plugin-identities-path-only
+          CORE_AGENT_POLICY_RUNTIME_IDENTITIES_FILE: /tmp/core-agent-policy-runtime-identities-path-only
+          CORE_AGENT_POLICY_PROOF_KEY_FILE: /tmp/core-agent-policy-proof-key-path-only
+          CORE_AGENT_POLICY_TRUSTED_CONTEXT_PUBLIC_KEYS_FILE: /tmp/core-agent-policy-trusted-context-public-keys-path-only
+          CORE_AGENT_POLICY_TRUSTED_CONTEXT_SIGNING_KEY_FILE: /tmp/core-agent-policy-trusted-context-signing-key-path-only
           CORE_AGENT_PLATFORM: linux/amd64
           CORE_AGENT_PROVIDER_SECRET_ROOT: /tmp/core-agent-provider-path-only
           CORE_AGENT_SUPERVISOR_STATE_ROOT: /tmp/core-agent-runtime-state-path-only

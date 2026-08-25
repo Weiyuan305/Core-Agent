@@ -38,4 +38,11 @@ test("proof and call storage exposes only digest and safe metadata", async () =>
   assert.match(migration, /safe_result_summary text/);
   assert.match(migration, /policy_execution_proofs_state_check/);
   assert.match(migration, /policy_sessions_active_runtime_session_key/);
+  assert.match(migration, /constraint mcp_tool_calls_lifecycle_check check/);
+  assert.match(migration, /status = 'requested' and started_at is null and finished_at is null/);
+  assert.match(migration, /status = 'succeeded' and started_at is not null[\s\S]+finished_at is not null/);
+  assert.match(migration, /expires_at > created_at and updated_at >= created_at/);
+  assert.match(migration, /consumed_at >= created_at and consumed_at <= expires_at/);
+  assert.match(migration, /state = 'expired'[\s\S]+invalidated_at >= expires_at/);
+  assert.match(migration, /started_at is null or started_at >= requested_at/);
 });

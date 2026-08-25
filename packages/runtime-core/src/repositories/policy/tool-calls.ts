@@ -45,6 +45,7 @@ export async function transitionToolCall(trx: Transaction<RuntimeDatabase>, inpu
   reasonCode: string | null; summary: string | null; runId: string; profileId: string; actorId: string;
   membershipId: string; effectiveRole: "admin" | "consultant" | "student"; requestId: string; traceId: string;
   correlationId: string; toolCallId: string; toolName: string; policyVersion: string;
+  entitlementSnapshotRef: { snapshot_id: string; version: number; evaluated_at: string };
 }): Promise<boolean> {
   const updated = await trx.updateTable("mcp_tool_calls").set({
     status: input.to, reason_code: input.reasonCode, safe_result_summary: input.summary,
@@ -71,6 +72,7 @@ export async function transitionToolCall(trx: Transaction<RuntimeDatabase>, inpu
       outcome: input.to === "succeeded" ? "succeeded" : "failed", request_id: input.requestId,
       trace_id: input.traceId, reason_summary: input.summary ?? "Tool invocation failed safely",
       run_id: input.runId, policy_version: input.policyVersion, resource_version: Number(updated.resource_version),
+      entitlement_snapshot_ref: input.entitlementSnapshotRef,
     };
     await appendAuditEvent({ tenantId: input.tenantId, trx }, event);
   }

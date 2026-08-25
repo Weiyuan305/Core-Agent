@@ -123,6 +123,11 @@
           "minLength": 1,
           "type": "string"
         },
+        "core_session_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
         "delegation_id": {
           "maxLength": 255,
           "minLength": 1,

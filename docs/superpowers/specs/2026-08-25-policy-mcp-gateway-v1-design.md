@@ -1,6 +1,6 @@
 # Policy Plugin and Capability/MCP Gateway v1 Design
 
-**Status:** Approved for implementation
+**Status:** Implemented; deterministic acceptance passed in two consecutive command invocations (four clean attempts); managed Runtime acceptance `NOT_RUN` because the Docker daemon was unavailable
 **Date:** 2026-08-25
 **Depends on:** [Entitlement and Capability Registry v1](2026-08-10-entitlement-capability-registry-v1-design.md)
 **Next phase:** Composite Memory authority, then EduApply read-only MCP onboarding
@@ -365,8 +365,9 @@ Schema 16 adds:
   status, and review metadata;
 - `mcp_server_versions`: immutable reviewed server binding metadata and limits;
 - `mcp_tool_bindings`: immutable Capability/server/tool/schema bindings;
-- `policy_sessions`: Tenant-scoped current Run binding, expiry, state, and exact
-  authority references;
+- `policy_sessions`: Tenant-scoped current Core Session/Agent Session/Run binding,
+  expiry, state, signed effective role, exact Runtime generation, and exact authority
+  references;
 - `policy_decisions`: append-only allow/deny facts and hashes;
 - `policy_execution_proofs`: proof digest, exact bindings, expiry, and one-way state;
 - `mcp_tool_calls`: requested/started/terminal lifecycle and safe failure/result
@@ -374,7 +375,11 @@ Schema 16 adds:
 
 Foreign keys include `tenant_id` for every tenant resource. Published global policy,
 server, and binding rows cannot be updated or deleted. Decisions and calls are
-append-only except for named state-transition functions or service transactions.
+append-only except for database-enforced one-way state transitions. Initial states,
+immutable facts, transition edges, and resource-version increments are validated by
+named triggers even for direct application-role SQL. Temporal constraints additionally
+require session/proof/call timestamps to follow creation and request order; consumed
+proofs cannot be backdated or consumed after their expiry.
 Indexes support exact active-session lookup, expiry sweep, proof digest lock, Run
 audit, and capability binding resolution. Database constraints cap all IDs, hashes,
 status vocabularies, and safe summaries.
@@ -385,9 +390,13 @@ data policy; that is separate from tool authorization evidence.
 
 ## 12. Audit and events
 
-Every session open/close, decision, proof consumption, and tool terminal outcome
-records the real Actor/Membership, Tenant/Profile/Run, policy version, exact
+Every attributable session open/close, decision, proof consumption, and tool terminal
+outcome records the real Actor/Membership, Tenant/Profile/Run, policy version, exact
 Entitlement Snapshot ref, decision/outcome, request/trace IDs, and a safe closed reason.
+An authentication attempt that safely matches a stored session but presents the wrong
+Runtime identity records a denial audit without disclosing that session. A request that
+cannot be attributed to any session fails closed without fabricating Actor/Membership
+audit facts.
 
 Existing ProductEvent Tool branches are emitted transactionally:
 
@@ -429,9 +438,15 @@ ID and decision.
   or endpoint authority.
 - No model-controlled field carries a trusted internal ID except the public tool name
   and validated tool arguments.
-- Runtime identity selects a managed Runtime but never replaces current DB authority.
+- Plugin and Runtime identities are scoped to one exact Tenant, Runtime container, and
+  generation; Runtime identity is additionally scoped to one Profile. They never
+  select a session or replace current DB authority.
+- Every decision, listing, proof consumption, and dispatch-boundary check revalidates
+  Tenant, Actor, Membership, Profile, Conversation, Run, Agent Session, Core Session,
+  Runtime generation/health, and current immutable Snapshot authority.
 - Proofs are secret, short-lived, digest-stored, single-use, and redacted from all
-  logs/errors/events.
+  logs/errors/events. Proof consumption and the corresponding requested call record
+  commit in one transaction.
 - Tenant and Profile mismatches return indistinguishable denial.
 - Tool schemas are reviewed platform artifacts; schemas cannot execute code, resolve
   references over the network, coerce values, or expose secrets.
@@ -492,9 +507,13 @@ Completion requires all of the following:
 10. Runtime/Supervisor tests prove exact networks, mounts, identity rotation, and no
     downstream/database credential exposure.
 11. An opt-in local acceptance performs a real managed Hermes read-only tool call when
-    a Docker-compatible daemon is available. If unavailable, the report is explicitly
-    `NOT_RUN`; deterministic acceptance must still pass and cannot be presented as live
-    Runtime evidence.
+    a Docker-compatible daemon is available. The driver creates owner-only one-time
+    identities and keys before Compose, starts the narrow Gateway ingress, bootstraps
+    the reviewed synthetic catalog plus B2B Entitlement/Snapshot, waits for the exact
+    reconciled Runtime generation, explicitly requests the reviewed tool once, verifies
+    call/proof/session/audit evidence, scans for its secret sentinels, and cleans up. If
+    Docker is unavailable, the report is explicitly `NOT_RUN`; deterministic acceptance
+    must still pass and cannot be presented as live Runtime evidence.
 12. Exact Node 22.13.0 unit, type, build, migration, integration, security, formatting,
     and secret-scan gates pass.
 

@@ -38,6 +38,8 @@ test("Policy Gateway Worker client uses exact private auth and closed open/close
     idempotency_key: "policy-close-run-a", request_id: "request-a", trace_id: "trace-a",
   });
   assert.equal(seen.length, 2);
+  assert.equal(seen[0]!.url, "http://policy-mcp-gateway:8787/v1/policy-sessions/open");
+  assert.equal(seen[1]!.url, "http://policy-mcp-gateway:8787/v1/policy-sessions/policy-session-a/close");
   assert.equal(new Headers(seen[0]!.init?.headers).get("authorization"), `Bearer ${"w".repeat(32)}`);
   assert.equal(new Headers(seen[0]!.init?.headers).get("x-core-agent-tenant-id"), null);
   assert.equal(new Headers(seen[1]!.init?.headers).get("x-core-agent-tenant-id"), "tenant-a");

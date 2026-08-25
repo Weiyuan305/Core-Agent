@@ -59,8 +59,10 @@ export interface PolicySessionTable {
   policy_session_id: string;
   actor_id: string;
   membership_id: string;
+  effective_role: "admin" | "consultant" | "student";
   profile_id: string;
   session_id: string;
+  core_session_id: string;
   conversation_id: string;
   run_id: string;
   runtime_container_id: string;

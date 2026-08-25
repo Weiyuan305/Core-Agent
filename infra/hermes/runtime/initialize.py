@@ -126,6 +126,7 @@ def validate_profile(value: object) -> dict[str, object]:
         "provider_base_url",
         "model_id",
         "provider_secret_file",
+        "policy_runtime_secret_file",
     }, "Profile")
     profile_id = require_id(profile["profile_id"], "profile_id")
     profile_ref = require_string(profile["hermes_profile_ref"], "hermes_profile_ref", 63)
@@ -137,6 +138,9 @@ def validate_profile(value: object) -> dict[str, object]:
     if model_id != APPROVED_MODEL_ID:
         raise InitializerError("model_id is not approved")
     secret_file = require_string(profile["provider_secret_file"], "provider_secret_file", 4_096)
+    policy_runtime_secret_file = require_string(
+        profile["policy_runtime_secret_file"], "policy_runtime_secret_file", 4_096
+    )
     return {
         "profile_id": profile_id,
         "hermes_profile_ref": profile_ref,
@@ -144,6 +148,7 @@ def validate_profile(value: object) -> dict[str, object]:
         "provider_base_url": provider_base_url,
         "model_id": model_id,
         "provider_secret_file": secret_file,
+        "policy_runtime_secret_file": policy_runtime_secret_file,
     }
 
 
@@ -203,6 +208,7 @@ def expected_manifest(bundle: dict[str, object]) -> dict[str, object]:
         "provider_base_url": profile["provider_base_url"],
         "model_id": profile["model_id"],
         "provider_secret_file": profile["provider_secret_file"],
+        "policy_runtime_secret_file": profile["policy_runtime_secret_file"],
     } for profile in profiles]
     canonical_fields = {
         "bundle_version": bundle["bundle_version"],
@@ -527,6 +533,7 @@ def configure_profile(
     profiles_descriptor: int,
     profile: dict[str, object],
     provider_key: str,
+    policy_runtime_token: str,
     ingress_key: str,
 ) -> None:
     profile_ref = str(profile["hermes_profile_ref"])
@@ -561,6 +568,7 @@ def configure_profile(
         environment = (
             f"CORE_AGENT_PROVIDER_API_KEY={provider_key}\n"
             f"API_SERVER_KEY={ingress_key}\n"
+            f"CORE_AGENT_POLICY_RUNTIME_TOKEN={policy_runtime_token}\n"
         ).encode("utf-8")
         configuration = canonical_json({
             "model": {
@@ -580,7 +588,7 @@ def configure_profile(
             },
             "mcp_servers": {
                 "core_agent_gateway": {
-                    "url": "http://policy-mcp-gateway:8787/mcp",
+                    "url": "http://policy-gateway-ingress:8787/mcp",
                     "headers": {
                         "Authorization": "Bearer ${CORE_AGENT_POLICY_RUNTIME_TOKEN}",
                     },
@@ -676,13 +684,20 @@ def initialize(bundle_path: Path, data_root: Path, manifest_path: Path, secret_r
                 secret_root,
                 secret_identity,
                 str(profile["provider_secret_file"]),
+            ), read_secret(
+                secret_descriptor,
+                secret_root,
+                secret_identity,
+                str(profile["policy_runtime_secret_file"]),
             ))
             for profile in bundle["profiles"]
         ]
         assert_root_directory(secret_root, secret_descriptor, secret_identity, "Provider secret root")
 
-        for profile, provider_key in prepared:
-            configure_profile(profiles_descriptor, profile, provider_key, ingress_key)
+        for profile, provider_key, policy_runtime_token in prepared:
+            configure_profile(
+                profiles_descriptor, profile, provider_key, policy_runtime_token, ingress_key
+            )
 
         current_refs = {str(profile["hermes_profile_ref"]) for profile in bundle["profiles"]}
         previous_refs = set()

@@ -30,6 +30,9 @@ export async function loadReviewedToolBinding(db: Database, publicToolName: stri
       "mcp_server_versions.status as server_status",
     ])
     .where("mcp_tool_bindings.public_tool_name", "=", publicToolName)
+    .where("mcp_tool_bindings.status", "=", "reviewed")
+    .where("capability_versions.status", "=", "reviewed")
+    .where("mcp_server_versions.status", "=", "reviewed")
     .executeTakeFirst();
   if (row === undefined) return undefined;
   const server = validateReviewedServerVersion({

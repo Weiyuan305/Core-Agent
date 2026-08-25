@@ -5,11 +5,13 @@ import { sql, type Kysely } from "kysely";
 import Schema from "typebox/schema";
 
 import type { RuntimeDatabase } from "../../db/database.js";
+import { withDatabaseTransactionRetry } from "../../db/transaction-retry.js";
+import { DomainError } from "../../domain/idempotency.js";
 import type { McpInvocationPort } from "../../policy/mcp-invocation-port.js";
-import { canonicalizeToolArguments } from "../../policy/canonical-json.js";
 import { recordRequestedToolCall, transitionToolCall } from "../../repositories/policy/tool-calls.js";
-import { consumeExecutionProof } from "./consume-execution-proof.js";
+import { consumeExecutionProofInTransaction } from "./consume-execution-proof.js";
 import type { PolicyProofKey } from "./proof-crypto.js";
+import type { PolicyRuntimeIdentity } from "./session-authority.js";
 
 const resultValidator = Schema.Compile(GatewayToolResultSchema);
 const safeFailure = (): GatewayToolResult => ({ content: [{ type: "text", text: "Tool invocation was unavailable." }], isError: true });
@@ -21,42 +23,45 @@ export interface InvokeAuthorizedToolDependencies {
 }
 
 export async function invokeAuthorizedTool(dependencies: InvokeAuthorizedToolDependencies, input: {
-  readonly tenantId: string; readonly toolName: string; readonly proof: unknown;
+  readonly identity: PolicyRuntimeIdentity; readonly policySessionId: string; readonly toolName: string; readonly proof: unknown;
   readonly arguments: unknown; readonly signal?: AbortSignal;
 }): Promise<GatewayToolResult> {
-  const consumed = await consumeExecutionProof(dependencies, {
-    tenantId: input.tenantId, proof: input.proof, toolName: input.toolName, arguments: input.arguments,
+  const mcpToolCallId = `mcp-call-${randomUUID()}`;
+  const consumed = await withDatabaseTransactionRetry(dependencies.db, async (trx) => {
+    const result = await consumeExecutionProofInTransaction(trx, dependencies.proofKey, {
+      identity: input.identity, policySessionId: input.policySessionId, proof: input.proof,
+      toolName: input.toolName, arguments: input.arguments,
+    });
+    if (!result.allowed) return result;
+    const now = (await sql<{ now: Date }>`select clock_timestamp() as now`.execute(trx)).rows[0]!.now;
+    await recordRequestedToolCall(trx, {
+      tenantId: input.identity.tenantId, mcpToolCallId, policySessionId: result.session.policy_session_id,
+      decisionId: result.decisionId, proofId: result.proofId, bindingId: result.binding.mcpToolBindingId,
+      toolCallId: result.toolCallId, toolName: input.toolName, argumentsHash: result.argumentsHash,
+      now, runId: result.session.run_id, profileId: result.session.profile_id, requestId: result.session.request_id,
+      traceId: result.session.trace_id, correlationId: result.session.correlation_id,
+    });
+    return result;
   });
   if (!consumed.allowed) return { content: [{ type: "text", text: consumed.reason }], isError: true };
-  const facts = await dependencies.db.transaction().execute(async (trx) => {
-    const now = (await sql<{ now: Date }>`select clock_timestamp() as now`.execute(trx)).rows[0]!.now;
-    const session = await trx.selectFrom("policy_sessions").selectAll().where("tenant_id", "=", input.tenantId)
-      .where("policy_session_id", "=", consumed.policySessionId)
-      .executeTakeFirstOrThrow();
-    const membership = await trx.selectFrom("memberships").select("roles").where("tenant_id", "=", input.tenantId)
-      .where("membership_id", "=", session.membership_id).executeTakeFirstOrThrow();
-    const effectiveRole = (["admin", "consultant", "student"] as const).find((role) => membership.roles.includes(role)) ?? "student";
-    const mcpToolCallId = `mcp-call-${randomUUID()}`;
-    await recordRequestedToolCall(trx, {
-      tenantId: input.tenantId, mcpToolCallId, policySessionId: session.policy_session_id,
-      decisionId: consumed.decisionId, proofId: consumed.proofId, bindingId: consumed.binding.mcpToolBindingId,
-      toolCallId: consumed.toolCallId, toolName: input.toolName, argumentsHash: canonicalizeToolArguments(input.arguments).hash,
-      now, runId: session.run_id, profileId: session.profile_id, requestId: session.request_id,
-      traceId: session.trace_id, correlationId: session.correlation_id,
-    });
-    return { session, effectiveRole, mcpToolCallId };
-  });
+  const facts = { session: consumed.session, effectiveRole: consumed.effectiveRole, mcpToolCallId };
   const transition = async (from: "requested" | "started", to: "started" | "succeeded" | "failed", reason: string | null, summary: string | null) => dependencies.db.transaction().execute(async (trx) => {
     const now = (await sql<{ now: Date }>`select clock_timestamp() as now`.execute(trx)).rows[0]!.now;
     return transitionToolCall(trx, {
-      tenantId: input.tenantId, mcpToolCallId: facts.mcpToolCallId, from, to, now, reasonCode: reason, summary,
+      tenantId: input.identity.tenantId, mcpToolCallId: facts.mcpToolCallId, from, to, now, reasonCode: reason, summary,
       runId: facts.session.run_id, profileId: facts.session.profile_id, actorId: facts.session.actor_id,
       membershipId: facts.session.membership_id, effectiveRole: facts.effectiveRole, requestId: facts.session.request_id,
       traceId: facts.session.trace_id, correlationId: facts.session.correlation_id, toolCallId: consumed.toolCallId,
       toolName: input.toolName, policyVersion: facts.session.policy_version_id,
+      entitlementSnapshotRef: {
+        snapshot_id: facts.session.snapshot_id, version: Number(facts.session.snapshot_version),
+        evaluated_at: facts.session.snapshot_evaluated_at.toISOString(),
+      },
     });
   });
-  await transition("requested", "started", null, null);
+  if (!await transition("requested", "started", null, null)) {
+    throw new DomainError("INTERNAL_ERROR", "MCP Tool call start transition was rejected");
+  }
   try {
     const result = await dependencies.invocationPort.invoke({
       binding: consumed.binding, arguments: consumed.arguments, requestId: facts.session.request_id,
@@ -64,13 +69,20 @@ export async function invokeAuthorizedTool(dependencies: InvokeAuthorizedToolDep
       ...(input.signal === undefined ? {} : { signal: input.signal }),
     });
     if (!resultValidator.Check(result)) {
-      await transition("started", "failed", "DOWNSTREAM_CONTRACT_INVALID", "Downstream result did not satisfy the reviewed contract");
+      if (!await transition("started", "failed", "DOWNSTREAM_CONTRACT_INVALID", "Downstream result did not satisfy the reviewed contract")) {
+        throw new DomainError("INTERNAL_ERROR", "MCP Tool call terminal transition was rejected");
+      }
       return safeFailure();
     }
-    await transition("started", "succeeded", null, "Read-only Tool invocation succeeded");
+    if (!await transition("started", "succeeded", null, "Read-only Tool invocation succeeded")) {
+      throw new DomainError("INTERNAL_ERROR", "MCP Tool call terminal transition was rejected");
+    }
     return result;
-  } catch {
-    await transition("started", "failed", "DOWNSTREAM_UNAVAILABLE", "Read-only Tool invocation was unavailable");
+  } catch (error) {
+    if (error instanceof DomainError) throw error;
+    if (!await transition("started", "failed", "DOWNSTREAM_UNAVAILABLE", "Read-only Tool invocation was unavailable")) {
+      throw new DomainError("INTERNAL_ERROR", "MCP Tool call failure transition was rejected");
+    }
     return safeFailure();
   }
 }

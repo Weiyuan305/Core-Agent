@@ -293,7 +293,7 @@ const PolicySessionClosedEventSchema = createEventBranch("policy_session.closed"
   policy_session_id: OpaqueIdSchema,
   run_id: OpaqueIdSchema,
   policy_version: Type.Literal("core-agent-read-mcp-v1"),
-  state: Type.Literal("closed"),
+  state: Type.Union([Type.Literal("closed"), Type.Literal("expired")]),
   resource_version: ResourceVersionSchema,
 });
 const PolicyDecisionRecordedEventSchema = createEventBranch("policy.decision_recorded", {

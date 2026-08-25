@@ -13,7 +13,7 @@ import {
   writeFile
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 const initializer = new URL("../../infra/hermes/runtime/initialize.py", import.meta.url).pathname;
@@ -27,6 +27,7 @@ function profile(overrides = {}) {
     provider_base_url: "https://tokenhub.infplacex.com/v1/chat/completions",
     model_id: "cywx/gpt-5.6-sol",
     provider_secret_file: "",
+    policy_runtime_secret_file: "",
     ...overrides
   };
 }
@@ -38,7 +39,11 @@ function bundle(profiles, overrides = {}) {
     runtime_id: "runtime_synthetic",
     generation: 1,
     image_ref: `core-agent/hermes-runtime@sha256:${"a".repeat(64)}`,
-    profiles,
+    profiles: profiles.map((declaredProfile) => ({
+      ...declaredProfile,
+      policy_runtime_secret_file: declaredProfile.policy_runtime_secret_file
+        || join(dirname(declaredProfile.provider_secret_file), "policy_runtime")
+    })),
     ...overrides
   };
 }
@@ -55,6 +60,7 @@ async function harness(t) {
   await mkdir(dataRoot, { mode: 0o700 });
   await mkdir(secretRoot, { mode: 0o700 });
   await writeFile(join(secretRoot, "hermes_ingress"), "sentinel-ingress-key-0123456789", { mode: 0o600 });
+  await writeFile(join(secretRoot, "policy_runtime"), "sentinel-policy-runtime-0123456789", { mode: 0o600 });
   const fakeHermes = join(bin, "hermes");
   await writeFile(fakeHermes, `#!/usr/bin/env node
 import { appendFileSync, existsSync } from "node:fs";
@@ -213,6 +219,7 @@ test("initializer creates sorted profiles, exact env projections, and an idempot
     assert.equal(await readFile(environmentPath, "utf8"), [
       `CORE_AGENT_PROVIDER_API_KEY=${secret}`,
       "API_SERVER_KEY=sentinel-ingress-key-0123456789",
+      "CORE_AGENT_POLICY_RUNTIME_TOKEN=sentinel-policy-runtime-0123456789",
       ""
     ].join("\n"));
     const configurationPath = join(paths.dataRoot, "profiles", profileRef, "config.yaml");
@@ -229,7 +236,7 @@ test("initializer creates sorted profiles, exact env projections, and an idempot
           skip_preflight: true,
           strict_redirect_headers: true,
           timeout: 30,
-          url: "http://policy-mcp-gateway:8787/mcp"
+          url: "http://policy-gateway-ingress:8787/mcp"
         }
       },
       model: {
@@ -258,7 +265,7 @@ test("initializer creates sorted profiles, exact env projections, and an idempot
     { profile_id: "profile_a", hermes_profile_ref: "consultant-a" },
     { profile_id: "profile_b", hermes_profile_ref: "consultant-b" }
   ]);
-  assert.doesNotMatch(manifestText, /sentinel-secret|sentinel-ingress|provider_secret_file|OPENAI_API_KEY|API_SERVER_KEY/);
+  assert.doesNotMatch(manifestText, /sentinel-secret|sentinel-ingress|sentinel-policy|provider_secret_file|policy_runtime_secret_file|OPENAI_API_KEY|CORE_AGENT_POLICY_RUNTIME_TOKEN|API_SERVER_KEY/);
 
   const before = await stat(paths.manifestPath);
   const second = runInitializer(paths);

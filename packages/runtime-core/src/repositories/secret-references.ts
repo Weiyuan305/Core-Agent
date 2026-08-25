@@ -10,7 +10,7 @@ import { repositoryContext, safeContractInteger, type TenantRepositoryContext } 
 export const secretReferenceStatuses = ["active", "rotated", "revoked"] as const;
 export type SecretReferenceStatus = (typeof secretReferenceStatuses)[number];
 type StoredSecretPurpose = "provider_credential" | "integration" | "bootstrap";
-type StoredPublicSecretPurpose = Exclude<SecretPurpose, "identity_signing">;
+type StoredPublicSecretPurpose = Exclude<SecretPurpose, "identity_signing" | "policy_runtime" | "policy_plugin">;
 
 const storedPurposeByPublicPurpose: Readonly<Record<StoredPublicSecretPurpose, StoredSecretPurpose>> = {
   model_provider: "provider_credential",

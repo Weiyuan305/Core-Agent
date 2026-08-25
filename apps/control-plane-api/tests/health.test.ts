@@ -334,6 +334,8 @@ test("every DomainError maps to its exact non-leaking ErrorEnvelope status", () 
     RESOURCE_VERSION_CONFLICT: [409, "conflict"],
     CAPABILITY_CONFLICT: [409, "conflict"],
     ENTITLEMENT_DENIED: [403, "authorization"],
+    POLICY_DENIED: [403, "authorization"],
+    TOOL_UNAVAILABLE: [503, "unavailable"],
     SEAT_EXHAUSTED: [409, "conflict"],
     SERVICE_PREPARING: [503, "unavailable"],
     INVALID_STATE_TRANSITION: [409, "conflict"],

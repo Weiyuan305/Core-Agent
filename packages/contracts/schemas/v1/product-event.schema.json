@@ -3702,8 +3702,16 @@
                   "type": "string"
                 },
                 "state": {
-                  "const": "closed",
-                  "type": "string"
+                  "anyOf": [
+                    {
+                      "const": "closed",
+                      "type": "string"
+                    },
+                    {
+                      "const": "expired",
+                      "type": "string"
+                    }
+                  ]
                 }
               },
               "required": [

@@ -77,20 +77,20 @@ HTTP JSON-RPC, existing Docker/Supervisor protocol, Node test runner.
 - Create: `packages/contracts/tests/mcp-gateway.test.ts`
 - Modify: contract release, compatibility, schema, README, and changelog files
 
-- [ ] Write RED tests for exact closed session open/close, decision request/result,
+- [x] Write RED tests for exact closed session open/close, decision request/result,
   MCP tool descriptor, safe Tool result, and closed reason-code schemas.
-- [ ] Prove all resources reject additional fields, accessors, invalid IDs, unsorted
+- [x] Prove all resources reject additional fields, accessors, invalid IDs, unsorted
   arrays, raw endpoint/credential/proof fields in safe summaries, and unsupported
   risk/approval branches.
-- [ ] Add ProductEvent branches for policy session and decision lifecycle containing
+- [x] Add ProductEvent branches for policy session and decision lifecycle containing
   IDs, versions, decision, safe reason, and resource version only.
-- [ ] Run focused contract tests and record the expected missing-export failure.
-- [ ] Implement schemas with TypeBox, export them, register every top-level schema,
+- [x] Run focused contract tests and record the expected missing-export failure.
+- [x] Implement schemas with TypeBox, export them, register every top-level schema,
   and add stable safe errors `POLICY_DENIED` and `TOOL_UNAVAILABLE`.
-- [ ] Publish additive immutable 0.9.0 compatibility artifacts without changing
+- [x] Publish additive immutable 0.9.0 compatibility artifacts without changing
   historical 0.2.0-0.8.0 bytes.
-- [ ] Run `npm run contracts:check` under Node 22.13.0.
-- [ ] Commit: `feat(contracts): add policy mcp gateway protocol`
+- [x] Run `npm run contracts:check` under Node 22.13.0.
+- [x] Commit: `feat(contracts): add policy mcp gateway protocol`
 
 ### Task 2: Add schema 16 storage and state constraints
 
@@ -103,21 +103,21 @@ HTTP JSON-RPC, existing Docker/Supervisor protocol, Node test runner.
 - Create: `packages/runtime-core/tests/policy-mcp-schema.test.ts`
 - Modify: `packages/runtime-core/tests/migrations.test.ts`
 
-- [ ] Write RED migration tests for empty-to-16 and 15-to-16 upgrades, exact tables,
+- [x] Write RED migration tests for empty-to-16 and 15-to-16 upgrades, exact tables,
   indexes, foreign keys, check constraints, and schema version.
-- [ ] Add global `policy_versions`, `mcp_server_versions`, and `mcp_tool_bindings`.
+- [x] Add global `policy_versions`, `mcp_server_versions`, and `mcp_tool_bindings`.
   Published/reviewed rows are immutable and bounded; tool bindings reference one exact
   reviewed Capability Version and one exact server version.
-- [ ] Add tenant-scoped `policy_sessions`, `policy_decisions`,
+- [x] Add tenant-scoped `policy_sessions`, `policy_decisions`,
   `policy_execution_proofs`, and `mcp_tool_calls` with composite Tenant foreign keys.
-- [ ] Enforce unique active `(runtime_container_id, hermes_session_ref)`, unique
+- [x] Enforce unique active `(runtime_container_id, hermes_session_ref)`, unique
   decision `(policy_session_id, tool_call_id)`, proof digest, one-way state
   vocabularies, database-clock expiry, and bounded safe summaries.
-- [ ] Add named immutable/history triggers and deny direct terminal-state rewrites
+- [x] Add named immutable/history triggers and deny direct terminal-state rewrites
   outside the expected service transitions.
-- [ ] Add Kysely row types without representing proof plaintext or raw arguments.
-- [ ] Run Runtime Core migration/unit checks on PostgreSQL 17.
-- [ ] Commit: `feat(runtime): add policy mcp authority schema`
+- [x] Add Kysely row types without representing proof plaintext or raw arguments.
+- [x] Run Runtime Core migration/unit checks on PostgreSQL 17.
+- [x] Commit: `feat(runtime): add policy mcp authority schema`
 
 ### Task 3: Bootstrap immutable policy and reviewed synthetic bindings
 
@@ -131,20 +131,20 @@ HTTP JSON-RPC, existing Docker/Supervisor protocol, Node test runner.
 - Create: `scripts/bootstrap-policy-mcp.mjs`
 - Create: corresponding Runtime Core and script tests
 
-- [ ] Write RED tests for the canonical built-in rule document/hash and synthetic
+- [x] Write RED tests for the canonical built-in rule document/hash and synthetic
   server/tool binding.
-- [ ] Reject mutable versions, public/loopback/arbitrary origins, redirects, unknown
+- [x] Reject mutable versions, public/loopback/arbitrary origins, redirects, unknown
   protocols, remote schema references, open object schemas, duplicate names,
   capability mismatch, and every non-MCP/read/none Capability.
-- [ ] Implement a bounded JSON-schema subset for reviewed object inputs: string,
+- [x] Implement a bounded JSON-schema subset for reviewed object inputs: string,
   number, integer, boolean, null, arrays, nested closed objects, enum, const, required,
   min/max length/items/value; no `$ref`, format callbacks, defaults, coercion, or code.
-- [ ] Bootstrap idempotently through exact hashes. Identical replay succeeds;
+- [x] Bootstrap idempotently through exact hashes. Identical replay succeeds;
   same identity with different facts conflicts. Store only an opaque credential ref.
-- [ ] Provide one disabled-by-default synthetic tool `core_agent.synthetic_profile`
+- [x] Provide one disabled-by-default synthetic tool `core_agent.synthetic_profile`
   with a simple closed input and output contract. No customer content.
-- [ ] Run focused unit and PostgreSQL catalog tests.
-- [ ] Commit: `feat(policy): add reviewed read mcp catalog`
+- [x] Run focused unit and PostgreSQL catalog tests.
+- [x] Commit: `feat(policy): add reviewed read mcp catalog`
 
 ### Task 4: Implement canonical arguments and the pure policy evaluator
 
@@ -155,17 +155,17 @@ HTTP JSON-RPC, existing Docker/Supervisor protocol, Node test runner.
 - Create: `packages/runtime-core/src/policy/evaluate-read-mcp.ts`
 - Create: focused unit and adversarial security tests
 
-- [ ] Write RED table tests for every allow predicate and each closed denial reason.
-- [ ] Reject non-plain values, accessors, unsupported prototypes, non-finite numbers,
+- [x] Write RED table tests for every allow predicate and each closed denial reason.
+- [x] Reject non-plain values, accessors, unsupported prototypes, non-finite numbers,
   duplicate parsed keys at the HTTP boundary, reserved proof fields, excessive bytes,
   depth, nodes, properties, arrays, or strings.
-- [ ] Produce a versioned deterministic canonical JSON byte sequence and SHA-256 hash;
+- [x] Produce a versioned deterministic canonical JSON byte sequence and SHA-256 hash;
   prove object-key order does not change the hash and semantic changes do.
-- [ ] Implement the evaluator as a pure function over explicit current-authority,
+- [x] Implement the evaluator as a pure function over explicit current-authority,
   Capability, binding, session, and argument facts. Unknown fields/branches deny.
-- [ ] Prove no evaluator output includes arguments, endpoint, credential, or exception.
-- [ ] Run focused tests and `git diff --check`.
-- [ ] Commit: `feat(policy): enforce read mcp decisions`
+- [x] Prove no evaluator output includes arguments, endpoint, credential, or exception.
+- [x] Run focused tests and `git diff --check`.
+- [x] Commit: `feat(policy): enforce read mcp decisions`
 
 ### Task 5: Implement session admission, decisions, and single-use proofs
 
@@ -180,20 +180,20 @@ HTTP JSON-RPC, existing Docker/Supervisor protocol, Node test runner.
 - Create: `packages/runtime-core/src/services/policy/consume-execution-proof.ts`
 - Create: PostgreSQL integration and concurrency tests
 
-- [ ] Write RED admission tests for signature/audience/issuer/TTL, exact Run/Session/
+- [x] Write RED admission tests for signature/audience/issuer/TTL, exact Run/Session/
   Runtime/Snapshot linkage, idempotency, and conflict reuse.
-- [ ] Open sessions only after `requireCurrentSnapshotAuthority` and current identity,
+- [x] Open sessions only after `requireCurrentSnapshotAuthority` and current identity,
   session, run, and runtime-generation checks. Use database time for expiry.
-- [ ] Issue 32-byte random opaque proofs; store only an HMAC-SHA-256 digest using a
+- [x] Issue 32-byte random opaque proofs; store only an HMAC-SHA-256 digest using a
   Gateway-only key material interface. Bind all exact facts and cap TTL at 30 seconds.
-- [ ] Make an identical unconsumed decision idempotent; deny changed arguments/tool,
+- [x] Make an identical unconsumed decision idempotent; deny changed arguments/tool,
   duplicate tool-call ID with changed facts, and already-consumed replay.
-- [ ] Consume under `SELECT ... FOR UPDATE`, recheck current authority in the same
+- [x] Consume under `SELECT ... FOR UPDATE`, recheck current authority in the same
   transaction, mark used once, and invalidate on close/currentness change.
-- [ ] Run two concurrent consumers against real PostgreSQL and prove exactly one wins.
-- [ ] Prove tables, audit, errors, and captured logs never contain proof plaintext or
+- [x] Run two concurrent consumers against real PostgreSQL and prove exactly one wins.
+- [x] Prove tables, audit, errors, and captured logs never contain proof plaintext or
   raw arguments.
-- [ ] Commit: `feat(policy): add run bound execution proofs`
+- [x] Commit: `feat(policy): add run bound execution proofs`
 
 ### Task 6: Implement audited read-only downstream invocation
 
@@ -206,19 +206,19 @@ HTTP JSON-RPC, existing Docker/Supervisor protocol, Node test runner.
 - Modify: event/audit transaction helpers as needed
 - Create: deterministic adapter and lifecycle tests
 
-- [ ] Write RED tests for sorted authorized listing, proof stripping, exact downstream
+- [x] Write RED tests for sorted authorized listing, proof stripping, exact downstream
   binding selection, requested/started/terminal transitions, and bounded result.
-- [ ] Define an injected invocation port that accepts only platform-selected immutable
+- [x] Define an injected invocation port that accepts only platform-selected immutable
   binding facts, validated arguments, safe trace identifiers, timeout, and abort
   signal. It cannot accept caller-supplied origin or credentials.
-- [ ] Implement the deterministic synthetic adapter and an unavailable production
+- [x] Implement the deterministic synthetic adapter and an unavailable production
   adapter. v1 readiness denies if a non-synthetic remote adapter is requested.
-- [ ] Emit Tool ProductEvents and AuditEvents transactionally with IDs/hashes/safe
+- [x] Emit Tool ProductEvents and AuditEvents transactionally with IDs/hashes/safe
   reasons only. Record exactly one terminal call outcome.
-- [ ] Map timeout, adapter, response-contract, and internal errors to calm stable
+- [x] Map timeout, adapter, response-contract, and internal errors to calm stable
   failures; never return or log raw exceptions.
-- [ ] Run unit and PostgreSQL lifecycle tests.
-- [ ] Commit: `feat(policy): add audited mcp invocation boundary`
+- [x] Run unit and PostgreSQL lifecycle tests.
+- [x] Commit: `feat(policy): add audited mcp invocation boundary`
 
 ### Task 7: Build the private Policy/MCP Gateway application
 
@@ -231,21 +231,21 @@ HTTP JSON-RPC, existing Docker/Supervisor protocol, Node test runner.
 - Create: Gateway HTTP, MCP, and security tests
 - Modify: root workspace scripts and lockfile
 
-- [ ] Write RED HTTP tests for exact private auth, content type, body/header limits,
+- [x] Write RED HTTP tests for exact private auth, content type, body/header limits,
   no CORS/cookies/forwarded identity, unknown routes, and safe error envelopes.
-- [ ] Write RED MCP exchange: `initialize`, initialized notification, `tools/list`,
+- [x] Write RED MCP exchange: `initialize`, initialized notification, `tools/list`,
   decision, proof-injected `tools/call`, and synthetic text result.
-- [ ] Implement the Streamable HTTP JSON-RPC subset negotiated by vendored Hermes:
+- [x] Implement the Streamable HTTP JSON-RPC subset negotiated by vendored Hermes:
   protocol version `2025-03-26`, JSON response mode, `Mcp-Session-Id`, and only the
   allowed methods. Reject batches and unsupported server capabilities.
-- [ ] Require three separate authentication audiences: Worker session routes, Runtime
+- [x] Require three separate authentication audiences: Worker session routes, Runtime
   MCP route, and plugin decision route. Compare bounded secrets in constant time.
-- [ ] Make `/health` liveness-only and `/ready` prove schema 16, built-in policy hash,
+- [x] Make `/health` liveness-only and `/ready` prove schema 16, built-in policy hash,
   binding bootstrap, proof key, and adapter mode.
-- [ ] Test malformed JSON/duplicate keys, oversized input, forged identity, protocol
+- [x] Test malformed JSON/duplicate keys, oversized input, forged identity, protocol
   mismatch, unknown method, changed arguments, no proof, replay, and safe logs.
-- [ ] Add the app to root `check`, unit, build, and integration commands.
-- [ ] Commit: `feat(gateway): add private policy mcp service`
+- [x] Add the app to root `check`, unit, build, and integration commands.
+- [x] Commit: `feat(gateway): add private policy mcp service`
 
 ### Task 8: Add the fail-closed Hermes Policy Plugin
 
@@ -258,20 +258,20 @@ HTTP JSON-RPC, existing Docker/Supervisor protocol, Node test runner.
 - Modify: `infra/hermes/managed/config.yaml`
 - Modify: managed-image/runtime verification tests
 
-- [ ] Write RED Python tests with a real plugin context for allow, denial, timeout,
+- [x] Write RED Python tests with a real plugin context for allow, denial, timeout,
   malformed JSON, missing config, exception, non-Gateway tool, reserved input, and
   proof overwrite.
-- [ ] Register only `pre_tool_call`. Read the fixed Gateway origin and Runtime identity
+- [x] Register only `pre_tool_call`. Read the fixed Gateway origin and Runtime identity
   secret from platform-projected environment/file, never hook arguments or Profile.
-- [ ] Use a short bounded standard-library HTTP request. On every failure return
+- [x] Use a short bounded standard-library HTTP request. On every failure return
   `block`; on allow return `modify` with an exact copied argument object and reserved
   proof.
-- [ ] Redact proof, arguments, body, headers, and raw exceptions from logs/messages.
-- [ ] Copy the standalone plugin into the product image, enable only it, and configure
+- [x] Redact proof, arguments, body, headers, and raw exceptions from logs/messages.
+- [x] Copy the standalone plugin into the product image, enable only it, and configure
   exactly one `core_agent_gateway` HTTP MCP server with active Profile identity.
-- [ ] Prove the upstream Hermes source lock/tree is unchanged.
-- [ ] Run Python plugin tests and managed-image/config tests.
-- [ ] Commit: `feat(hermes): add core agent policy plugin`
+- [x] Prove the upstream Hermes source lock/tree is unchanged.
+- [x] Run Python plugin tests and managed-image/config tests.
+- [x] Commit: `feat(hermes): add core agent policy plugin`
 
 ### Task 9: Bind Worker Run execution to policy sessions
 
@@ -282,18 +282,18 @@ HTTP JSON-RPC, existing Docker/Supervisor protocol, Node test runner.
 - Modify: `apps/control-plane-worker/src/handlers/execute-agent-run.ts`
 - Modify: Worker configuration and tests
 
-- [ ] Write RED tests proving a policy-enabled Run opens exactly one session after
+- [x] Write RED tests proving a policy-enabled Run opens exactly one session after
   current authority succeeds and before Hermes receives content.
-- [ ] Project exact signed Trusted Context, Run/Conversation/Core Session/Hermes
+- [x] Project exact signed Trusted Context, Run/Conversation/Core Session/Hermes
   session, Runtime generation, and trace facts through a bounded private client.
-- [ ] Always attempt close after terminal persistence; retries are idempotent. If open
+- [x] Always attempt close after terminal persistence; retries are idempotent. If open
   fails, do not enter Hermes. If close fails, terminal Run remains correct and expiry
   protects future calls while a bounded cleanup job retries.
-- [ ] Keep policy-disabled/model-only Runs byte-compatible and do not create sessions.
-- [ ] Ensure cancellation and crash recovery cannot reuse an active Hermes session for
+- [x] Keep policy-disabled/model-only Runs byte-compatible and do not create sessions.
+- [x] Ensure cancellation and crash recovery cannot reuse an active Hermes session for
   another Run.
-- [ ] Run Worker and execute-run integration tests.
-- [ ] Commit: `feat(worker): bind runs to policy sessions`
+- [x] Run Worker and execute-run integration tests.
+- [x] Commit: `feat(worker): bind runs to policy sessions`
 
 ### Task 10: Project Gateway topology and per-Runtime identity
 
@@ -306,20 +306,20 @@ HTTP JSON-RPC, existing Docker/Supervisor protocol, Node test runner.
 - Modify: runtime-network/path/secret preparation and tests
 - Modify: product initializer/entrypoint only where projection requires it
 
-- [ ] Write RED exact-inspection tests for the added `core-agent-backplane` endpoint,
+- [x] Write RED exact-inspection tests for the added `core-agent-backplane` endpoint,
   Gateway identity read-only mount, fixed non-secret origin, and absence of database,
   Worker, downstream, or control-plane credentials.
-- [ ] Add a least-privilege Gateway service on the control network and a narrow ingress
+- [x] Add a least-privilege Gateway service on the control network and a narrow ingress
   proxy on control plus backplane; do not publish the ingress on the host.
-- [ ] Generate/rotate one per-Runtime identity through the existing secret-reference
+- [x] Generate/rotate one per-Runtime identity through the existing secret-reference
   boundary and mount it read-only to the managed Runtime. The Supervisor never returns
   its value through API inspection.
-- [ ] Update exact container/network validation and rollback cleanup. Preserve private
+- [x] Update exact container/network validation and rollback cleanup. Preserve private
   Tenant network and controlled provider egress behavior.
-- [ ] Configure Gateway health/readiness, non-root UID, read-only filesystem, dropped
+- [x] Configure Gateway health/readiness, non-root UID, read-only filesystem, dropped
   capabilities, bounded CPU/memory/PIDs, tmpfs, and no Docker socket.
-- [ ] Run Supervisor unit, runtime topology, compose semantic, and secret-scan tests.
-- [ ] Commit: `feat(runtime): route hermes through policy gateway`
+- [x] Run Supervisor unit, runtime topology, compose semantic, and secret-scan tests.
+- [x] Commit: `feat(runtime): route hermes through policy gateway`
 
 ### Task 11: Add end-to-end deterministic acceptance and adversarial security tests
 
@@ -331,22 +331,22 @@ HTTP JSON-RPC, existing Docker/Supervisor protocol, Node test runner.
 - Create: security fixtures/reports under ignored acceptance output
 - Modify: root scripts and CI-equivalent runtime tests
 
-- [ ] Start a real temporary PostgreSQL 17 instance, migrate empty-to-16, bootstrap a
+- [x] Start a real temporary PostgreSQL 17 instance, migrate empty-to-16, bootstrap a
   synthetic Tenant/Profile/Entitlement/Snapshot/Runtime/Run and reviewed synthetic
   binding, then start the real Gateway HTTP server.
-- [ ] Complete initialize/list/decision/call and verify a genuine synthetic read
+- [x] Complete initialize/list/decision/call and verify a genuine synthetic read
   response, persisted consumed proof, Tool event sequence, AuditEvent, and closed
   policy session.
-- [ ] In the same acceptance attempt wrong Tenant/Profile/Runtime, stale Snapshot,
+- [x] In the same acceptance attempt wrong Tenant/Profile/Runtime, stale Snapshot,
   revoked Entitlement, blocked binding, unknown tool, reserved injection, altered
   arguments, expired proof, concurrent replay, unsupported method, and oversized
   request; prove each denies without leaking existence or input.
-- [ ] Execute the real Python plugin against the live local Gateway for allow and deny.
-- [ ] Add an opt-in managed Runtime driver that uses the locked product image and
+- [x] Execute the real Python plugin against the live local Gateway for allow and deny.
+- [x] Add an opt-in managed Runtime driver that uses the locked product image and
   reports `PASS`, `FAIL`, or `NOT_RUN` with a reason. Never turn missing Docker into
   deterministic `PASS`.
-- [ ] Run deterministic acceptance twice to prove idempotent bootstrap and cleanup.
-- [ ] Commit: `test: accept policy mcp gateway end to end`
+- [x] Run deterministic acceptance twice to prove idempotent bootstrap and cleanup.
+- [x] Commit: `test: accept policy mcp gateway end to end`
 
 ### Task 12: Finish CI, operations, rollback, and review
 
@@ -356,13 +356,13 @@ HTTP JSON-RPC, existing Docker/Supervisor protocol, Node test runner.
 - Modify: `README.md`, `.env.example`, CI workflows, runtime docs, and design status
 - Create/update: acceptance report template and compatibility evidence
 
-- [ ] Document prerequisites, secret files, bootstrap, start order, readiness, safe
+- [x] Document prerequisites, secret files, bootstrap, start order, readiness, safe
   synthetic canary, audit queries, revocation drill, proof replay drill, rotation,
   backup, rollback, and explicit out-of-scope boundaries.
-- [ ] Add CI gates for contracts, Gateway, Python plugin, PostgreSQL concurrency,
+- [x] Add CI gates for contracts, Gateway, Python plugin, PostgreSQL concurrency,
   deterministic end-to-end, Runtime semantics, source-lock verification, secret scan,
   and `git diff --check`.
-- [ ] Run exact Node 22.13.0 gates:
+- [x] Run exact Node 22.13.0 gates:
 
   ```bash
   npm exec --yes --package=node@22.13.0 -- npm run check
@@ -371,16 +371,16 @@ HTTP JSON-RPC, existing Docker/Supervisor protocol, Node test runner.
   npm exec --yes --package=node@22.13.0 -- npm run test:integration
   npm exec --yes --package=node@22.13.0 -- npm run accept:policy-mcp-gateway
   npm exec --yes --package=node@22.13.0 -- npm audit --omit=dev
-  npm exec --yes --package=node@22.13.0 -- node scripts/verify-no-secret.mjs
+  npm exec --yes --package=node@22.13.0 -- node scripts/verify-no-secret.mjs synthetic-policy-mcp-secret-sentinel-v1
   git diff --check
   ```
 
-- [ ] Run the opt-in local Runtime acceptance if a Docker-compatible daemon is
+- [x] Run the opt-in local Runtime acceptance if a Docker-compatible daemon is
   present; otherwise preserve explicit `NOT_RUN` evidence.
-- [ ] Review every branch against the spec, inspect changed-file scope, search for
+- [x] Review every branch against the spec, inspect changed-file scope, search for
   TODO/TBD/placeholders, verify no upstream Hermes change, and confirm no raw
   argument/proof/secret logging.
-- [ ] Update design status with exact deterministic and live Runtime evidence.
-- [ ] Commit: `docs: operate policy mcp gateway v1`
-- [ ] Confirm clean worktree and report exact commits, tests, limitations, and next
+- [x] Update design status with exact deterministic and live Runtime evidence.
+- [x] Commit: `docs: operate policy mcp gateway v1`
+- [x] Confirm clean worktree and report exact commits, tests, limitations, and next
   safe step. Do not push or create a PR until the user asks.

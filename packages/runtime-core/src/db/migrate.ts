@@ -138,7 +138,7 @@ const schemaManifestEntries = [
   [13, "entitlement_capability_authority", "b2bf71c90115f32ee7c2f8ac270fcc598b6cdae9a27168c64beaa3f681ba181d"],
   [14, "catalog_artifact_contract_parity", "f95542be7709937690c0f944bf71d2fa9b322fdcc3496fc7e5b63ca43ddb1fa6"],
   [15, "snapshot_recurrence", "f38bfbdd6015f7baf8d7e0e0ca29897a9e5996ce01b356c36f9fdb50294aacd2"],
-  [16, "policy_mcp_gateway", "27bc66823a8c0aef27284158f0760980b7b28bff12ae46f3a14839e65aaaaf61"],
+  [16, "policy_mcp_gateway", "5a8e4125beff580bfb8a231d2c6aa957437208fa6200b5976b893bf73ce3c758"],
 ] as const;
 
 const schemaManifests = new Map<number, SchemaManifest>(schemaManifestEntries.map(([version, name, checksum]) => [
@@ -1134,8 +1134,10 @@ const schema16Columns: readonly LegacyColumnShape[] = [
   ["policy_sessions", "policy_session_id", "text", true, ""],
   ["policy_sessions", "actor_id", "text", true, ""],
   ["policy_sessions", "membership_id", "text", true, ""],
+  ["policy_sessions", "effective_role", "text", true, ""],
   ["policy_sessions", "profile_id", "text", true, ""],
   ["policy_sessions", "session_id", "text", true, ""],
+  ["policy_sessions", "core_session_id", "text", true, ""],
   ["policy_sessions", "conversation_id", "text", true, ""],
   ["policy_sessions", "run_id", "text", true, ""],
   ["policy_sessions", "runtime_container_id", "text", true, ""],
@@ -1197,6 +1199,7 @@ const schema16Constraints: readonly LegacyConstraintShape[] = [
   ["mcp_tool_bindings", "mcp_tool_bindings_title_check", "c", true, "CHECK (char_length(title) >= 1 AND char_length(title) <= 200)"],
   ["mcp_tool_calls", "mcp_tool_calls_arguments_hash_check", "c", true, "CHECK (arguments_hash ~ '^sha256:[a-f0-9]{64}$'::text)"],
   ["mcp_tool_calls", "mcp_tool_calls_decision_fkey", "f", true, "FOREIGN KEY (tenant_id, decision_id) REFERENCES policy_decisions(tenant_id, decision_id)"],
+  ["mcp_tool_calls", "mcp_tool_calls_lifecycle_check", "c", true, "CHECK (status = 'requested'::text AND started_at IS NULL AND finished_at IS NULL AND reason_code IS NULL AND safe_result_summary IS NULL OR status = 'started'::text AND started_at IS NOT NULL AND started_at >= requested_at AND finished_at IS NULL AND reason_code IS NULL AND safe_result_summary IS NULL OR status = 'succeeded'::text AND started_at IS NOT NULL AND started_at >= requested_at AND finished_at IS NOT NULL AND finished_at >= started_at AND reason_code IS NULL OR status = 'failed'::text AND finished_at IS NOT NULL AND (started_at IS NULL OR started_at >= requested_at) AND finished_at >= COALESCE(started_at, requested_at) AND reason_code IS NOT NULL)"],
   ["mcp_tool_calls", "mcp_tool_calls_mcp_tool_binding_id_fkey", "f", true, "FOREIGN KEY (mcp_tool_binding_id) REFERENCES mcp_tool_bindings(mcp_tool_binding_id)"],
   ["mcp_tool_calls", "mcp_tool_calls_pkey", "p", true, "PRIMARY KEY (tenant_id, mcp_tool_call_id)"],
   ["mcp_tool_calls", "mcp_tool_calls_proof_fkey", "f", true, "FOREIGN KEY (tenant_id, proof_id) REFERENCES policy_execution_proofs(tenant_id, proof_id)"],
@@ -1223,9 +1226,11 @@ const schema16Constraints: readonly LegacyConstraintShape[] = [
   ["policy_execution_proofs", "policy_execution_proofs_proof_digest_key", "u", true, "UNIQUE (proof_digest)"],
   ["policy_execution_proofs", "policy_execution_proofs_resource_version_check", "c", true, "CHECK (resource_version > 0)"],
   ["policy_execution_proofs", "policy_execution_proofs_session_fkey", "f", true, "FOREIGN KEY (tenant_id, policy_session_id) REFERENCES policy_sessions(tenant_id, policy_session_id)"],
-  ["policy_execution_proofs", "policy_execution_proofs_state_check", "c", true, "CHECK (state = 'issued'::text AND consumed_at IS NULL AND invalidated_at IS NULL OR state = 'consumed'::text AND consumed_at IS NOT NULL AND invalidated_at IS NULL OR (state = ANY (ARRAY['invalidated'::text, 'expired'::text])) AND consumed_at IS NULL AND invalidated_at IS NOT NULL)"],
+  ["policy_execution_proofs", "policy_execution_proofs_state_check", "c", true, "CHECK (expires_at > created_at AND updated_at >= created_at AND (state = 'issued'::text AND consumed_at IS NULL AND invalidated_at IS NULL OR state = 'consumed'::text AND consumed_at IS NOT NULL AND invalidated_at IS NULL AND consumed_at >= created_at AND consumed_at <= expires_at AND updated_at >= consumed_at OR state = 'invalidated'::text AND consumed_at IS NULL AND invalidated_at IS NOT NULL AND invalidated_at >= created_at AND updated_at >= invalidated_at OR state = 'expired'::text AND consumed_at IS NULL AND invalidated_at IS NOT NULL AND invalidated_at >= expires_at AND updated_at >= invalidated_at))"],
   ["policy_sessions", "policy_sessions_close_reason_check", "c", true, "CHECK (close_reason IS NULL OR (close_reason = ANY (ARRAY['run_succeeded'::text, 'run_failed'::text, 'run_cancelled'::text, 'run_expired'::text, 'authority_changed'::text])))"],
   ["policy_sessions", "policy_sessions_conversation_fkey", "f", true, "FOREIGN KEY (tenant_id, conversation_id) REFERENCES conversations(tenant_id, conversation_id)"],
+  ["policy_sessions", "policy_sessions_core_session_fkey", "f", true, "FOREIGN KEY (core_session_id) REFERENCES core_sessions(session_id)"],
+  ["policy_sessions", "policy_sessions_effective_role_check", "c", true, "CHECK (effective_role = ANY (ARRAY['admin'::text, 'consultant'::text, 'student'::text]))"],
   ["policy_sessions", "policy_sessions_idempotency_key", "u", true, "UNIQUE (tenant_id, idempotency_key)"],
   ["policy_sessions", "policy_sessions_membership_fkey", "f", true, "FOREIGN KEY (tenant_id, membership_id, actor_id) REFERENCES memberships(tenant_id, membership_id, actor_id)"],
   ["policy_sessions", "policy_sessions_payload_hash_check", "c", true, "CHECK (payload_hash ~ '^sha256:[a-f0-9]{64}$'::text)"],
@@ -1240,7 +1245,7 @@ const schema16Constraints: readonly LegacyConstraintShape[] = [
   ["policy_sessions", "policy_sessions_session_fkey", "f", true, "FOREIGN KEY (tenant_id, session_id) REFERENCES sessions(tenant_id, session_id)"],
   ["policy_sessions", "policy_sessions_snapshot_fkey", "f", true, "FOREIGN KEY (tenant_id, profile_id, snapshot_id, snapshot_version, snapshot_evaluated_at) REFERENCES entitlement_snapshots(tenant_id, profile_id, snapshot_id, snapshot_version, evaluated_at)"],
   ["policy_sessions", "policy_sessions_snapshot_version_check", "c", true, "CHECK (snapshot_version > 0)"],
-  ["policy_sessions", "policy_sessions_state_check", "c", true, "CHECK (state = 'active'::text AND close_reason IS NULL AND closed_at IS NULL OR (state = ANY (ARRAY['closed'::text, 'expired'::text])) AND close_reason IS NOT NULL AND closed_at IS NOT NULL)"],
+  ["policy_sessions", "policy_sessions_state_check", "c", true, "CHECK (expires_at > created_at AND updated_at >= created_at AND (state = 'active'::text AND close_reason IS NULL AND closed_at IS NULL OR (state = ANY (ARRAY['closed'::text, 'expired'::text])) AND close_reason IS NOT NULL AND closed_at IS NOT NULL AND closed_at >= created_at AND updated_at >= closed_at))"],
   ["policy_sessions", "policy_sessions_state_value_check", "c", true, "CHECK (state = ANY (ARRAY['active'::text, 'closed'::text, 'expired'::text]))"],
   ["policy_versions", "policy_versions_identity_key", "u", true, "UNIQUE (policy_id, version)"],
   ["policy_versions", "policy_versions_pkey", "p", true, "PRIMARY KEY (policy_version_id)"],
@@ -1279,14 +1284,21 @@ const schema16Tables = [
   "policy_decisions", "policy_execution_proofs", "mcp_tool_calls",
 ] as const;
 
-const schema16Routine: RoutineShape = [
+const schema16CatalogRoutine: RoutineShape = [
   "f", "core_agent_enforce_policy_catalog_immutable", "", "trigger", false,
   ["search_path=pg_catalog, public"], "4aff16af25439e66b7fa4e2559c94544",
 ];
+const schema16TransitionRoutine: RoutineShape = [
+  "f", "core_agent_enforce_policy_state_transition", "", "trigger", false,
+  ["search_path=pg_catalog, public"], "8dbb0652e09d988ddc890579b6631b12",
+];
 
 const schema16Triggers = [
+  ["mcp_tool_calls", "mcp_tool_calls_transition", "O", "CREATE TRIGGER mcp_tool_calls_transition BEFORE INSERT OR DELETE OR UPDATE ON mcp_tool_calls FOR EACH ROW EXECUTE FUNCTION core_agent_enforce_policy_state_transition()"],
   ["mcp_server_versions", "mcp_server_versions_immutable", "O", "CREATE TRIGGER mcp_server_versions_immutable BEFORE DELETE OR UPDATE ON mcp_server_versions FOR EACH ROW EXECUTE FUNCTION core_agent_enforce_policy_catalog_immutable()"],
   ["mcp_tool_bindings", "mcp_tool_bindings_immutable", "O", "CREATE TRIGGER mcp_tool_bindings_immutable BEFORE DELETE OR UPDATE ON mcp_tool_bindings FOR EACH ROW EXECUTE FUNCTION core_agent_enforce_policy_catalog_immutable()"],
+  ["policy_execution_proofs", "policy_execution_proofs_transition", "O", "CREATE TRIGGER policy_execution_proofs_transition BEFORE INSERT OR DELETE OR UPDATE ON policy_execution_proofs FOR EACH ROW EXECUTE FUNCTION core_agent_enforce_policy_state_transition()"],
+  ["policy_sessions", "policy_sessions_transition", "O", "CREATE TRIGGER policy_sessions_transition BEFORE INSERT OR DELETE OR UPDATE ON policy_sessions FOR EACH ROW EXECUTE FUNCTION core_agent_enforce_policy_state_transition()"],
   ["policy_versions", "policy_versions_immutable", "O", "CREATE TRIGGER policy_versions_immutable BEFORE DELETE OR UPDATE ON policy_versions FOR EACH ROW EXECUTE FUNCTION core_agent_enforce_policy_catalog_immutable()"],
 ] as const;
 
@@ -1311,10 +1323,11 @@ schemaManifests.set(16, {
   constraints: schema16Constraints,
   indexes: schema16Indexes,
   triggers: schema16Triggers,
-  routines: [schema16Routine],
+  routines: [schema16CatalogRoutine, schema16TransitionRoutine],
   relationAcls: schema16RelationAcls,
   routineAcls: [
-    ["revoke", "public", schema16Routine[1], schema16Routine[0], schema16Routine[2], "PUBLIC", "EXECUTE", false],
+    ["revoke", "public", schema16CatalogRoutine[1], schema16CatalogRoutine[0], schema16CatalogRoutine[2], "PUBLIC", "EXECUTE", false],
+    ["revoke", "public", schema16TransitionRoutine[1], schema16TransitionRoutine[0], schema16TransitionRoutine[2], "PUBLIC", "EXECUTE", false],
   ],
 });
 
@@ -2048,7 +2061,7 @@ async function validateRegisteredCatalog(
   ] as const);
   if (actualRoutines.some((row) => !row.owner_matches)
     || JSON.stringify(normalizedRoutines) !== JSON.stringify(expectedRoutines)) {
-    throw new Error(`schema ${throughVersion} manifest validation failed: routine catalog`);
+    throw new Error(`schema ${throughVersion} manifest validation failed: routine catalog${catalogDifference(expectedRoutines, normalizedRoutines)}`);
   }
   const expectedRoutineAcls = [...foldManifestAcls(manifests, throughVersion, "routineAcls").values()]
     .filter((entry): entry is FoldedRoutineAcl => entry.length === 7)

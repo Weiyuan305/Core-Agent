@@ -76,6 +76,7 @@ test("managed topology rebuilds current service images before migration and star
       "api-ingress",
       "worker",
       "supervisor",
+      "policy-gateway-ingress",
     ],
     { timeoutMs: 180_000, maxOutputBytes: 4 * 1024 * 1024 },
   ]]);

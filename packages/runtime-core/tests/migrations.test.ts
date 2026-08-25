@@ -3017,7 +3017,7 @@ test("recorded schema 10 rejects altered constraint index function owner ACL seq
         await assert.rejects(
           applyMigrations(pool, migrationsDirectory),
           category === "sequence catalog"
-            ? /schema 17 manifest validation failed: relation catalog/u
+            ? new RegExp(`schema ${EXPECTED_SCHEMA_VERSION} manifest validation failed: relation catalog`, "u")
             : /schema 10 (manifest validation|ACL convergence) failed/u,
         );
       }

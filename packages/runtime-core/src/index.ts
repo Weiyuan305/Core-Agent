@@ -86,11 +86,13 @@ export { bootstrapBuiltinPolicy, type SyntheticBindingDocument } from "./service
 export { openPolicySession, type OpenPolicySessionDependencies } from "./services/policy/open-policy-session.js";
 export { closePolicySession } from "./services/policy/close-policy-session.js";
 export { issueToolDecision, type IssueToolDecisionDependencies } from "./services/policy/issue-tool-decision.js";
-export { consumeExecutionProof, type ConsumeExecutionProofResult } from "./services/policy/consume-execution-proof.js";
+export { consumeExecutionProof, consumeExecutionProofInTransaction, type ConsumeExecutionProofInput, type ConsumeExecutionProofResult } from "./services/policy/consume-execution-proof.js";
 export { deriveExecutionProof, executionProofDigest, proofDigestMatches, type PolicyProofKey } from "./services/policy/proof-crypto.js";
 export { createSyntheticMcpInvocationPort, createUnavailableRemoteMcpInvocationPort, type McpInvocationPort, type McpInvocationRequest } from "./policy/mcp-invocation-port.js";
 export { listAuthorizedTools } from "./services/policy/list-authorized-tools.js";
 export { invokeAuthorizedTool, type InvokeAuthorizedToolDependencies } from "./services/policy/invoke-authorized-tool.js";
+export { sweepExpiredPolicyProofs, sweepStalePolicySessions } from "./services/policy/sweep-policy-sessions.js";
+export { type PolicyPluginIdentity, type PolicyRuntimeIdentity } from "./services/policy/session-authority.js";
 export {
   bootstrapRuntimeDatabaseAuth,
   type RuntimeDatabaseAuthBootstrapInput,

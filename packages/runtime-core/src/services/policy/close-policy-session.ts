@@ -4,7 +4,8 @@ import { sql, type Kysely } from "kysely";
 import type { RuntimeDatabase } from "../../db/database.js";
 import { withDatabaseTransactionRetry } from "../../db/transaction-retry.js";
 import { DomainError } from "../../domain/idempotency.js";
-import { invalidateIssuedProofs, lockPolicySession } from "../../repositories/policy/sessions.js";
+import { lockPolicySession } from "../../repositories/policy/sessions.js";
+import { terminatePolicySession } from "./policy-effects.js";
 
 export async function closePolicySession(
   db: Kysely<RuntimeDatabase>, tenantId: string, request: ClosePolicySessionRequest,
@@ -19,12 +20,9 @@ export async function closePolicySession(
       }
       throw new DomainError("IDEMPOTENCY_CONFLICT", "Policy session close conflicts with terminal state");
     }
-    await trx.updateTable("policy_sessions").set({
-      state: "closed", close_reason: request.reason, closed_at: now,
-      resource_version: sql`resource_version + 1`, updated_at: now,
-    }).where("tenant_id", "=", tenantId).where("policy_session_id", "=", session.policy_session_id)
-      .where("state", "=", "active").executeTakeFirstOrThrow();
-    await invalidateIssuedProofs(trx, tenantId, session.policy_session_id, now);
+    if (!await terminatePolicySession(trx, session, now, "closed", request.reason)) {
+      throw new DomainError("IDEMPOTENCY_CONFLICT", "Policy session close lost its transition fence");
+    }
     return { schema_version: 1, policy_session_id: session.policy_session_id, state: "closed" };
   });
 }

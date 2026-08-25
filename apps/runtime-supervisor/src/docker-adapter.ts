@@ -56,7 +56,10 @@ const gatewayEnvironment = Object.freeze([
   "API_SERVER_HOST=0.0.0.0",
   "API_SERVER_PORT=8642",
   "GATEWAY_MULTIPLEX_PROFILES=true",
+  "CORE_AGENT_POLICY_GATEWAY_ORIGIN=http://policy-gateway-ingress:8787",
 ]);
+const ingressCredentialName = "hermes_ingress";
+const policyPluginCredentialName = "core_agent_policy_plugin_token";
 const egressNetworkConfiguration = Object.freeze({
   subnet: "172.31.240.0/24",
   gateway: "172.31.240.1",
@@ -416,6 +419,31 @@ function resourceDigest(...parts: readonly string[]): string {
   return hash.digest("hex");
 }
 
+function policyRuntimeSecretReference(
+  tenantId: string,
+  runtimeId: string,
+  profileId: string,
+  generation: number,
+): SecretReference {
+  return {
+    reference_id: `policy_runtime_${resourceDigest(tenantId, runtimeId, profileId).slice(0, 32)}`,
+    version: generation,
+    purpose: "policy_runtime",
+  };
+}
+
+function policyPluginSecretReference(
+  tenantId: string,
+  runtimeId: string,
+  generation: number,
+): SecretReference {
+  return {
+    reference_id: `policy_plugin_${resourceDigest(tenantId, runtimeId).slice(0, 32)}`,
+    version: generation,
+    purpose: "policy_plugin",
+  };
+}
+
 function operationInitializerName(containerName: string, operationId: string): string {
   return `${containerName}-initializer-${createHash("sha256").update(operationId).digest("hex").slice(0, 12)}`;
 }
@@ -679,6 +707,7 @@ function exactGatewayOptions(
   request: ProvisionRuntimeCommandV1,
   names: RuntimeNames,
   ingressSecretPath: string,
+  policyPluginSecretPath: string,
   user: string,
 ): Dockerode.ContainerCreateOptions {
   return {
@@ -702,6 +731,7 @@ function exactGatewayOptions(
       Binds: [
         `${names.volume}:/opt/data`,
         `${ingressSecretPath}:/run/secrets/hermes_ingress:ro`,
+        `${policyPluginSecretPath}:/run/secrets/core_agent_policy_plugin_token:ro`,
       ],
       Tmpfs: {
         "/run": "rw,nosuid,nodev,size=64m,mode=0755,exec",
@@ -1202,6 +1232,7 @@ function validateGatewayInspection(
   identity: { readonly tenant_id: string; readonly runtime_id: string; readonly generation: number },
   names: RuntimeNames,
   ingressPath: string,
+  policyPluginPath: string,
   user: string,
   imageConfiguration: LockedImageConfiguration,
 ): RuntimeObservation | CapabilityRuntimeObservation {
@@ -1294,9 +1325,10 @@ function validateGatewayInspection(
   if (stringProperty(dataProperty(hostConfig, "RestartPolicy"), "Name") !== "unless-stopped") throw rejected();
   const binds = safeStringArray(dataProperty(hostConfig, "Binds"));
   if (
-    binds.length !== 2
+    binds.length !== 3
     || binds[0] !== `${names.volume}:/opt/data`
     || binds[1] !== `${ingressPath}:/run/secrets/hermes_ingress:ro`
+    || binds[2] !== `${policyPluginPath}:/run/secrets/core_agent_policy_plugin_token:ro`
   ) throw rejected();
 
   const healthcheck = dataProperty(config, "Healthcheck");
@@ -1634,10 +1666,16 @@ export class DockerRuntimeAdapter {
     const ingressParent = join(resolve(this.#options.ingressRoot), runtimeDigest);
     const ingressDirectory = join(ingressParent, `g-${request.runtime.generation}`);
     const ingressPath = join(ingressDirectory, "hermes_ingress");
+    const policyPluginPath = join(ingressDirectory, policyPluginCredentialName);
     const dockerIngressPath = dockerHostPath(
       this.#options.ingressRoot,
       this.#options.dockerHostIngressRoot,
       ingressPath,
+    );
+    const dockerPolicyPluginPath = dockerHostPath(
+      this.#options.ingressRoot,
+      this.#options.dockerHostIngressRoot,
+      policyPluginPath,
     );
     const user = managedUser(this.#options);
     const initializerName = operationInitializerName(names.container, request.operation_id);
@@ -1742,12 +1780,14 @@ export class DockerRuntimeAdapter {
     if (gateway.inspection !== undefined) {
       if (volume.inspection === undefined || network.inspection === undefined || egressNetwork.inspection === undefined) throw rejected();
       await validatePersistentIngress(ingressPath);
+      await validatePersistentIngress(policyPluginPath);
       const observation = validateGatewayInspection(
         gateway.inspection,
         request,
         request.runtime,
         names,
         dockerIngressPath,
+        dockerPolicyPluginPath,
         user,
         imageConfiguration,
       );
@@ -1768,6 +1808,7 @@ export class DockerRuntimeAdapter {
         request.runtime,
         names,
         dockerIngressPath,
+        dockerPolicyPluginPath,
         user,
         imageConfiguration,
       );
@@ -1830,6 +1871,17 @@ export class DockerRuntimeAdapter {
           profile.provider_secret_ref,
           join(secretDirectory, secretFilename),
         );
+        const policyRuntimeFilename = `policy-runtime-${resourceDigest(profile.profile_id).slice(0, 32)}`;
+        await writeSecretMaterial(
+          this.#options.secretStore,
+          policyRuntimeSecretReference(
+            request.runtime.tenant_id,
+            request.runtime.runtime_id,
+            profile.profile_id,
+            request.runtime.generation,
+          ),
+          join(secretDirectory, policyRuntimeFilename),
+        );
         profiles.push({
           profile_id: profile.profile_id,
           hermes_profile_ref: profile.hermes_profile_ref,
@@ -1837,6 +1889,7 @@ export class DockerRuntimeAdapter {
           provider_base_url: profile.provider_base_url,
           model_id: profile.model_id,
           provider_secret_file: `/run/core-agent/secrets/${secretFilename}`,
+          policy_runtime_secret_file: `/run/core-agent/secrets/${policyRuntimeFilename}`,
         });
       }
       await writeSecretMaterial(
@@ -1917,17 +1970,40 @@ export class DockerRuntimeAdapter {
 
       await this.#verifyManifest(request, names, verifierName, stageDirectory, mutationState, signal);
       assertNotAborted(signal);
-      const ingressMaterial = await this.#options.secretStore.get(request.runtime.ingress_secret_ref);
       try {
-        assertNotAborted(signal);
-        await this.#writeIngressCredential(
-          runtimeDigest,
+        const ingressMaterial = await this.#options.secretStore.get(request.runtime.ingress_secret_ref);
+        try {
+          assertNotAborted(signal);
+          await this.#writeIngressCredential(
+            runtimeDigest,
+            request.runtime.generation,
+            ingressCredentialName,
+            ingressMaterial.text(),
+            request.protocol_version === 2,
+          );
+        } finally {
+          ingressMaterial.release();
+        }
+        const policyPluginMaterial = await this.#options.secretStore.get(policyPluginSecretReference(
+          request.runtime.tenant_id,
+          request.runtime.runtime_id,
           request.runtime.generation,
-          ingressMaterial.text(),
-          request.protocol_version === 2,
-        );
-      } finally {
-        ingressMaterial.release();
+        ));
+        try {
+          assertNotAborted(signal);
+          await this.#writeIngressCredential(
+            runtimeDigest,
+            request.runtime.generation,
+            policyPluginCredentialName,
+            policyPluginMaterial.text(),
+            request.protocol_version === 2,
+          );
+        } finally {
+          policyPluginMaterial.release();
+        }
+      } catch (error) {
+        await this.#removeIngressCredential(runtimeDigest, request.runtime.generation, request.protocol_version === 2);
+        throw error;
       }
       assertNotAborted(signal);
       let gatewayContainer: DockerContainerLike | undefined;
@@ -1936,6 +2012,7 @@ export class DockerRuntimeAdapter {
           request,
           names,
           dockerIngressPath,
+          dockerPolicyPluginPath,
           user,
         ), ...abortOptions(signal) }), mutationState, signal);
         assertNotAborted(signal);
@@ -1946,6 +2023,7 @@ export class DockerRuntimeAdapter {
           request.runtime,
           names,
           dockerIngressPath,
+          dockerPolicyPluginPath,
           user,
           imageConfiguration,
         );
@@ -2068,10 +2146,16 @@ export class DockerRuntimeAdapter {
     const ingressParent = join(resolve(this.#options.ingressRoot), runtimeDigest);
     const ingressDirectory = join(ingressParent, `g-${request.generation}`);
     const ingressPath = join(ingressDirectory, "hermes_ingress");
+    const policyPluginPath = join(ingressDirectory, policyPluginCredentialName);
     const dockerIngressPath = dockerHostPath(
       this.#options.ingressRoot,
       this.#options.dockerHostIngressRoot,
       ingressPath,
+    );
+    const dockerPolicyPluginPath = dockerHostPath(
+      this.#options.ingressRoot,
+      this.#options.dockerHostIngressRoot,
+      policyPluginPath,
     );
     const user = managedUser(this.#options);
     await this.#validateIngressGeneration(runtimeDigest, request.generation, true);
@@ -2117,12 +2201,14 @@ export class DockerRuntimeAdapter {
     validateNetworkInspection(network.inspection, names.network, "backplane", true);
     validateNetworkInspection(egressNetwork.inspection, managedEgressNetwork, "egress", false);
     await validatePersistentIngress(ingressPath);
+    await validatePersistentIngress(policyPluginPath);
     const before = validateGatewayInspection(
       container.inspection,
       request,
       request,
       names,
       dockerIngressPath,
+      dockerPolicyPluginPath,
       user,
       imageConfiguration,
     );
@@ -2134,6 +2220,7 @@ export class DockerRuntimeAdapter {
       request,
       names,
       dockerIngressPath,
+      dockerPolicyPluginPath,
       user,
       imageConfiguration,
     );
@@ -2298,6 +2385,7 @@ export class DockerRuntimeAdapter {
   async #writeIngressCredential(
     runtimeDigest: string,
     generation: number,
+    credentialName: typeof ingressCredentialName | typeof policyPluginCredentialName,
     value: string,
     allowSiblingGenerations = false,
   ): Promise<string> {
@@ -2305,7 +2393,7 @@ export class DockerRuntimeAdapter {
     if (held === undefined) throw rejected();
     const temporaryName = `.pending-${randomBytes(16).toString("hex")}`;
     const temporaryPath = childPath(held.generation, held.generationPath, temporaryName);
-    const finalPath = childPath(held.generation, held.generationPath, "hermes_ingress");
+    const finalPath = childPath(held.generation, held.generationPath, credentialName);
     try {
       await writeExclusive(temporaryPath, value);
       await assertHeldPrivateDirectory(held.root, held.rootPath);
@@ -2313,7 +2401,7 @@ export class DockerRuntimeAdapter {
       await assertHeldPrivateDirectory(held.generation, childPath(held.parent, held.parentPath, held.generationName));
       await rename(temporaryPath, finalPath);
       await held.generation.sync();
-      return join(held.generationPath, "hermes_ingress");
+      return join(held.generationPath, credentialName);
     } finally {
       await unlink(temporaryPath).catch(() => undefined);
       await this.#closeIngressDirectories(held);
@@ -2328,25 +2416,27 @@ export class DockerRuntimeAdapter {
     const held = await this.#openIngressDirectories(runtimeDigest, generation, false, allowSiblingGenerations);
     if (held === undefined) return;
     try {
-      const credentialPath = childPath(held.generation, held.generationPath, "hermes_ingress");
-      let credential: FileHandle | undefined;
-      try {
-        credential = await open(credentialPath, constants.O_RDONLY | constants.O_NOFOLLOW);
-      } catch (error) {
-        if (!isNotFound(error)) throw rejected();
-      }
-      if (credential !== undefined) {
+      for (const credentialName of [ingressCredentialName, policyPluginCredentialName] as const) {
+        const credentialPath = childPath(held.generation, held.generationPath, credentialName);
+        let credential: FileHandle | undefined;
         try {
-          const heldFile = await credential.stat({ bigint: true });
-          const namedFile = await lstat(credentialPath, { bigint: true });
-          const uid = process.getuid?.();
-          if (
-            uid === undefined || !heldFile.isFile() || heldFile.uid !== BigInt(uid)
-            || (heldFile.mode & 0o7777n) !== 0o600n || !sameFileIdentity(heldFile, namedFile)
-          ) throw rejected();
-          await unlink(credentialPath);
-        } finally {
-          await credential.close().catch(() => undefined);
+          credential = await open(credentialPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+        } catch (error) {
+          if (!isNotFound(error)) throw rejected();
+        }
+        if (credential !== undefined) {
+          try {
+            const heldFile = await credential.stat({ bigint: true });
+            const namedFile = await lstat(credentialPath, { bigint: true });
+            const uid = process.getuid?.();
+            if (
+              uid === undefined || !heldFile.isFile() || heldFile.uid !== BigInt(uid)
+              || (heldFile.mode & 0o7777n) !== 0o600n || !sameFileIdentity(heldFile, namedFile)
+            ) throw rejected();
+            await unlink(credentialPath);
+          } finally {
+            await credential.close().catch(() => undefined);
+          }
         }
       }
       await assertHeldPrivateDirectory(held.root, held.rootPath);

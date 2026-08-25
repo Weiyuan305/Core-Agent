@@ -72,7 +72,7 @@ def _decision_url() -> str:
     parsed = parse.urlsplit(origin)
     if (
         parsed.scheme != "http"
-        or parsed.hostname not in {"policy-mcp-gateway", "127.0.0.1", "localhost"}
+        or parsed.hostname not in {"policy-mcp-gateway", "policy-gateway-ingress", "127.0.0.1", "localhost"}
         or parsed.username is not None
         or parsed.password is not None
         or parsed.path not in ("", "/")
@@ -80,7 +80,7 @@ def _decision_url() -> str:
         or parsed.fragment
     ):
         raise ValueError("gateway origin is invalid")
-    return origin.rstrip("/") + "/v1/policy/decisions"
+    return origin.rstrip("/") + "/v1/policy-decisions"
 
 
 def _parse_decision(payload: bytes) -> dict[str, Any]:
