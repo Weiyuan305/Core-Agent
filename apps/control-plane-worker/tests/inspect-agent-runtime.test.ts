@@ -9,7 +9,10 @@ import { inspectAgentRunRuntime, type AgentRuntimeSupervisorPort } from "../src/
 const imageRef = `managed/runtime:v1@sha256:${"a".repeat(64)}`;
 const facts: StoredAgentRunExecutionFacts = {
   tenantId: "tenant_a", jobId: "job_execute_a", runId: "run_a", conversationId: "conversation_a",
-  assistantMessageId: "message_assistant_a", profileRef: "consultant_a", sessionRef: "session_a",
+  assistantMessageId: "message_assistant_a", actorId: "actor_a", membershipId: "membership_a",
+  effectiveRole: "consultant", profileId: "profile_a", profileRef: "consultant_a",
+  sessionId: "session_a", sessionRef: "hermes_session_a", coreSessionId: "core_session_a",
+  requestId: "request_a", traceId: "trace_a", clientRequestId: "client_request_a",
   modelId: "model_a", timeoutMs: 10_000, content: "hello",
   ingressSecretRef: { reference_id: "ingress_a", version: 1, purpose: "hermes_ingress" },
   runtime: { runtimeId: "runtime_a", generation: 7, imageRef },

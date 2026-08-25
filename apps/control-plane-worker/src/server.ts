@@ -10,6 +10,7 @@ import { Pool } from "pg";
 import { HttpHermesReadinessClient } from "./hermes-readiness-client.js";
 import { IdentityProviderDeletionClient } from "./identity-provider-deletion-client.js";
 import { createWorkerRuntimeRepositories, runControlPlaneWorker, type WorkerClock, type WorkerLogger } from "./main.js";
+import { createWorkerPolicySessionLifecycle, loadWorkerPolicyConfiguration } from "./policy-session-lifecycle.js";
 
 const require = createRequire(import.meta.url);
 const pino = require("pino") as () => WorkerLogger;
@@ -148,6 +149,10 @@ export async function startControlPlaneWorker(environment: NodeJS.ProcessEnv = p
     await assertSchemaVersion(db);
     if (identityDb !== undefined) await assertSchemaVersion(identityDb);
     const providerCatalog = loadProviderCatalog(providerJson);
+    const policyConfiguration = loadWorkerPolicyConfiguration(environment);
+    const policySessions = policyConfiguration === undefined
+      ? undefined
+      : await createWorkerPolicySessionLifecycle(db, policyConfiguration);
     await runControlPlaneWorker({
       db, ...(identityDb === undefined ? {} : { identityDb }),
       ...(identityProviderDeletion === undefined ? {} : { identityProviderDeletion }),
@@ -163,6 +168,7 @@ export async function startControlPlaneWorker(environment: NodeJS.ProcessEnv = p
       ingressSecretStore: new FileSecretStore(configuration.secretRoot),
       hermesClient: new HttpHermesReadinessClient(),
       executionHermesClient: new HermesClient(),
+      ...(policySessions === undefined ? {} : { policySessions }),
     }, controller.signal);
   } finally {
     process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop);
