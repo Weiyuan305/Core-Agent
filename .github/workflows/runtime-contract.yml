@@ -111,7 +111,7 @@ jobs:
     timeout-minutes: 15
     services:
       postgres:
-        image: postgres:17-bookworm@sha256:07edf880f0cf3f742c990d23faf92cb19e84923a8bce30f7d8e1a8ab63cae7b3
+        image: postgres:17-bookworm@sha256:7bade6d532592ca8ce7ee32def7399dad2607c4ea5583839fc4352a095a11ea6
         ports:
           - 5432:5432
         env:
@@ -181,7 +181,7 @@ jobs:
     timeout-minutes: 20
     services:
       postgres:
-        image: postgres:17-bookworm@sha256:07edf880f0cf3f742c990d23faf92cb19e84923a8bce30f7d8e1a8ab63cae7b3
+        image: postgres:17-bookworm@sha256:7bade6d532592ca8ce7ee32def7399dad2607c4ea5583839fc4352a095a11ea6
         ports:
           - 5432:5432
         env:
