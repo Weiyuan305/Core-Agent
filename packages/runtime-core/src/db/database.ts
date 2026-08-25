@@ -5,6 +5,7 @@ import type { AgentRunFailureCode } from "@core-agent/contracts";
 
 import type { IdentityAuthorityTables } from "./identity-tables.js";
 import type { EntitlementAuthorityTables } from "./entitlement-tables.js";
+import type { PolicyMcpAuthorityTables } from "./policy-mcp-tables.js";
 
 type JsonValue = unknown;
 type RuntimeBigIntInput = string | number | bigint;
@@ -17,7 +18,7 @@ export type NullableRuntimeBigInt = ColumnType<
   RuntimeBigIntInput | null
 >;
 
-export interface RuntimeDatabase extends IdentityAuthorityTables, EntitlementAuthorityTables {
+export interface RuntimeDatabase extends IdentityAuthorityTables, EntitlementAuthorityTables, PolicyMcpAuthorityTables {
   core_agent_schema_migrations: { version: number; name: string; checksum: string; applied_at: Date };
   tenants: { tenant_id: string; schema_version: number; resource_version: RuntimeBigInt; tenant_mode: string; status: string; display_name: string; created_at: Date; updated_at: Date };
   actors: { actor_id: string; schema_version: number; resource_version: RuntimeBigInt; actor_kind: string; display_name: string | null; status: "active" | "disabled" | "deletion_pending" | "deleted"; created_at: Date; updated_at: Date };

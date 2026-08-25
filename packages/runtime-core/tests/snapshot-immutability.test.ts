@@ -33,7 +33,7 @@ test.beforeEach(async () => {
 });
 
 test("schema 15 admits a later monotonic Snapshot when a historical canonical set recurs", async () => {
-  assert.equal(EXPECTED_SCHEMA_VERSION, 15);
+  assert.equal(EXPECTED_SCHEMA_VERSION, 16);
   const catalog = await entitlementTestPool.query<{ contype: string }>(
     `select constraint_type.contype
      from pg_constraint as constraint_type

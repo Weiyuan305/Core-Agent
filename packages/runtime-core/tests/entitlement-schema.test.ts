@@ -351,7 +351,7 @@ test.beforeEach(async () => resetDatabase());
 test.after(async () => pool.end());
 
 test("schema 15 migrates both empty and schema-12 databases without changing identity history", async () => {
-  assert.equal(EXPECTED_SCHEMA_VERSION, 15);
+  assert.equal(EXPECTED_SCHEMA_VERSION, 16);
   await applyMigrations(pool, migrationsDirectory);
   assert.deepEqual(
     (await pool.query("select version, name from core_agent_schema_migrations order by version")).rows.at(-1),
