@@ -777,6 +777,41 @@ test("revoked Core Session and terminal Run revoke current Policy authority befo
     .where("policy_session_id", "=", second.opened.policy_session_id).executeTakeFirstOrThrow()).state, "closed");
 });
 
+test("Policy lifecycle rows share the captured database clock with their opening effects", async () => {
+  const fixture = await openPolicyFixture("captured_clock");
+  const decision = await issueToolDecision({ db, proofKey }, fixture.pluginIdentity, {
+    schema_version: 1, hermes_session_ref: hermesSessionRef, tool_call_id: "tool_call_captured_clock",
+    tool_name: "core_agent.synthetic_profile", arguments: { profile_id: "fixture" },
+  });
+  assert.equal(decision.decision, "allow");
+  if (decision.decision !== "allow") return;
+
+  const timing = await pool.query<{ session_clock_matches: boolean; proof_clock_matches: boolean; proof_update_matches: boolean }>(`
+    select
+      session_row.created_at = session_event.occurred_at as session_clock_matches,
+      proof_row.created_at = decision_event.occurred_at as proof_clock_matches,
+      proof_row.updated_at = proof_row.created_at as proof_update_matches
+    from policy_sessions session_row
+    join policy_execution_proofs proof_row
+      on proof_row.tenant_id = session_row.tenant_id
+      and proof_row.policy_session_id = session_row.policy_session_id
+    join product_events session_event
+      on session_event.tenant_id = session_row.tenant_id
+      and session_event.event_type = 'policy_session.opened'
+    join product_events decision_event
+      on decision_event.tenant_id = session_row.tenant_id
+      and decision_event.event_type = 'policy.decision_recorded'
+    where session_row.tenant_id = $1
+      and session_row.policy_session_id = $2
+      and proof_row.decision_id = $3
+  `, [tenantId, fixture.opened.policy_session_id, decision.decision_id]);
+  assert.deepEqual(timing.rows, [{
+    session_clock_matches: true,
+    proof_clock_matches: true,
+    proof_update_matches: true,
+  }]);
+});
+
 test("proof consumption rolls back when requested Tool-call persistence fails", async () => {
   const fixture = await openPolicyFixture("atomic_call");
   const decision = await issueToolDecision({ db, proofKey }, fixture.pluginIdentity, {

@@ -141,7 +141,7 @@ export async function issueToolDecision(
     await trx.insertInto("policy_execution_proofs").values({
       tenant_id: tenantId, proof_id: proofId, decision_id: decisionId, policy_session_id: session.policy_session_id,
       proof_digest: digest, arguments_hash: canonical!.hash, state: "issued", expires_at: expiresAt,
-      consumed_at: null, invalidated_at: null, resource_version: 1,
+      consumed_at: null, invalidated_at: null, resource_version: 1, created_at: now, updated_at: now,
     }).execute();
     return { schema_version: 1, decision_id: decisionId, decision: "allow", reason: "POLICY_ALLOWED", execution_proof: proof, expires_at: expiresAt.toISOString() };
   });

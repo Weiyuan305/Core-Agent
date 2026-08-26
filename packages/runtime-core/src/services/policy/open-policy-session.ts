@@ -120,7 +120,7 @@ export async function openPolicySession(
       policy_version_id: BUILTIN_READ_POLICY.version,
       state: "active", close_reason: null, idempotency_key: request.idempotency_key, payload_hash: payloadHash,
       request_id: payload.request_id, trace_id: payload.trace_id, correlation_id: request.correlation_id,
-      expires_at: expiresAt, closed_at: null, resource_version: 1,
+      expires_at: expiresAt, closed_at: null, resource_version: 1, created_at: now, updated_at: now,
     }).returningAll().executeTakeFirstOrThrow();
     await appendPolicySessionEffect(trx, inserted, now, { kind: "opened", resourceVersion: 1 });
     return { schema_version: 1, policy_session_id: policySessionId, state: "active", policy_version: BUILTIN_READ_POLICY.version, expires_at: expiresAt.toISOString() };
