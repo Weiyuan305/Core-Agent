@@ -11,7 +11,7 @@ import { ContractSchemas } from "../src/index.js";
 test("an independent strict Ajv consumer compiles every schema and valid fixture", async () => {
   const root = resolve(import.meta.dirname, "..");
   const schemaKeys = Object.keys(ContractSchemas).sort((left, right) => left.localeCompare(right));
-  assert.equal(schemaKeys.length, 107);
+  assert.equal(schemaKeys.length, 119);
 
   for (const schemaKey of schemaKeys) {
     const schema = JSON.parse(await readFile(

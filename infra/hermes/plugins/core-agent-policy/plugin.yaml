@@ -1,0 +1,6 @@
+name: core-agent-policy
+version: "1.0.0"
+description: "Fail-closed Core-Agent policy decision hook for reviewed MCP tools."
+author: "Core-Agent"
+hooks:
+  - pre_tool_call

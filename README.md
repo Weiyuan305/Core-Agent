@@ -33,6 +33,14 @@ execution steps are recorded in
 [ADR 0008](docs/architecture/0008-vendored-hermes-source-and-upstream-sync.md) and
 the [Hermes source vendoring plan](docs/superpowers/plans/2026-08-07-hermes-source-vendoring.md).
 
+The private Policy/MCP Gateway v1 is also implemented. It exposes one reviewed
+synthetic read-only MCP Capability to an entitled Profile, with a Worker-opened
+policy session, a fail-closed Hermes pre-tool hook, current PostgreSQL authority,
+and a short-lived single-use execution proof checked again at dispatch. It does
+not enable a real business MCP service or customer/student data. See the
+[Policy/MCP operations runbook](docs/operations/policy-mcp-gateway.md) and
+[approved design](docs/superpowers/specs/2026-08-25-policy-mcp-gateway-v1-design.md).
+
 ## Control Plane Contracts
 
 The versioned Control Plane wire contracts live in
@@ -152,6 +160,7 @@ for the complete acceptance sequence.
 npm test
 npm run check
 npm run test:runtime
+npm run accept:policy-mcp-gateway
 ```
 
 PostgreSQL and real integration gates require the dedicated test database

@@ -1,4 +1,4 @@
-export const CONTRACT_PACKAGE_VERSION = "0.8.0" as const;
+export const CONTRACT_PACKAGE_VERSION = "0.9.0" as const;
 export const WIRE_SCHEMA_VERSION = 1 as const;
 
 export * from "./common/primitives.js";
@@ -14,6 +14,9 @@ export * from "./identity/authority.js";
 export * from "./identity/public-auth.js";
 export * from "./profile/profile.js";
 export * from "./approval/schema.js";
+export * from "./policy/policy-session.js";
+export * from "./policy/policy-decision.js";
+export * from "./mcp/gateway.js";
 export * from "./runtime/resources.js";
 export * from "./runtime/transitions.js";
 export * from "./runtime/invariants.js";

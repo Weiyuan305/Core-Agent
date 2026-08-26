@@ -1,0 +1,1 @@
+{"schema_key":"close-policy-session-request","expected":{"structurally_valid":true,"violation_codes":[]},"value":{"schema_version":1,"policy_session_id":"policy_session_demo","run_id":"run_demo","reason":"run_succeeded","idempotency_key":"close.run_demo","request_id":"request_demo","trace_id":"trace_demo"}}

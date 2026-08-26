@@ -353,6 +353,7 @@ export async function issueTrustedContext(
       request_id: input.requestId,
       trace_id: input.traceId,
       client_request_id: input.clientRequestId,
+      core_session_id: input.sessionId,
       context_id: input.contextId,
       issuer: dependencies.issuer,
       audience: [...audience],

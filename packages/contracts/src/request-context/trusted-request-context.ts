@@ -44,6 +44,7 @@ export const TrustedRequestContextSchema = Type.Object(
     request_id: OpaqueIdSchema,
     trace_id: OpaqueIdSchema,
     client_request_id: OpaqueIdSchema,
+    core_session_id: Type.Optional(OpaqueIdSchema),
     context_id: OpaqueIdSchema,
     issuer: OpaqueIdSchema,
     audience: Type.Array(OpaqueIdSchema, { minItems: 1, uniqueItems: true }),

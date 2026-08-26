@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.0 - 2026-08-25
+
+- Add closed private Policy Session open/close and Hermes hook decision contracts.
+- Add the single-use execution-proof transport field, reviewed read-only Gateway
+  Tool descriptors, bounded text results, stable policy denial reasons, and policy
+  lifecycle ProductEvents.
+- Keep endpoint, credential, raw argument, result, prompt, and customer data outside
+  safe summaries and events.
+- Append the immutable 0.9.0 schema release without changing 0.2.0–0.8.0.
+
 ## 0.8.0 - 2026-08-21
 
 - Add closed Capability-Version and Pack-Version catalog lifecycle ProductEvent

@@ -1,0 +1,49 @@
+{
+  "policy": {
+    "policy_version_id": "core-agent-read-mcp-v1",
+    "policy_id": "core-agent-read-mcp",
+    "catalog_version": "1.0.0"
+  },
+  "server": {
+    "mcp_server_version_id": "core-agent-synthetic-v1",
+    "mcp_server_id": "core-agent-synthetic",
+    "version": "1.0.0",
+    "adapter_kind": "synthetic",
+    "origin": null,
+    "protocol_version": "2025-03-26",
+    "credential_reference_id": null,
+    "connect_timeout_ms": 500,
+    "request_timeout_ms": 1000,
+    "maximum_response_bytes": 8192,
+    "status": "reviewed"
+  },
+  "capability": {
+    "capability_version_id": "core-agent-synthetic-profile-v1",
+    "capability_id": "core_agent.synthetic_profile",
+    "version": "1.0.0",
+    "kind": "mcp",
+    "risk_class": "read",
+    "approval_requirement": "none",
+    "status": "reviewed"
+  },
+  "binding": {
+    "mcp_tool_binding_id": "core-agent-synthetic-profile-binding-v1",
+    "capability_version_id": "core-agent-synthetic-profile-v1",
+    "capability_id": "core_agent.synthetic_profile",
+    "capability_version": "1.0.0",
+    "public_tool_name": "core_agent.synthetic_profile",
+    "downstream_tool_name": "synthetic_profile",
+    "title": "Synthetic profile",
+    "description": "Returns deterministic non-customer fixture data for platform acceptance.",
+    "input_schema_json": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "profile_id": { "type": "string", "minLength": 1, "maxLength": 64 }
+      },
+      "required": ["profile_id"]
+    },
+    "output_contract_ref": "gateway-tool-result@0.9.0",
+    "status": "reviewed"
+  }
+}

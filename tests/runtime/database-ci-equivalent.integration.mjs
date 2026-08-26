@@ -164,6 +164,7 @@ async function runCiEquivalentScenario({ injectedFailure = false, injectedOutput
     const postgresOutput = protectedRun("npm", ["run", "test:postgres"], environment, credential, credentialFile);
     assertNodeTestSummaries(postgresOutput, [
       expectedCounts.runtimeCorePostgres.testCount,
+      expectedCounts.policyMcpPostgres.testCount,
       expectedCounts.identityGatewayPostgres.testCount,
       expectedCounts.controlPlaneApiPostgres.testCount,
     ]);

@@ -39,8 +39,17 @@ export interface StoredAgentRunExecutionFacts {
   readonly runId: string;
   readonly conversationId: string;
   readonly assistantMessageId: string;
+  readonly actorId: string;
+  readonly membershipId: string;
+  readonly effectiveRole: "admin" | "consultant" | "student";
+  readonly profileId: string;
   readonly profileRef: string;
+  readonly sessionId: string;
   readonly sessionRef: string;
+  readonly coreSessionId?: string;
+  readonly requestId: string;
+  readonly traceId: string;
+  readonly clientRequestId: string;
   readonly modelId: string;
   readonly timeoutMs: number;
   readonly content: string;
@@ -197,7 +206,7 @@ export class WorkerAgentRunRepository {
         .where("actor_id", "=", conversation.created_by_actor_id).forShare().executeTakeFirst();
       const workerMembership = await trx.selectFrom("memberships").select(["actor_id", "roles", "status"]).where("tenant_id", "=", job.tenantId)
         .where("membership_id", "=", workerMembershipId).forShare().executeTakeFirst();
-      const conversationMemberships = await trx.selectFrom("memberships").select(["roles", "status"])
+      const conversationMemberships = await trx.selectFrom("memberships").select(["membership_id", "roles", "status"])
         .where("tenant_id", "=", job.tenantId).where("actor_id", "=", conversation.created_by_actor_id)
         .forShare().execute();
       if (
@@ -209,6 +218,11 @@ export class WorkerAgentRunRepository {
         || conversationActor.status !== "active"
         || !conversationMemberships.some((candidate) => candidate.status === "active" && candidate.roles.length > 0)
       ) throw new Error("Stored Agent Run execution authority is inconsistent");
+      const activeMembership = conversationMemberships.find((candidate) => candidate.status === "active" && candidate.roles.length > 0);
+      if (activeMembership === undefined) throw new Error("Stored Agent Run execution Membership is unavailable");
+      const effectiveRole = (["admin", "consultant", "student"] as const)
+        .find((role) => activeMembership.roles.includes(role));
+      if (effectiveRole === undefined) throw new Error("Stored Agent Run execution role is unavailable");
       await requireStillOwned(trx, job);
       const now = this.now();
       if (run.status === "queued") {
@@ -262,6 +276,11 @@ export class WorkerAgentRunRepository {
         .where("tenant_id", "=", job.tenantId).where("reference_id", "=", provider.credential_secret_ref)
         .where("purpose", "=", "provider_credential").where("status", "=", "active").forShare().executeTakeFirst();
       if (credential === undefined) throw new Error("Stored Agent Run provider credential metadata is inconsistent");
+      const coreSession = await trx.selectFrom("core_sessions").select("session_id")
+        .where("actor_id", "=", conversation.created_by_actor_id).where("status", "=", "active")
+        .where("idle_expires_at", ">", sql<Date>`clock_timestamp()`)
+        .where("absolute_expires_at", ">", sql<Date>`clock_timestamp()`)
+        .orderBy("last_seen_at", "desc").executeTakeFirst();
       await requireStillOwned(trx, job);
       return {
         kind: "admitted" as const,
@@ -271,8 +290,17 @@ export class WorkerAgentRunRepository {
           runId: job.runId,
           conversationId: run.conversation_id,
           assistantMessageId: assistantMessageId(job.tenantId, job.runId),
+          actorId: conversation.created_by_actor_id,
+          membershipId: activeMembership.membership_id,
+          effectiveRole,
+          profileId: profile.profile_id,
           profileRef: profile.hermes_profile_ref,
+          sessionId: sessions[0]!.session_id,
           sessionRef: sessions[0]!.hermes_session_ref,
+          ...(coreSession === undefined ? {} : { coreSessionId: coreSession.session_id }),
+          requestId: run.request_id,
+          traceId: run.trace_id,
+          clientRequestId: run.client_request_id,
           modelId: profile.model_id,
           timeoutMs: provider.timeout_ms,
           content: messages[0]!.content,

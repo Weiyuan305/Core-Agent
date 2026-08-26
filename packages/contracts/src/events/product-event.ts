@@ -267,6 +267,50 @@ export const ToolEventSchema = Type.Union(
   { $id: "core-agent://v1/tool-event", "x-extensible-union": true },
 );
 
+export const PolicyDecisionEventReasonSchema = Type.Union([
+  Type.Literal("POLICY_ALLOWED"),
+  Type.Literal("SESSION_NOT_ACTIVE"),
+  Type.Literal("CURRENT_AUTHORITY_CHANGED"),
+  Type.Literal("CAPABILITY_NOT_EFFECTIVE"),
+  Type.Literal("POLICY_NOT_PERMITTED"),
+  Type.Literal("TOOL_NOT_BOUND"),
+  Type.Literal("ARGUMENTS_INVALID"),
+  Type.Literal("PROOF_INVALID"),
+  Type.Literal("PROOF_EXPIRED"),
+  Type.Literal("PROOF_REPLAYED"),
+  Type.Literal("DOWNSTREAM_UNAVAILABLE"),
+  Type.Literal("DOWNSTREAM_CONTRACT_INVALID"),
+]);
+
+const PolicySessionOpenedEventSchema = createEventBranch("policy_session.opened", {
+  policy_session_id: OpaqueIdSchema,
+  run_id: OpaqueIdSchema,
+  policy_version: Type.Literal("core-agent-read-mcp-v1"),
+  state: Type.Literal("active"),
+  resource_version: ResourceVersionSchema,
+});
+const PolicySessionClosedEventSchema = createEventBranch("policy_session.closed", {
+  policy_session_id: OpaqueIdSchema,
+  run_id: OpaqueIdSchema,
+  policy_version: Type.Literal("core-agent-read-mcp-v1"),
+  state: Type.Union([Type.Literal("closed"), Type.Literal("expired")]),
+  resource_version: ResourceVersionSchema,
+});
+const PolicyDecisionRecordedEventSchema = createEventBranch("policy.decision_recorded", {
+  policy_session_id: OpaqueIdSchema,
+  decision_id: OpaqueIdSchema,
+  tool_call_id: OpaqueIdSchema,
+  decision: Type.Union([Type.Literal("allow"), Type.Literal("deny")]),
+  reason: PolicyDecisionEventReasonSchema,
+  policy_version: Type.Literal("core-agent-read-mcp-v1"),
+  resource_version: ResourceVersionSchema,
+});
+
+export const PolicyEventSchema = Type.Union(
+  [PolicySessionOpenedEventSchema, PolicySessionClosedEventSchema, PolicyDecisionRecordedEventSchema],
+  { $id: "core-agent://v1/policy-event", "x-extensible-union": true },
+);
+
 const RuntimeStatusChangedEventSchema = createEventBranch(
   "runtime.status_changed",
   {
@@ -594,6 +638,9 @@ const ProductEventBranchSchemas = [
   ToolStartedEventSchema,
   ToolSucceededEventSchema,
   ToolFailedEventSchema,
+  PolicySessionOpenedEventSchema,
+  PolicySessionClosedEventSchema,
+  PolicyDecisionRecordedEventSchema,
   RuntimeStatusChangedEventSchema,
   ...RuntimeCommandAcceptedEventBranches,
   ErrorReportedEventBranchSchema,
@@ -612,6 +659,7 @@ const ProductEventFamilySchemas = [
   TaskEventSchema,
   ApprovalEventSchema,
   ToolEventSchema,
+  PolicyEventSchema,
   RuntimeEventSchema,
   ErrorReportedEventSchema,
   MessageCreatedEventSchema,

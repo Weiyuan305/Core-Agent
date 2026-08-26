@@ -42,6 +42,8 @@ const providerCatalog = loadProviderCatalog(JSON.parse(await readFile(join(repos
 const imageRef = `nousresearch/hermes-agent:v2026.7.30@sha256:${"5316c2c2534c49f5e1b1691e1a2115f1230d900033c3b35d1c8fc2e47352b26d"}`;
 const providerSecret = "synthetic-supervisor-provider-secret-0001";
 const ingressSecret = "synthetic-supervisor-ingress-secret-0002";
+const policyRuntimeSecret = "synthetic-policy-runtime-secret-0003";
+const policyPluginSecret = "synthetic-policy-plugin-secret-0004";
 const imageEnvironment = [
   "/opt/hermes/.venv/bin:/usr/local/bin:/usr/bin".replace(/^/u, "PATH="),
   "HOME=/home/hermes",
@@ -255,7 +257,13 @@ class FakeSecretStore implements SecretStore {
   public async get(reference: SecretReference): Promise<SecretMaterial> {
     const material = new FakeMaterial(
       reference,
-      reference.purpose === "hermes_ingress" ? ingressSecret : providerSecret,
+      reference.purpose === "hermes_ingress"
+        ? ingressSecret
+        : reference.purpose === "policy_runtime"
+          ? policyRuntimeSecret
+          : reference.purpose === "policy_plugin"
+            ? policyPluginSecret
+            : providerSecret,
     );
     this.materials.push(material);
     return material;
@@ -883,6 +891,7 @@ test("initializer and gateway use daemon-visible binds, one numeric identity, an
     "API_SERVER_HOST=0.0.0.0",
     "API_SERVER_PORT=8642",
     "GATEWAY_MULTIPLEX_PROFILES=true",
+    "CORE_AGENT_POLICY_GATEWAY_ORIGIN=http://policy-gateway-ingress:8787",
   ]);
   assert.equal(gateway.HostConfig?.NetworkMode, "core-agent-backplane");
   assert.equal(gateway.User, managedUser);
@@ -897,13 +906,16 @@ test("initializer and gateway use daemon-visible binds, one numeric identity, an
   assert.deepEqual(gateway.HostConfig?.RestartPolicy, { Name: "unless-stopped" });
   assert.equal(JSON.stringify(docker.created).includes(providerSecret), false);
   assert.equal(JSON.stringify(docker.created).includes(ingressSecret), false);
+  assert.equal(JSON.stringify(docker.created).includes(policyRuntimeSecret), false);
+  assert.equal(JSON.stringify(docker.created).includes(policyPluginSecret), false);
   assert.equal(JSON.stringify(initializer.HostConfig?.Binds).includes("tenant_a"), false);
   assert.equal(JSON.stringify(initializer.HostConfig?.Binds).includes("runtime_a"), false);
   assert.equal(JSON.stringify(initializer.HostConfig?.Binds).includes("profile_a"), false);
-  assert.deepEqual(docker.stagedModes, [0o600, 0o700, 0o600, 0o600]);
-  assert.equal(docker.stagedSecretNames.length, 2);
+  assert.deepEqual(docker.stagedModes, [0o600, 0o700, 0o600, 0o600, 0o600]);
+  assert.equal(docker.stagedSecretNames.length, 3);
   assert(docker.stagedSecretNames.includes("hermes_ingress"));
-  assert.equal(secretStore.materials.length, 3);
+  assert(docker.stagedSecretNames.some((name) => name.startsWith("policy-runtime-")));
+  assert.equal(secretStore.materials.length, 5);
   assert.equal(secretStore.materials.every((material) => material.released), true);
 
   assert.deepEqual(await readdir(roots.stagingRoot), []);
@@ -917,6 +929,11 @@ test("initializer and gateway use daemon-visible binds, one numeric identity, an
   assert.equal(ingressPath.startsWith(roots.ingressRoot), false);
   assert.equal(await readFile(docker.localPath(ingressPath), "utf8"), ingressSecret);
   assert.equal((await stat(docker.localPath(ingressPath))).mode & 0o777, 0o600);
+  const policyPluginBind = gateway.HostConfig?.Binds?.find((bind) => bind.endsWith(":/run/secrets/core_agent_policy_plugin_token:ro"));
+  assert(policyPluginBind !== undefined);
+  const policyPluginPath = policyPluginBind.slice(0, -":/run/secrets/core_agent_policy_plugin_token:ro".length);
+  assert.equal(await readFile(docker.localPath(policyPluginPath), "utf8"), policyPluginSecret);
+  assert.equal((await stat(docker.localPath(policyPluginPath))).mode & 0o777, 0o600);
   assert.equal(observation.private_origin, "http://172.30.0.7:8642");
   assert.deepEqual([...docker.networks.keys()].sort(), ["core-agent-backplane", "core-agent-egress"]);
   assert.equal((docker.networks.get("core-agent-backplane") as { Internal: boolean }).Internal, true);
@@ -1842,7 +1859,7 @@ test("provision validates the fixed non-secret manifest before starting the gate
   await assert.rejects(adapter.provision(signed()), /SUPERVISOR_REJECTED/);
   assert.equal(docker.created.length, 2);
   assert.equal(docker.created.some((created) => created.Labels?.["core-agent.resource"] === "runtime"), false);
-  assert.equal(secretStore.materials.length, 2);
+  assert.equal(secretStore.materials.length, 3);
   assert.equal(secretStore.materials.every((material) => material.released), true);
 });
 
@@ -1979,6 +1996,7 @@ test("delete refuses a symlinked generation directory without touching its outsi
   const ingressPath = docker.localPath(ingressBind.slice(0, -":/run/secrets/hermes_ingress:ro".length));
   const generationDirectory = dirname(ingressPath);
   await rm(ingressPath);
+  await rm(join(generationDirectory, "core_agent_policy_plugin_token"));
   await rmdir(generationDirectory);
   const outside = join(temporaryRoot, "outside-ingress");
   await mkdir(outside, { mode: 0o700 });

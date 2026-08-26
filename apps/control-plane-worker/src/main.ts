@@ -22,6 +22,7 @@ import { handleReconcileCapabilityProjection } from "./handlers/reconcile-capabi
 import { handleReconcileRuntime } from "./handlers/reconcile-runtime.js";
 import { handleStopIdleB2cRuntime } from "./handlers/stop-idle-b2c-runtime.js";
 import { inspectAgentRunRuntime } from "./inspect-agent-runtime.js";
+import type { WorkerPolicySessionLifecycle } from "./policy-session-lifecycle.js";
 import { handleNonReconcileRecovery } from "./recovery-boundary.js";
 import { runWorkerLoop } from "./worker-loop.js";
 
@@ -80,6 +81,7 @@ export interface WorkerDependencies {
   readonly hermesClient: HermesReadinessClient;
   readonly executionHermesClient: HermesExecutionClient;
   readonly identityProviderDeletion?: WorkerIdentityProviderDeletionClient;
+  readonly policySessions?: WorkerPolicySessionLifecycle;
 }
 
 function jobRef(dependencies: WorkerDependencies, job: ClaimedJob) {
@@ -280,6 +282,8 @@ async function dispatchRuntimeJob(dependencies: WorkerDependencies, job: Claimed
       },
     }, facts, job.attemptCount, operationSignal),
     markDispatched: (runJob) => dependencies.repositories.agentRuns.markDispatched(runJob),
+    openPolicySession: (facts) => dependencies.policySessions?.open(facts) ?? Promise.resolve(undefined),
+    closePolicySession: (facts, session, reason) => dependencies.policySessions?.close(facts, session, reason) ?? Promise.resolve(),
     stream: (facts, origin, operationSignal) => ({ async *[Symbol.asyncIterator]() {
       const material = await dependencies.ingressSecretStore.get(facts.ingressSecretRef);
       yield* dependencies.executionHermesClient.streamChat({

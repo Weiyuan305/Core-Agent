@@ -26,6 +26,7 @@ const configurationKeys = {
   dockerHostIngressRoot: "CORE_AGENT_DOCKER_HOST_INGRESS_ROOT",
   providerSecretRoot: "CORE_AGENT_PROVIDER_SECRET_ROOT",
   ingressSecretRoot: "CORE_AGENT_INGRESS_SECRET_ROOT",
+  policySecretRoot: "CORE_AGENT_POLICY_SECRET_ROOT",
   dockerSocketPath: "CORE_AGENT_DOCKER_SOCKET_PATH",
   imageLockPath: "CORE_AGENT_IMAGE_LOCK_PATH",
   providerCatalogPath: "CORE_AGENT_PROVIDER_CATALOG_PATH",
@@ -42,6 +43,7 @@ export interface SupervisorConfiguration {
   readonly managedRuntimeGid: number;
   readonly providerSecretRoot: string;
   readonly ingressSecretRoot: string;
+  readonly policySecretRoot: string;
   readonly dockerSocketPath: string;
   readonly imageLockPath: string;
   readonly providerCatalogPath: string;
@@ -86,11 +88,13 @@ export class PurposeScopedSecretStore implements SecretStore {
   public constructor(
     private readonly provider: SecretStore,
     private readonly ingress: SecretStore,
+    private readonly policy: SecretStore,
   ) {}
 
   public async get(reference: SecretReference): Promise<SecretMaterial> {
     if (reference.purpose === "model_provider") return this.provider.get(reference);
     if (reference.purpose === "hermes_ingress") return this.ingress.get(reference);
+    if (reference.purpose === "policy_runtime" || reference.purpose === "policy_plugin") return this.policy.get(reference);
     throw new Error("SUPERVISOR_REJECTED: Secret purpose is invalid");
   }
 }
@@ -112,6 +116,7 @@ export async function startRuntimeSupervisor(
   const secretStore = new PurposeScopedSecretStore(
     new FileSecretStore(configuration.providerSecretRoot),
     new FileSecretStore(configuration.ingressSecretRoot),
+    new FileSecretStore(configuration.policySecretRoot),
   );
   const adapter = new DockerRuntimeAdapter({
     docker: new Dockerode({ socketPath: configuration.dockerSocketPath }) as unknown as DockerClientLike,

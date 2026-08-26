@@ -1,0 +1,38 @@
+{
+  "$id": "core-agent://v1/gateway-tool-result",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "content": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "maxLength": 64000,
+            "type": "string"
+          },
+          "type": {
+            "const": "text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "text"
+        ],
+        "type": "object"
+      },
+      "maxItems": 16,
+      "minItems": 1,
+      "type": "array"
+    },
+    "isError": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "content",
+    "isError"
+  ],
+  "type": "object"
+}

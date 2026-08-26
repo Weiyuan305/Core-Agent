@@ -1,0 +1,27 @@
+{
+  "$id": "core-agent://v1/close-policy-session-response",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "policy_session_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "state": {
+      "const": "closed",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "policy_session_id",
+    "state"
+  ],
+  "type": "object"
+}

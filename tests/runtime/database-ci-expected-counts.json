@@ -42,10 +42,16 @@
   "identityGatewayPostgres": {
     "testCount": 3
   },
+  "policyMcpPostgres": {
+    "testCount": 8,
+    "suitePaths": [
+      "tests/policy-mcp-postgres.test.ts"
+    ]
+  },
   "controlPlaneApiPostgres": {
     "testCount": 15
   },
   "integration": {
-    "testCount": 105
+    "testCount": 113
   }
 }

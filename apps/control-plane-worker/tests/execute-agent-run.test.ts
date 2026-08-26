@@ -28,8 +28,17 @@ const facts: StoredAgentRunExecutionFacts = {
   runId: "run_a",
   conversationId: "conversation_a",
   assistantMessageId: "message_assistant_a",
+  actorId: "actor_a",
+  membershipId: "membership_a",
+  effectiveRole: "consultant",
+  profileId: "profile_a",
   profileRef: "consultant_a",
+  sessionId: "session_a",
   sessionRef: "hermes_session_a",
+  coreSessionId: "core_session_a",
+  requestId: "request_a",
+  traceId: "trace_a",
+  clientRequestId: "client_request_a",
   modelId: "cywx/gpt-5.6-sol",
   timeoutMs: 90_000,
   content: "Synthetic hello",
@@ -61,6 +70,8 @@ function port(overrides: Partial<ReviewedExecuteAgentRunPort> = {}) {
   const value = {
     begin: async () => { calls.push("begin"); return { kind: "admitted", facts }; },
     inspectRuntime: async () => { calls.push("inspect"); return "http://core-agent-runtime-example:8642"; },
+    openPolicySession: async () => { calls.push("policy-open-disabled"); return undefined; },
+    closePolicySession: async () => { calls.push("policy-close"); },
     markDispatched: async () => { calls.push("mark-dispatched"); return { kind: "updated" as const }; },
     stream: () => { calls.push("hermes"); return scriptedStream(["Hello", " there"]); },
     persistDelta: async (_job, _messageId, delta) => { calls.push(`delta:${delta}`); return { kind: "updated" }; },
@@ -69,7 +80,7 @@ function port(overrides: Partial<ReviewedExecuteAgentRunPort> = {}) {
     fail: async (_job, failure) => { calls.push(`fail:${failure.code}:${failure.summary}`); return { kind: "updated" }; },
     ...overrides,
   } satisfies ReviewedExecuteAgentRunPort;
-  return { value, calls };
+  return { value: value as ReviewedExecuteAgentRunPort, calls };
 }
 
 test("execute Agent Run durably persists each delta before pulling the next one and completes exact content", async () => {
@@ -92,7 +103,44 @@ test("execute Agent Run durably persists each delta before pulling the next one 
   const result = await handleExecuteAgentRun(setup.value, job, new AbortController().signal);
 
   assert.deepEqual(result, { kind: "succeeded" });
-  assert.deepEqual(setup.calls, ["begin", "inspect", "mark-dispatched", "delta:Hello", "delta: there", "complete:Hello there"]);
+  assert.deepEqual(setup.calls, ["begin", "inspect", "policy-open-disabled", "mark-dispatched", "delta:Hello", "delta: there", "complete:Hello there"]);
+});
+
+test("policy-enabled Run opens before Hermes and closes only after terminal persistence", async () => {
+  const setup = port({
+    openPolicySession: async () => { setup.calls.push("policy-open"); return { policySessionId: "policy-session-a" }; },
+    closePolicySession: async (_facts, session, reason) => {
+      setup.calls.push(`policy-close:${session.policySessionId}:${reason}`);
+    },
+  });
+
+  const result = await handleExecuteAgentRun(setup.value, job, new AbortController().signal);
+
+  assert.deepEqual(result, { kind: "succeeded" });
+  assert.deepEqual(setup.calls, [
+    "begin", "inspect", "policy-open", "mark-dispatched", "hermes", "delta:Hello", "delta: there",
+    "complete:Hello there", "policy-close:policy-session-a:run_succeeded",
+  ]);
+});
+
+test("policy open failure never enters Hermes and policy session closes after failed terminal persistence", async () => {
+  const unavailable = port({
+    openPolicySession: async () => { unavailable.calls.push("policy-open"); throw Object.assign(new Error(), { retryable: true }); },
+  });
+  const retried = await handleExecuteAgentRun(unavailable.value, job, new AbortController().signal);
+  assert.deepEqual(retried, { kind: "retry", summary: "Agent execution dependency is unavailable" });
+  assert.deepEqual(unavailable.calls, ["begin", "inspect", "policy-open", "retry"]);
+
+  const failed = port({
+    openPolicySession: async () => { failed.calls.push("policy-open"); return { policySessionId: "policy-session-a" }; },
+    stream: () => scriptedStream([new Error("private")]),
+    closePolicySession: async (_facts, _session, reason) => { failed.calls.push(`policy-close:${reason}`); },
+  });
+  await handleExecuteAgentRun(failed.value, job, new AbortController().signal);
+  assert.deepEqual(failed.calls, [
+    "begin", "inspect", "policy-open", "mark-dispatched",
+    "fail:RUN_INTERNAL_ERROR:Agent execution failed after dispatch", "policy-close:run_failed",
+  ]);
 });
 
 test("disconnect after first durable delta terminalizes without automatic replay", async () => {
@@ -106,7 +154,7 @@ test("disconnect after first durable delta terminalizes without automatic replay
   assert.equal(result.kind, "failed");
   assert.equal(hermesCalls, 1);
   assert.deepEqual(setup.calls, [
-    "begin", "inspect", "mark-dispatched", "delta:partial", "fail:AGENT_RUNTIME_NOT_READY:Agent execution failed after dispatch",
+    "begin", "inspect", "policy-open-disabled", "mark-dispatched", "delta:partial", "fail:AGENT_RUNTIME_NOT_READY:Agent execution failed after dispatch",
   ]);
   assert.equal(setup.calls.includes("retry"), false);
 });
@@ -123,7 +171,7 @@ test("Hermes acceptance before the first delta is already unsafe and never retri
 
   assert.deepEqual(result, { kind: "failed", summary: "Agent execution failed after dispatch" });
   assert.deepEqual(setup.calls, [
-    "begin", "inspect", "mark-dispatched", "hermes-accepted", "fail:AGENT_RUNTIME_NOT_READY:Agent execution failed after dispatch",
+    "begin", "inspect", "policy-open-disabled", "mark-dispatched", "hermes-accepted", "fail:AGENT_RUNTIME_NOT_READY:Agent execution failed after dispatch",
   ]);
   assert.equal(setup.calls.includes("retry"), false);
 });
@@ -141,6 +189,7 @@ test("managed Hermes failure keeps its precise code after durable dispatch", asy
   assert.deepEqual(setup.calls, [
     "begin",
     "inspect",
+    "policy-open-disabled",
     "mark-dispatched",
     "fail:MODEL_SERVICE_UNAVAILABLE:Agent execution failed after dispatch",
   ]);
@@ -157,7 +206,7 @@ test("database concurrency exhaustion after unsafe dispatch leaves Agent Run fin
     DatabaseTransactionRetryExhaustedError,
   );
   assert.deepEqual(setup.calls, [
-    "begin", "inspect", "mark-dispatched", "hermes", "delta:Hello", "delta: there", "complete:db-exhausted",
+    "begin", "inspect", "policy-open-disabled", "mark-dispatched", "hermes", "delta:Hello", "delta: there", "complete:db-exhausted",
   ]);
   assert.equal(setup.calls.some((call) => call === "retry" || call.startsWith("fail:")), false);
 });
@@ -170,7 +219,7 @@ test("lease loss while marking dispatch performs zero SecretStore or Hermes work
   const result = await handleExecuteAgentRun(setup.value, job, new AbortController().signal);
 
   assert.deepEqual(result, { kind: "failed", summary: "Worker job lease lost" });
-  assert.deepEqual(setup.calls, ["begin", "inspect", "mark-dispatched"]);
+  assert.deepEqual(setup.calls, ["begin", "inspect", "policy-open-disabled", "mark-dispatched"]);
 });
 
 test("unsafe reclaim and final-attempt recovery terminalize with zero inspect, secret, or Hermes work", async () => {

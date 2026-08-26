@@ -1,0 +1,38 @@
+{
+  "$id": "core-agent://v1/open-policy-session-response",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "expires_at": {
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      "type": "string"
+    },
+    "policy_session_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "policy_version": {
+      "const": "core-agent-read-mcp-v1",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "state": {
+      "const": "active",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "policy_session_id",
+    "state",
+    "policy_version",
+    "expires_at"
+  ],
+  "type": "object"
+}

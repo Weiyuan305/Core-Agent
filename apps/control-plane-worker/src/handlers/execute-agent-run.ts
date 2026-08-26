@@ -10,6 +10,7 @@ import {
 } from "@core-agent/runtime-core";
 
 import type { HandlerResult } from "../dispatch-job.js";
+import type { OpenedWorkerPolicySession } from "../policy-session-lifecycle.js";
 
 export type ExecuteAgentRunJob = Extract<ClaimedJob, { jobKind: "execute_agent_run" }>;
 
@@ -17,6 +18,8 @@ export interface ExecuteAgentRunPort {
   begin(job: AgentRunWorkerJobRef): Promise<AgentRunBeginResult>;
   inspectRuntime(facts: StoredAgentRunExecutionFacts, signal: AbortSignal): Promise<string>;
   markDispatched(job: AgentRunWorkerJobRef): Promise<JobLeaseResult>;
+  openPolicySession(facts: StoredAgentRunExecutionFacts): Promise<OpenedWorkerPolicySession | undefined>;
+  closePolicySession(facts: StoredAgentRunExecutionFacts, session: OpenedWorkerPolicySession, reason: "run_succeeded" | "run_failed" | "run_cancelled"): Promise<void>;
   stream(facts: StoredAgentRunExecutionFacts, origin: string, signal: AbortSignal): AsyncIterable<string>;
   persistDelta(job: AgentRunWorkerJobRef, messageId: string, delta: string): Promise<JobLeaseResult>;
   complete(job: AgentRunWorkerJobRef, facts: StoredAgentRunExecutionFacts, content: string): Promise<JobLeaseResult>;
@@ -75,11 +78,14 @@ export async function handleExecuteAgentRun(
   if (begun.kind === "lease_lost") return leaseLost();
   let dispatched = false;
   let runtimeInspected = false;
+  let policySession: OpenedWorkerPolicySession | undefined;
   let content = "";
   try {
     if (signal.aborted) return leaseLost();
     const origin = await port.inspectRuntime(begun.facts, signal);
     runtimeInspected = true;
+    if (signal.aborted) return leaseLost();
+    policySession = await port.openPolicySession(begun.facts);
     if (signal.aborted) return leaseLost();
     const marked = await port.markDispatched(jobRef);
     if (marked.kind === "lease_lost") return leaseLost();
@@ -93,23 +99,35 @@ export async function handleExecuteAgentRun(
     }
     if (signal.aborted) return leaseLost();
     const completed = await port.complete(jobRef, begun.facts, content);
-    return completed.kind === "lease_lost" ? leaseLost() : { kind: "succeeded" };
+    if (completed.kind === "lease_lost") return leaseLost();
+    if (policySession !== undefined) {
+      try { await port.closePolicySession(begun.facts, policySession, "run_succeeded"); } catch { /* expiry remains fail-closed */ }
+    }
+    return { kind: "succeeded" };
   } catch (error) {
     if (isDatabaseTransactionRetryExhaustedError(error)) throw error;
     if (signal.aborted) return leaseLost();
     if (dispatched) {
-      return terminalFailure(port, jobRef, {
+      const result = await terminalFailure(port, jobRef, {
         code: error instanceof HermesStreamError ? error.failureCode : "RUN_INTERNAL_ERROR",
         summary: "Agent execution failed after dispatch",
       });
+      if (policySession !== undefined && result.kind === "failed" && result.summary !== "Worker job lease lost") {
+        try { await port.closePolicySession(begun.facts, policySession, "run_failed"); } catch { /* expiry remains fail-closed */ }
+      }
+      return result;
     }
     if (retryable(error) && job.attemptCount < job.maxAttempts) {
       const retried = await port.retry(jobRef, "Agent execution dependency is unavailable");
       return retried.kind === "lease_lost" ? leaseLost() : { kind: "retry", summary: "Agent execution dependency is unavailable" };
     }
-    return terminalFailure(port, jobRef, {
+    const result = await terminalFailure(port, jobRef, {
       code: runtimeInspected ? "RUN_INTERNAL_ERROR" : "AGENT_RUNTIME_NOT_READY",
       summary: "Agent execution failed before durable output",
     });
+    if (policySession !== undefined && result.kind === "failed" && result.summary !== "Worker job lease lost") {
+      try { await port.closePolicySession(begun.facts, policySession, "run_failed"); } catch { /* expiry remains fail-closed */ }
+    }
+    return result;
   }
 }

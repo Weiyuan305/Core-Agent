@@ -47,6 +47,14 @@ const smokeEnvironment = Object.freeze({
   CORE_AGENT_DATABASE_IDENTITY_PASSWORD_FILE: "/safe/database/identity-password",
   CORE_AGENT_PROVIDER_SECRET_ROOT: "/safe/provider",
   CORE_AGENT_INGRESS_SECRET_ROOT: "/safe/ingress",
+  CORE_AGENT_POLICY_RUNTIME_SECRET_ROOT: "/safe/policy/runtime-secrets",
+  CORE_AGENT_POLICY_GATEWAY_WORKER_TOKEN_FILE: "/safe/policy/gateway-worker-token",
+  CORE_AGENT_POLICY_WORKER_TOKEN_FILE: "/safe/policy/worker-token",
+  CORE_AGENT_POLICY_PLUGIN_IDENTITIES_FILE: "/safe/policy/plugin-identities.json",
+  CORE_AGENT_POLICY_RUNTIME_IDENTITIES_FILE: "/safe/policy/runtime-identities.json",
+  CORE_AGENT_POLICY_PROOF_KEY_FILE: "/safe/policy/proof-key",
+  CORE_AGENT_POLICY_TRUSTED_CONTEXT_PUBLIC_KEYS_FILE: "/safe/policy/trusted-context-public-keys.json",
+  CORE_AGENT_POLICY_TRUSTED_CONTEXT_SIGNING_KEY_FILE: "/safe/policy/trusted-context-signing-key.pem",
   CORE_AGENT_SUPERVISOR_STATE_ROOT: "/safe/state",
   CORE_AGENT_API_UID: "12000",
   CORE_AGENT_API_GID: "12000",
@@ -882,7 +890,18 @@ platform_toolsets:
     - clarify
 
 plugins:
-  enabled: []
+  enabled:
+    - core-agent-policy
+
+mcp_servers:
+  core_agent_gateway:
+    url: http://policy-gateway-ingress:8787/mcp
+    headers:
+      Authorization: "Bearer \${CORE_AGENT_POLICY_RUNTIME_TOKEN}"
+    strict_redirect_headers: true
+    skip_preflight: true
+    connect_timeout: 5
+    timeout: 30
 
 security:
   redact_secrets: true

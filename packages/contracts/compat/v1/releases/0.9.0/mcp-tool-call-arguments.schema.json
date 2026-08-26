@@ -1,0 +1,17 @@
+{
+  "$id": "core-agent://v1/mcp-tool-call-arguments",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "maxProperties": 129,
+  "properties": {
+    "__core_agent_policy": {
+      "maxLength": 512,
+      "minLength": 24,
+      "type": "string"
+    }
+  },
+  "required": [
+    "__core_agent_policy"
+  ],
+  "type": "object"
+}

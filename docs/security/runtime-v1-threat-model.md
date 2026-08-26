@@ -5,9 +5,11 @@
 This model covers the public Identity Gateway, provider adapter, Core identity
 authority, Core Sessions, Trusted Context, the private Control Plane, and
 tenant-isolated Runtime boundary, Entitlement authority, Capability Registry,
-and exact Runtime Capability projection. Real customer or **student data is
-prohibited** in this release. Payments, MCP/Skills execution, Human Approval,
-final submissions, and irreversible external actions remain disabled.
+exact Runtime Capability projection, and the private Policy/MCP Gateway.
+Real customer or **student data is prohibited** in this release. The only MCP
+effect is a deterministic synthetic read fixture. Skills, real business MCP,
+payments, Human Approval, final submissions, and irreversible external actions
+remain disabled.
 
 MFA is **not enabled** in v1. Password reauthentication, short management
 windows, rate limits, visible platform authority, audit, and disabled
@@ -28,6 +30,9 @@ irreversible actions reduce impact but do not replace MFA.
   Ed25519-signed, audience-bound, maximum-300-second envelope.
 - Each Hermes Runtime remains separated by Tenant container, network, and
   Volume. Identity sharing does not merge Runtime storage.
+- The Worker signs exact Run authority and opens a bounded policy session. The
+  Hermes plugin may request but cannot grant authority; the Gateway consumes one
+  opaque proof against exact canonical arguments before invoking a reviewed binding.
 
 ## Threats and controls
 
@@ -45,7 +50,11 @@ irreversible actions reduce impact but do not replace MFA.
 | mutable or incompatible Capability | reviewed exact semantic versions, immutable artifact grammar, known contracts, risk allowlist, atomic conflict rejection | preserve current release/snapshot/Runtime and return a calm conflict |
 | stale Capability at external effect | signed exact snapshot on admission plus current-authority pre-effect recheck | deny before side effect; an already-dispatched model-only reply may finish |
 | private commercial or Capability leakage | closed public summaries/events, seven-category database/event/log/Supervisor/Hermes canaries | fail release; retain only safe IDs, states, counts, generations, and digests |
-| unauthorized tool activation | v2 manifest digest binding, staged-manifest verification, zero managed MCP/tools/Skills in this release | fail projection and keep Assignment unavailable |
+| unauthorized tool activation | v2 manifest digest binding, staged-manifest verification, only the exact reviewed synthetic MCP binding and zero Skills/unreviewed tools | fail projection and keep Assignment unavailable |
+| plugin bypass or compromise | Gateway independently requires a current policy session and single-use proof; Runtime identity is Profile/Tenant-bound | deny before dispatch; rotate Runtime/plugin identity |
+| proof theft, replay, or argument substitution | HMAC-derived opaque proof, digest-only storage, exact argument hash, 30-second maximum TTL, transactional single consumer | return stable proof rejection; preserve audit evidence |
+| stale or blocked MCP binding | immutable reviewed binding, current Snapshot and catalog status on list/decision/consume, no customer URL or discovery | hide tool and deny; never fall back to Runtime-supplied endpoint |
+| Gateway SSRF or credential spread | synthetic adapter only in v1; private fixed ingress; Runtime has no DB, Worker, signing, or downstream credential | stop Gateway/ingress and rotate scoped identity |
 | platform impersonation | immutable platform-origin Membership, original Actor retained, tenant audit/outbox | reject non-platform grant/revoke |
 | cross-Tenant access | server-derived authority, composite Tenant keys, no provider metadata/JWT claims | fail closed |
 | signing-key substitution | allowlisted unique `key_id`, Ed25519 type checks, publish-before-activate rotation, unknown/retired rejection | disable key and revoke affected Sessions |
@@ -70,6 +79,9 @@ irreversible actions reduce impact but do not replace MFA.
 - Capability management does not authorize public chat. The student chat entry
   remains fail-closed until the separate authenticated Conversation gateway is
   designed, accepted, and tested.
+- The synthetic adapter proves the reference-monitor path, not remote MCP safety.
+  A real domain adapter requires a separate data-boundary, credential, SSRF,
+  output-contract, consent, retention, and live acceptance review.
 
 ## Incident priorities
 

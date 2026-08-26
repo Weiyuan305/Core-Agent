@@ -18,12 +18,15 @@ RUN printf '%s\n' "${CORE_AGENT_GIT_SHA}" | grep -Eq '^[a-f0-9]{40}$' \
 USER root
 
 COPY infra/hermes/managed/config.yaml /etc/hermes/config.yaml
+COPY infra/hermes/plugins/core-agent-policy /opt/hermes/plugins/core-agent-policy
 COPY infra/hermes/runtime/initialize.py /opt/core-agent/initialize.py
 COPY infra/hermes/runtime/gateway-entrypoint.sh /opt/core-agent/gateway-entrypoint.sh
 
 RUN chmod 0755 /etc/hermes \
     && chmod 0644 /etc/hermes/config.yaml \
     && install -d -m 01777 -o root -g root /opt/data \
+    && chown -R root:root /opt/hermes/plugins/core-agent-policy \
+    && chmod -R go-w /opt/hermes/plugins/core-agent-policy \
     && chown root:root /opt/core-agent/initialize.py /opt/core-agent/gateway-entrypoint.sh \
     && chmod 0555 /opt/core-agent/initialize.py /opt/core-agent/gateway-entrypoint.sh
 

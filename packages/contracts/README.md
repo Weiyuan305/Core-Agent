@@ -88,10 +88,11 @@ unknown-event fallback does not relax this producer requirement.
 
 ## MCP boundary
 
-MCP integration is deferred. New first-party MCP services should default to
-TypeScript and consume this package directly. Existing Python services should
-read the generated JSON Schema artifacts. This package contains no MCP SDK,
-MCP Server, or business Tool implementation.
+Version 0.9.0 publishes the private, transport-neutral contracts used by the
+Core-Agent Policy/MCP Gateway and managed Hermes policy hook. This package still
+contains no MCP SDK, MCP Server, downstream endpoint, credential, or business Tool
+implementation. TypeScript services should consume it directly; existing Python
+services should read the generated JSON Schema artifacts.
 
 ## Compatibility changes
 

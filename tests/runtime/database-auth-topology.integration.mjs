@@ -87,8 +87,9 @@ async function protectedFile(path, value) {
   await chmod(path, 0o600);
 }
 
-async function scenario(kind) {
+async function scenario(kind, { injectedPreflightFailure = false } = {}) {
   const root = await mkdtemp(join(repositoryRoot, `.core-agent-auth-${kind}-`));
+  try {
   const project = `coreagentround7${kind}${process.pid}${randomBytes(4).toString("hex")}`.toLowerCase();
   const legacyContainer = `${project}-legacy-init`;
   const credentials = {
@@ -103,12 +104,38 @@ async function scenario(kind) {
   credentialValues.push(ingressMaterial);
   const paths = Object.fromEntries(Object.keys(credentials).map((name) => [name, join(root, name)]));
   for (const [name, path] of Object.entries(paths)) await protectedFile(path, credentials[name]);
-  for (const name of ["provider", "ingress", "state"]) await mkdir(join(root, name), { mode: 0o700 });
+  for (const name of ["provider", "ingress", "policy", "state"]) await mkdir(join(root, name), { mode: 0o700 });
   await protectedFile(join(root, "ingress", "round9_ingress.v1"), ingressMaterial);
+  const policyMaterials = {
+    gatewayWorker: randomBytes(32).toString("base64url"),
+    worker: randomBytes(32).toString("base64url"),
+    plugins: "[]",
+    runtimes: "[]",
+    proof: randomBytes(32),
+    publicKeys: "[]",
+    signingKey: randomBytes(64).toString("base64url"),
+  };
+  const policyPaths = {
+    gatewayWorker: join(root, "policy-gateway-worker-token"),
+    worker: join(root, "policy-worker-token"),
+    plugins: join(root, "policy-plugin-identities.json"),
+    runtimes: join(root, "policy-runtime-identities.json"),
+    proof: join(root, "policy-proof-key"),
+    publicKeys: join(root, "policy-trusted-context-public-keys.json"),
+    signingKey: join(root, "policy-trusted-context-signing-key.pem"),
+  };
+  for (const [name, path] of Object.entries(policyPaths)) await protectedFile(path, policyMaterials[name]);
+  credentialValues.push(
+    policyMaterials.gatewayWorker,
+    policyMaterials.worker,
+    policyMaterials.proof,
+    policyMaterials.signingKey,
+  );
   const bootstrapKey = join(root, "bootstrap-key");
   const bootstrapMaterial = `${randomBytes(32).toString("base64url")}\n`;
   credentialValues.push(bootstrapMaterial);
   await protectedFile(bootstrapKey, bootstrapMaterial);
+  if (injectedPreflightFailure) throw new Error("injected topology preflight failure");
   const environment = {
     ...process.env,
     CORE_AGENT_REAL_HERMES_SMOKE: "1",
@@ -124,6 +151,14 @@ async function scenario(kind) {
     CORE_AGENT_INGRESS_SECRET_ROOT: join(root, "ingress"),
     CORE_AGENT_NODE_IMAGE: lock.images.node.platforms[platform],
     CORE_AGENT_PLATFORM: platform,
+    CORE_AGENT_POLICY_GATEWAY_WORKER_TOKEN_FILE: policyPaths.gatewayWorker,
+    CORE_AGENT_POLICY_PLUGIN_IDENTITIES_FILE: policyPaths.plugins,
+    CORE_AGENT_POLICY_PROOF_KEY_FILE: policyPaths.proof,
+    CORE_AGENT_POLICY_RUNTIME_IDENTITIES_FILE: policyPaths.runtimes,
+    CORE_AGENT_POLICY_RUNTIME_SECRET_ROOT: join(root, "policy"),
+    CORE_AGENT_POLICY_TRUSTED_CONTEXT_PUBLIC_KEYS_FILE: policyPaths.publicKeys,
+    CORE_AGENT_POLICY_TRUSTED_CONTEXT_SIGNING_KEY_FILE: policyPaths.signingKey,
+    CORE_AGENT_POLICY_WORKER_TOKEN_FILE: policyPaths.worker,
     CORE_AGENT_POSTGRES_BOOTSTRAP_PASSWORD_FILE: paths.bootstrap,
     CORE_AGENT_POSTGRES_IMAGE: lock.images.postgres.platforms[platform],
     CORE_AGENT_PROVIDER_SECRET_ROOT: join(root, "provider"),
@@ -511,10 +546,31 @@ SQL`,
       work: async () => rm(root, { recursive: true, force: true }),
     },
   ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 }
 
 test("official PostgreSQL topology converges fresh and persisted legacy-trust volumes to protected SCRAM", { timeout: 20 * 60 * 1000 }, async () => {
   await scenario("fresh");
   await scenario("legacy");
   await scenario("schema10-dirty");
+});
+
+test("disposable PostgreSQL topology removes its credential root after a preflight failure", async () => {
+  const prefix = ".core-agent-auth-preflight-cleanup-";
+  const before = new Set((await readdir(repositoryRoot)).filter((name) => name.startsWith(prefix)));
+  let after = [];
+  try {
+    await assert.rejects(
+      scenario("preflight-cleanup", { injectedPreflightFailure: true }),
+      (error) => error?.message === "injected topology preflight failure",
+    );
+    after = (await readdir(repositoryRoot)).filter((name) => name.startsWith(prefix));
+    assert.deepEqual(new Set(after), before);
+  } finally {
+    for (const name of after) {
+      if (!before.has(name)) await rm(join(repositoryRoot, name), { recursive: true, force: true });
+    }
+  }
 });

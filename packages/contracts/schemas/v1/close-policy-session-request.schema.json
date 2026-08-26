@@ -1,0 +1,71 @@
+{
+  "$id": "core-agent://v1/close-policy-session-request",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "idempotency_key": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "policy_session_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "reason": {
+      "anyOf": [
+        {
+          "const": "run_succeeded",
+          "type": "string"
+        },
+        {
+          "const": "run_failed",
+          "type": "string"
+        },
+        {
+          "const": "run_cancelled",
+          "type": "string"
+        },
+        {
+          "const": "run_expired",
+          "type": "string"
+        },
+        {
+          "const": "authority_changed",
+          "type": "string"
+        }
+      ]
+    },
+    "request_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "run_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "SchemaVersion",
+      "type": "number"
+    },
+    "trace_id": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "policy_session_id",
+    "run_id",
+    "reason",
+    "idempotency_key",
+    "request_id",
+    "trace_id"
+  ],
+  "type": "object"
+}
